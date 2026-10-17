@@ -226,6 +226,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }

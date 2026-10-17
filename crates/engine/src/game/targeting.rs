@@ -2964,6 +2964,8 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
         | GameEvent::Clash { .. }
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
@@ -3445,23 +3447,23 @@ fn stack_spell_entry_matches_filter(
         return false;
     }
 
-    let requires_single_target = filter_requires_single_target(filter);
+    let single_target = super::filter::single_target_count(filter);
     let targets_only_constraint = super::filter::extract_targets_only(filter);
     let targets_constraint = super::filter::extract_targets(filter);
     let source_controller_opt = state.objects.get(&source_id).map(|o| o.controller);
+    let targets = entry
+        .ability()
+        .map(super::ability_utils::declared_targets_in_chain)
+        .unwrap_or_default();
 
-    // CR 115.9a: "with a single target" counts the spell's chosen target instances.
-    if requires_single_target {
-        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
-        if targets.len() != 1 {
-            return false;
-        }
+    // CR 115.9a / CR 115.9c: a single target, counted as the requirement says.
+    if single_target.is_some_and(|count| !count.admits(&targets)) {
+        return false;
     }
 
     let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
     // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
     if let Some(ref constraint) = targets_only_constraint {
-        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
         if targets.is_empty()
             || !targets.iter().all(|t| match t {
                 TargetRef::Object(id) => {
@@ -3481,7 +3483,6 @@ fn stack_spell_entry_matches_filter(
     }
     // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
     if let Some(ref constraint) = targets_constraint {
-        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
         if targets.is_empty()
             || !targets.iter().any(|t| match t {
                 TargetRef::Object(id) => {
@@ -3523,20 +3524,6 @@ fn stack_spell_matches_filter(
             .any(|filter| stack_spell_matches_filter(state, object_id, filter, ctx)),
         TargetFilter::Not { filter } => !stack_spell_matches_filter(state, object_id, filter, ctx),
         other => super::filter::matches_target_filter(state, object_id, other, ctx),
-    }
-}
-
-/// Check if a filter contains a `HasSingleTarget` property anywhere in its tree.
-fn filter_requires_single_target(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::HasSingleTarget)),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_requires_single_target)
-        }
-        _ => false,
     }
 }
 

@@ -9,6 +9,7 @@ pub mod combat_ai;
 mod combat_tax;
 pub mod combo;
 pub mod config;
+pub mod contest;
 pub mod context;
 pub mod damage_reflection;
 pub mod decision_kind;

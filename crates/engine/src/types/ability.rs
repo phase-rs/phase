@@ -7109,8 +7109,6 @@ pub enum FilterProp {
     /// choice made earlier in the same resolving instruction sequence. Used by
     /// "of the chosen kind" library filters and guess-resolution conditions.
     MatchesLastChosenCardPredicate,
-    /// CR 115.7: Matches stack entries that have exactly one target.
-    /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
     /// CR 700.2: Matches a spell/ability on the stack that is modal (its printed
     /// text offers two or more options in a bulleted list). Evaluated against the
@@ -20385,6 +20383,25 @@ pub enum Effect {
         )]
         player: TargetFilter,
     },
+    /// "You and [player] have a [staring | breath-holding] contest" (Eye to Eye,
+    /// Mouth to Mouth). The resolving ability's controller and `contestant` take
+    /// part in a real-time sustained-clicking adaptation of the physical contest
+    /// (see `types::contest`): the resolver pauses on
+    /// `WaitingFor::PhysicalContest`, the host feeds timestamped clicks, and the
+    /// settled outcome sets `optional_effect_performed` for the controller so the
+    /// existing "if you win" rider (`AbilityCondition::EventOutcomeWon`) gates the
+    /// rest of the chain. A tie or a technical cancellation leaves the rider
+    /// ungated-false, so nothing happens.
+    ///
+    /// `contestant` is the second participant, resolved through
+    /// `resolve_player_for_context_ref` ("target creature's controller" is
+    /// `ParentTargetController`; "that player" is the previously declared player
+    /// target). The Comprehensive Rules define no physical contests, so there is
+    /// no CR number for the contest itself.
+    PhysicalContest {
+        kind: crate::types::contest::ContestKind,
+        contestant: TargetFilter,
+    },
     /// Heist — designed-for-digital (MTG Arena) keyword action. NOT in the
     /// Comprehensive Rules; operates per the Arena programmed rules (see
     /// `docs/MagicCompRules.txt` — absent). Reminder text:
@@ -22805,6 +22822,8 @@ impl Effect {
             | Effect::ProliferateTarget { .. }
             | Effect::Populate
             | Effect::Clash
+            // A contestant is a player, never a copied stack object.
+            | Effect::PhysicalContest { .. }
             | Effect::Behold { .. }
             | Effect::EndTheTurn
             | Effect::EndCombatPhase
@@ -23237,6 +23256,7 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            | Effect::PhysicalContest { .. }
             // Digital-only Alchemy (no CR entry): the boon installer and the
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
@@ -23449,6 +23469,9 @@ impl Effect {
             // target via the same `is_context_ref()` filter the other player-axis
             // effects use.
             | Effect::Discover { player, .. }
+            // The second contestant surfaces like any other player-axis effect: a
+            // context ref (`ParentTargetController`) adds no slot of its own.
+            | Effect::PhysicalContest { contestant: player, .. }
             | Effect::BlightEffect { player, .. }
             // CR 701.47a: Amass's performer. The default `Controller` is a
             // context ref, but a subject-targeted form ("target player amasses
@@ -24025,6 +24048,9 @@ impl Effect {
             | Effect::ExileFromTopUntil { player, .. }
             | Effect::GainLife { player, .. }
             | Effect::Discover { player, .. }
+            | Effect::PhysicalContest {
+                contestant: player, ..
+            }
             | Effect::BlightEffect { player, .. }
             | Effect::Amass { player, .. } => Some(player),
 
@@ -24589,6 +24615,8 @@ impl Effect {
             // library. That player may then put that card on the bottom of their
             // library." Either way the card stays in its own library.
             Effect::Clash => false,
+            // No card moves: the contest is a real-time click race between two players.
+            Effect::PhysicalContest { .. } => false,
 
             // CR 701.24a: shuffling randomizes "the cards within it" — a reorder,
             // not a move. `Effect::Shuffle` carries a player filter and no
@@ -25485,6 +25513,7 @@ impl Effect {
             | Effect::ProliferateTarget { .. }
             | Effect::Populate
             | Effect::Clash
+            | Effect::PhysicalContest { .. }
             | Effect::Behold { .. }
             | Effect::EndTheTurn
             | Effect::EndCombatPhase
@@ -25916,6 +25945,7 @@ impl Effect {
             | Effect::ExileFromTopUntil { .. }
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::Cascade
@@ -26186,6 +26216,7 @@ impl Effect {
             | Effect::CreateEmblem { .. }
             | Effect::CreateBoon { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::DraftFromSpellbook { .. }
@@ -26453,6 +26484,7 @@ impl Effect {
             | Effect::CreateEmblem { .. }
             | Effect::CreateBoon { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::DraftFromSpellbook { .. }
@@ -26710,6 +26742,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ExileFromTopUntil { .. } => "ExileFromTopUntil",
         Effect::RevealUntil { .. } => "RevealUntil",
         Effect::Discover { .. } => "Discover",
+        Effect::PhysicalContest { .. } => "PhysicalContest",
         Effect::Heist { .. } => "Heist",
         Effect::HeistExile => "HeistExile",
         Effect::Cascade => "Cascade",
@@ -26964,6 +26997,7 @@ pub enum EffectKind {
     ExileFaceDownPile,
     RevealUntil,
     Discover,
+    PhysicalContest,
     Heist,
     HeistExile,
     Cascade,
@@ -27254,6 +27288,7 @@ impl From<&Effect> for EffectKind {
             Effect::ExileFaceDownPile { .. } => EffectKind::ExileFaceDownPile,
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
+            Effect::PhysicalContest { .. } => EffectKind::PhysicalContest,
             Effect::Heist { .. } => EffectKind::Heist,
             Effect::HeistExile => EffectKind::HeistExile,
             Effect::Cascade => EffectKind::Cascade,
@@ -35045,6 +35080,233 @@ mod parent_target_missing_reason_tests {
 }
 
 #[cfg(test)]
+mod chosen_target_slots_tests {
+    use super::*;
+
+    /// CR 601.2c: a record survives a save whether or not it holds a slot, and
+    /// a node saved without the key restores as unrecorded.
+    #[test]
+    fn a_record_round_trips_and_a_missing_key_restores_unrecorded() {
+        for slots in [
+            ChosenTargetSlots::Recorded(Vec::new()),
+            ChosenTargetSlots::Recorded(vec![0]),
+            ChosenTargetSlots::Unrecorded,
+        ] {
+            let mut ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                crate::types::identifiers::ObjectId(1),
+                crate::types::player::PlayerId(0),
+            );
+            ability.chosen_target_slots = slots.clone();
+            let json = serde_json::to_value(&ability).unwrap();
+            assert_eq!(
+                json.get("chosen_target_slots").is_some(),
+                slots != ChosenTargetSlots::Unrecorded,
+                "key presence for {slots:?}: {json}"
+            );
+            let back: ResolvedAbility = serde_json::from_value(json).unwrap();
+            assert_eq!(back.chosen_target_slots, slots);
+        }
+    }
+
+    fn node(targets: Vec<TargetRef>, chosen: Vec<usize>) -> ResolvedAbility {
+        let mut node = ResolvedAbility::new(
+            Effect::NoOp,
+            targets,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        node.chosen_target_slots = ChosenTargetSlots::Recorded(chosen);
+        node
+    }
+
+    /// CR 601.2c + CR 608.2d: the guesser is bound at resolution, not chosen,
+    /// so prepending it leaves every node's chosen targets as they were.
+    #[test]
+    fn prepending_a_guesser_keeps_each_node_reading_its_chosen_targets() {
+        let other = TargetRef::Player(crate::types::player::PlayerId(1));
+        let guesser = crate::types::player::PlayerId(2);
+        let object = TargetRef::Object(crate::types::identifiers::ObjectId(7));
+        let sub = node(
+            vec![other.clone(), TargetRef::Player(guesser), object.clone()],
+            vec![0, 2],
+        );
+        let else_branch = node(vec![object.clone()], vec![0]);
+        let mut root = node(Vec::new(), Vec::new())
+            .sub_ability(sub)
+            .else_ability(else_branch);
+
+        root.push_front_player_target_recursive(guesser);
+
+        let sub = root.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            sub.targets,
+            vec![TargetRef::Player(guesser), other.clone(), object.clone()]
+        );
+        let else_branch = root.else_ability.as_deref().unwrap();
+        assert_eq!(
+            else_branch.targets,
+            vec![TargetRef::Player(guesser), object.clone()]
+        );
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(&root),
+            vec![other, object.clone(), object]
+        );
+    }
+
+    /// CR 601.2c: a player chosen as a target stays chosen when the same
+    /// player is moved to the front as the guesser.
+    #[test]
+    fn a_guesser_chosen_as_a_target_stays_chosen() {
+        let guesser = crate::types::player::PlayerId(2);
+        let object = TargetRef::Object(crate::types::identifiers::ObjectId(7));
+        let mut root = node(vec![object.clone(), TargetRef::Player(guesser)], vec![0, 1]);
+
+        root.push_front_player_target_recursive(guesser);
+
+        assert_eq!(
+            root.targets,
+            vec![TargetRef::Player(guesser), object.clone()]
+        );
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(&root),
+            vec![object, TargetRef::Player(guesser)]
+        );
+    }
+
+    /// CR 115.3 + CR 601.2c: a player chosen for two instances of "target"
+    /// stays declared twice when the same player is moved to the front as the
+    /// guesser.
+    #[test]
+    fn a_guesser_chosen_twice_stays_declared_twice() {
+        let guesser = crate::types::player::PlayerId(2);
+        let g = TargetRef::Player(guesser);
+        let object = TargetRef::Object(crate::types::identifiers::ObjectId(7));
+        let boards = [
+            (vec![g.clone(), object.clone(), g.clone()], vec![0, 2]),
+            (vec![object.clone(), g.clone(), g.clone()], vec![0, 1, 2]),
+        ];
+
+        let read: Vec<_> = boards
+            .into_iter()
+            .map(|(targets, chosen)| {
+                let mut root = node(targets, chosen);
+                root.push_front_player_target_recursive(guesser);
+                let illegal =
+                    crate::game::ability_utils::illegal_declared_target_slots(&root, &root, &root);
+                (
+                    root.targets.clone(),
+                    crate::game::ability_utils::declared_targets_in_chain(&root),
+                    illegal,
+                )
+            })
+            .collect();
+
+        let front = vec![g.clone(), object.clone(), g.clone()];
+        assert_eq!(
+            read,
+            vec![
+                (front.clone(), vec![g.clone(), g.clone()], Vec::new()),
+                (front, vec![object, g.clone(), g], Vec::new()),
+            ]
+        );
+    }
+
+    /// CR 115.3 + CR 601.2c: a guesser chosen for a node's unless-payer and
+    /// quantity slots keeps both when moved to the front, so the quantity slot
+    /// still reads the guesser rather than the primary target.
+    #[test]
+    fn a_guesser_chosen_for_a_quantity_slot_keeps_its_reading() {
+        use crate::game::ability_utils::{primary_announced_player, quantity_slot_player_ordinal};
+        let guesser = crate::types::player::PlayerId(2);
+        let g = TargetRef::Player(guesser);
+        let primary = TargetRef::Player(crate::types::player::PlayerId(1));
+        let mut root = node(vec![g.clone(), g.clone(), primary.clone()], vec![0, 1, 2]);
+        root.effect = Effect::DealDamage {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: CountBinding::Explicit,
+                },
+            },
+            target: TargetFilter::Player,
+            damage_source: None,
+            excess: None,
+        };
+        root.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+            payer: TargetFilter::Typed(TypedFilter::default()),
+        });
+        let reads = |node: &ResolvedAbility| {
+            let ordinal = quantity_slot_player_ordinal(&node.targets, Some(node));
+            let counted = ordinal.and_then(|ordinal| {
+                node.targets
+                    .iter()
+                    .filter(|target| matches!(target, TargetRef::Player(_)))
+                    .nth(ordinal)
+                    .cloned()
+            });
+            (
+                ordinal,
+                counted,
+                primary_announced_player(&node.targets, node),
+            )
+        };
+        assert_eq!(reads(&root), (Some(1), Some(g.clone()), Some(guesser)));
+
+        root.push_front_player_target_recursive(guesser);
+
+        assert_eq!(reads(&root), (Some(1), Some(g.clone()), Some(guesser)));
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(&root),
+            vec![g.clone(), g, primary]
+        );
+    }
+
+    /// CR 601.2c: a projection of a node's targets keeps each recorded slot on
+    /// the target it named and drops the slots it does not keep.
+    #[test]
+    fn a_projection_keeps_recorded_slots_on_their_targets() {
+        let [a, b, c] =
+            [7, 8, 9].map(|id| TargetRef::Object(crate::types::identifiers::ObjectId(id)));
+        let mut root = node(vec![a.clone(), b, c.clone()], vec![0, 1]);
+
+        root.project_target_occurrences(&[2, 0]);
+
+        assert_eq!(root.targets, vec![c, a.clone()]);
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(&root),
+            vec![a]
+        );
+    }
+
+    /// CR 601.2c: a target inserted without being chosen shifts the recorded
+    /// slots after it and leaves those before it.
+    #[test]
+    fn an_unchosen_insert_keeps_recorded_slots_on_their_targets() {
+        let first = TargetRef::Object(crate::types::identifiers::ObjectId(7));
+        let last = TargetRef::Object(crate::types::identifiers::ObjectId(8));
+        let inserted = TargetRef::Object(crate::types::identifiers::ObjectId(9));
+        let mut root = node(vec![first.clone(), last.clone()], vec![0, 1]);
+
+        root.insert_target(1, inserted.clone(), None);
+
+        assert_eq!(root.targets, vec![first.clone(), inserted, last.clone()]);
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(&root),
+            vec![first, last]
+        );
+    }
+}
+
+#[cfg(test)]
 mod target_read_origin_tests {
     use super::*;
 
@@ -35247,6 +35509,42 @@ impl AttachTargetBindings {
     }
 }
 
+/// CR 601.2c: which of a node's `targets` were chosen as its targets.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChosenTargetSlots {
+    /// No record.
+    #[default]
+    Unrecorded,
+    /// The indices into `targets` of the targets chosen for this node; empty
+    /// when it chose none.
+    Recorded(Vec<usize>),
+}
+
+impl ChosenTargetSlots {
+    /// Whether this node has no record. Such a node is saved without the key,
+    /// and a missing key restores as [`Self::Unrecorded`].
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+
+    /// The recorded slots; none for an unrecorded node.
+    pub fn slots(&self) -> &[usize] {
+        match self {
+            Self::Unrecorded => &[],
+            Self::Recorded(slots) => slots,
+        }
+    }
+
+    /// Points each recorded slot at `moved(slot)`, dropping a slot that maps
+    /// to `None`.
+    pub(crate) fn remap(&mut self, moved: impl Fn(usize) -> Option<usize>) {
+        if let Self::Recorded(slots) = self {
+            *slots = slots.iter().filter_map(|&slot| moved(slot)).collect();
+        }
+    }
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 ///
 /// Serde goes through the derived implementation (`remote = "Self"`) plus the
@@ -35335,6 +35633,10 @@ pub struct ResolvedAbility {
     /// legacy save re-serializes in positional form.
     #[serde(rename = "selected_target_incarnations", default, skip_serializing)]
     pub legacy_selected_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 601.2c: which of `targets` were chosen for this node (see
+    /// [`ResolvedAbility::push_chosen_target`]).
+    #[serde(default, skip_serializing_if = "ChosenTargetSlots::is_unrecorded")]
+    pub chosen_target_slots: ChosenTargetSlots,
     /// CR 602.2b + CR 601.2f: self-referential activation cost modification
     /// carried from the printed ability definition so target-dependent riders
     /// can be applied after targets are committed.
@@ -35784,6 +36086,7 @@ impl PartialEq for ResolvedAbility {
             target_incarnations: a_target_incarnations,
             target_pins: _,
             legacy_selected_target_incarnations: _,
+            chosen_target_slots: a_chosen_target_slots,
             activation_cost_reduction: a_activation_cost_reduction,
             activation_record: a_activation_record,
             illegal_target_slots: a_illegal_target_slots,
@@ -35858,6 +36161,7 @@ impl PartialEq for ResolvedAbility {
             target_incarnations: b_target_incarnations,
             target_pins: _,
             legacy_selected_target_incarnations: _,
+            chosen_target_slots: b_chosen_target_slots,
             activation_cost_reduction: b_activation_cost_reduction,
             activation_record: b_activation_record,
             illegal_target_slots: b_illegal_target_slots,
@@ -35933,6 +36237,7 @@ impl PartialEq for ResolvedAbility {
             // CR 400.7: occurrence pins compare in their normalized, aligned
             // form, so a legacy keyed decode equals its positional re-encode.
             && self.aligned_target_pins() == other.aligned_target_pins()
+            && a_chosen_target_slots == b_chosen_target_slots
             && a_activation_cost_reduction == b_activation_cost_reduction
             && a_activation_record == b_activation_record
             && a_illegal_target_slots == b_illegal_target_slots
@@ -36185,6 +36490,7 @@ impl ResolvedAbility {
             | Effect::ExileFromTopUntil { .. }
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::Cascade
@@ -36356,6 +36662,7 @@ impl ResolvedAbility {
             target_incarnations: Vec::new(),
             target_pins: Vec::new(),
             legacy_selected_target_incarnations: Vec::new(),
+            chosen_target_slots: ChosenTargetSlots::Unrecorded,
             activation_cost_reduction: None,
             activation_record: None,
             illegal_target_slots: Vec::new(),
@@ -36364,6 +36671,58 @@ impl ResolvedAbility {
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
+        }
+    }
+
+    /// CR 601.2c: Appends a target chosen for this node and records its slot.
+    pub(crate) fn push_chosen_target(&mut self, target: TargetRef) {
+        let slot = self.targets.len();
+        match &mut self.chosen_target_slots {
+            ChosenTargetSlots::Recorded(slots) => slots.push(slot),
+            unrecorded @ ChosenTargetSlots::Unrecorded => {
+                *unrecorded = ChosenTargetSlots::Recorded(vec![slot]);
+            }
+        }
+        self.push_target(target);
+    }
+
+    /// CR 601.2c: Makes `target` the first entry of `targets`. Recorded slots
+    /// keep naming the targets they named; the first entry is recorded only if
+    /// an occurrence it replaces was.
+    ///
+    /// CR 115.3: the first entry replaces every unrecorded occurrence and the
+    /// first recorded one; each further recorded occurrence is kept.
+    pub(crate) fn move_target_to_front(&mut self, target: TargetRef) {
+        let recorded = self.chosen_target_slots.slots();
+        let mut front_is_recorded = false;
+        let mut moved = Vec::with_capacity(self.targets.len());
+        let mut occurrences = vec![(target.clone(), None)];
+        for (slot, (entry, pin)) in self.target_occurrences().into_iter().enumerate() {
+            let is_recorded = recorded.contains(&slot);
+            if entry == target && !(is_recorded && front_is_recorded) {
+                front_is_recorded |= is_recorded;
+                moved.push(0);
+            } else {
+                moved.push(occurrences.len());
+                occurrences.push((entry, pin));
+            }
+        }
+        self.replace_target_occurrences(occurrences);
+        self.chosen_target_slots
+            .remap(|slot| moved.get(slot).copied());
+    }
+
+    /// CR 601.2c + CR 603.3d: Starts the target record of every node of this
+    /// chain that has none, so a node no assignment reached declares nothing.
+    pub(crate) fn start_target_record_recursive(&mut self) {
+        if self.chosen_target_slots.is_unrecorded() {
+            self.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.start_target_record_recursive();
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.start_target_record_recursive();
         }
     }
 
@@ -37763,22 +38122,9 @@ impl ResolvedAbility {
     /// CR 608.2d: Make `player` available as a player target across the chain so
     /// a `TargetFilter::ParentTarget` anaphor ("they lose life ...") resolves to
     /// the guesser. Inserted at the front so it wins the first-player-target
-    /// lookup. Any existing occurrence of this player is removed first to
-    /// guarantee they land at index 0 regardless of their prior seat position.
+    /// lookup.
     pub fn push_front_player_target_recursive(&mut self, player: PlayerId) {
-        // CR 608.2d: Remove any existing occurrence first so the guesser is
-        // always at index 0 regardless of seat order in the target list. The
-        // object occurrences keep their own pins (an occurrence projection,
-        // then an unpinned player insertion).
-        let kept: Vec<usize> = self
-            .targets
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| **t != TargetRef::Player(player))
-            .map(|(position, _)| position)
-            .collect();
-        self.project_target_occurrences(&kept);
-        self.insert_target(0, TargetRef::Player(player), None);
+        self.move_target_to_front(TargetRef::Player(player));
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.push_front_player_target_recursive(player);
         }
@@ -43785,14 +44131,11 @@ mod modal_ability_tests {
     }
 
     /// CR 608.2d: `push_front_player_target_recursive` must promote a guesser
-    /// from any non-leading slot to index 0, and the guesser must appear exactly
-    /// once afterward. This is the regression for the prior bug where a
-    /// continuation with targets `[Player(other), Player(guesser)]` — guesser in
-    /// slot 1 — was NOT corrected before the fix, causing `target_player()` to
-    /// bind `other` instead of `guesser` for the "they lose life" rider.
-    ///
-    /// The fix (`retain` before `insert`) must hold for both top-level targets and
-    /// every recursive sub/else branch.
+    /// from any non-leading slot to index 0. This is the regression for the
+    /// prior bug where a continuation with targets
+    /// `[Player(other), Player(guesser)]` — guesser in slot 1 — was NOT
+    /// corrected before the fix, causing `target_player()` to bind `other`
+    /// instead of `guesser` for the "they lose life" rider.
     #[test]
     fn push_front_player_target_recursive_promotes_non_leading_guesser() {
         let other = PlayerId(1);

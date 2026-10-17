@@ -8,6 +8,8 @@ import type {
   AiDecisionDiagnosticsCapability,
   AiLlmProposalResult,
   AiProposalSubmission,
+  ContestClickInput,
+  ContestDriveResult,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -478,6 +480,29 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 250));
     return Promise.race([drain, timeout]);
   };
+
+  /**
+   * Host a running Eye to Eye / Mouth to Mouth contest on this local engine: the
+   * engine's state machine is advanced to the caller's clock and given the clicks
+   * collected since the last call. See `drive_contest_js` in engine-wasm.
+   */
+  async driveContest(
+    nowMs: number,
+    aiPlayers: PlayerId[],
+    clicks: ContestClickInput[],
+    awayPlayers: PlayerId[] = [],
+  ): Promise<ContestDriveResult> {
+    this.assertInitialized("driveContest");
+    try {
+      const result = this.engine
+        ? await this.engine.driveContest(nowMs, aiPlayers, awayPlayers, clicks)
+        : await this.fallback!.driveContest(nowMs, aiPlayers, awayPlayers, clicks);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized("submitAction");
@@ -1422,6 +1447,12 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
 interface MainThreadFallback {
   ensureCardDatabase(): Promise<number>;
+  driveContest(
+    nowMs: number,
+    aiPlayers: PlayerId[],
+    awayPlayers: PlayerId[],
+    clicks: ContestClickInput[],
+  ): Promise<ContestDriveResult>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
@@ -1546,6 +1577,23 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
   return {
     ensureCardDatabase: () => cardData.ensureCardDatabase(),
+
+    driveContest: (
+      nowMs: number,
+      aiPlayers: PlayerId[],
+      awayPlayers: PlayerId[],
+      clicks: ContestClickInput[],
+    ) =>
+      enqueue(() => {
+        const outcome = wasm.drive_contest_js(
+          nowMs,
+          Uint8Array.from(aiPlayers),
+          Uint8Array.from(awayPlayers),
+          clicks,
+        );
+        if (typeof outcome === "string") throw new Error(outcome);
+        return outcome as ContestDriveResult;
+      }),
 
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => {

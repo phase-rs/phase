@@ -271,6 +271,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         force_block_attacker: _,   // exact force-block referent, no dynamic read
         target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
         target_pins: _,            // CR 400.7 selected-target pins, no dynamic read
+        chosen_target_slots: _,    // CR 115.1 announced-target record, no dynamic read
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
@@ -1957,6 +1958,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => scan_target_filter(contestant, target_ctx, mode),
         Effect::Heist {
             target,
             look_count: _,
@@ -7156,6 +7161,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -7399,6 +7405,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ExileFromTopUntil { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }

@@ -147,6 +147,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::ability::DoubleTarget;
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::contest::ContestKind;
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -11118,6 +11119,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // matched by the imperative "you may" arm or fall through to
     // `Effect::Unimplemented`.
     if let Some(clause) = try_parse_compound_subject_each(text, ctx) {
+        return clause;
+    }
+
+    // Eye to Eye / Mouth to Mouth: "you and <player> have a <kind> contest".
+    if let Some(clause) = try_parse_physical_contest(text, ctx) {
         return clause;
     }
 
@@ -24202,6 +24208,94 @@ fn try_parse_shared_equal_to_quantity_compound(
     Some(ParsedEffectClause {
         sub_ability: sub_ability.map(Box::new),
         ..parsed_clause(head.lower_conjunct(qty, subject.as_ref(), tp.original))
+    })
+}
+
+/// "staring" / "breath-holding" — the contest noun of a physical-contest clause.
+/// One axis of the grammar: a future Un-set contest adds an arm here and a
+/// `ContestKind` variant, nothing else in the clause shape changes.
+fn parse_contest_kind(lower: &str) -> OracleResult<'_, ContestKind> {
+    alt((
+        value(ContestKind::Staring, tag("staring")),
+        value(ContestKind::BreathHolding, tag("breath-holding")),
+    ))
+    .parse(lower)
+}
+
+/// Clause grammar for "you and <second subject> have a <kind> contest[.]",
+/// returning the unparsed second-subject text and the contest kind. The second
+/// subject is delegated to the single-subject grammar, the authority for
+/// possessive actors ("target creature's controller") and anaphors ("that player").
+fn parse_physical_contest_clause(lower: &str) -> OracleResult<'_, (&str, ContestKind)> {
+    terminated(
+        preceded(tag("you and "), parse_physical_contest_tail),
+        all_consuming(opt(tag("."))),
+    )
+    .parse(lower)
+}
+
+/// The part of a physical-contest clause after the compound subject's "you and ":
+/// "<second subject> have a <kind> contest". Leaves whatever follows unconsumed (the
+/// chunker probes a remainder that still holds later sentences). Shared with the clause chunker
+/// (`sequence::remainder_is_physical_contest_tail`), whose no-split guard must keep
+/// "you and that player have a ... contest" as ONE clause — "that player <verb>" would
+/// otherwise read as a fresh clause and bisect the compound subject.
+pub(super) fn parse_physical_contest_tail(lower: &str) -> OracleResult<'_, (&str, ContestKind)> {
+    let (rest, second) = take_until::<_, _, OracleError<'_>>(" have a ").parse(lower)?;
+    let (rest, kind) = preceded(
+        tag(" have a "),
+        terminated(parse_contest_kind, tag(" contest")),
+    )
+    .parse(rest)?;
+    Ok((rest, (second, kind)))
+}
+
+/// Eye to Eye ("You and target creature's controller have a staring contest")
+/// and Mouth to Mouth ("You and that player have a breath-holding contest").
+///
+/// The Comprehensive Rules define no physical contests, so there is no CR
+/// number for the contest; the surrounding rules are CR 109.5 (the "you" is the
+/// ability's controller) and CR 115.1 / CR 601.2c (a possessive-actor second
+/// subject names its player through an announced object target, declared here as
+/// a leading `Effect::TargetOnly` slot exactly as `try_parse_compound_subject_each`
+/// does). The "if you win" rider is a separate sentence and gates on
+/// `AbilityCondition::EventOutcomeWon` through the ordinary clause machinery.
+///
+/// A second subject that does not denote exactly one player ("each opponent")
+/// is declined rather than guessed, so it falls through to a diagnostic
+/// `Unimplemented` instead of a wrong contest.
+fn try_parse_physical_contest(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (_, (second, kind)) = parse_physical_contest_clause(lower.trim()).ok()?;
+    let application = subject::parse_subject_application(second.trim(), ctx)?;
+    // CR 115.1 + CR 608.2c: the contestant must be a player the ability has already
+    // bound — a relation to an announced object target, an anaphor to an earlier
+    // slot, or a player slot this clause declares itself. An unbound population
+    // ("an opponent", "your opponents") resolves to no particular player and would
+    // fall back to the controller, so it is declined rather than guessed.
+    let names_one_bound_player = match &application.affected {
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::DefendingPlayer => true,
+        other => other.denotes_player_target() && application.target.is_some(),
+    };
+    if !names_one_bound_player || application.multi_target.is_some() {
+        return None;
+    }
+    let contest = parsed_clause(Effect::PhysicalContest {
+        kind,
+        contestant: application.affected,
+    });
+    let Some(target) = application.target else {
+        return Some(contest);
+    };
+    Some(ParsedEffectClause {
+        sub_ability: Some(Box::new(ability_definition_from_clause(
+            AbilityKind::Spell,
+            contest,
+        ))),
+        ..parsed_clause(Effect::TargetOnly { target })
     })
 }
 
@@ -38100,6 +38194,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }

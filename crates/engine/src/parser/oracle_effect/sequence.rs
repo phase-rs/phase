@@ -1588,6 +1588,14 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && remainder_trimmed_starts_with_compound_subject_each(
                                 remainder_trimmed,
                             );
+                        // Eye to Eye / Mouth to Mouth: "you and <player> have a <kind>
+                        // contest" is one compound-subject clause with no " each ".
+                        let compound_subject_each = compound_subject_each
+                            || (first_subject_token == "you"
+                                && super::parse_physical_contest_tail(
+                                    &remainder_trimmed.to_ascii_lowercase(),
+                                )
+                                .is_ok());
                         if compound_subject_each {
                             compound_subject_each_sticky = true;
                         }
@@ -8093,6 +8101,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade

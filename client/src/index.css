@@ -1102,3 +1102,19 @@ select.select-dark option {
 .debug-bounds [data-debug-label="Opp Zones"]::after    { background: #fbbf24; }
 .debug-bounds [data-debug-label="Player Bottom"]       { outline-color: #818cf8; }
 .debug-bounds [data-debug-label="Player Bottom"]::after { background: #818cf8; }
+
+/* Eye to Eye / Mouth to Mouth: a lightweight pop on each registered click. Short and
+   non-blocking so rapid clicking is never slowed by the animation. Opted into with
+   Tailwind's `motion-safe:` variant, so reduced-motion users never see it. */
+@keyframes contest-click-pop {
+  from {
+    transform: scale(0.94);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+.animate-pulse-once {
+  animation: contest-click-pop 90ms ease-out;
+}

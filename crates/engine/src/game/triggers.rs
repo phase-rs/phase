@@ -8588,10 +8588,16 @@ pub(crate) fn seed_batched_attack_parent_targets(
 /// `current_trigger_event`. CR 603.6 specifically authorizes zone-change
 /// abilities to find and affect the object after it changes zones.
 fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
+    // CR 115.1: event-context seeding is not a spell or ability that may change
+    // a chosen target, so it never overwrites one, even when the chosen target
+    // is the trigger's own source.
+    if !ability.chosen_target_slots.slots().is_empty() {
+        return true;
+    }
     if ability.targets.is_empty() {
         return false;
     }
-    // CR 608.2c: only skip when real propagated targets exist — a lone source
+    // CR 608.2c: skip when real propagated targets exist — a lone source
     // fallback from `resolved_targets` use_self must be overwritable.
     ability
         .targets
@@ -8833,6 +8839,8 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
     ability.bind_force_block_attacker_recursive(event_attacker);
     ability.context.triggering_spell = triggering_spell_pin(state, trigger_event.as_ref());
+    // CR 603.3d: the targets this ability declares are only those chosen for it.
+    ability.start_target_record_recursive();
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(
         state,
@@ -19324,6 +19332,51 @@ pub mod tests {
             EventContextSeedTiming::StackPush,
         );
         assert_eq!(ability.targets, vec![TargetRef::Object(creature)]);
+    }
+
+    #[test]
+    fn seed_event_context_parent_targets_keeps_a_chosen_source_target() {
+        use crate::types::ability::PerpetualModification;
+
+        let state = GameState::default();
+        let spacecraft = ObjectId(1);
+        let creature = ObjectId(2);
+        let event = GameEvent::Stationed {
+            spacecraft_id: spacecraft,
+            creature_id: creature,
+            counters_added: 1,
+        };
+        for timing in [
+            EventContextSeedTiming::StackPush,
+            EventContextSeedTiming::ResolutionFallback,
+        ] {
+            let mut fallback = ResolvedAbility::new(
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::ParentTarget,
+                    modification: PerpetualModification::GrantKeywords {
+                        keywords: vec![Keyword::Deathtouch],
+                    },
+                },
+                vec![TargetRef::Object(spacecraft)],
+                spacecraft,
+                PlayerId(0),
+            );
+            let mut chosen = fallback.clone();
+            chosen.chosen_target_slots =
+                crate::types::ability::ChosenTargetSlots::Recorded(vec![0]);
+            seed_event_context_parent_targets(&state, &mut fallback, Some(&event), timing);
+            seed_event_context_parent_targets(&state, &mut chosen, Some(&event), timing);
+            assert_eq!(
+                fallback.targets,
+                vec![TargetRef::Object(creature)],
+                "reach guard: {timing:?} seeds an unchosen source"
+            );
+            assert_eq!(
+                chosen.targets,
+                vec![TargetRef::Object(spacecraft)],
+                "CR 115.1: {timing:?}"
+            );
+        }
     }
 
     #[test]

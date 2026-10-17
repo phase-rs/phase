@@ -130,6 +130,43 @@ impl GameDb {
         })
     }
 
+    /// Test fault: a terminal result already recorded for this Full key with different
+    /// content, so every honest `prepare_full_terminal` fails while the key stays
+    /// active (the transient shape of a commit failure).
+    #[cfg(test)]
+    pub(crate) fn plant_terminal_conflict(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO terminal_match_results
+                (game_code, generation, terminal_revision, artifact_digest, display_json, created_at)
+             VALUES (?1, ?2, 0, 'conflicting-digest', '{}', ?3)",
+            params![key.game_code, key.generation, now_epoch()],
+        )?;
+        Ok(())
+    }
+
+    /// Undo [`Self::plant_terminal_conflict`]: the fault clears.
+    #[cfg(test)]
+    pub(crate) fn clear_terminal_conflict(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM terminal_match_results WHERE game_code = ?1 AND generation = ?2",
+            params![key.game_code, key.generation],
+        )?;
+        Ok(())
+    }
+
+    /// Test fault: the Full key is retired out from under the running game.
+    #[cfg(test)]
+    pub(crate) fn retire_full_key_for_test(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE game_sessions SET retired = 1 WHERE game_code = ?1 AND generation = ?2",
+            params![key.game_code, key.generation],
+        )?;
+        Ok(())
+    }
+
     /// Legacy persistence path retained while Full runtime callers migrate to
     /// generation-fenced snapshots. New lifecycle code must use
     /// [`Self::save_full_session`] instead.
