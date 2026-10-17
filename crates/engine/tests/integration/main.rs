@@ -497,6 +497,7 @@ mod gourmands_talent_turn_scoped_food_grant;
 mod gran_gran_integration;
 mod granted_alt_cost_hand_keyword;
 mod granted_bloodthirst_5802;
+mod granted_loyalty_ability_timing;
 mod granted_storm_snapshot;
 mod granted_sunburst_5337;
 mod graveyard_permission_announcement;
