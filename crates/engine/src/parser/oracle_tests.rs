@@ -31,10 +31,7 @@ fn coordinated_total_count_full_source_honesty() {
 fn coordinated_population_draw_full_source() {
     let head = "cards you own in exile and in your graveyard";
     let complete_tail = "that are instant cards, are sorcery cards, and/or have an Adventure";
-    let population = QuantityExpr::Ref {
-        qty: crate::parser::oracle_quantity::parse_quantity_ref(&format!("{head} {complete_tail}"))
-            .expect("complete three-predicate population"),
-    };
+    let population = complete_coordinated_population_quantity();
     for (introduction, expected) in [
         ("the number of ", population.clone()),
         ("the total number of ", population.clone()),
@@ -54,28 +51,32 @@ fn coordinated_population_draw_full_source() {
         ),
     ] {
         let operand = format!("{introduction}{head} {complete_tail}");
-        let source = format!("Draw X cards, where X is {operand}.");
-        let parsed = parse_oracle_text(
-            &source,
-            "Synthetic complete Draw population",
-            &[],
-            &["Sorcery".into()],
-            &[],
-        );
-        assert_eq!(parsed.abilities.len(), 1);
-        assert!(!has_unimplemented(&parsed.abilities[0]), "{source}");
-        assert!(
-            matches!(parsed.abilities[0].effect.as_ref(), Effect::Draw { count, target: TargetFilter::Controller } if count == &expected),
-            "{source}: {:?}",
-            parsed.abilities
-        );
-        assert!(parsed.parse_warnings.is_empty(), "{source}");
+        // Public clause normalization trims terminal punctuation before lowering.
+        // The punctuation sibling must retain the entire complete expression.
+        for ending in [".", ",."] {
+            let source = format!("Draw X cards, where X is {operand}{ending}");
+            let parsed = parse_oracle_text(
+                &source,
+                "Synthetic complete Draw population",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert_eq!(parsed.abilities.len(), 1);
+            assert!(!has_unimplemented(&parsed.abilities[0]), "{source}");
+            assert!(
+                matches!(parsed.abilities[0].effect.as_ref(), Effect::Draw { count, target: TargetFilter::Controller } if count == &expected),
+                "{source}: {:?}",
+                parsed.abilities
+            );
+            assert!(parsed.parse_warnings.is_empty(), "{source}");
+        }
         for tail in [
             "that are instant cards, are squirrels wearing hats",
             "that are instant cards, are sorcery cards, and/or have an unknown adventure",
             "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
             "that are instant cards, are sorcery cards, and/or",
-            "that are instant cards, are sorcery cards, and/or have an Adventure,",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, have",
         ] {
             let operand = format!("{introduction}{head} {tail}");
             let source = format!("Draw X cards, where X is {operand}.");
@@ -89,6 +90,49 @@ fn coordinated_population_draw_full_source() {
             assert!(malformed.abilities.iter().any(has_unimplemented), "{source}");
             assert!(malformed.abilities.iter().any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains(&operand))), "whole original Draw operand: {source}: {:?}", malformed.abilities);
         }
+    }
+}
+
+fn complete_coordinated_population_quantity() -> QuantityExpr {
+    // CR 108.3 + CR 109.2a + CR 715.2a: shared ownership and zones intersect
+    // the three alternatives; expected values are independent of parser output.
+    let owned = FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    let typed =
+        |kind, properties| TargetFilter::Typed(TypedFilter::new(kind).properties(properties));
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    typed(TypeFilter::Card, vec![owned.clone()]),
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(
+                                TypeFilter::Card,
+                                vec![FilterProp::InZone { zone: Zone::Exile }],
+                            ),
+                            typed(
+                                TypeFilter::Card,
+                                vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    },
+                                    owned,
+                                ],
+                            ),
+                        ],
+                    },
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(TypeFilter::Instant, vec![]),
+                            typed(TypeFilter::Sorcery, vec![]),
+                            typed(TypeFilter::Card, vec![FilterProp::HasAdventure]),
+                        ],
+                    },
+                ],
+            },
+        },
     }
 }
 
@@ -114,31 +158,60 @@ fn assert_coordinated_where_x_full_source_honesty(introductions: &[&str]) {
         let frame = |operand: &str| {
             format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {operand}.")
         };
-        let complete = parse_oracle_text(
-            &frame(&operand),
-            "Candlekeep Inspiration",
-            &[],
-            &["Sorcery".into()],
-            &[],
-        );
-        assert_eq!(complete.abilities.len(), 1);
-        assert!(!has_unimplemented(&complete.abilities[0]));
-        let expected = crate::parser::oracle_quantity::parse_quantity_ref(&operand).unwrap();
-        let Effect::GenericEffect {
-            static_abilities, ..
-        } = complete.abilities[0].effect.as_ref()
-        else {
-            panic!("complete base P/T effect");
-        };
-        assert!(static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(m, ContinuousModification::SetPowerDynamic { value } if value == &QuantityExpr::Ref { qty: expected.clone() }))));
-        assert!(static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(m, ContinuousModification::SetToughnessDynamic { value } if value == &QuantityExpr::Ref { qty: expected.clone() }))));
-        assert!(complete.parse_warnings.is_empty());
+        let expected = complete_coordinated_population_quantity();
+        for punctuation in ["", ","] {
+            let source = frame(&format!("{operand}{punctuation}"));
+            let complete = parse_oracle_text(
+                &source,
+                "Candlekeep Inspiration",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert_eq!(complete.abilities.len(), 1);
+            let ability = &complete.abilities[0];
+            assert!(!has_unimplemented(ability), "{source}");
+            // CR 611.2a + CR 613.4b: both base characteristics retain the
+            // stated duration and the layer-7b dynamic setting operation.
+            assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } = ability.effect.as_ref()
+            else {
+                panic!("complete base P/T effect: {source}");
+            };
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(static_abilities.len(), 1);
+            let definition = &static_abilities[0];
+            assert_eq!(definition.mode, StaticMode::Continuous);
+            assert_eq!(
+                definition.affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You)
+                ))
+            );
+            assert!(!definition.characteristic_defining);
+            assert_eq!(
+                definition.modifications,
+                vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: expected.clone()
+                    },
+                    ContinuousModification::SetToughnessDynamic {
+                        value: expected.clone()
+                    },
+                ]
+            );
+            assert!(complete.parse_warnings.is_empty(), "{source}");
+        }
         for tail in [
             "that are instant cards, are squirrels wearing hats",
             "that are instant cards, are sorcery cards, and/or have an unknown adventure",
             "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
             "that are instant cards, are sorcery cards, and/or",
-            "that are instant cards, are sorcery cards, and/or have an Adventure,",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, have",
         ] {
             let operand = format!("{introduction}{head} {tail}");
             let source = frame(&operand);

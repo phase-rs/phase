@@ -1,11 +1,22 @@
 //! Coordinated card populations through the production casting pipeline.
+use super::support::shared_card_export_json;
+use engine::database::card_db::CardDatabase;
 use engine::game::game_object::BackFaceData;
+use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityCost, ContinuousModification, ControllerRef, Duration, Effect, FilterProp, QuantityExpr,
+    QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+};
 use engine::types::card::LayoutKind;
+use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::statics::{CostModifyMode, StaticMode};
 use engine::types::zones::Zone;
+use serde_json::{to_string, Map, Value};
+use std::path::Path;
 
 const SAILORS: &str = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
 
@@ -349,4 +360,348 @@ fn assert_population_draw(runner: &mut GameRunner, spell: ObjectId, expected: i6
     outcome.assert_hand_drawn(P1, 0);
     outcome.assert_zone(&[spell], Zone::Graveyard);
     assert_eq!(outcome.mana_pool_total(P0), 0);
+}
+
+#[test]
+fn coordinated_population_export_string_loader() {
+    const BEACON: &str = "Beacon Bolt deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\nJump-start (You may cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile this card.)";
+    const DRAKE: &str = "Flying\nCrackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\nWhen this creature enters, draw a card.";
+    const HUSKBURSTER: &str = "This spell costs {1} less to cast for each creature card you own in exile and in your graveyard.\nMenace, deathtouch";
+    const RAL: &str = "[+1]: Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.\n[−3]: Ral deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\n[−8]: You get an emblem with \"Whenever you cast an instant or sorcery spell, this emblem deals 4 damage to any target and you draw two cards.\"";
+    const CURVE: &str = "Create a 0/0 green and blue Fractal creature token. Put X +1/+1 counters on it, where X is one plus the total number of instant and sorcery cards you own in exile and in your graveyard.";
+
+    let client_export =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    assert!(
+        client_export.exists(),
+        "generated client export is required"
+    );
+    let raw = shared_card_export_json().expect(
+        "generated full export is required for coordinated population string-loader regression",
+    );
+    let mut entries = Map::<String, Value>::new();
+    for (key, name, oracle) in [
+        ("sailors' bane", "Sailors' Bane", SAILORS),
+        (
+            "candlekeep inspiration",
+            "Candlekeep Inspiration",
+            CANDLEKEEP,
+        ),
+        ("beacon bolt", "Beacon Bolt", BEACON),
+        ("crackling drake", "Crackling Drake", DRAKE),
+        ("huskburster swarm", "Huskburster Swarm", HUSKBURSTER),
+        ("ral, izzet viceroy", "Ral, Izzet Viceroy", RAL),
+        ("serpentine curve", "Serpentine Curve", CURVE),
+    ] {
+        let entry = raw.get(key).expect("required changed face in full export");
+        assert_eq!(entry.get("name").and_then(Value::as_str), Some(name));
+        assert_eq!(
+            entry.get("oracle_text").and_then(Value::as_str),
+            Some(oracle)
+        );
+        entries.insert(key.into(), entry.clone());
+    }
+    assert_eq!(entries.len(), 7);
+    let serialized = to_string(&entries).expect("unchanged raw entries serialize");
+    let db = CardDatabase::from_json_str(&serialized).expect("real changed export entries load");
+    assert_eq!(db.face_iter().count(), 7);
+    let sailors = db
+        .get_face_by_name("Sailors' Bane")
+        .expect("loaded Sailors' Bane");
+    let candlekeep = db
+        .get_face_by_name("Candlekeep Inspiration")
+        .expect("loaded Candlekeep Inspiration");
+    let beacon = db
+        .get_face_by_name("Beacon Bolt")
+        .expect("loaded Beacon Bolt");
+    let drake = db
+        .get_face_by_name("Crackling Drake")
+        .expect("loaded Crackling Drake");
+    let huskburster = db
+        .get_face_by_name("Huskburster Swarm")
+        .expect("loaded Huskburster Swarm");
+    let ral = db
+        .get_face_by_name("Ral, Izzet Viceroy")
+        .expect("loaded Ral, Izzet Viceroy");
+    let curve = db
+        .get_face_by_name("Serpentine Curve")
+        .expect("loaded Serpentine Curve");
+    for (face, name, oracle) in [
+        (sailors, "Sailors' Bane", SAILORS),
+        (candlekeep, "Candlekeep Inspiration", CANDLEKEEP),
+        (beacon, "Beacon Bolt", BEACON),
+        (drake, "Crackling Drake", DRAKE),
+        (huskburster, "Huskburster Swarm", HUSKBURSTER),
+        (ral, "Ral, Izzet Viceroy", RAL),
+        (curve, "Serpentine Curve", CURVE),
+    ] {
+        assert_eq!(face.name, name);
+        assert_eq!(face.oracle_text.as_deref(), Some(oracle));
+    }
+
+    // CR 108.3 + CR 109.2a + CR 109.5 + CR 400.1: the spell's "you"
+    // selects ownership and the stated zones, independently of stored controller.
+    let owned = FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    let typed =
+        |kind, properties| TargetFilter::Typed(TypedFilter::new(kind).properties(properties));
+    let zones = TargetFilter::Or {
+        filters: vec![
+            typed(
+                TypeFilter::Card,
+                vec![FilterProp::InZone { zone: Zone::Exile }],
+            ),
+            typed(
+                TypeFilter::Card,
+                vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    owned.clone(),
+                ],
+            ),
+        ],
+    };
+    let qa = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    typed(TypeFilter::Card, vec![owned.clone()]),
+                    zones.clone(),
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(TypeFilter::Instant, vec![]),
+                            typed(TypeFilter::Sorcery, vec![]),
+                            typed(TypeFilter::Card, vec![FilterProp::HasAdventure]),
+                        ],
+                    },
+                ],
+            },
+        },
+    };
+    let qi = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(TypeFilter::Instant, vec![owned.clone()]),
+                            typed(TypeFilter::Sorcery, vec![owned.clone()]),
+                        ],
+                    },
+                    zones.clone(),
+                ],
+            },
+        },
+    };
+    let qc = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![typed(TypeFilter::Creature, vec![owned]), zones],
+            },
+        },
+    };
+
+    let sailors_static = sailors
+        .static_abilities
+        .first()
+        .expect("Sailors cost static");
+    let StaticMode::ModifyCost {
+        mode,
+        amount,
+        dynamic_count: Some(count),
+        ..
+    } = &sailors_static.mode
+    else {
+        panic!("Sailors dynamic cost slot");
+    };
+    assert_eq!(*mode, CostModifyMode::Reduce);
+    assert_eq!(*amount, ManaCost::generic(1));
+    assert_eq!(sailors_static.affected, Some(TargetFilter::SelfRef));
+    let sailors_count = QuantityExpr::Ref { qty: count.clone() };
+    assert_eq!(sailors_count, qa);
+
+    let candlekeep_ability = candlekeep
+        .abilities
+        .first()
+        .expect("Candlekeep spell ability");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = candlekeep_ability.effect.as_ref()
+    else {
+        panic!("Candlekeep continuous effect slot");
+    };
+    // CR 611.2a + CR 613.4b: both base characteristics have the printed duration.
+    assert_eq!(candlekeep_ability.duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    let [candlekeep_static] = static_abilities.as_slice() else {
+        panic!("one Candlekeep static");
+    };
+    assert_eq!(candlekeep_static.mode, StaticMode::Continuous);
+    assert_eq!(
+        candlekeep_static.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert!(!candlekeep_static.characteristic_defining);
+    let [ContinuousModification::SetPowerDynamic {
+        value: candlekeep_power,
+    }, ContinuousModification::SetToughnessDynamic {
+        value: candlekeep_toughness,
+    }] = candlekeep_static.modifications.as_slice()
+    else {
+        panic!("exactly one distinct Candlekeep power and toughness slot");
+    };
+    assert_eq!(candlekeep_power, &qa);
+    assert_eq!(candlekeep_toughness, &qa);
+
+    let Effect::DealDamage {
+        amount: beacon_count,
+        ..
+    } = beacon
+        .abilities
+        .first()
+        .expect("Beacon ability")
+        .effect
+        .as_ref()
+    else {
+        panic!("Beacon damage amount slot");
+    };
+    assert_eq!(beacon_count, &qi);
+    let drake_static = drake.static_abilities.first().expect("Drake power static");
+    assert_eq!(drake_static.mode, StaticMode::Continuous);
+    assert!(drake_static.characteristic_defining);
+    assert_eq!(drake_static.affected, Some(TargetFilter::SelfRef));
+    let [ContinuousModification::SetDynamicPower { value: drake_count }] =
+        drake_static.modifications.as_slice()
+    else {
+        panic!("exactly one Drake dynamic power slot");
+    };
+    assert_eq!(drake_count, &qi);
+    let huskburster_static = huskburster
+        .static_abilities
+        .first()
+        .expect("Huskburster cost static");
+    let StaticMode::ModifyCost {
+        mode,
+        amount,
+        dynamic_count: Some(count),
+        ..
+    } = &huskburster_static.mode
+    else {
+        panic!("Huskburster dynamic cost slot");
+    };
+    assert_eq!(*mode, CostModifyMode::Reduce);
+    assert_eq!(*amount, ManaCost::generic(1));
+    assert_eq!(huskburster_static.affected, Some(TargetFilter::SelfRef));
+    let huskburster_count = QuantityExpr::Ref { qty: count.clone() };
+    assert_eq!(huskburster_count, qc);
+    let ral_ability = ral.abilities.get(1).expect("Ral minus-three ability");
+    assert_eq!(ral_ability.cost, Some(AbilityCost::Loyalty { amount: -3 }));
+    let Effect::DealDamage {
+        amount: ral_count, ..
+    } = ral_ability.effect.as_ref()
+    else {
+        panic!("Ral minus-three damage amount slot");
+    };
+    assert_eq!(ral_count, &qi);
+    let Effect::Token {
+        enter_with_counters,
+        ..
+    } = curve
+        .abilities
+        .first()
+        .expect("Curve token ability")
+        .effect
+        .as_ref()
+    else {
+        panic!("Curve token counter slot");
+    };
+    let [(CounterType::Plus1Plus1, curve_count)] = enter_with_counters.as_slice() else {
+        panic!("one Curve +1/+1 counter quantity");
+    };
+    assert_eq!(
+        curve_count,
+        &QuantityExpr::Offset {
+            inner: Box::new(qi),
+            offset: 1
+        }
+    );
+
+    let slots = [
+        ("Sailors cost", &sailors_count, 3, 0),
+        ("Candlekeep power", candlekeep_power, 3, 0),
+        ("Candlekeep toughness", candlekeep_toughness, 3, 0),
+        ("Beacon damage", beacon_count, 2, 0),
+        ("Drake power", drake_count, 2, 0),
+        ("Huskburster cost", &huskburster_count, 2, 0),
+        ("Ral damage", ral_count, 2, 0),
+        ("Curve counters", curve_count, 3, 1),
+    ];
+    assert_eq!(slots.len(), 8);
+    for populated in [true, false] {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Loaded count source", "")
+            .id();
+        let mut owned_ids = Vec::new();
+        let mut adventure_ids = Vec::new();
+        if populated {
+            let overlap = scenario
+                .add_spell_to_exile(P0, "Loaded Instant Adventure", true)
+                .id();
+            let sorcery = scenario
+                .add_spell_to_graveyard(P0, "Loaded Sorcery member", false)
+                .id();
+            let adventure = scenario
+                .add_creature_to_graveyard(P0, "Loaded Adventure creature", 1, 1)
+                .id();
+            let ordinary = scenario
+                .add_creature_to_graveyard(P0, "Loaded ordinary creature", 1, 1)
+                .id();
+            owned_ids.extend([overlap, sorcery, adventure, ordinary]);
+            adventure_ids.extend([overlap, adventure]);
+        }
+        let foreign_ids = [
+            scenario
+                .add_spell_to_exile(P1, "Loaded foreign exile Instant", true)
+                .id(),
+            scenario
+                .add_spell_to_graveyard(P1, "Loaded opponent Sorcery", false)
+                .id(),
+            scenario
+                .add_creature_to_graveyard(P1, "Loaded opponent Creature", 1, 1)
+                .id(),
+        ];
+        scenario.add_spell_to_hand(P0, "Loaded hand Instant", true);
+        scenario.add_spell_to_library_top(P0, "Loaded library Instant", true);
+        let mut runner = scenario.build();
+        // CR 109.4: off-zone controller storage is not ownership authority.
+        for id in owned_ids {
+            runner.state_mut().objects.get_mut(&id).unwrap().controller = P1;
+        }
+        for id in foreign_ids {
+            runner.state_mut().objects.get_mut(&id).unwrap().controller = P0;
+        }
+        // CR 715.2a + CR 715.2c: real alternative characteristics qualify the
+        // Adventure creature; the Instant plus Adventure remains one card.
+        for id in adventure_ids {
+            runner.state_mut().objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+                name: "Loaded Adventure alternative".into(),
+                layout_kind: Some(LayoutKind::Adventure),
+                ..Default::default()
+            });
+        }
+        for (slot, quantity, positive, empty) in slots {
+            assert_eq!(
+                resolve_quantity(runner.state(), quantity, P0, source),
+                if populated { positive } else { empty },
+                "{slot}, populated={populated}"
+            );
+        }
+    }
 }
