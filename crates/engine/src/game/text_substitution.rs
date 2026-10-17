@@ -497,6 +497,7 @@ fn rewrite_resolved_ability(
         target_incarnations: _,
         target_pins: _,
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _,
         activation_record: _,
         illegal_target_slots: _,
         unjudged_target_slots: _,

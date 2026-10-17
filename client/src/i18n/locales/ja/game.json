@@ -846,7 +846,16 @@
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
     "pwControllerTrample": "PWコントローラー（PW越しのトランプル）"
   },
+  "cardTextReference": {
+    "title": "日本語カード本文（参考）",
+    "hint": "印刷されたカード本文全体です。現在のOracleや、この能力の文面と異なる場合があります。",
+    "originalAbility": "能力の原文"
+  },
   "stack": {
+    "activatedAbility": "起動型能力",
+    "activatedAbilityNumber": "起動型能力 {{number}}",
+    "triggeredAbility": "誘発型能力",
+    "readAbility": "能力の原文とカード本文を見る",
     "title": "スタック",
     "collapsePanel": "スタックパネルを折りたたむ",
     "expandPanel": "スタックパネルを展開",
@@ -2675,5 +2684,34 @@
     "reveal_one": "{{count}}枚を公開",
     "reveal_other": "{{count}}枚を公開",
     "decline": "公開しない"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "にらめっこ対決",
+      "breathHolding": "息止め対決"
+    },
+    "versus": "{{first}} 対 {{second}}",
+    "instructions": "できるだけ長く、クリック、タップ、またはスペースキーの押下を繰り返してください。{{seconds}}秒間止まった最初のプレイヤーの負けです。",
+    "status": {
+      "pending": "対決の開始を待っています…",
+      "preparing": "準備してください…",
+      "go": "スタート！クリックし続けて！",
+      "paused": "プレイヤーの再接続を待つため、対決を一時停止中…",
+      "spectating": "対決を観戦中…",
+      "resolving": "結果を判定中…"
+    },
+    "button": {
+      "wait": "スタートを待つ…",
+      "active": "クリックし続けて！"
+    },
+    "you": "あなた",
+    "clicks": "{{name}}：{{count}}",
+    "result": {
+      "won": "対決に勝ちました！",
+      "lost": "対決に負けました。",
+      "winner": "{{name}}が対決に勝ちました。",
+      "tie": "引き分け：何も起こりません。",
+      "cancelled": "対決は中止されました：何も起こりません。"
+    }
   }
 }

@@ -316,7 +316,7 @@ fn run(arm: &GateArm) -> Vec<String> {
             "{what}: the loop's controller must be the proposer, got {proposer:?}"
         ));
     }
-    if certificate.win_kind != WinKind::Advantage {
+    if certificate.win_kind != Some(WinKind::Advantage) {
         wrong.push(format!(
             "{what}: an unbounded mill an empty library neither stops (CR 701.17b) nor ends \
              the game on (CR 121.4) is an ADVANTAGE loop, not a win the collapse can deliver; \

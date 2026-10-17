@@ -13901,12 +13901,15 @@ fn delayed_trigger_install_command_mut(
 ///
 /// Single authority for the field so both wire hosts enforce identically — the offer's
 /// `LoopCertificate::per_cycle` and the proposal's `ShortcutProposal::per_cycle` are different
-/// structs carrying the same `PeriodicDelta`, and only the second is what the drive reads.
+/// structs carrying the same `PeriodSignature`, and only the second is what the drive reads.
 fn reject_zero_frames_per_period(
-    period: &Option<crate::analysis::resource::PeriodicDelta>,
+    period: &Option<crate::analysis::resource::PeriodSignature>,
     host: &str,
 ) -> Result<(), String> {
-    if period.as_ref().is_some_and(|pd| pd.frames_per_period == 0) {
+    if period
+        .as_ref()
+        .is_some_and(|signature| signature.frames_per_period() == 0)
+    {
         return Err(format!(
             "persisted {host} states frames_per_period 0, which delimits every committed cycle \
              at the first priority beat rather than at the certified CR 732.2a period"
@@ -13975,9 +13978,9 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
         reject_zero_frames_per_period(&certificate.per_cycle, "LoopShortcut offer")?;
     }
     // THE SECOND WIRE HOST FOR THE SAME FIELD, and the one the drive actually reads.
-    // `frames_per_period` is not a `LoopCertificate` field — it lives on `PeriodicDelta`, and
+    // `frames_per_period` is not a `LoopCertificate` field — it lives on `PeriodSignature`, and
     // `ShortcutProposal` carries its own `per_cycle` too. `materialize_fixed_shortcut` feeds
-    // `drive_one_shortcut_cycle` from `proposal.per_cycle.as_ref().map(|pd| pd.frames_per_period)`
+    // `drive_one_shortcut_cycle` from `proposal.per_cycle.as_ref().map(PeriodSignature::frames_per_period)`
     // (`game/engine.rs`), i.e. from THIS host, not from the offer's certificate. Guarding only
     // the offer would leave the consumed path open — the restored `RespondToShortcut` state is
     // reached without ever re-entering `LoopShortcut`.
@@ -16700,6 +16703,21 @@ pub enum WaitingFor {
         card: ObjectId,
         remaining: Vec<(PlayerId, ObjectId)>,
     },
+    /// Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest between
+    /// the resolving ability's controller (contestant 0) and `contest.contestants[1]`.
+    ///
+    /// Nobody submits a `GameAction` here: the host stamps each click with its own
+    /// monotonic clock and drives the state machine through
+    /// `game::contest::{start_contest, advance_contest, contest_click,
+    /// set_contest_connection, cancel_contest}`. When the machine reaches a terminal
+    /// phase those entry points settle it — recording the outcome as the
+    /// controller's win/non-win for the "if you win" rider and resuming the parked
+    /// continuation — and hand priority back, exactly like a settled clash.
+    PhysicalContest {
+        contest: Box<crate::types::contest::ContestState>,
+        /// The resolving ability's source, for the settled `EffectResolved` event.
+        source_id: ObjectId,
+    },
     /// CR 701.38: A player is voting on the listed choices. After this player
     /// has cast all of their votes (1 + extras from "you may vote an additional
     /// time" static abilities), the engine advances to the next player in
@@ -17734,6 +17752,11 @@ pub enum NoActor {
     /// latch and no transport consumed it, so a 3-player Commander game parked
     /// forever with no acting player and no client rendering it.
     ResolveAllReadyPrefix,
+    /// A real-time contest (Eye to Eye, Mouth to Mouth) whose inputs are
+    /// host-stamped clicks and clock ticks rather than `GameAction`s. Advanced by
+    /// [`crate::game::contest::advance_contest`]; every transport that can enter
+    /// the state must drive it, or the game parks with nobody able to move it.
+    HostContestDriver,
 }
 
 impl WaitingFor {
@@ -17902,6 +17925,7 @@ impl WaitingFor {
             WaitingFor::ChooseFromZoneOpponentChooser { .. } => "ChooseFromZoneOpponentChooser",
             WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
+            WaitingFor::PhysicalContest { .. } => "PhysicalContest",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
@@ -18110,6 +18134,7 @@ impl WaitingFor {
                 ActingAuthority::One(*proposer)
             }
             WaitingFor::GameOver { .. } => ActingAuthority::None(NoActor::MatchTeardown),
+            WaitingFor::PhysicalContest { .. } => ActingAuthority::None(NoActor::HostContestDriver),
         }
     }
 
@@ -18412,6 +18437,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::PhysicalContest { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
@@ -18619,6 +18645,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::PhysicalContest { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
@@ -23108,12 +23135,14 @@ declare_game_state! {
 
     /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
-    /// `ExileTop` came up with nothing (empty library, no eligible card, an
+    /// `ExileTop` / library search came up with nothing (empty library, no eligible card, an
     /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
     /// since issue #8798; a `RevealUntil` that revealed no matching card) — distinct from "none of those has run
     /// in this chain link," which is `None`. This is a brief, transient
     /// relay: `effects::apply_parent_chain_context` reads and immediately
-    /// clears it at the very next parent->child hand-off (whatever that
+    /// clears it at the very next parent->child hand-off (a reflexive-trigger
+    /// materialization probe that creates nothing restores it for the real hand-off)
+    /// (whatever that
     /// child turns out to be), copying it onto that child's (and, while still target-less, its descendants') typed
     /// `ResolvedAbility::parent_target_missing_reason` field. The only other
     /// reader is the same hop's inline `WhenYouDo` creation gate
@@ -31207,6 +31236,8 @@ impl GameState {
                 | GameEvent::PlayerCounterChanged { .. }
                 | GameEvent::ManaExpended { .. }
                 | GameEvent::Clash { .. }
+                | GameEvent::PhysicalContestStarted { .. }
+                | GameEvent::PhysicalContestResolved { .. }
                 | GameEvent::VoteCast { .. }
                 | GameEvent::VoteResolved { .. }
                 | GameEvent::PowerToughnessChanged { .. }
@@ -33226,7 +33257,8 @@ mod forced_cascade_window_tests {
     fn certificate() -> crate::analysis::loop_check::LoopCertificate {
         crate::analysis::loop_check::LoopCertificate {
             unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
-            win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: crate::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -33514,7 +33546,8 @@ mod forced_cascade_window_tests {
                         predicted_winner: Some(PlayerId(0)),
                         count: crate::analysis::decision_template::IterationCount::UntilLethal,
                         unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
-                        win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                        win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+                        win_kind_at: None,
                         template: None,
                         per_cycle: None,
                         shortened_by: None,

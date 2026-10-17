@@ -7,6 +7,7 @@ pub mod attribution;
 pub mod card;
 pub mod card_type;
 pub mod casting_costs;
+pub mod contest;
 pub mod counter;
 pub mod custom_format;
 pub mod definitions;

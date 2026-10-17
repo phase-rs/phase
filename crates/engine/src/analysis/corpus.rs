@@ -803,7 +803,7 @@ pub fn row(idx: usize) -> &'static ComboRow {
 pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) -> RowStatus {
     match outcome {
         Some(cert)
-            if cert.win_kind == row.win_kind
+            if cert.win_kind == Some(row.win_kind)
                 && cert
                     .unbounded
                     .iter()
@@ -811,7 +811,7 @@ pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) 
         {
             RowStatus::Confirmed {
                 unbounded: cert.unbounded,
-                win_kind: cert.win_kind,
+                win_kind: row.win_kind,
             }
         }
         Some(cert) => RowStatus::Failed {

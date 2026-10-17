@@ -26,11 +26,7 @@ use crate::types::proposed_event::TokenCharacteristics;
 /// keyed by subtype string. The cross-reference is asserted in tests so a
 /// preset's `category` cannot drift from the runtime ability registry.
 ///
-/// Eldrazi Spawn (also keyed by `predefined_token_abilities`) is *not*
-/// listed here — Spawn is a Creature subtype, not an artifact token, so
-/// `TokenCategory::Creature` covers it. The engine still attaches the
-/// spawn ability at create-time via the same subtype-keyed dispatch. The
-/// CR 701.71a Jace planeswalker token is the second instance of that route:
+/// The CR 701.71a Jace planeswalker token is *not* listed here:
 /// `TokenCategory::Planeswalker` carries it, and its loyalty abilities are
 /// keyed into `predefined_token_abilities` by the `Jace` subtype.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,8 +83,8 @@ pub enum TokenCategory {
     /// characteristic only planeswalkers have, so only these presets have a `Some`
     /// loyalty. Its loyalty abilities are attached at
     /// runtime by `predefined_token_abilities`, keyed by planeswalker subtype
-    /// (CR 306.3) — the Eldrazi Spawn route, not the `PredefinedArtifact` route,
-    /// because `PredefinedTokenKind` enumerates artifact subtypes only.
+    /// (CR 306.3) — not the `PredefinedArtifact` route, because
+    /// `PredefinedTokenKind` enumerates artifact subtypes only.
     Planeswalker,
     /// CR 301.1: Plain artifact token that isn't Equipment, Vehicle, or a
     /// predefined-ability subtype (Book artifacts, custom curiosities, etc.).

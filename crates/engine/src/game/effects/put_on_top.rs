@@ -4,8 +4,8 @@ use rand::seq::SliceRandom;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -69,33 +69,25 @@ pub fn resolve(
         ),
     };
 
-    // CR 401.5 + CR 608.2c (issue #1365): This Dig-tail seam is the one place
-    // "put up to one of them on top … the rest on the bottom" can land with
-    // `target: ParentTarget` and no selection — when the Dig it follows looked
-    // at an empty library. There is nothing to place, and that must NOT fall
-    // back to `resolved_targets`'s generic self-fallback (below), which would
-    // otherwise move the Dig's own source (e.g. a reanimated Thassa's Oracle)
-    // into the library it just found empty, corrupting devotion and
-    // library-count reads for any trailing win condition.
+    // CR 608.2c + CR 609.3: A missing ParentTarget referent supplies nothing
+    // to place. For example, a Dig looking at an empty library must not move
+    // its own source through `resolved_targets`'s generic self-fallback.
     //
-    // `ability.parent_target_missing_reason` is a typed, per-ability signal
-    // stamped ONLY by `effects::apply_parent_chain_context`, when this ability
-    // is handed off as a Dig's immediate sub_ability or, still target-less,
-    // down the chain that Dig heads — never read from raw global state here.
-    // So every OTHER `ParentTarget` consumer (Avenging Angel's LTB
-    // self-return, etc.) keeps its ordinary self-fallback regardless of an
-    // unrelated Dig anywhere else in the same resolution, including a second,
-    // later `PutAtLibraryPosition` call.
-    let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
+    // The typed per-ability signal is stamped at a parent->child hand-off
+    // (see `ResolvedAbility::parent_target_missing_reason`) and travels through
+    // targetless hops. Ordinary search finalize overwrites it with that search's
+    // result. Fresh unrelated LTB self-returns retain None and their source
+    // fallback regardless of an unrelated producer's transient global relay.
+    let missing_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
         && ability.targets.is_empty()
-        && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
+        && ability.parent_target_missing_reason.is_some();
 
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
     // `None` / `ParentTarget` fall back to the source only when
     // `ability.targets` is empty (the LTB self-return shape — Avenging Angel).
     // This is the post-#323 SelfRef short-circuit applied uniformly.
-    let effective_targets = if dig_found_nothing_for_parent_target {
+    let effective_targets = if missing_parent_target {
         Vec::new()
     } else {
         crate::game::targeting::resolved_targets(ability, &target_filter, state)
@@ -358,7 +350,9 @@ pub fn resolve(
     };
 
     if collected_targets.is_empty() {
-        if expected == 0 {
+        // CR 608.2c + CR 609.3: An absent ParentTarget supplies no object to
+        // position, but this instruction still completes before the next one.
+        if expected == 0 || missing_parent_target {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
@@ -598,12 +592,129 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        Effect, FilterProp, ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 608.2c + CR 609.3: Every missing producer result suppresses only
+    /// empty ParentTarget placement; explicit targets and SelfRef still move.
+    #[test]
+    fn missing_referent_placement_guards_only_empty_parent_target() {
+        for reason in [
+            ParentTargetMissingReason::Dig,
+            ParentTargetMissingReason::ChooseFromZone,
+            ParentTargetMissingReason::RevealHandChoice,
+            ParentTargetMissingReason::ExileTop,
+            ParentTargetMissingReason::RevealUntil,
+            ParentTargetMissingReason::SearchLibrary,
+        ] {
+            for (filter, own_target) in [
+                (TargetFilter::ParentTarget, false),
+                (TargetFilter::ParentTarget, true),
+                (TargetFilter::SelfRef, false),
+            ] {
+                let mut state = GameState::new_two_player(7);
+                let source = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(1),
+                    "Owner-relative source".into(),
+                    Zone::Graveyard,
+                );
+                let own = create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "Explicit target".into(),
+                    Zone::Exile,
+                );
+                let moves_source = filter == TargetFilter::SelfRef;
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutAtLibraryPosition {
+                        target: filter,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        position: LibraryPosition::Top,
+                    },
+                    if own_target {
+                        vec![TargetRef::Object(own)]
+                    } else {
+                        vec![]
+                    },
+                    source,
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = Some(reason);
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(
+                    state.objects[&source].zone,
+                    if moves_source {
+                        Zone::Library
+                    } else {
+                        Zone::Graveyard
+                    }
+                );
+                assert_eq!(
+                    state.objects[&own].zone,
+                    if own_target {
+                        Zone::Library
+                    } else {
+                        Zone::Exile
+                    }
+                );
+                if moves_source {
+                    assert_eq!(state.players[1].library.front(), Some(&source));
+                }
+                assert!(events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::PutAtLibraryPosition,
+                        ..
+                    }
+                )));
+            }
+        }
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Unrelated owner-relative return".into(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(ability.parent_target_missing_reason, None);
+        assert_eq!(state.objects[&source].owner, PlayerId(1));
+        assert_eq!(state.objects[&source].controller, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.objects[&source].zone, Zone::Library);
+        assert_eq!(state.players[1].library.front(), Some(&source));
+        assert!(state.players[0].library.is_empty());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id,
+                ..
+            } if *source_id == source
+        )));
+    }
 
     #[test]
     fn test_resolve_puts_card_on_top_of_library() {
@@ -960,8 +1071,8 @@ mod tests {
     }
 
     /// Issue #1365 follow-up: this resolver must consult
-    /// `ability.parent_target_missing_reason` (a typed field stamped ONLY by
-    /// `effects::apply_parent_chain_context` at a real Dig->child hand-off),
+    /// `ability.parent_target_missing_reason` (a typed field stamped at a
+    /// parent->child hand-off (see `ResolvedAbility::parent_target_missing_reason`)),
     /// never `state.last_parent_target_missing_reason` directly. A freshly
     /// built `ResolvedAbility` (as in any ordinary LTB self-return trigger)
     /// never goes through that hand-off, so its field stays `None` no matter

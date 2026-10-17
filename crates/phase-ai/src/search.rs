@@ -1336,6 +1336,10 @@ pub fn fallback_action(
         // Terminal — no action possible.
         WaitingFor::GameOver { .. } => None,
 
+        // Eye to Eye / Mouth to Mouth: the host drives the contest and AI seats click on the
+        // schedule `contest::AiContestants` plans — there is no `GameAction` to choose.
+        WaitingFor::PhysicalContest { .. } => None,
+
         // A local player explicitly proposed this shortcut. AI seats accept the
         // engine-issued consent so the authoritative Ready consumer can
         // materialize the already-agreed priority cycle.
@@ -6725,7 +6729,8 @@ mod tests {
             predicted_winner: Some(PlayerId(1)),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
                 per_cycle: None,

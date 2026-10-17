@@ -2959,6 +2959,12 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         ];
     }
 
+    // CR 101.2 + CR 121.3 + CR 119.7: "Players can't draw cards or gain life"
+    // (Mornsong Aria) — CantDraw plus CantGainLife for the same subject.
+    if let Some(defs) = parse_cant_draw_cards_or_gain_life(tp.lower, &stripped) {
+        return defs;
+    }
+
     // CR 104.2b + CR 104.3e + CR 810.8a: "<player-scope> can't lose/win the
     // game and <player-scope> can't win/lose the game" — one game-outcome-lock
     // static per conjunct, each with its own player scope (Platinum Angel

@@ -10,6 +10,8 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useLocalizedCardContent } from "../../hooks/useLocalizedCardContent.ts";
+import { CardTextReference } from "../card/CardTextReference.tsx";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -110,6 +112,8 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const triggerSourceName =
     entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
   const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "";
+  const localized = useLocalizedCardContent(sourceName);
+  const displaySourceName = localized?.name || sourceName;
   const imageProps = sourceObj ? objectImageProps(sourceObj) : null;
   const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
   const sourceTokenImageRef =
@@ -159,14 +163,19 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
       ? y.target.ThisObject.source_id === entry.source_id && descMatches
       : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
   });
-  // Triggered abilities show "Triggered — From <source>" so the player can
-  // tell which permanent owns the trigger without hovering the card image.
-  // Activated abilities don't carry a pre-resolved source name (different
-  // engine path); they keep the bare "Activated" label.
-  const abilityLabel = details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
+  // Localize from the engine's typed `ability_kind`, never by parsing the
+  // English `kind_label`. Ability descriptions below remain in their original text.
+  const abilityKind = details?.ability_kind;
+  const abilityLabel = abilityKind?.type === "Triggered"
+    ? t("stack.triggeredAbility")
+    : abilityKind?.type === "Activated"
+      ? abilityKind.data.number != null
+        ? t("stack.activatedAbilityNumber", { number: abilityKind.data.number })
+        : t("stack.activatedAbility")
+      : details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
     ? t("stack.activated")
     : isTriggered && triggerSourceName
-      ? t("stack.triggeredFrom", { source: triggerSourceName })
+      ? t("stack.triggeredFrom", { source: displaySourceName })
       : t("stack.triggered"));
   const triggerDescription =
     details?.ability_description
@@ -280,14 +289,14 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
           // forever — worse than a blank square, since it implies the art is
           // still coming. Name the source instead.
           <CardArtFallback
-            name={sourceName}
+            name={displaySourceName}
             className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
-            alt={sourceName}
+            alt={displaySourceName}
             className="h-full w-full object-cover"
             draggable={false}
             onError={() => advanceFailedSource?.(src)}
@@ -360,6 +369,59 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
             />
           )}
         </div>
+      )}
+
+      {!isSpell && localized?.oracle_text && (
+        <PopoverMenu
+          ariaLabel={t("stack.readAbility")}
+          variant="dialog"
+          menuWidthPx={360}
+          onOpenChange={(open) => {
+            if (open) {
+              inspectObject(null);
+              setPreviewSticky(false);
+              onHoverChange?.(false);
+            }
+          }}
+          renderTrigger={({ ref, open, toggle }) => (
+            // 44px touch target on the left edge, mirroring the yield control on
+            // the right edge, so it never covers the bottom-right controller
+            // avatar and a near-miss tap does not fall through to ChooseTarget.
+            <button
+              ref={ref}
+              type="button"
+              data-testid="stack-read-ability"
+              aria-label={t("stack.readAbility")}
+              aria-haspopup="dialog"
+              aria-expanded={open}
+              title={t("stack.readAbility")}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={toggle}
+              className="absolute left-1 top-1/2 z-30 flex min-h-11 min-w-11 -translate-y-1/2 items-center justify-center rounded-full bg-slate-800/90 text-slate-100 shadow-md ring-1 ring-white/25 hover:bg-slate-700"
+            >
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true" className="h-4 w-4">
+                <path d="M3 3h5l2 2 2-2h5v13h-5l-2 2-2-2H3V3Zm7 2v13" />
+              </svg>
+            </button>
+          )}
+        >
+          {(close) => (
+            <div className="p-3">
+              <h2 className="font-semibold text-white">{displaySourceName}</h2>
+              <p className="mt-1 text-xs text-purple-300">{abilityLabel}</p>
+              {triggerDescription && (
+                <div className="mt-3">
+                  <h3 className="text-xs text-slate-400">{t("cardTextReference.originalAbility")}</h3>
+                  <RichLabel text={triggerDescription} size="xs" className="mt-1 block whitespace-pre-wrap text-sm text-slate-200" />
+                </div>
+              )}
+              <CardTextReference text={localized.oracle_text} />
+              <button type="button" onClick={close} className="mt-3 min-h-11 rounded-lg border border-white/20 px-3 text-sm text-white">
+                {t("common:actions.close")}
+              </button>
+            </div>
+          )}
+        </PopoverMenu>
       )}
 
       {selectedModeLabels.length > 0 && (
@@ -516,7 +578,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
               >
                 <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldThis")}</span>
                 <span className="text-xs font-normal leading-tight text-gray-400">
-                  {t("priorityYield.yieldThisHint", { source: sourceName })}
+                  {t("priorityYield.yieldThisHint", { source: displaySourceName })}
                 </span>
               </button>
               <button
@@ -533,7 +595,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
               >
                 <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldAllCopies")}</span>
                 <span className="text-xs font-normal leading-tight text-gray-400">
-                  {t("priorityYield.allCopiesHint", { source: sourceName })}
+                  {t("priorityYield.allCopiesHint", { source: displaySourceName })}
                 </span>
               </button>
               {matchingYield && (

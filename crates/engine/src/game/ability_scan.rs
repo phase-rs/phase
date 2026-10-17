@@ -94,17 +94,19 @@
 use crate::analysis::resource::{HistoryMember, HistoryReads};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AttachCardinality, AttachSelection,
-    AttachmentReferent, AttackSubject, CardTypeSetSource, ContinuousModification, ControllerRef,
-    CountScope, DelayedTriggerCondition, Duration, EachDamageRecipient, Effect, EffectScope,
-    FilterProp, ForEachCategoryAction, GuessSubject, KeeperConstraint, ManaProduction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, NameStickerSet,
-    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition, ResolvedAbility,
-    StaticCondition, TargetFilter, TrackedAnaphorSource, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneChoiceCandidateSource,
+    AttachmentReferent, AttackSubject, CardTypeSetSource, CastingPermission,
+    ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, Duration,
+    EachDamageRecipient, Effect, EffectScope, FilterProp, ForEachCategoryAction, GuessSubject,
+    KeeperConstraint, ManaProduction, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint, MultiTargetSpec, NameStickerSet, ObjectScope, PlayerFilter,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
+    ReplacementCondition, ResolvedAbility, StaticCondition, TargetFilter, TrackedAnaphorSource,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause, ZoneChoiceCandidateSource,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
+use crate::types::statics::CastFrequency;
 
 /// The three independent classification axes, accumulated over one AST walk.
 /// `true` on an axis means "reads (or may read) that dimension"; the fail-safe
@@ -269,6 +271,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         force_block_attacker: _,   // exact force-block referent, no dynamic read
         target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
         target_pins: _,            // CR 400.7 selected-target pins, no dynamic read
+        chosen_target_slots: _,    // CR 115.1 announced-target record, no dynamic read
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
@@ -1800,7 +1803,17 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::ProcessRadCounters => Axes::NONE,
-        Effect::GrantCastingPermission { .. } => Axes::CONSERVATIVE,
+        // The walk reads the grant's history and leaves its other axes undescended.
+        Effect::GrantCastingPermission {
+            permission,
+            target,
+            grantee: _,
+        } => Axes {
+            history: scan_target_filter(target, target_ctx, mode)
+                .history
+                .or(casting_permission_history(permission, mode)),
+            ..Axes::CONSERVATIVE
+        },
         Effect::ChooseFromZone {
             zone,
             filter,
@@ -1945,6 +1958,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => scan_target_filter(contestant, target_ctx, mode),
         Effect::Heist {
             target,
             look_count: _,
@@ -2245,6 +2262,63 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             name: _,
             description: _,
         } => Axes::NONE,
+    }
+}
+
+/// CR 601.3: the history a casting permission reads when it allows a card to be cast or played:
+/// its duration, filter and cost, the ledgers a frequency consults, and the turn a turn-stamped
+/// permission is compared with.
+fn casting_permission_history(permission: &CastingPermission, mode: ScanMode) -> HistoryReads {
+    match permission {
+        CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => {
+            HistoryReads::NONE
+        }
+        CastingPermission::WarpExile {
+            castable_after_turn: _,
+        }
+        | CastingPermission::Plotted { turn_plotted: _ }
+        | CastingPermission::Foretold {
+            cost: _,
+            turn_foretold: _,
+        } => HistoryReads::of(HistoryMember::TurnNumber),
+        // Not descended: a constraint, a cost and entry modifications can each express a read.
+        CastingPermission::ExileWithAltCost { .. }
+        | CastingPermission::ExileWithAltAbilityCost { .. } => HistoryReads::ALL,
+        CastingPermission::PlayFromExile {
+            duration,
+            granted_to: _,
+            mode: _,
+            frequency,
+            source_id: _,
+            exiled_by_ability_controller: _,
+            mana_spend_permission: _,
+            card_filter,
+            single_use_group: _,
+            single_use: _,
+            cast_cost_modifier: _,
+            alt_ability_cost,
+            without_paying_mana_cost: _,
+            land_enter_tapped: _,
+            invalidation: _,
+            provenance: _,
+        } => {
+            let mut reads = scan_duration(duration, mode).history;
+            reads = reads.or(match frequency {
+                CastFrequency::Unlimited => HistoryReads::NONE,
+                CastFrequency::OncePerTurn | CastFrequency::OncePerTurnPerPermanentType => {
+                    HistoryReads::of(HistoryMember::ExilePlayPermissionsUsed)
+                        .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
+                }
+            });
+            if let Some(filter) = card_filter {
+                let census = FilterReadContext::LiveBoardCensus;
+                reads = reads.or(scan_target_filter(filter, census, mode).history);
+            }
+            if let Some(cost) = alt_ability_cost {
+                reads = reads.or(scan_ability_cost(cost, mode).history);
+            }
+            reads
+        }
     }
 }
 
@@ -7087,6 +7161,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -7330,6 +7405,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ExileFromTopUntil { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }
@@ -11358,5 +11434,30 @@ mod tests {
             loop_axes(&grant_until_end_of_turn(not_continuous)),
             (true, true, true)
         );
+    }
+
+    /// CR 702.170d + CR 702.143a: a casting-permission grant reads the history its permission
+    /// reads: the turn for a plotted or foretold card, the permissions used for a once-each-turn
+    /// permission, nothing for an unlimited one, and everything for an alternative cost the walk
+    /// does not descend.
+    #[test]
+    fn a_casting_permission_grant_reads_the_history_its_permission_reads() {
+        let db = crate::test_support::shared_card_db();
+        let history = |name: &str, trigger: usize| {
+            let face = db
+                .get_face_by_name(name)
+                .unwrap_or_else(|| panic!("{name} is in the card fixture"));
+            trigger_definition_history(&face.triggers[trigger])
+        };
+        let turn = HistoryReads::of(HistoryMember::TurnNumber);
+        assert_eq!(history("Ramirez DePietro, Pillager", 1), HistoryReads::NONE);
+        assert_eq!(history("Kellan Joins Up", 0), turn);
+        assert_eq!(history("The Foretold Soldier", 0), turn);
+        assert_eq!(
+            history("Evelyn, the Covetous", 0),
+            HistoryReads::of(HistoryMember::ExilePlayPermissionsUsed)
+                .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
+        );
+        assert_eq!(history("Aang, Swift Savior", 0), HistoryReads::ALL);
     }
 }

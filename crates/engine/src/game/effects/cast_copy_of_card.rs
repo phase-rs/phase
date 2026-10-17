@@ -257,6 +257,8 @@ fn cast_one_copy(
         ability_def.map(|def| build_resolved_from_def(&def, copy_id, ability.controller));
     if let Some(resolved) = resolved.as_mut() {
         resolved.context.cast_from_zone = Some(origin_zone);
+        // CR 707.12: a cast copy declares only the targets chosen for it.
+        resolved.start_target_record_recursive();
     }
 
     // CR 707.12 + CR 707.10: the copy-onto-stack authority emits `StackPushed`.

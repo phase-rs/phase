@@ -16918,7 +16918,7 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     Ok((rest, TargetFilter::Typed(typed)))
 }
 
-/// CR 120.3: Parse the damage-kind adjective (`"combat "` / `"noncombat "`).
+/// CR 120.2a + CR 120.2b: Parse the damage-kind adjective (`"combat "` / `"noncombat "`).
 /// Each branch consumes its trailing space so the caller can chain directly
 /// into `tag("damage")`.
 fn parse_damage_kind_adjective(input: &str) -> OracleResult<'_, DamageKindFilter> {
@@ -17167,7 +17167,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
-    // CR 120.1 + CR 120.3: "a source [you control] deals [combat/noncombat]
+    // CR 120.1 + CR 120.2a + CR 120.2b: "a source [you control] deals [combat/noncombat]
     // [N or more] damage to <recipient>". One combinator-driven parser that
     // composes four independent axes:
     //   * source filter   — `parse_source_subject` ("a source", "a source you control",
