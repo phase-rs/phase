@@ -64,11 +64,13 @@ impl ParserWork {
     pub(crate) fn deserialization(&self) {
         self.deserializations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.changed.notify_one();
     }
 
     pub(crate) fn metadata_recovery(&self) {
         self.metadata_recoveries
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.changed.notify_one();
     }
 
     pub(crate) fn rate_limited(&self) {
@@ -81,6 +83,17 @@ impl ParserWork {
         loop {
             let changed = self.changed.notified();
             if self.limited.load(std::sync::atomic::Ordering::SeqCst) >= count {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) async fn wait_counts(&self, expected: (usize, usize)) {
+        loop {
+            let changed = self.changed.notified();
+            let observed = self.counts();
+            if observed.0 >= expected.0 && observed.1 >= expected.1 {
                 return;
             }
             changed.await;

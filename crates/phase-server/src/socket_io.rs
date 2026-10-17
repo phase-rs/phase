@@ -1424,10 +1424,14 @@ mod transport_fixup_tests {
             }
             hello.release.notify_one();
             loop {
-                if matches!(
-                    recv_server_message(&mut socket).await,
-                    ServerMessage::Pong { timestamp: 90_001 }
-                ) {
+                let message: ServerMessage = match socket.next().await.unwrap().unwrap() {
+                    WsMessage::Text(text) => serde_json::from_str(&text).unwrap(),
+                    // Tungstenite may already have flushed its automatic Pong
+                    // before the control writer sends the coalesced proof reply.
+                    WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                    frame => panic!("expected the post-hello application reply, got {frame:?}"),
+                };
+                if matches!(message, ServerMessage::Pong { timestamp: 90_001 }) {
                     break;
                 }
             }
@@ -1580,6 +1584,13 @@ mod transport_fixup_tests {
                 .unwrap();
             work.wait_rate_limited(limited).await;
         }
+        // Raw envelopes also cross wire::decode_client_envelope's blocking
+        // boundary AFTER admission. Admission does not prove parser entry yet.
+        work.wait_counts((
+            crate::RATE_LIMIT_MESSAGES as usize,
+            crate::RATE_LIMIT_MESSAGES as usize,
+        ))
+        .await;
     }
 
     async fn expect_parser_quota_drop(
