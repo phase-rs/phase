@@ -4509,6 +4509,22 @@ fn parse_spell_quality_filter(quality: &str) -> Option<TargetFilter> {
     remainder.trim().is_empty().then_some(filter)
 }
 
+/// The printed spell-quality predicate of a matched cast-this-way gains-rider
+/// sentence, for the swallow detector's quality-matched exemption. Returns
+/// `None` when the text is not a gains-rider sentence at all; `Some(None)` for
+/// the unconditional anaphoric form ("if you cast it this way"); `Some(Some(p))`
+/// for the quality form ("if you cast a creature spell this way" → the typed
+/// creature predicate). The caller matches the exact predicate against the
+/// delivered carrier's `cast_filter`, so a carrier missing the very condition
+/// its sentence names can never clear the warning.
+pub(crate) fn cast_this_way_gains_rider_sentence_quality(
+    text: &str,
+) -> Option<Option<TargetFilter>> {
+    let text = text.trim_start();
+    let (_, cast_filter) = parse_cast_this_way_gains_rider_prefix(text)?;
+    Some(cast_filter)
+}
+
 /// The shared body core of the gains-modifications rider: the anaphoric subject
 /// ("it gains …") plus the modification-body grammar. Returns the unconsumed
 /// remainder AND the typed modifications from the same pass, so the detector's

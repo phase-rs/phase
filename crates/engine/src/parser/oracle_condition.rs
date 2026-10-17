@@ -360,6 +360,10 @@ fn static_condition_to_restriction_condition(
         // restriction must not tell.
         StaticCondition::Unrecognized { .. } => None,
         // The absence of a condition. A restriction with no condition is not a restriction.
+        // CR 500.8 + CR 506.1 + CR 608.2c: a per-turn phase-occurrence gate has
+        // no exact restriction-surface representation, so it fails closed here
+        // rather than approximating.
+        StaticCondition::FirstCombatPhaseOfTurn => None,
         StaticCondition::None => None,
         // CR 118.12a + CR 508.1d + CR 509.1c: an optional-cost combat tax, resolved via a
         // `WaitingFor::CombatTaxPayment` round-trip at declaration time. It is not a

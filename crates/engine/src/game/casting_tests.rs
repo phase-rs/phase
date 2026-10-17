@@ -55359,6 +55359,7 @@ fn resolve_graveyard_paid_grant_with_gains_rider(
     state: &mut GameState,
     spell: ObjectId,
     with_rider: bool,
+    cast_filter: Option<TargetFilter>,
 ) {
     let mut grant = ResolvedAbility::new(
         Effect::CastFromZone {
@@ -55385,7 +55386,7 @@ fn resolve_graveyard_paid_grant_with_gains_rider(
                     modifications: vec![ContinuousModification::AddKeyword {
                         keyword: Keyword::Haste,
                     }],
-                    cast_filter: None,
+                    cast_filter,
                 },
             },
             vec![],
@@ -55585,7 +55586,7 @@ fn paid_offer_accept_applies_the_gains_rider() {
     let mut state = setup_game_at_main_phase();
     let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
     add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
-    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true, None);
     let WaitingFor::CastOffer {
         kind:
             crate::types::game_state::CastOfferKind::GraveyardPaidCast {
@@ -55662,7 +55663,7 @@ fn paid_offer_accept_applies_the_gains_rider() {
     let mut state = setup_game_at_main_phase();
     let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
     add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
-    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, false);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, false, None);
     apply_as_current(
         &mut state,
         GameAction::GraveyardPaidCastChoice {
@@ -55681,6 +55682,94 @@ fn paid_offer_accept_applies_the_gains_rider() {
     );
 }
 
+/// CR 608.2c + CR 601.2a (review): the rider's typed `cast_filter` is enforced
+/// through the existing request/offer route. A creature cast under a
+/// creature-filtered rider applies exactly one scoped rider effect; a
+/// noncreature cast reaches the stack with NO matching rider effect after
+/// finalization.
+#[test]
+fn paid_offer_rider_quality_filter_gates_the_application() {
+    let rider = vec![ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste,
+    }];
+    let creature_filter =
+        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature));
+
+    // Positive — a creature cast under the creature filter applies the rider.
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(
+        &mut state,
+        creature,
+        true,
+        Some(creature_filter.clone()),
+    );
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the filtered-rider offer must succeed");
+    for _ in 0..8 {
+        if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("paying the {U} cost must finalize the filtered-rider cast");
+    }
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == creature),
+        "reach guard: the filtered-rider creature cast must reach the stack"
+    );
+    let applied: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications == rider
+        })
+        .collect();
+    assert_eq!(
+        applied.len(),
+        1,
+        "a creature cast under the creature filter must apply the rider exactly once"
+    );
+
+    // Negative — a NONCREATURE cast under the same filter reaches the stack
+    // with no rider effect after finalization.
+    let mut state = setup_game_at_main_phase();
+    let sorcery = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, sorcery, true, Some(creature_filter));
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the offer for a noncreature must succeed");
+    for _ in 0..8 {
+        if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("paying the {U} cost must finalize the noncreature cast");
+    }
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == sorcery),
+        "reach guard: the noncreature cast must reach the stack"
+    );
+    assert!(
+        state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| { effect.affected != TargetFilter::SpecificObject { id: sorcery } }),
+        "a noncreature cast under the creature filter must receive no rider effect"
+    );
+}
+
 /// CR 608.2c + CR 611.2a (row 6.2 sibling): declining a rider-bearing paid
 /// offer latches nothing — the card stays in the graveyard, no rider effect is
 /// installed, and a later manual move shows no haste.
@@ -55688,7 +55777,7 @@ fn paid_offer_accept_applies_the_gains_rider() {
 fn paid_offer_decline_installs_nothing() {
     let mut state = setup_game_at_main_phase();
     let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
-    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true, None);
     assert!(
         matches!(
             &state.waiting_for,
@@ -55739,6 +55828,11 @@ fn paid_offer_decline_installs_nothing() {
     let mut events = Vec::new();
     crate::game::zones::move_to_zone(&mut state, creature, Zone::Battlefield, &mut events);
     crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&creature].zone,
+        Zone::Battlefield,
+        "reach guard: the later route must actually move the card to the battlefield"
+    );
     assert!(
         !crate::game::keywords::object_has_effective_keyword_kind(
             &state,

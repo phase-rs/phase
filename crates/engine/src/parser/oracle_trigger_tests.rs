@@ -30892,8 +30892,8 @@ fn you_attack_with_two_or_more_creatures_untyped_no_filter() {
         "untyped count>1 must NOT set valid_card"
     );
     assert_eq!(
-        def.condition,
-        Some(TriggerCondition::AttackersDeclaredCount {
+        head_attack_count(&def),
+        Some(&TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::Controller {
                 scope: ControllerRef::You,
                 filter: None,
@@ -30901,6 +30901,51 @@ fn you_attack_with_two_or_more_creatures_untyped_no_filter() {
             comparator: Comparator::GE,
             count: 2,
         })
+    );
+}
+
+/// CR 508.1 + CR 603.4: the trigger-head count producers wrap their event-time
+/// counts in `TriggerCondition::EventTime` (provenance: the count is the trigger
+/// event's own qualifier, not an intervening-if). Tests asserting the count
+/// shape read it through this unwrapper; the wrapper itself is pinned by
+/// `attack_with_two_or_more_dinosaurs_head_is_event_time_wrapped`.
+fn head_attack_count(def: &TriggerDefinition) -> Option<&TriggerCondition> {
+    match def.condition.as_ref()? {
+        TriggerCondition::EventTime { condition } => Some(condition),
+        other => Some(other),
+    }
+}
+
+/// Review control (CR 508.1a + CR 603.4): a filtered head count is a fact about
+/// the attack declaration, so its producer wraps it in `EventTime` and the
+/// chain walker strips it — a later type/control change to an attacker cannot
+/// block the trigger's resolution. A genuinely filtered intervening-if stays
+/// unwrapped and is rechecked (Squall, pinned in the game-side test
+/// `stack_condition_keeps_only_intervening_if_attack_filters`).
+#[test]
+fn attack_with_two_or_more_dinosaurs_head_is_event_time_wrapped() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks you with two or more Dinosaurs, you draw a card.",
+        "Test Watcher",
+    );
+    assert!(
+        matches!(
+            def.condition,
+            Some(TriggerCondition::EventTime { ref condition })
+                if matches!(
+                    condition.as_ref(),
+                    TriggerCondition::AttackersDeclaredCount {
+                        subject: AttackersDeclaredCountSubject::AttackTarget {
+                            filter: Some(_),
+                            ..
+                        },
+                        comparator: Comparator::GE,
+                        count: 2,
+                    }
+                )
+        ),
+        "the filtered head count must be EventTime-wrapped, got {:?}",
+        def.condition
     );
 }
 
@@ -30931,7 +30976,7 @@ fn trigger_you_attack_with_two_or_more_typed_creatures() {
         other => panic!("expected Typed valid_card with Dinosaur, got {other:?}"),
     }
     // The count condition carries the SAME filter as the type axis.
-    match &def.condition {
+    match head_attack_count(&def) {
         Some(TriggerCondition::AttackersDeclaredCount {
             subject:
                 AttackersDeclaredCountSubject::Controller {
@@ -30968,7 +31013,7 @@ fn trigger_you_attack_with_two_or_more_creatures() {
         ))
     );
     assert!(matches!(
-        def.condition,
+        head_attack_count(&def),
         Some(TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::Controller {
                 scope: ControllerRef::You,
@@ -31000,14 +31045,18 @@ fn trigger_another_player_attacks_with_two_or_more_creatures_intervening_if() {
                 assert_eq!(conditions.len(), 2);
                 assert!(matches!(
                     &conditions[0],
-                    TriggerCondition::AttackersDeclaredCount {
-                        subject: AttackersDeclaredCountSubject::Controller {
-                            scope: ControllerRef::Opponent,
-                            filter: None,
-                        },
-                        comparator: Comparator::GE,
-                        count: 2,
-                    }
+                    TriggerCondition::EventTime { condition }
+                        if matches!(
+                            condition.as_ref(),
+                            TriggerCondition::AttackersDeclaredCount {
+                                subject: AttackersDeclaredCountSubject::Controller {
+                                    scope: ControllerRef::Opponent,
+                                    filter: None,
+                                },
+                                comparator: Comparator::GE,
+                                count: 2,
+                            }
+                        )
                 ));
                 assert!(matches!(
                     &conditions[1],
@@ -31059,7 +31108,7 @@ fn trigger_an_opponent_attacks_with_two_or_more_creatures() {
     );
     assert_eq!(def.mode, TriggerMode::YouAttack);
     assert!(matches!(
-        def.condition,
+        head_attack_count(&def),
         Some(TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::Controller {
                 scope: ControllerRef::Opponent,
@@ -31085,7 +31134,7 @@ fn trigger_a_player_attacks_with_three_or_more_creatures() {
     assert!(def.batched);
     assert_eq!(def.valid_source, Some(TargetFilter::Player));
     assert!(matches!(
-        def.condition,
+        head_attack_count(&def),
         Some(TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::Controller {
                 scope: ControllerRef::TriggeringPlayer,
@@ -33035,7 +33084,7 @@ fn trouble_in_pairs_disjunctive_trigger_splits_into_three_triggers() {
 
     assert_eq!(triggers[0].mode, TriggerMode::YouAttack);
     assert!(matches!(
-        triggers[0].condition,
+        head_attack_count(&triggers[0]),
         Some(TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
@@ -33079,7 +33128,7 @@ fn trouble_in_pairs_opponent_attacks_you_with_two_or_more_creatures() {
     assert_eq!(def.mode, TriggerMode::YouAttack);
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
     assert!(matches!(
-        def.condition,
+        head_attack_count(&def),
         Some(TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
@@ -33110,7 +33159,7 @@ fn opponent_attacks_you_with_two_or_more_dinosaurs_carries_type_filter() {
         ),
         other => panic!("expected Typed valid_card with Dinosaur, got {other:?}"),
     }
-    match &def.condition {
+    match head_attack_count(&def) {
         Some(TriggerCondition::AttackersDeclaredCount {
             subject:
                 AttackersDeclaredCountSubject::AttackTarget {

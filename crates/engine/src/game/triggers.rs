@@ -16753,12 +16753,15 @@ fn condition_is_attack_event_only(
                 filter,
                 ..
             } => {
-                // CR 603.4: a condition carrying an object-level filter is a
+                // CR 603.4: an UNWRAPPED AttackTarget count is an intervening-if
+                // — the trigger-head producers wrap their event-time counts in
+                // `TriggerCondition::EventTime` (dropped by the caller before
+                // this arm). A condition carrying an object-level filter is a
                 // fact about the creatures as they are, not about the
                 // declaration alone — it must survive onto the stack entry and
                 // be rechecked at resolution (Squall's chosen-number P/T
-                // existential). The filter-less family keeps the event-time-only
-                // contract (the deliberate pre-existing event-fact contract).
+                // existential). The filter-less intervening-if family keeps the
+                // pre-existing event-fact contract.
                 filter.is_none()
                     && trigger
                         .attack_target_filter
@@ -20219,6 +20222,41 @@ pub mod tests {
                 "{mode:?}: the intervening-if beside it must stay on the stack"
             );
         }
+    }
+
+    /// Review control (CR 508.1a + CR 603.4): a FILTERED attack count from the
+    /// trigger HEAD is the trigger event's own qualifier — the producer wraps it
+    /// in `EventTime`, so it is stripped and a later attacker mutation cannot
+    /// block resolution. A genuinely filtered INTERVENING-IF (Squall's
+    /// chosen-number existential) keeps its resolution recheck.
+    #[test]
+    fn stack_condition_keeps_only_intervening_if_attack_filters() {
+        let mut attacks = make_trigger(TriggerMode::YouAttack);
+        attacks.attack_target_filter = Some(AttackTargetFilter::Player);
+
+        // Head form: the producer's `EventTime` wrapper is the provenance.
+        let head = TriggerCondition::EventTime {
+            condition: Box::new(attack_target_count_condition_with_pt_filter(
+                AttackTargetFilter::Player,
+                TargetFilter::Any,
+            )),
+        };
+        assert_eq!(
+            stack_condition_for_trigger(&attacks, &head),
+            None,
+            "a head-produced filtered count is an event-time fact"
+        );
+
+        // Intervening-if form: unwrapped and filtered → retained for the recheck.
+        let intervening = attack_target_count_condition_with_pt_filter(
+            AttackTargetFilter::Player,
+            TargetFilter::Any,
+        );
+        assert_eq!(
+            stack_condition_for_trigger(&attacks, &intervening),
+            Some(intervening.clone()),
+            "a filtered intervening-if keeps its resolution recheck"
+        );
     }
 
     /// CR 603.8 + CR 603.4: a parsed state trigger stacks exactly its intervening
