@@ -1177,6 +1177,9 @@ fn encoded_refusal_keeps_admission_until_actual_socket_flush() {
                 for id in 100..100 + count {
                     receive_quota_refusal(&mut socket, id).await;
                 }
+                // Flush-held capacity and the independent inspection-rate window
+                // are separate budgets. Reuse capacity in a fresh rate window.
+                tokio::time::sleep(Duration::from_secs(crate::RATE_LIMIT_WINDOW_SECS)).await;
                 exhaust_application_quota(&mut socket).await;
                 send_command_frame(&mut socket, &GameAction::PassPriority, 100 + count).await;
                 receive_quota_refusal(&mut socket, 100 + count).await;
@@ -1190,6 +1193,9 @@ fn encoded_refusal_keeps_admission_until_actual_socket_flush() {
                     "a flushed budget must be reusable on the same live socket",
                 );
 
+                // The overflow phase must test eight unflushed refusals, not
+                // exhaustion of the separate thirty-inspection work window.
+                tokio::time::sleep(Duration::from_secs(crate::RATE_LIMIT_WINDOW_SECS)).await;
                 exhaust_application_quota(&mut socket).await;
                 let blocked = table.app.context.socket_hooks.arm_quota_flush();
                 send_command_frame(&mut socket, &GameAction::PassPriority, 200).await;

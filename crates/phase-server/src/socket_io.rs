@@ -1427,10 +1427,12 @@ mod transport_fixup_tests {
         for _ in 1..crate::RATE_LIMIT_MESSAGES {
             socket.send(parser_test_frame(&ping, format)).await.unwrap();
             loop {
-                if matches!(
-                    recv_server_message(socket).await,
-                    ServerMessage::Pong { timestamp: 7712 },
-                ) {
+                let reply = if format.is_some() {
+                    crate::issue_4548_full_create_tests::recv_enveloped_server_message(socket).await
+                } else {
+                    recv_server_message(socket).await
+                };
+                if matches!(reply, ServerMessage::Pong { timestamp: 7712 }) {
                     break;
                 }
             }
