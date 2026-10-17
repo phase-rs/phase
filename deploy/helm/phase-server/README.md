@@ -233,9 +233,13 @@ observation, rather than being unconditionally backdated to detection.
 Accepted mutations still finish independently.
 
 Clicks and ticks apply queued contest presence edges only through their host
-observation time, in timestamp order; later edges stay queued for the next
-observation or driver drain. The autonomous tick still applies disconnects
-and grace forfeits without further client traffic. An accepted Full reconnect
+observation time, in timestamp order; later edges stay queued for a later
+observation. Presence before the earliest queued return is absent; before a
+queued departure it is present. Duplicate live-presence reports queue no edge.
+Publication drains flush only through the engine's already-observed contest
+clock, not wall time. They cannot advance time past an earlier pending click.
+The autonomous tick still applies disconnects and grace forfeits without
+further client traffic. An accepted Full reconnect
 stamps its connected edge with the same transport receipt time used by registry
 admission, so executor wait alone cannot turn a timely return into a contest
 forfeit. This does not resolve the separate registry expiry-finalization race.

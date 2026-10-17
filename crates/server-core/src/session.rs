@@ -2182,6 +2182,9 @@ impl GameSession {
 
     /// Preserve transport detection time across cleanup and session-lease waits.
     pub fn mark_disconnected_at(&mut self, player: PlayerId, observed_at: std::time::Instant) {
+        if !self.connected[player.0 as usize] {
+            return;
+        }
         self.connected[player.0 as usize] = false;
         // Queue host-stamped presence; the admitted contest driver applies it.
         self.queue_contest_connection_at(
@@ -2200,6 +2203,9 @@ impl GameSession {
 
     /// Use the same receipt time that the registry accepted for reconnect grace.
     pub fn mark_connected_at(&mut self, player: PlayerId, observed_at: std::time::Instant) {
+        if self.connected[player.0 as usize] {
+            return;
+        }
         self.connected[player.0 as usize] = true;
         self.queue_contest_connection_at(
             player,
