@@ -9,6 +9,7 @@ import type {
   AiDecisionDiagnosticReceipt,
   AiLlmProposalResult,
   AiProposalSubmission,
+  ContestDriveResult,
   FormatConfig,
   GameAction,
   GameEvent,
@@ -321,6 +322,18 @@ export class EngineWorkerClient {
   async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
     return this.request<SubmitResult>(
       { type: "submitAction", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async driveContest(
+    nowMs: number,
+    aiPlayers: number[],
+    awayPlayers: number[],
+    clicks: unknown[],
+  ): Promise<ContestDriveResult> {
+    return this.request<ContestDriveResult>(
+      { type: "driveContest", nowMs, aiPlayers, awayPlayers, clicks },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

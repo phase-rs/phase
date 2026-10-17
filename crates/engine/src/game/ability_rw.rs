@@ -3198,6 +3198,11 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::SetLifeTotal { target, amount } | Effect::DealDamage { amount, target, .. } => {
             legacy_quantity_expr(amount) || legacy_target_filter(target)
         }
+        // The second contestant is the only filter the contest reads.
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => legacy_target_filter(contestant),
         Effect::Endure {
             amount: count,
             subject: target,
@@ -4889,6 +4894,12 @@ fn rw_effect(
         Effect::Learn => (ext_write(StateKind::HandLibrary), None),
         Effect::DraftFromSpellbook { .. } => (ext_write(StateKind::HandLibrary), None),
         Effect::Clash => (ext_write(StateKind::HandLibrary), None),
+        // The contest itself writes no state; its result only gates the rider that
+        // follows. It reads the second contestant's filter.
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => (rw_target_filter(contestant), None),
         Effect::ChooseDrawnThisTurnPayOrTopdeck {
             count,
             life_payment,

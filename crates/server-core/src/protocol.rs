@@ -460,6 +460,16 @@ pub enum ClientMessage {
     Emote {
         emote: String,
     },
+    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries the
+    /// engine-authored identity of the contest it is for (so a frame delayed from an
+    /// earlier contest is dropped, never counted as activity in a later one) and a
+    /// per-contest sequence number (duplicate / reorder protection): the sender is
+    /// the authenticated seat and the instant is the server's own clock, so a client
+    /// can claim neither a win nor a timestamp.
+    ContestClick {
+        contest: u64,
+        seq: u32,
+    },
     SpectatorJoin {
         game_code: String,
     },
@@ -999,6 +1009,15 @@ pub enum ServerMessage {
     Emote {
         from_player: PlayerId,
         emote: String,
+    },
+    /// Live click counters of the running contest, sent between full state
+    /// transitions (display only — the counts never decide the winner).
+    ContestProgress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        /// The contest these counters belong to; a client ignores any other.
+        contest: u64,
+        clicks: Vec<(PlayerId, u32)>,
     },
     TimerUpdate {
         player: PlayerId,
@@ -2140,6 +2159,43 @@ mod tests {
             ServerMessage::Emote { from_player, emote } => {
                 assert_eq!(from_player, PlayerId(1));
                 assert_eq!(emote, "Nice!");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// `ContestClick` carries only a contest identity and a sequence number: no seat,
+    /// timestamp or count for a client to forge. The exact wire shape is pinned because the TypeScript adapter
+    /// (`ws-adapter.ts` `submitContestClick`) writes it by hand.
+    #[test]
+    fn client_message_contest_click_roundtrips_with_only_a_sequence() {
+        let json =
+            serde_json::to_string(&ClientMessage::ContestClick { contest: 3, seq: 7 }).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestClick","data":{"contest":3,"seq":7}}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::ContestClick { contest: 3, seq: 7 }
+        ));
+    }
+
+    #[test]
+    fn server_message_contest_progress_roundtrips() {
+        let msg = ServerMessage::ContestProgress {
+            full_key: None,
+            contest: 3,
+            clicks: vec![(PlayerId(0), 12), (PlayerId(1), 9)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestProgress","data":{"contest":3,"clicks":[[0,12],[1,9]]}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::ContestProgress { clicks, .. } => {
+                assert_eq!(clicks, vec![(PlayerId(0), 12), (PlayerId(1), 9)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -3417,6 +3473,11 @@ mod tests {
         }
     }
 
+    /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
+    /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
+    /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
+    /// `ServerMessage::ContestProgress`; a v146 peer cannot parse the new tags, so
+    /// it must be refused before it receives v147 state.
     /// v146: `ConfirmedPeriod` gains `counted_by` (CR 732.2a counted loop offers) and `performance`,
     /// and a loop offer's `win_kind` becomes optional; a v145 peer drops the field
     /// or cannot parse the offer, so it must be refused before it receives v146 state.
@@ -3643,8 +3704,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_146_for_counted_loop_offers() {
-        assert_eq!(PROTOCOL_VERSION, 146);
+    fn protocol_version_is_147_for_physical_contest() {
+        assert_eq!(PROTOCOL_VERSION, 147);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3655,7 +3716,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_146_for_counted_loop_offers` stays
+    /// `protocol_version_is_147_for_physical_contest` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

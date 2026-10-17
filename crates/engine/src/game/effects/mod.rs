@@ -119,6 +119,7 @@ pub mod endure;
 pub mod energy;
 pub mod epic;
 pub mod exile_resolving_spell;
+pub mod physical_contest;
 pub mod put_chosen_counter;
 // Tests for `epic` live in a sibling file (declared here, not in `epic.rs`, so
 // `epic.rs` stays implementation-only).
@@ -4656,6 +4657,10 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
                 kind: CastOfferKind::FreeCastWindow { .. },
                 ..
             }
+            // CR 608.2c: a contest's "if you win" rider must read the settled
+            // result, so every later instruction waits in the continuation until the
+            // host drives the contest to a terminal state (`game::contest::settle`).
+            | WaitingFor::PhysicalContest { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::ProliferateChoice { .. }
             | WaitingFor::TimeTravelChoice { .. }
@@ -4890,6 +4895,22 @@ pub(crate) fn optional_decline_branch(
 /// declining the optional effect leaves `IfYouDo` false, but the sibling
 /// disjunct may still be satisfied, so the sub-ability must be re-evaluated
 /// rather than dropped. Predicate helper, not rule-implementing code.
+/// CR 608.2c: Whether `condition` reads the outcome of an in-progress contest
+/// ("If you win" — `AbilityCondition::EventOutcomeWon`), possibly under `Not` /
+/// `And` / `Or`. Such a gate cannot be evaluated while the contest is still running,
+/// so its sub-ability is parked and re-evaluated once the host settles the result.
+/// Predicate helper, not rule-implementing code.
+fn condition_depends_on_contest_result(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::EventOutcomeWon => true,
+        AbilityCondition::Not { condition } => condition_depends_on_contest_result(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_depends_on_contest_result)
+        }
+        _ => false,
+    }
+}
+
 fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::EffectOutcome { .. } => true,
@@ -5711,6 +5732,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -8185,6 +8207,7 @@ pub fn resolve_effect(
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
+        Effect::PhysicalContest { .. } => physical_contest::resolve(state, ability, events),
         // Heist (Arena digital-only): look step. Raises ChooseFromZoneChoice
         // over random nonland cards from the targeted opponent's library and
         // stashes a HeistExile continuation.
@@ -18619,6 +18642,10 @@ fn resolve_chain_body(
                     || condition.has_when_you_do_marker()
                     || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
                         && condition_depends_on_result_object(condition))
+                    // CR 608.2c: "If you win" after a contest reads the settled
+                    // result, which the host has not produced while the contest runs.
+                    || (matches!(state.waiting_for, WaitingFor::PhysicalContest { .. })
+                        && condition_depends_on_contest_result(condition))
                     || condition_awaits_resolution_only_referent(condition, state, ability))
             {
                 let mut sub_clone = sub.as_ref().clone();

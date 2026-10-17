@@ -1322,6 +1322,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
@@ -1606,6 +1607,7 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
 
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
@@ -7598,6 +7600,312 @@ async fn broadcast_ai_failure(
     }
 }
 
+/// How often a running contest evaluates timeouts and flushes its transitions.
+/// Short against the 2s default inactivity timeout so a lapse resolves promptly,
+/// long enough that an idle contest costs one cheap lock per tick.
+const CONTEST_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long the contest driver waits before retrying a game-ending contest's terminal
+/// commit that failed, so a persistent database fault is one retry per beat rather
+/// than one per tick.
+const CONTEST_TERMINAL_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Start this game's contest driver task if a contest is running and none owns it.
+/// Idempotent — `GameSession::claim_contest_driver` hands the right out once per
+/// contest, so every action path may call this after it applies a game submission.
+// Same shape as the sibling transport fan-outs: every argument is a distinct shared
+// handle the driver task must own, and a bundling struct would only move the arity.
+#[allow(clippy::too_many_arguments)]
+async fn ensure_contest_driver(
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    connections: &SharedConnections,
+    draft_state: &SharedDraftState,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    lobby: &SharedLobby,
+    lobby_subscribers: &SharedLobbySubscribers,
+    game_code: &str,
+) {
+    let claimed = match lock_session(state, game_code).await {
+        Ok(mut session) => session.claim_contest_driver(),
+        Err(_) => false,
+    };
+    if !claimed {
+        return;
+    }
+    tokio::spawn(run_contest_driver(
+        executor.clone(),
+        state.clone(),
+        connections.clone(),
+        draft_state.clone(),
+        game_db.clone(),
+        game_spectators.clone(),
+        lobby.clone(),
+        lobby_subscribers.clone(),
+        game_code.to_string(),
+    ));
+}
+
+/// Drive one game's contests to completion: tick the engine state machine on the
+/// server clock, publish every transition (and the AI follow-up after a settle)
+/// exactly like any other game transition, and stream lightweight click counters in
+/// between. Exits — releasing the driver claim — once no contest is running.
+// See `ensure_contest_driver`: one owned handle per argument.
+#[allow(clippy::too_many_arguments)]
+async fn run_contest_driver(
+    executor: game_executor::GameExecutor,
+    state: SharedState,
+    connections: SharedConnections,
+    draft_state: SharedDraftState,
+    game_db: SharedGameDb,
+    game_spectators: SharedGameSpectators,
+    lobby: SharedLobby,
+    lobby_subscribers: SharedLobbySubscribers,
+    game_code: String,
+) {
+    let mut ticker = tokio::time::interval(CONTEST_TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The terminal artifact of a game this driver ended, kept across retries: rebuilding
+    // it after a commit that landed would read the ratings that commit already moved
+    // and no longer match the committed artifact.
+    let mut pending_terminal: Option<persistence::FullTerminalArtifact> = None;
+    loop {
+        ticker.tick().await;
+        let Ok(mut session) = lock_session(&state, &game_code).await else {
+            return;
+        };
+        let Some(full_key) = session
+            .full_runtime
+            .as_ref()
+            .map(|runtime| runtime.key.clone())
+        else {
+            session.release_contest_driver();
+            return;
+        };
+        let persistence = game_db.clone();
+        let persistence_executor = executor.clone();
+        let existing_terminal = pending_terminal.clone();
+        let (session, tick) = executor
+            .with_session(session, move |session| {
+                session.tick_contest();
+                let drain = session.drain_contest_outbox();
+                let progress = session.contest_progress();
+                let done = !session.contest_active();
+                let session = &mut *session;
+                let eliminated = session.state.eliminated_players.clone();
+                let rewind_targets = session.rewind_options();
+                let player_count = session.player_count;
+                let game_over_winner = match &session.state.waiting_for {
+                    engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
+                    _ => None,
+                };
+                let terminal = if let Some(artifact) = existing_terminal {
+                    Ok(Some(artifact))
+                } else if let Some(winner) = game_over_winner {
+                    let ranked_result = ranked_duel_players(session).and_then(|players| {
+                        ranked_result_for_duel(&persistence, &session.game_code, &players, winner)
+                    });
+                    terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
+                        .map(Some)
+                } else {
+                    if !drain.transitions.is_empty() {
+                        persist_full_session_async(&persistence_executor, &persistence, session);
+                    }
+                    Ok(None)
+                };
+                // A game this tick ended still owes its terminal commit, which can fail and
+                // need another attempt: the claim is kept until that is settled below.
+                if done && game_over_winner.is_none() {
+                    session.release_contest_driver();
+                }
+                (
+                    full_key,
+                    player_count,
+                    eliminated,
+                    rewind_targets,
+                    drain,
+                    progress,
+                    done,
+                    game_over_winner,
+                    terminal,
+                )
+            })
+            .await;
+        let (
+            full_key,
+            player_count,
+            eliminated,
+            rewind_targets,
+            drain,
+            progress,
+            done,
+            game_over_winner,
+            terminal,
+        ) = tick;
+
+        broadcast_ai_results(
+            &executor,
+            &connections,
+            &game_spectators,
+            full_key.clone(),
+            player_count,
+            eliminated,
+            drain.transitions,
+            rewind_targets,
+        )
+        .await;
+        broadcast_ai_failure(&connections, &game_code, drain.ai_failure).await;
+
+        if let Some(progress) = progress {
+            let conns = connections.lock().await;
+            if let Some(players) = conns.get(&game_code) {
+                for sender in players.values() {
+                    let _ = sender.send(ServerMessage::ContestProgress {
+                        full_key: Some(full_key.clone()),
+                        contest: progress.contest,
+                        clicks: progress.clicks.to_vec(),
+                    });
+                }
+            }
+        }
+
+        match terminal {
+            Ok(Some(artifact)) => {
+                let terminal_key = artifact.key.clone();
+                pending_terminal = Some(artifact.clone());
+                match prepare_full_terminal_with_commit_status(&game_db, artifact).await {
+                    Ok(deliveries) => {
+                        {
+                            let conns = connections.lock().await;
+                            if let Some(players) = conns.get(&game_code) {
+                                for (player, delivery) in &deliveries {
+                                    if let Some(sender) = players.get(player) {
+                                        let _ = sender.send(ServerMessage::TerminalResult {
+                                            delivery: Some(delivery.clone()),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        drop(session);
+                        report_draft_game_over(
+                            &draft_state,
+                            &connections,
+                            &game_code,
+                            game_over_winner.flatten(),
+                        )
+                        .await;
+                        state.lock().await.remove_game(&game_code);
+                        connections.lock().await.remove(&game_code);
+                        game_spectators.lock().await.remove(&game_code);
+                        // A finished game must not stay joinable in the public lobby.
+                        delist_and_announce(
+                            &lobby,
+                            &lobby_subscribers,
+                            std::iter::once(game_code.as_str()),
+                        )
+                        .await;
+                        return;
+                    }
+                    // The commit never landed, or its outcome is unknown: only the
+                    // database can say whether this exact Full key is still active.
+                    Err(TerminalPreparationFailure::BeforeTerminalCommit(error)) => {
+                        error!(game = %game_code, %error, "contest terminal preparation failed");
+                        let persistence = game_db.clone();
+                        let code = game_code.clone();
+                        let admission = executor.admit_persistence_io().await;
+                        let current = tokio::task::spawn_blocking(move || {
+                            let _admission = admission;
+                            persistence.load_active_full_key(&code)
+                        })
+                        .await;
+                        let still_active = matches!(
+                            current,
+                            Ok(Ok(Some(active_key))) if active_key == terminal_key
+                        );
+                        if !still_active {
+                            // Retired elsewhere (or committed despite the error): the game
+                            // is over for good, so retire it in memory too rather than
+                            // retry a commit that can never apply.
+                            error!(
+                                game = %game_code,
+                                "terminal preparation did not leave this Full key active; retiring the room"
+                            );
+                            retire_abandoned_game_routes(
+                                &state,
+                                &connections,
+                                &game_spectators,
+                                &lobby,
+                                &lobby_subscribers,
+                                session,
+                                &game_code,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                    // The commit landed (retries are idempotent): only reading the
+                    // deliveries back failed. Never restore the runtime; try again.
+                    Err(TerminalPreparationFailure::AfterTerminalCommit(error)) => {
+                        error!(
+                            game = %game_code,
+                            %error,
+                            "contest terminal delivery preparation failed after terminal commit"
+                        );
+                    }
+                }
+                // Keep the claim and try the same commit again on the next beat.
+                drop(session);
+                tokio::time::sleep(CONTEST_TERMINAL_RETRY).await;
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                error!(game = %game_code, %error, "contest terminal artifact failed");
+                let (session, ()) = executor
+                    .with_session(session, |session| {
+                        session.release_contest_driver();
+                    })
+                    .await;
+                drop(session);
+                return;
+            }
+        }
+
+        drop(session);
+        if done {
+            return;
+        }
+    }
+}
+
+/// Apply one click from the authenticated seat. A click is fire-and-forget: it is
+/// never answered (a throttled or ignored click is not an error to the player), and
+/// the result reaches clients through the driver task's state transitions.
+async fn handle_contest_click(
+    contest: u64,
+    seq: u32,
+    state: &SharedState,
+    connections: &SharedConnections,
+    tx: &crate::socket_mailbox::Sender,
+    identity: &SocketIdentity,
+) {
+    let (Some(game_code), Some(player_token)) = (
+        identity.game_code.as_deref(),
+        identity.player_token.as_deref(),
+    ) else {
+        return;
+    };
+    let Ok(mut session) = lock_session(state, game_code).await else {
+        return;
+    };
+    if !full_socket_is_current_while_state_locked(&session, connections, identity, tx).await {
+        return;
+    }
+    session.handle_contest_click(player_token, contest, seq);
+}
+
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
 /// carrying the rolled-back state to every seat, filtered per-player exactly
 /// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
@@ -7729,6 +8037,8 @@ fn operation_failed_message(
         | ClientMessage::JoinGameWithPassword { .. }
         | ClientMessage::LookupJoinTarget { .. }
         | ClientMessage::Emote { .. }
+        // Fire-and-forget: a click is never answered, so there is no promise to settle.
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::SpectatorJoin { .. }
         | ClientMessage::Ping { .. }
         | ClientMessage::UpdateLobbyMetadata { .. }
@@ -9399,6 +9709,20 @@ async fn handle_client_message(
                 identity,
             )
             .await;
+            if let Some(game_code) = identity.game_code.as_deref() {
+                ensure_contest_driver(
+                    &context.game_executor,
+                    state,
+                    connections,
+                    draft_state,
+                    game_db,
+                    game_spectators,
+                    lobby,
+                    lobby_subscribers,
+                    game_code,
+                )
+                .await;
+            }
         }
 
         ClientMessage::Interaction { submission } => {
@@ -9416,6 +9740,24 @@ async fn handle_client_message(
                 identity,
             )
             .await;
+            if let Some(game_code) = identity.game_code.as_deref() {
+                ensure_contest_driver(
+                    &context.game_executor,
+                    state,
+                    connections,
+                    draft_state,
+                    game_db,
+                    game_spectators,
+                    lobby,
+                    lobby_subscribers,
+                    game_code,
+                )
+                .await;
+            }
+        }
+
+        ClientMessage::ContestClick { contest, seq } => {
+            handle_contest_click(contest, seq, state, connections, tx, identity).await;
         }
 
         ClientMessage::Reconnect {
@@ -17967,10 +18309,19 @@ mod game_submission_tests {
         deck: DeckData,
         format_config: Option<engine::types::format::FormatConfig>,
     ) -> (String, String, server_core::FullSessionKey) {
+        create_started_ai_game_listed(socket, booster_pack_pool, false, deck, format_config).await
+    }
+
+    /// [`create_started_ai_game`], optionally as a public room (listed in the lobby).
+    async fn create_started_ai_game_listed(
+        socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        booster_pack_pool: Option<Vec<String>>,
+        public: bool,
+    ) -> (String, String, server_core::FullSessionKey) {
         let create = ClientMessage::CreateGameWithSettings {
             deck: deck.clone(),
             display_name: "Alice".to_string(),
-            public: false,
+            public,
             password: None,
             timer_seconds: None,
             player_count: 2,
@@ -18151,6 +18502,258 @@ mod game_submission_tests {
         .await;
         server.abort();
         result.expect("human decision was not delivered after a zero-transition AI follow-up");
+    }
+
+    /// Whether the lobby snapshot a fresh subscriber receives lists `code`.
+    async fn lobby_lists(url: &str, code: &str) -> bool {
+        let mut socket = connect_and_hello(url.to_string()).await;
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&ClientMessage::SubscribeLobby)
+                    .expect("subscribe json")
+                    .into(),
+            ))
+            .await
+            .expect("send subscribe");
+        loop {
+            if let ServerMessage::LobbyUpdate { games } = recv_server_message(&mut socket).await {
+                return games.iter().any(|game| game.game_code == code);
+            }
+        }
+    }
+
+    /// A contest that settles into the end of the game (the winner's opponent was at
+    /// 0 life, so the settlement's state-based-action pass ends it) is a TERMINAL AI
+    /// follow-up from the contest driver. The driver must retire the room through the
+    /// same authority as every other terminal path, `delist_and_announce`, so no lobby
+    /// row outlives the finished game. A game start already unregisters its row, so
+    /// this seeds one to stand for any entry left behind (an expiry-sweep race, a
+    /// relist) and checks the driver's retirement removes it.
+    #[tokio::test]
+    async fn a_game_that_ends_at_contest_settlement_is_delisted_from_the_lobby() {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+
+        let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut host = connect_and_hello(url.clone()).await;
+            let (code, _token, _key) =
+                create_started_ai_game_listed(&mut host, None, true, DeckData::default(), None)
+                    .await;
+            app.lobby.lock().await.lobby_mut().register_game(
+                &code,
+                RegisterGameRequest {
+                    host_name: "Alice".to_string(),
+                    public: true,
+                    ..Default::default()
+                },
+                &SysEnv,
+            );
+            assert!(
+                lobby_lists(&url, &code).await,
+                "reach guard: a public row for the running game exists"
+            );
+
+            // Park the game on a contest between the human host (P0, who never clicks)
+            // and the AI (P1, who does), with the AI at 0 life: the AI wins the
+            // contest, and the pass that settles it ends the game.
+            {
+                let handle = app.sessions.lock().await.session(&code).expect("session");
+                let mut session = handle.lock().await;
+                let config = ContestConfig {
+                    countdown_ms: 1,
+                    inactivity_timeout_ms: 400,
+                    reconnect_grace_ms: 5_000,
+                    settle_window_ms: 0,
+                    max_active_ms: 60_000,
+                };
+                session.contest.policy.config = config;
+                session.state.players[1].life = 0;
+                session.state.waiting_for =
+                    engine::types::game_state::WaitingFor::PhysicalContest {
+                        contest: Box::new(ContestState::new(
+                            1,
+                            ContestKind::Staring,
+                            PlayerId(0),
+                            PlayerId(1),
+                            config,
+                        )),
+                        source_id: engine::types::identifiers::ObjectId(1),
+                    };
+            }
+            ensure_contest_driver(
+                &app.context.game_executor,
+                &app.sessions,
+                &app.connections,
+                &app.draft_sessions,
+                &app.game_db,
+                &app.game_spectators,
+                &app.lobby,
+                &app.lobby_subscribers,
+                &code,
+            )
+            .await;
+
+            loop {
+                if !lobby_lists(&url, &code).await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(
+                app.sessions.lock().await.session(&code).is_none(),
+                "and the finished session was retired with it"
+            );
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "the finished game was never delisted");
+    }
+
+    /// Park a started AI game (human P0, AI P1 at 0 life) on a contest the AI wins, so
+    /// the contest driver's settlement ends the game, and start the driver.
+    async fn start_game_ending_contest(app: &AppState, code: &str) {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+        {
+            let handle = app.sessions.lock().await.session(code).expect("session");
+            let mut session = handle.lock().await;
+            let config = ContestConfig {
+                countdown_ms: 1,
+                inactivity_timeout_ms: 400,
+                reconnect_grace_ms: 5_000,
+                settle_window_ms: 0,
+                max_active_ms: 60_000,
+            };
+            session.contest.policy.config = config;
+            session.state.players[1].life = 0;
+            session.state.waiting_for = engine::types::game_state::WaitingFor::PhysicalContest {
+                contest: Box::new(ContestState::new(
+                    1,
+                    ContestKind::Staring,
+                    PlayerId(0),
+                    PlayerId(1),
+                    config,
+                )),
+                source_id: engine::types::identifiers::ObjectId(1),
+            };
+        }
+        ensure_contest_driver(
+            &app.context.game_executor,
+            &app.sessions,
+            &app.connections,
+            &app.draft_sessions,
+            &app.game_db,
+            &app.game_spectators,
+            &app.lobby,
+            &app.lobby_subscribers,
+            code,
+        )
+        .await;
+    }
+
+    /// A game-ending contest whose terminal commit fails while the Full key is still
+    /// active is NOT abandoned: the driver keeps its claim, the room stays live, and the
+    /// commit is retried until it lands — then the room is retired like any finished game.
+    #[tokio::test]
+    async fn a_failed_terminal_commit_at_contest_settlement_is_retried_until_it_lands() {
+        let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut host = connect_and_hello(url.clone()).await;
+            let (code, _token, key) =
+                create_started_ai_game_listed(&mut host, None, true, DeckData::default(), None)
+                    .await;
+            app.lobby.lock().await.lobby_mut().register_game(
+                &code,
+                RegisterGameRequest {
+                    host_name: "Alice".to_string(),
+                    public: true,
+                    ..Default::default()
+                },
+                &SysEnv,
+            );
+            app.game_db.plant_terminal_conflict(&key).expect("fault");
+
+            start_game_ending_contest(&app, &code).await;
+
+            // The contest settles into the end of the game within a second or so; the
+            // failing commit must leave the room live for several retry beats.
+            tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+            assert!(
+                app.sessions.lock().await.session(&code).is_some(),
+                "a commit that failed with its key still active must not retire the room"
+            );
+            assert!(
+                matches!(
+                    app.sessions
+                        .lock()
+                        .await
+                        .session(&code)
+                        .expect("session")
+                        .lock()
+                        .await
+                        .state
+                        .waiting_for,
+                    engine::types::game_state::WaitingFor::GameOver { .. }
+                ),
+                "reach guard: the contest really did end the game"
+            );
+
+            app.game_db.clear_terminal_conflict(&key).expect("clear");
+            loop {
+                if app.sessions.lock().await.session(&code).is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(
+                !lobby_lists(&url, &code).await,
+                "and the finished room left the lobby with it"
+            );
+        })
+        .await;
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "the terminal commit was never retried to completion"
+        );
+    }
+
+    /// A commit failure that leaves the Full key no longer active (retired out from
+    /// under the game) can never apply: the room is retired in memory instead of retried.
+    #[tokio::test]
+    async fn a_terminal_commit_that_can_never_apply_retires_the_room_at_contest_settlement() {
+        let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut host = connect_and_hello(url.clone()).await;
+            let (code, _token, key) =
+                create_started_ai_game_listed(&mut host, None, true, DeckData::default(), None)
+                    .await;
+            app.lobby.lock().await.lobby_mut().register_game(
+                &code,
+                RegisterGameRequest {
+                    host_name: "Alice".to_string(),
+                    public: true,
+                    ..Default::default()
+                },
+                &SysEnv,
+            );
+            app.game_db.retire_full_key_for_test(&key).expect("fault");
+
+            start_game_ending_contest(&app, &code).await;
+
+            loop {
+                if app.sessions.lock().await.session(&code).is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(
+                !lobby_lists(&url, &code).await,
+                "the retired room must not stay listed"
+            );
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "the room was never retired");
     }
 
     #[tokio::test]

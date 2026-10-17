@@ -1336,6 +1336,10 @@ pub fn fallback_action(
         // Terminal — no action possible.
         WaitingFor::GameOver { .. } => None,
 
+        // Eye to Eye / Mouth to Mouth: the host drives the contest and AI seats click on the
+        // schedule `contest::AiContestants` plans — there is no `GameAction` to choose.
+        WaitingFor::PhysicalContest { .. } => None,
+
         // A local player explicitly proposed this shortcut. AI seats accept the
         // engine-issued consent so the authoritative Ready consumer can
         // materialize the already-agreed priority cycle.

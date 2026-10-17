@@ -8451,17 +8451,21 @@ fn check_actor_authorization(
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
-    if authorized.is_empty() {
-        return Err(EngineError::WrongPlayer);
-    }
     if let GameAction::Concede { player_id } = action {
         // CR 104.3a: A player may concede at any time in an unfinished game —
         // but only themselves. `GameOver` has no authorized submitter, so it
-        // cannot admit a second concession.
-        if *player_id != actor {
+        // cannot admit a second concession. A host-driven contest
+        // (`WaitingFor::PhysicalContest`) is also actorless, yet its game is
+        // unfinished: a contestant must still be able to leave it.
+        let unfinished_host_driven =
+            matches!(state.waiting_for, WaitingFor::PhysicalContest { .. });
+        if *player_id != actor || (authorized.is_empty() && !unfinished_host_driven) {
             return Err(EngineError::WrongPlayer);
         }
         return Ok(());
+    }
+    if authorized.is_empty() {
+        return Err(EngineError::WrongPlayer);
     }
     if !authorized.contains(&actor) {
         return Err(EngineError::WrongPlayer);

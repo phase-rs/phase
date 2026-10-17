@@ -127,6 +127,8 @@ import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { MutateMergeChoiceModalContent } from "../components/modal/MutateMergeChoiceModal.tsx";
 import { CipherEncodeChoiceModalContent } from "../components/modal/CipherEncodeChoiceModal.tsx";
+import { ContestOverlay } from "../components/contest/ContestOverlay.tsx";
+import { useContestStore } from "../stores/contestStore.ts";
 import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -476,6 +478,9 @@ export function GamePage() {
           () => setReceivedEmote(null),
           3000,
         );
+        break;
+      case "contestProgress":
+        useContestStore.getState().setProgress(event.contest, event.clicks);
         break;
       case "timerUpdate":
         setTimerRemaining((prev) => ({
@@ -1997,6 +2002,9 @@ function GamePageContent({
               Wrapped in DialogHost so any active dialog can be peeked away to
               reveal the battlefield underneath; peek state resets on every
               new WaitingFor so a fresh prompt is always visible. */}
+          {/* Eye to Eye / Mouth to Mouth: real-time clicking contest + result banner. */}
+          <ContestOverlay />
+
           <DialogHost>
             {waitingFor != null &&
               isClickThroughWaitingFor(waitingFor, objects) &&
