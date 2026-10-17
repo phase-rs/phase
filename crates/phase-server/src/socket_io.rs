@@ -1273,7 +1273,10 @@ mod socket_tests {
 mod transport_fixup_tests {
     use super::*;
     use crate::game_submission_tests::connect_and_hello;
-    use crate::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+    use crate::issue_4548_full_create_tests::{
+        recv_server_message, send_test_message, spawn_full_mode_server,
+    };
+    use crate::socket_ingress::MAX_PAYLOAD_BYTES;
     use server_core::protocol::ClientMessage;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -1296,7 +1299,10 @@ mod transport_fixup_tests {
                 "padding": "x".repeat(60 * 1024),
             })
             .to_string();
-            for _ in 0..20 {
+            // Stop at the first frame that exceeds the retained-byte limit so
+            // later writes cannot race the explicit overflow close.
+            let overflow_frames = MAX_PAYLOAD_BYTES / frame.len() + 1;
+            for _ in 0..overflow_frames {
                 if socket
                     .send(WsMessage::Text(frame.clone().into()))
                     .await
@@ -1383,7 +1389,7 @@ mod transport_fixup_tests {
     }
 
     #[tokio::test]
-    async fn compact_command_burst_still_allows_ping_while_handler_is_blocked() {
+    async fn queued_pre_hello_command_burst_still_allows_ping() {
         let (url, server, _directory, app) = spawn_full_mode_server().await;
         let hello = app.context.socket_hooks.arm_hello_accept();
         let result = tokio::time::timeout(Duration::from_secs(3), async {
@@ -1447,6 +1453,61 @@ mod transport_fixup_tests {
         })
         .await;
         hello.release.notify_one();
+        server.abort();
+        result.expect("a normal command burst blocked the reserved heartbeat");
+    }
+
+    #[tokio::test]
+    async fn compact_command_burst_still_allows_ping_while_handler_is_blocked() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut socket = connect_and_hello(url).await;
+            // Observe server-side hello acceptance before exhausting command quota.
+            send_test_message(
+                &mut socket,
+                &ClientMessage::Ping { timestamp: 90_000 },
+                false,
+            )
+            .await;
+            loop {
+                if matches!(
+                    recv_server_message(&mut socket).await,
+                    ServerMessage::Pong { timestamp: 90_000 }
+                ) {
+                    break;
+                }
+            }
+            let held = app.lobby.lock().await;
+            // Exceed decoder quota without spending the reader's Ping reserve.
+            for _ in 0..40 {
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&ClientMessage::SubscribeLobby)
+                            .unwrap()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Ping { timestamp: 90_001 })
+                        .unwrap()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                if matches!(
+                    recv_server_message(&mut socket).await,
+                    ServerMessage::Pong { timestamp: 90_001 }
+                ) {
+                    break;
+                }
+            }
+            drop(held);
+        })
+        .await;
         server.abort();
         result.expect("a normal command burst blocked the reserved heartbeat");
     }
