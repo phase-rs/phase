@@ -1153,6 +1153,12 @@ fn default_true() -> bool {
 /// can still be multiplied by ordinary token replacement effects.
 pub const MAX_DEBUG_CREATE_COUNT: u32 = 100;
 
+/// Maximum amount for one sandbox `GainLife` / `LoseLife` debug action. The
+/// ceiling leaves about 2^11 headroom under `i32::MAX` for doubling life-gain
+/// replacements, whose multiplication in `resolve_event_replacement_quantity`
+/// is unchecked.
+pub const MAX_DEBUG_LIFE_AMOUNT: u32 = 1_000_000;
+
 /// Serde default for debug create counts: legacy payloads create one object.
 fn default_debug_create_count() -> u32 {
     1
@@ -1308,6 +1314,10 @@ pub enum DebugAction {
     // ── Player State Manipulation ─────────────────────────────────────────
     /// Set a player's life total directly.
     SetLife { player_id: PlayerId, life: i32 },
+    /// Gain life through the real CR 119.3 life-gain event (replacements, can't-gain statics, life-gain triggers apply).
+    GainLife { player_id: PlayerId, amount: u32 },
+    /// Lose life through the real CR 119.3 life-loss event.
+    LoseLife { player_id: PlayerId, amount: u32 },
     /// Modify a non-energy player counter. Positive delta adds, negative removes.
     ModifyPlayerCounters {
         player_id: PlayerId,
@@ -1453,6 +1463,8 @@ impl DebugAction {
             | Self::ShuffleLibrary { .. }
             | Self::Proliferate { .. }
             | Self::SetLife { .. }
+            | Self::GainLife { .. }
+            | Self::LoseLife { .. }
             | Self::ModifyPlayerCounters { .. }
             | Self::ModifyEnergy { .. }
             | Self::AddMana { .. }
@@ -1490,6 +1502,50 @@ impl DebugAction {
             ));
         }
         Ok(())
+    }
+
+    /// Rejects sandbox life-change amounts above `MAX_DEBUG_LIFE_AMOUNT` before
+    /// any state change (no silent wrap or clamp).
+    pub fn validate_life_change_amount(&self) -> Result<(), String> {
+        match self {
+            Self::GainLife { amount, .. } | Self::LoseLife { amount, .. } => {
+                if *amount > MAX_DEBUG_LIFE_AMOUNT {
+                    return Err(format!(
+                        "Debug life change amount {amount} exceeds the maximum {MAX_DEBUG_LIFE_AMOUNT}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::MoveToZone { .. }
+            | Self::CreateCard { .. }
+            | Self::RemoveObject { .. }
+            | Self::Sacrifice { .. }
+            | Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetBasePowerToughness { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::SetPrepared { .. }
+            | Self::SetController { .. }
+            | Self::SetSummoningSickness { .. }
+            | Self::SetFaceState { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. }
+            | Self::GrantKeyword { .. }
+            | Self::RemoveKeyword { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => Ok(()),
+        }
     }
 
     /// Human-readable description of this debug action, used by the sandbox
@@ -1679,6 +1735,12 @@ impl DebugAction {
             }
             DebugAction::SetLife { player_id, life } => {
                 format!("SetLife ({} → {})", player_label(*player_id), life)
+            }
+            DebugAction::GainLife { player_id, amount } => {
+                format!("GainLife ({} gains {})", player_label(*player_id), amount)
+            }
+            DebugAction::LoseLife { player_id, amount } => {
+                format!("LoseLife ({} loses {})", player_label(*player_id), amount)
             }
             DebugAction::AddMana { player_id, mana } => {
                 format!("AddMana ({} gains {:?})", player_label(*player_id), mana)

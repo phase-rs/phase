@@ -3346,6 +3346,11 @@ mod tests {
         }
     }
 
+    /// v146: `DebugAction` gains `GainLife` / `LoseLife` (Sandbox life changes
+    /// through the CR 119.3 events), carried in `GameAction::Debug`; a v145 peer
+    /// cannot parse the tags, so it must be refused before it can receive or
+    /// send one. P2P moves in lockstep (wire 128); lobby messages unchanged.
+    ///
     /// v145: `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
     /// serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
     /// peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
@@ -3569,8 +3574,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_145_for_search_missing_referent() {
-        assert_eq!(PROTOCOL_VERSION, 145);
+    fn protocol_version_is_146_for_sandbox_life_debug_actions() {
+        assert_eq!(PROTOCOL_VERSION, 146);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3581,7 +3586,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_145_for_search_missing_referent` stays
+    /// `protocol_version_is_146_for_sandbox_life_debug_actions` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -1256,14 +1256,16 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::GrantKeyword { .. } => 18,
         DebugAction::RemoveKeyword { .. } => 19,
         DebugAction::SetLife { .. } => 20,
-        DebugAction::ModifyPlayerCounters { .. } => 21,
-        DebugAction::ModifyEnergy { .. } => 22,
-        DebugAction::AddMana { .. } => 23,
-        DebugAction::SetInfiniteMana { .. } => 24,
-        DebugAction::SetPhase { .. } => 25,
-        DebugAction::RunStateBasedActions => 26,
-        DebugAction::CreateToken { .. } => 27,
-        DebugAction::CreateTokenCopy { .. } => 28,
+        DebugAction::GainLife { .. } => 21,
+        DebugAction::LoseLife { .. } => 22,
+        DebugAction::ModifyPlayerCounters { .. } => 23,
+        DebugAction::ModifyEnergy { .. } => 24,
+        DebugAction::AddMana { .. } => 25,
+        DebugAction::SetInfiniteMana { .. } => 26,
+        DebugAction::SetPhase { .. } => 27,
+        DebugAction::RunStateBasedActions => 28,
+        DebugAction::CreateToken { .. } => 29,
+        DebugAction::CreateTokenCopy { .. } => 30,
     }
 }
 
@@ -1544,6 +1546,32 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             let DebugAction::SetLife {
                 player_id: b0,
                 life: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::GainLife {
+            player_id: a0,
+            amount: a1,
+        } => {
+            let DebugAction::GainLife {
+                player_id: b0,
+                amount: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::LoseLife {
+            player_id: a0,
+            amount: a1,
+        } => {
+            let DebugAction::LoseLife {
+                player_id: b0,
+                amount: b1,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");

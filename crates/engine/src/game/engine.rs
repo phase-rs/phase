@@ -16019,6 +16019,9 @@ pub fn preflight_debug_action(
     action
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
+    action
+        .validate_life_change_amount()
+        .map_err(EngineError::InvalidAction)?;
 
     if let DebugAction::CreateCard {
         owner,

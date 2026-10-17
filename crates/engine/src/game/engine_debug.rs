@@ -22,6 +22,7 @@ use crate::types::zones::Zone;
 
 use super::effects::attach::{attach_to as attach_object_to, attach_to_player};
 use super::effects::change_zone::shuffle_library;
+use super::effects::life::{apply_life_gain, apply_life_loss, ReplacementDeferred};
 use super::engine::{
     action_rejection_for_engine_error, explicit_debug_permission_rejection, preflight_debug_action,
     EngineError,
@@ -497,6 +498,14 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::GainLife { player_id, amount } => {
+            apply_debug_life_change(state, player_id, amount, DebugLifeChange::Gain, events)?;
+        }
+
+        DebugAction::LoseLife { player_id, amount } => {
+            apply_debug_life_change(state, player_id, amount, DebugLifeChange::Loss, events)?;
+        }
+
         DebugAction::ModifyPlayerCounters {
             player_id,
             counter_kind,
@@ -735,6 +744,94 @@ pub fn apply_debug_action(
         std::mem::take(events),
         state.waiting_for.clone(),
     ))
+}
+
+/// CR 119.3: Direction of a sandbox life change routed through the real life-change event.
+#[derive(Debug, Clone, Copy)]
+enum DebugLifeChange {
+    Gain,
+    Loss,
+}
+
+/// CR 119.3: Apply a sandbox life gain/loss through `apply_life_gain` /
+/// `apply_life_loss`, so replacement (CR 614.1a, CR 616.1) and can't (CR 101.2)
+/// effects apply, then settle the action the way the reducer settles any action.
+fn apply_debug_life_change(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    change: DebugLifeChange,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    validate_player(state, player_id)?;
+    if !super::players::is_alive(state, player_id) {
+        return Err(EngineError::InvalidAction(format!(
+            "Debug: player {} is no longer in the game",
+            player_id.0
+        )));
+    }
+    // Representability, checked before any mutation (no wrap, no clamp).
+    let delta = i32::try_from(amount).map_err(|_| {
+        EngineError::InvalidAction("Debug: life change amount is not representable".into())
+    })?;
+    let player = state
+        .players
+        .iter()
+        .find(|p| p.id == player_id)
+        .expect("the validated debug player must remain present");
+    let representable = match change {
+        DebugLifeChange::Gain => {
+            player.life.checked_add(delta).is_some()
+                && player.life_gained_this_turn.checked_add(amount).is_some()
+        }
+        DebugLifeChange::Loss => {
+            player.life.checked_sub(delta).is_some()
+                && player.life_lost_this_turn.checked_add(amount).is_some()
+        }
+    };
+    if !representable {
+        return Err(EngineError::InvalidAction(
+            "Debug: resulting life total is not representable".into(),
+        ));
+    }
+    let event_start = events.len();
+    let outcome = match change {
+        DebugLifeChange::Gain => apply_life_gain(state, player_id, amount, events),
+        DebugLifeChange::Loss => apply_life_loss(state, player_id, amount, events),
+    };
+    match outcome {
+        Ok(_) => {
+            // CR 603.2 + CR 603.3 + CR 704.3: scan this change's events for
+            // triggers, run SBAs, and scan the SBA-generated events (dies triggers,
+            // target prompts) through the reducer's single settlement authority.
+            // The Debug branch returns before `run_post_action_pipeline`, so the
+            // arm converges here over exactly its own slice.
+            let default_wf = state.waiting_for.clone();
+            let waiting_for = super::engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                event_start,
+                &default_wf,
+                false,
+                false,
+            )?;
+            state.waiting_for = waiting_for;
+        }
+        // CR 616.1: the authority installed the replacement-order prompt; its
+        // resume path owns the event's triggers and SBAs.
+        Err(ReplacementDeferred::ReplacementChoice) => {}
+        // CR 614.6 + CR 603.7: the substitute is paused on its own prompt. Queue
+        // (never dispatch) ordinary and delayed triggers for the resume's drain;
+        // no SBAs mid-resolution.
+        Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
+            super::triggers::collect_triggers_into_deferred(state, &events[event_start..]);
+            super::triggers::collect_delayed_trigger_contexts_into_deferred(
+                state,
+                &events[event_start..],
+            );
+        }
+    }
+    Ok(())
 }
 
 /// CR 122.1: Apply a final debug-selected player-counter delta through the
@@ -2844,5 +2941,549 @@ mod tests {
                 .any(|t| t.definition.mode == TriggerMode::Drawn),
             "sanity: watcher carries a Drawn trigger"
         );
+    }
+
+    // ── Sandbox GainLife / LoseLife (CR 119.3 life-change event) ─────────────
+
+    mod life_change {
+        use super::*;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::ability::{ChooseOneOfKind, PlayerFilter};
+        use crate::types::actions::MAX_DEBUG_LIFE_AMOUNT;
+        use crate::types::phase::Phase;
+
+        fn scenario() -> GameScenario {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario
+        }
+
+        fn add_card(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
+            scenario.add_real_card(
+                player,
+                name,
+                Zone::Battlefield,
+                crate::test_support::shared_card_db(),
+            )
+        }
+
+        fn debug_runner(scenario: GameScenario) -> GameRunner {
+            let mut runner = scenario.build();
+            runner.state_mut().debug_mode = true;
+            runner
+        }
+
+        fn gain(player_id: PlayerId, amount: u32) -> GameAction {
+            GameAction::Debug(DebugAction::GainLife { player_id, amount })
+        }
+
+        fn lose(player_id: PlayerId, amount: u32) -> GameAction {
+            GameAction::Debug(DebugAction::LoseLife { player_id, amount })
+        }
+
+        /// Submits a debug action through `apply` and asserts the reach guard:
+        /// the action got past preflight and the handler (`DebugActionUsed`).
+        fn act_ok(runner: &mut GameRunner, action: GameAction) -> ActionResult {
+            let result = runner.act(action).expect("debug life change must apply");
+            assert!(
+                result.events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::DebugActionUsed { player_id, .. } if *player_id == P0
+                )),
+                "reach guard: the debug action must be audited as used by P0"
+            );
+            result
+        }
+
+        fn life(runner: &GameRunner, player: PlayerId) -> i32 {
+            runner.life(player)
+        }
+
+        fn p1p1(runner: &GameRunner, id: ObjectId) -> u32 {
+            runner.state().objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        }
+
+        fn in_graveyard(runner: &GameRunner, player: PlayerId, id: ObjectId) -> bool {
+            runner.state().players[player.0 as usize]
+                .graveyard
+                .contains(&id)
+        }
+
+        /// CR 119.3 + CR 603.2 + CR 603.3: a debug gain is a real life-gain event,
+        /// so the recipient's "whenever you gain life" trigger goes on the stack
+        /// and the other player's does not.
+        #[test]
+        fn debug_gain_life_fires_recipient_life_gain_trigger() {
+            let mut scenario = scenario();
+            let p0_mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+            let p1_mate = add_card(&mut scenario, P1, "Ajani's Pridemate");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, gain(P0, 3));
+            assert_eq!(life(&runner, P0), 23);
+            assert_eq!(
+                runner.state().stack.len(),
+                1,
+                "exactly P0's Pridemate trigger must be on the stack after the action"
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player } if player == P0
+            ));
+
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, p0_mate), 1);
+            assert_eq!(p1p1(&runner, p1_mate), 0);
+        }
+
+        /// The recipient is the payload's player, never the actor implicitly.
+        #[test]
+        fn debug_gain_life_targets_payload_player_not_actor() {
+            let mut scenario = scenario();
+            let p0_mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+            let p1_mate = add_card(&mut scenario, P1, "Ajani's Pridemate");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, gain(P1, 3));
+            assert_eq!(life(&runner, P1), 23);
+            assert_eq!(life(&runner, P0), 20);
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, p1_mate), 1);
+            assert_eq!(p1p1(&runner, p0_mate), 0);
+        }
+
+        /// CR 101.2: "can't gain life" beats the gain and any doubling replacement.
+        #[test]
+        fn debug_gain_life_respects_cant_gain_static() {
+            for with_doubler in [false, true] {
+                let mut scenario = scenario();
+                let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+                add_card(&mut scenario, P0, "Forsaken Wastes");
+                if with_doubler {
+                    add_card(&mut scenario, P0, "Rhox Faithmender");
+                }
+                let mut runner = debug_runner(scenario);
+
+                act_ok(&mut runner, gain(P0, 3));
+                assert_eq!(life(&runner, P0), 20, "with_doubler={with_doubler}");
+                assert!(
+                    runner.state().stack.is_empty(),
+                    "with_doubler={with_doubler}"
+                );
+                runner.advance_until_stack_empty();
+                assert_eq!(p1p1(&runner, mate), 0, "with_doubler={with_doubler}");
+            }
+        }
+
+        /// CR 119.10 + CR 614.1a: a "would gain life … instead" replacement
+        /// rewrites the debug gain, and the modified event triggers once.
+        #[test]
+        fn debug_gain_life_applies_life_gain_replacement() {
+            let mut scenario = scenario();
+            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+            add_card(&mut scenario, P0, "Rhox Faithmender");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, gain(P0, 3));
+            assert_eq!(life(&runner, P0), 26);
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 1);
+        }
+
+        /// CR 119.9: gaining 0 life is no life-gain event and triggers nothing.
+        #[test]
+        fn debug_gain_zero_life_is_not_a_life_gain_event() {
+            let mut scenario = scenario();
+            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, gain(P0, 0));
+            assert_eq!(life(&runner, P0), 20);
+            assert!(runner.state().stack.is_empty());
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 0);
+        }
+
+        /// CR 603.7: a delayed "whenever a player gains life" trigger created by a
+        /// resolved spell sees the debug gain.
+        #[test]
+        fn debug_gain_life_fires_delayed_life_gain_trigger() {
+            let mut scenario = scenario();
+            let false_cure = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "False Cure",
+                    true,
+                    "Until end of turn, whenever a player gains life, that player loses 2 life for each 1 life they gained.",
+                )
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let mut runner = debug_runner(scenario);
+            runner.cast(false_cure).resolve();
+            runner.advance_until_stack_empty();
+            assert_eq!(
+                life(&runner, P0),
+                20,
+                "sanity: False Cure itself changes no life"
+            );
+
+            act_ok(&mut runner, gain(P0, 2));
+            runner.advance_until_stack_empty();
+            assert_eq!(life(&runner, P0), 18, "20 + 2 - (2 × 2)");
+        }
+
+        /// CR 119.3 + CR 603.2: a debug loss is a real life-loss event, so an
+        /// opponent's "whenever an opponent loses life" trigger fires; the
+        /// controller's own loss does not trigger it.
+        #[test]
+        fn debug_lose_life_fires_life_loss_trigger() {
+            let mut scenario = scenario();
+            add_card(&mut scenario, P1, "Exquisite Blood");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, lose(P0, 3));
+            assert_eq!(life(&runner, P0), 17);
+            runner.advance_until_stack_empty();
+            assert_eq!(life(&runner, P1), 23);
+
+            let mut scenario = self::scenario();
+            add_card(&mut scenario, P1, "Exquisite Blood");
+            let mut runner = debug_runner(scenario);
+            act_ok(&mut runner, lose(P1, 3));
+            assert_eq!(life(&runner, P1), 17);
+            assert!(runner.state().stack.is_empty());
+            runner.advance_until_stack_empty();
+            assert_eq!(life(&runner, P0), 20);
+        }
+
+        /// CR 119.6 + CR 704.5a: a player brought to 0 life loses the game.
+        #[test]
+        fn debug_lose_life_to_zero_loses_the_game() {
+            let mut scenario = scenario();
+            scenario.with_life(P0, 3);
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, lose(P0, 3));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { .. }
+            ));
+        }
+
+        /// CR 101.2: "your life total can't change" stops the debug loss for that
+        /// player only.
+        #[test]
+        fn debug_lose_life_respects_cant_lose_static() {
+            let mut scenario = scenario();
+            add_card(&mut scenario, P0, "Platinum Emperion");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, lose(P0, 3));
+            assert_eq!(life(&runner, P0), 20);
+            act_ok(&mut runner, lose(P1, 3));
+            assert_eq!(life(&runner, P1), 17);
+        }
+
+        fn death_shadow_scenario() -> (GameScenario, ObjectId) {
+            let mut scenario = scenario();
+            scenario.with_life(P0, 12);
+            let shadow = add_card(&mut scenario, P0, "Death's Shadow");
+            (scenario, shadow)
+        }
+
+        fn assert_shadow_toughness_one(runner: &mut GameRunner, shadow: ObjectId) {
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            assert_eq!(
+                runner.state().objects[&shadow].toughness,
+                Some(1),
+                "reach guard: Death's Shadow is 1 toughness at 12 life"
+            );
+        }
+
+        /// CR 704.3 + CR 704.5f: the debug gain runs SBAs, so a creature whose
+        /// toughness the new life total drops to 0 is put into the graveyard.
+        #[test]
+        fn debug_gain_life_runs_state_based_actions() {
+            let (scenario, shadow) = death_shadow_scenario();
+            let mut runner = debug_runner(scenario);
+            assert_shadow_toughness_one(&mut runner, shadow);
+
+            act_ok(&mut runner, gain(P0, 1));
+            assert!(in_graveyard(&runner, P0, shadow));
+        }
+
+        /// CR 704.3 + CR 603.2 + CR 603.3: events the SBAs generate are scanned
+        /// for triggers, so a dies trigger caused by the debug life change fires.
+        #[test]
+        fn debug_gain_life_scans_sba_dies_triggers() {
+            let (mut scenario, shadow) = death_shadow_scenario();
+            add_card(&mut scenario, P0, "Zulaport Cutthroat");
+            let mut runner = debug_runner(scenario);
+            assert_shadow_toughness_one(&mut runner, shadow);
+
+            act_ok(&mut runner, gain(P0, 1));
+            assert!(in_graveyard(&runner, P0, shadow));
+            assert_eq!(life(&runner, P0), 13);
+            assert_eq!(runner.state().stack.len(), 1, "Zulaport's dies trigger");
+
+            runner.advance_until_stack_empty();
+            assert_eq!(life(&runner, P1), 19);
+            assert_eq!(life(&runner, P0), 14);
+        }
+
+        /// CR 603.3: a targeted dies trigger caused by the debug life change opens
+        /// its target prompt.
+        #[test]
+        fn debug_gain_life_opens_sba_trigger_target_prompt() {
+            let (mut scenario, shadow) = death_shadow_scenario();
+            add_card(&mut scenario, P0, "Blood Artist");
+            let mut runner = debug_runner(scenario);
+            assert_shadow_toughness_one(&mut runner, shadow);
+
+            let result = act_ok(&mut runner, gain(P0, 1));
+            assert!(in_graveyard(&runner, P0, shadow));
+            assert!(
+                matches!(
+                    result.waiting_for,
+                    WaitingFor::TriggerTargetSelection { player, .. } if player == P0
+                ),
+                "Blood Artist's target prompt must open, got {:?}",
+                result.waiting_for
+            );
+
+            runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Player(P1)],
+                })
+                .expect("Blood Artist target");
+            runner.advance_until_stack_empty();
+            assert_eq!(life(&runner, P1), 19);
+            assert_eq!(life(&runner, P0), 14);
+        }
+
+        /// CR 616.1: with two applicable gain replacements the affected player
+        /// orders them; nothing happens until the choice resolves.
+        #[test]
+        fn debug_gain_life_defers_to_replacement_order_choice() {
+            let mut scenario = scenario();
+            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+            add_card(&mut scenario, P0, "Boon Reflection");
+            add_card(&mut scenario, P0, "Leyline of Hope");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, gain(P0, 3));
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(life(&runner, P0), 20);
+            assert!(runner.state().stack.is_empty());
+            assert_eq!(p1p1(&runner, mate), 0);
+
+            for _ in 0..4 {
+                if !matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ) {
+                    break;
+                }
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("replacement order choice");
+            }
+            runner.advance_until_stack_empty();
+            let final_life = life(&runner, P0);
+            assert!(
+                final_life == 27 || final_life == 28,
+                "Boon first gives 3→6→7 (27); Leyline first gives 3→4→8 (28); got {final_life}"
+            );
+            assert_eq!(p1p1(&runner, mate), 1);
+        }
+
+        /// CR 614.6: a substitute that pauses on its own prompt leaves the debug
+        /// action applied with the substitute's prompt pending and nothing
+        /// dispatched.
+        #[test]
+        fn debug_gain_life_pauses_on_interactive_substitution() {
+            let mut scenario = scenario();
+            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+            let mut runner = debug_runner(scenario);
+            let lich = create_object(
+                runner.state_mut(),
+                CardId(9_702),
+                P0,
+                "Interactive Lich".to_string(),
+                Zone::Battlefield,
+            );
+            let substitution = ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                player: TargetFilter::Controller,
+                            },
+                        )],
+                        kind: ChooseOneOfKind::Ordinary,
+                    },
+                ),
+            );
+            {
+                let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
+                obj.replacement_definitions = vec![substitution.clone()].into();
+                obj.base_replacement_definitions = std::sync::Arc::new(vec![substitution]);
+            }
+
+            act_ok(&mut runner, gain(P0, 4));
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { .. }
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(life(&runner, P0), 20);
+            assert!(runner.state().stack.is_empty());
+            assert_eq!(p1p1(&runner, mate), 0);
+        }
+
+        /// The cap is accepted; cap + 1 is rejected before any state change.
+        #[test]
+        fn debug_life_change_amount_cap_is_enforced_before_mutation() {
+            let mut scenario = scenario();
+            add_card(&mut scenario, P0, "Rhox Faithmender");
+            let mut runner = debug_runner(scenario);
+
+            let over = DebugAction::GainLife {
+                player_id: P0,
+                amount: MAX_DEBUG_LIFE_AMOUNT + 1,
+            };
+            assert!(preflight_debug_action(runner.state(), P0, &over).is_err());
+            let revision = runner.state().state_revision;
+            assert!(runner.act(GameAction::Debug(over)).is_err());
+            assert_eq!(life(&runner, P0), 20);
+            assert_eq!(runner.state().state_revision, revision);
+            let over_loss = DebugAction::LoseLife {
+                player_id: P0,
+                amount: MAX_DEBUG_LIFE_AMOUNT + 1,
+            };
+            assert!(preflight_debug_action(runner.state(), P0, &over_loss).is_err());
+
+            act_ok(&mut runner, gain(P0, MAX_DEBUG_LIFE_AMOUNT));
+            let expected = 20 + 2 * i32::try_from(MAX_DEBUG_LIFE_AMOUNT).unwrap();
+            assert_eq!(life(&runner, P0), expected);
+        }
+
+        /// Unrepresentable results are rejected before any mutation — no wrap,
+        /// no clamp.
+        #[test]
+        fn debug_life_change_rejects_unrepresentable_results_unchanged() {
+            type Setup = fn(&mut GameState);
+            let cases: [(Setup, GameAction); 4] = [
+                (|s| s.players[0].life = i32::MAX - 1, gain(P0, 2)),
+                (|s| s.players[0].life = i32::MIN + 1, lose(P0, 2)),
+                (
+                    |s| s.players[0].life_gained_this_turn = u32::MAX - 1,
+                    gain(P0, 2),
+                ),
+                (
+                    |s| s.players[0].life_lost_this_turn = u32::MAX - 1,
+                    lose(P0, 2),
+                ),
+            ];
+            for (index, (setup, action)) in cases.into_iter().enumerate() {
+                let mut scenario = scenario();
+                let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+                let mut runner = debug_runner(scenario);
+                setup(runner.state_mut());
+                let before = runner.state().players[0].clone();
+                let revision = runner.state().state_revision;
+
+                assert!(runner.act(action).is_err(), "case {index} must be rejected");
+                let after = &runner.state().players[0];
+                assert_eq!(after.life, before.life, "case {index}");
+                assert_eq!(
+                    after.life_gained_this_turn, before.life_gained_this_turn,
+                    "case {index}"
+                );
+                assert_eq!(
+                    after.life_lost_this_turn, before.life_lost_this_turn,
+                    "case {index}"
+                );
+                assert_eq!(runner.state().state_revision, revision, "case {index}");
+                assert!(runner.state().stack.is_empty(), "case {index}");
+                assert_eq!(p1p1(&runner, mate), 0, "case {index}");
+            }
+        }
+
+        /// The sandbox audit log describes both actions (engine-owned wording).
+        #[test]
+        fn debug_life_change_describe_strings() {
+            let state = sandbox_state();
+            assert_eq!(
+                DebugAction::GainLife {
+                    player_id: PlayerId(0),
+                    amount: 3
+                }
+                .describe(&state),
+                "GainLife (Player 1 gains 3)"
+            );
+            assert_eq!(
+                DebugAction::LoseLife {
+                    player_id: PlayerId(1),
+                    amount: 2
+                }
+                .describe(&state),
+                "LoseLife (Player 2 loses 2)"
+            );
+        }
+
+        #[test]
+        fn debug_life_change_requires_debug_mode() {
+            let mut runner = scenario().build();
+            assert!(runner.act(gain(P0, 1)).is_err());
+            assert_eq!(life(&runner, P0), 20);
+        }
+
+        #[test]
+        fn debug_life_change_rejects_unknown_player() {
+            let mut runner = debug_runner(scenario());
+            assert!(runner.act(gain(PlayerId(9), 1)).is_err());
+            assert!(runner.act(lose(PlayerId(9), 1)).is_err());
+        }
+
+        /// A player who left the game cannot receive a debug life change; the
+        /// remaining players still can.
+        #[test]
+        fn debug_life_change_rejects_eliminated_recipient() {
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            let mut runner = debug_runner(scenario);
+            let p2 = PlayerId(2);
+            let mut events = Vec::new();
+            crate::game::elimination::eliminate_player(runner.state_mut(), p2, &mut events);
+            let p2_life = life(&runner, p2);
+            let revision = runner.state().state_revision;
+
+            assert!(runner.act(gain(p2, 1)).is_err());
+            assert_eq!(life(&runner, p2), p2_life);
+            assert_eq!(runner.state().state_revision, revision);
+
+            act_ok(&mut runner, gain(P1, 1));
+            assert_eq!(life(&runner, P1), 21);
+        }
     }
 }

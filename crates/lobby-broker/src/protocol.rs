@@ -60,6 +60,15 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 146 — `DebugAction` gains `GainLife { player_id, amount }` and
+///      `LoseLife { player_id, amount }` (`"GainLife"` / `"LoseLife"`), the
+///      Sandbox life changes routed through the CR 119.3 life-gain and
+///      life-loss events, carried in `GameAction::Debug` on
+///      `ClientMessage::Action`. A v145 peer cannot parse either tag — a
+///      conditional PARSE bump like 76/79, breaking only while one of these
+///      actions is actually sent. No `GameState` shape changes. Full-game
+///      peers and P2P move in lockstep (wire 128); no lobby carrier names it.
+///
 /// 145 — `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
 ///      serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
 ///      peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
@@ -1093,7 +1102,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 145;
+pub const PROTOCOL_VERSION: u32 = 146;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2350,12 +2359,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 145);
+        assert_eq!(PROTOCOL_VERSION, 146);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 144);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 145);
     }
 
     #[test]

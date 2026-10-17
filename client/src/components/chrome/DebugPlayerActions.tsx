@@ -64,6 +64,44 @@ function DrawCardsForm({ onDispatch }: Props) {
   );
 }
 
+function GainLifeForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [amount, setAmount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Amount">
+        <NumberInput value={amount} onChange={setAmount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "GainLife", data: { player_id: playerId, amount } })}>
+        Gain Life
+      </SubmitButton>
+    </>
+  );
+}
+
+function LoseLifeForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [amount, setAmount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Amount">
+        <NumberInput value={amount} onChange={setAmount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "LoseLife", data: { player_id: playerId, amount } })}>
+        Lose Life
+      </SubmitButton>
+    </>
+  );
+}
+
 function MillForm({ onDispatch }: Props) {
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [count, setCount] = useState(1);
@@ -262,6 +300,12 @@ export function DebugPlayerActions({ onDispatch }: Props) {
     <div>
       <AccordionItem label="Set Life" expanded={expanded === "life"} onToggle={() => toggle("life")}>
         <SetLifeForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Gain Life" expanded={expanded === "gainLife"} onToggle={() => toggle("gainLife")}>
+        <GainLifeForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Lose Life" expanded={expanded === "loseLife"} onToggle={() => toggle("loseLife")}>
+        <LoseLifeForm onDispatch={onDispatch} />
       </AccordionItem>
       <AccordionItem label="Draw Cards" expanded={expanded === "draw"} onToggle={() => toggle("draw")}>
         <DrawCardsForm onDispatch={onDispatch} />
