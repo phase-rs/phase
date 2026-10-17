@@ -6,7 +6,7 @@ members = ["crates/*"]
 # lobby-worker/broker-wasm is a standalone wasm32 artifact (Cloudflare Worker
 # Durable Object brain). Excluded so the native workspace build / Tilt clippy
 # never compile it for the host target — it is built only via wasm-bindgen.
-exclude = ["client/src-tauri", "lobby-worker/broker-wasm"]
+exclude = ["client/src-tauri", "lobby-worker/broker-wasm", "crates/oracle-wasm"]
 
 [workspace.package]
 version = "0.112.0"

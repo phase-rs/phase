@@ -30,3 +30,6 @@ This deliberately checks parser compatibility, not installed runtime handlers (`
 The handler registries and full parse-tree JSON serializer are excluded from the boundary to keep
 the artifact smaller. An observed library-top CastFromZone fallback is reported as `needs_review`,
 not clean acceptance.
+
+This is an isolated workspace, like broker-wasm. Its binding/toolchain dependencies never change
+the engine/client workspace lockfile or the CLI versions used by existing deployment jobs.
