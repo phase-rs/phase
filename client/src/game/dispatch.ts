@@ -1048,7 +1048,10 @@ async function processRemoteUpdateInner(
   const skipAnimation =
     isDocumentHidden()
     || pendingQueue.length > MAX_ANIMATED_BACKLOG
-    || coalesced > MAX_ANIMATED_BACKLOG;
+    // A merged batch carries only its latest snapshot, so animating earlier
+    // updates' events against it can misplace their objects (e.g. a token the
+    // later update already removed). Any merge commits without animation.
+    || coalesced > 1;
 
   // 1. Capture positions before updating state (for lookups during animation)
   currentSnapshot = useAnimationStore.getState().captureSnapshot();

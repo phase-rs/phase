@@ -308,27 +308,28 @@ describe("processRemoteUpdate queue coalescing", () => {
     expect(useGameStore.getState().gameState?.turn_number).toBe(2);
   });
 
-  it("(k) a visible client animates a small merged batch but commits a deeper catch-up batch at once", async () => {
+  it("(k) a visible client animates an unmerged update but commits any merged batch without animation", async () => {
     const enqueue = vi.spyOn(useAnimationStore.getState(), "enqueueSteps");
     const sfx = vi.spyOn(audioManager, "playSfxForStep");
 
-    // In flight + a merge of exactly MAX_ANIMATED_BACKLOG (2) updates: both animate.
-    const small = [1, 2, 3].map((i) => processRemoteUpdate(snapshot(i), lifeEvent(-i), []));
+    // A single queued update behind the in-flight one is not merged: both animate.
+    const single = [1, 2].map((i) => processRemoteUpdate(snapshot(i), lifeEvent(-i), []));
     await vi.runAllTimersAsync();
-    await Promise.all(small);
+    await Promise.all(single);
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(sfx).toHaveBeenCalledTimes(2);
 
-    // In flight + a merge of 3: the merged batch commits without animation or SFX.
+    // In flight + a merge of 2: the merged batch carries only the later snapshot,
+    // so it commits without animation or SFX (only the in-flight update animates).
     enqueue.mockClear();
     sfx.mockClear();
-    const deep = [4, 5, 6, 7].map((i) => processRemoteUpdate(snapshot(i), lifeEvent(-i), []));
+    const merged = [3, 4, 5].map((i) => processRemoteUpdate(snapshot(i), lifeEvent(-i), []));
     await vi.runAllTimersAsync();
-    await Promise.all(deep);
+    await Promise.all(merged);
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(sfx).toHaveBeenCalledTimes(1);
-    expect(useGameStore.getState().gameState?.turn_number).toBe(7);
-    expect(lifeAmounts()).toEqual([-1, -2, -3, -4, -5, -6, -7]);
+    expect(useGameStore.getState().gameState?.turn_number).toBe(5);
+    expect(lifeAmounts()).toEqual([-1, -2, -3, -4, -5]);
   });
 
   it("(l) a merged batch spanning several turn starts flashes only the latest turn's banner", async () => {
