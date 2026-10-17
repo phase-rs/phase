@@ -13377,8 +13377,8 @@ fn parse_compound_static_kaito_animation() {
         .contains(&ContinuousModification::SetToughness { value: 4 }));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddType {
-            core_type: crate::types::card_type::CoreType::Creature,
+        .contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Creature],
         }));
     assert!(def
         .modifications
@@ -20868,8 +20868,8 @@ fn omo_nonland_creature_counter_subject_is_all_creature_types() {
 // [non-creature type]" with no CR 205.1b retention marker REPLACES the object's
 // card types, so the Kraken stops being a creature while it slumbers. The
 // modification must be a REPLACING `SetCardTypes`, not an additive `AddType`
-// (which left the impossible "Creature Land"). Creature animations, "artifact
-// creature" forms, and "in addition to its other types" stay additive.
+// (which left the impossible "Creature Land"). Explicit retention and "artifact
+// creature" forms stay additive under CR 205.1b.
 #[test]
 fn arixmethes_bare_is_a_land_replaces_card_types() {
     use crate::types::card_type::CoreType;
@@ -20909,13 +20909,77 @@ fn arixmethes_bare_is_a_land_replaces_card_types() {
     );
     // An artifact-creature compound retains its prior types (CR 205.1b).
     let artifact_creature = parse_static_line("~ is an artifact creature.").unwrap();
-    assert!(
+    assert_eq!(
+        artifact_creature.modifications,
+        vec![
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            },
+        ],
+        "'artifact creature' must retain both additive types"
+    );
+}
+
+// SHAPE: CR 205.1a / CR 205.1b: mixed animation modifications do not imply
+// retention; explicit retention and artifact-creature wording do.
+#[test]
+fn self_animation_card_type_replacement_preserves_other_modifications() {
+    let mixed = vec![
+        ContinuousModification::SetPower { value: 3 },
+        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::AddSubtype {
+            subtype: "Ninja".to_string(),
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof,
+        },
+    ];
+    let replaced = super::type_change::maybe_replace_card_types(
+        mixed.clone(),
+        "3/4 ninja creature with hexproof",
+    );
+    assert_eq!(
+        replaced[0],
+        ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
+        }
+    );
+    let non_types: Vec<_> = mixed
+        .iter()
+        .filter(|modification| !matches!(modification, ContinuousModification::AddType { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(&replaced[1..], non_types);
+    for retention in [
+        "in addition to its other types",
+        "that's still a planeswalker",
+        "that's still an enchantment",
+    ] {
+        assert_eq!(
+            super::type_change::maybe_replace_card_types(mixed.clone(), retention),
+            mixed
+        );
+    }
+    let mut artifact_creature = mixed.clone();
+    artifact_creature.push(ContinuousModification::AddType {
+        core_type: CoreType::Artifact,
+    });
+    assert_eq!(
+        super::type_change::maybe_replace_card_types(
+            artifact_creature.clone(),
+            "3/4 ninja artifact creature with hexproof"
+        ),
         artifact_creature
-            .modifications
-            .iter()
-            .all(|m| matches!(m, ContinuousModification::AddType { .. })),
-        "'artifact creature' must stay additive: {:?}",
-        artifact_creature.modifications
+    );
+    assert_eq!(
+        super::type_change::maybe_replace_card_types(non_types.clone(), "with hexproof"),
+        non_types
     );
 }
 
