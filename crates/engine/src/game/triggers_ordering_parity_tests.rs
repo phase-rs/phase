@@ -4,12 +4,13 @@
 //!   * The §5.2 **allowlist-parity sweep** — the corpus-wide proof that the new
 //!     `ability_rw` conflict gate reproduces the DELETED 12-string serde
 //!     allowlist's decision on every printed no-ordering-input trigger, modulo
-//!     the seven proven-order-dependent category-(1) rows (the CR 603.3b fix).
+//!     the proven-order-dependent category-(1) set (the CR 603.3b fix).
 //!     A FROZEN in-test copy of the deleted walk is the reference oracle.
 //!   * The **discriminators** N-A/N-B/N-B2/N-C/N-D/N-F — hand-built groups run
 //!     through the production ordering-soundness authority
 //!     (`group_is_order_independent`), each paired so exactly one classification
 //!     decision is bracketed (revert-fails recorded in the impl report).
+//!     Printed Kraken regressions also drive the ordinary ordering/choice flow.
 //!
 //! N-E (the per-arm profile pairings) already lives in `ability_rw`'s unit tests
 //! and is NOT duplicated here.
@@ -21,19 +22,23 @@ use crate::game::ability_rw::{
 };
 use crate::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use crate::game::game_object::GameObject;
+use crate::game::scenario::{GameScenario, P0, P1};
 use crate::test_support::shared_card_db;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AggregateFunction, ChoiceType, Comparator, ControllerRef,
-    Effect, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
-    SearchSelectionConstraint, TargetFilter, TargetSelectionMode, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypedFilter,
+    Effect, EffectScope, FilterProp, ObjectScope, OpponentMayScope, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypedFilter,
 };
+use crate::types::actions::GameAction;
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, ZoneChangeRecord};
+use crate::types::game_state::{GameState, WaitingFor, ZoneChangeRecord};
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -97,9 +102,9 @@ fn ast_bears_unimplemented(value: &serde_json::Value) -> bool {
 
 /// The canonical category-(1) rows (§5.2): provably order-dependent printed
 /// groups whose same-event auto→prompt flip IS the CR 603.3b fix. Each carries
-/// its in-plan order-dependence proof (see PR-6.75-C0FULL-C1-PLAN.md §5.2). A
-/// same-event diff on any OTHER card is an implementation finding, never a new
-/// row (STRICT PROOF-GATE).
+/// a documented order-dependence proof. Independently proved genuine corpus
+/// drift may add a row with an executable witness; unexplained implementation
+/// differences still fail the STRICT PROOF-GATE.
 const CATEGORY_1_ROWS: &[&str] = &[
     // Ouroboroid: each copy's Power{Source} read is fed by the other's
     // PutCounterAll — token/counter totals differ by order.
@@ -121,6 +126,12 @@ const CATEGORY_1_ROWS: &[&str] = &[
     // Complex Automaton: ObjectCount{Permanent} intervening-if read × self-Bounce
     // whose moved census (permanent) overlaps the read filter.
     "complex automaton",
+    // Reservoir Kraken: ready A and summoning-sick B share P1's sole untapped
+    // creature C. Tapping C for A first leaves only sick B untapped (0 attackers);
+    // tapping C for B first leaves ready A untapped (1 attacker). Fixed initial
+    // control history defeats relabeling; the two ordinary-flow regressions below
+    // prove the prompt and resolved outcome (CR 302.6 + CR 508.1a).
+    "reservoir kraken",
 ];
 
 /// §7 documented-conservative over-prompts: cards whose sweep decision-diff is a
@@ -1012,7 +1023,7 @@ fn ordering_parity_sweep() {
                 .intersection(&se_event_object_class)
                 .collect::<Vec<_>>()
         );
-        // cat-1 exact-hit: the 6 measured same-event flips. Your Inescapable Doom is
+        // cat-1 exact-hit: the measured same-event set. Your Inescapable Doom is
         // expected-UNHIT (its counter feed parses to Any so the sweep never forms its
         // group); if that parser gap is ever fixed it starts hitting and this assert
         // forces the bookkeeping update.
@@ -1021,6 +1032,7 @@ fn ordering_parity_sweep() {
             "docent of perfection",
             "ouroboroid",
             "promise of tomorrow",
+            "reservoir kraken",
             "sidequest: hunt the mark",
             "spawn of mayhem",
         ]
@@ -2540,4 +2552,279 @@ fn condition1_dodecapod_mixed_controller_still_prompts() {
         "Condition-1: mixed-controller Dodecapod discard batch ⇒ Mixed ⇒ STILL PROMPTS \
          (auto would be an unsound under-prompt on the cause-source controller channel)"
     );
+}
+
+const RESERVOIR_KRAKEN_ORACLE: &str = "Trample, ward {2}\nAt the beginning of each combat, if this creature is untapped, any opponent may tap an untapped creature they control. If they do, tap this creature and create a 1/1 blue Fish creature token with \"This token can't be blocked.\"";
+
+/// Check the actual printed trigger before either ordering regression uses it.
+fn reservoir_kraken_body(trigger: &TriggerDefinition) -> &AbilityDefinition {
+    // CR 603.2 + CR 603.4: both untapped sources trigger on this same combat.
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::BeginCombat));
+    assert_eq!(trigger.constraint, None);
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsTapped),
+        })
+    );
+    let body = trigger
+        .execute
+        .as_deref()
+        .expect("printed Kraken trigger body");
+    assert!(!ast_bears_unimplemented(
+        &serde_json::to_value(body).expect("serialize body")
+    ));
+    // CR 115.10a + CR 608.2d: the accepting opponent chooses an untapped
+    // creature they control on resolution; this is not an announced target.
+    assert!(body.optional);
+    assert_eq!(body.optional_for, Some(OpponentMayScope::AnyOpponent));
+    assert_eq!(body.target_choice_timing, TargetChoiceTiming::Resolution);
+    let mut accepting_creature = TypedFilter::creature().properties(vec![FilterProp::Untapped]);
+    accepting_creature.controller = Some(ControllerRef::ScopedPlayer);
+    assert_eq!(
+        *body.effect,
+        Effect::SetTapState {
+            target: TargetFilter::Typed(accepting_creature),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    );
+    let self_tap = body
+        .sub_ability
+        .as_deref()
+        .expect("successful tap continuation");
+    assert_eq!(
+        self_tap.condition,
+        Some(AbilityCondition::effect_performed())
+    );
+    assert_eq!(
+        *self_tap.effect,
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    );
+    let fish = self_tap.sub_ability.as_deref().expect("Fish continuation");
+    assert!(matches!(fish.effect.as_ref(), Effect::Token {
+        name, power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        count: QuantityExpr::Fixed { value: 1 }, ..
+    } if name == "Fish"));
+    assert!(fish.sub_ability.is_none());
+    body
+}
+
+#[test]
+fn reservoir_kraken_same_event_ordering_requires_choice() {
+    let face = shared_card_db()
+        .get_face_by_name("Reservoir Kraken")
+        .expect("printed Reservoir Kraken fixture");
+    assert_eq!(face.oracle_text.as_deref(), Some(RESERVOIR_KRAKEN_ORACLE));
+    assert_eq!(face.triggers.len(), 1);
+    let trigger = &face.triggers[0];
+    let body = reservoir_kraken_body(trigger);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario
+        .add_creature_from_oracle(P0, "Reservoir Kraken", 6, 6, RESERVOIR_KRAKEN_ORACLE)
+        .id();
+    let b = scenario
+        .add_creature_from_oracle(P0, "Reservoir Kraken", 6, 6, RESERVOIR_KRAKEN_ORACLE)
+        .with_summoning_sickness()
+        .id();
+    scenario.add_creature(P1, "Shared untapped creature", 2, 2);
+    let runner = scenario.build();
+    let state = runner.state();
+    let event = Some(GameEvent::PhaseChanged {
+        phase: Phase::BeginCombat,
+    });
+    let pending = |source: ObjectId| {
+        let resolved = build_resolved_from_def(body, source, P0);
+        assert!(sweep_no_ordering_input(state, &resolved, body));
+        assert!(build_target_slots(state, &resolved)
+            .expect("collect announcement slots")
+            .is_empty());
+        ctx_c_from_observed_source(
+            state,
+            source.0,
+            0,
+            resolved,
+            trigger.condition.clone(),
+            event.clone(),
+        )
+    };
+    // CR 603.3b: distinct sources compete for the opponent's shared creature.
+    assert!(!group_is_order_independent(
+        state,
+        &[pending(a), pending(b)]
+    ));
+    // The existing identical-function fast path remains valid for one source.
+    assert!(group_is_order_independent(state, &[pending(a), pending(a)]));
+}
+
+#[test]
+fn reservoir_kraken_order_changes_ready_attacker() {
+    let mut attacker_counts = Vec::new();
+    for a_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let a = scenario
+            .add_creature_from_oracle(P0, "Reservoir Kraken", 6, 6, RESERVOIR_KRAKEN_ORACLE)
+            .id();
+        let b = scenario
+            .add_creature_from_oracle(P0, "Reservoir Kraken", 6, 6, RESERVOIR_KRAKEN_ORACLE)
+            .with_summoning_sickness()
+            .id();
+        let c = scenario
+            .add_creature(P1, "Shared untapped creature", 2, 2)
+            .id();
+        let mut runner = scenario.build();
+        for source in [a, b] {
+            let object = &runner.state().objects[&source];
+            assert_eq!(object.trigger_definitions.len(), 1);
+            reservoir_kraken_body(&object.trigger_definitions[0].definition);
+        }
+        // CR 302.6 + CR 508.1a: the initial control-history asymmetry is fixed,
+        // so the two outcomes cannot be equated by relabeling the final IDs.
+        assert!(crate::game::combat::validate_attackers(runner.state(), &[a]).is_ok());
+        assert!(crate::game::combat::validate_attackers(runner.state(), &[b]).is_err());
+        let histories: Vec<_> = [a, b]
+            .iter()
+            .map(|id| {
+                let o = &runner.state().objects[id];
+                (
+                    o.owner,
+                    o.controller,
+                    o.entered_battlefield_turn,
+                    o.summoning_sick,
+                )
+            })
+            .collect();
+        assert!(!runner.state().objects[&c].tapped);
+        assert_eq!(runner.state().battlefield.len(), 3);
+
+        // Advance only once: revisiting this helper at BeginCombat refires it.
+        runner.advance_to_phase(Phase::BeginCombat);
+        let WaitingFor::OrderTriggers { player, triggers } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "two printed Kraken triggers must require ordering: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P0);
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(
+            triggers
+                .iter()
+                .map(|t| t.source_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([a, b])
+        );
+        let first = if a_first { a } else { b };
+        let first_index = triggers
+            .iter()
+            .position(|t| t.source_id == first)
+            .expect("first source");
+        let other_index = triggers
+            .iter()
+            .position(|t| t.source_id != first)
+            .expect("other source");
+        // CR 603.3b: chosen bottom-to-top order makes the desired source topmost.
+        runner
+            .act(GameAction::OrderTriggers {
+                order: vec![other_index, first_index],
+            })
+            .expect("order Kraken triggers");
+        let mut accepts = 0;
+        let mut selections = 0;
+        let mut settled = false;
+        for _ in 0..80 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OpponentMayChoice { player, .. } => {
+                    assert_eq!(player, P1);
+                    let accept = !runner.state().objects[&c].tapped;
+                    accepts += usize::from(accept);
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept })
+                        .expect("answer optional tap");
+                }
+                WaitingFor::MultiTargetSelection {
+                    player,
+                    legal_targets,
+                    ..
+                } => {
+                    assert_eq!(player, P1);
+                    assert!(!runner.state().objects[&c].tapped);
+                    assert_eq!(legal_targets, vec![c]);
+                    selections += 1;
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![c] })
+                        .expect("tap the shared creature");
+                }
+                WaitingFor::Priority { .. } if runner.state().phase == Phase::BeginCombat => {
+                    if runner.state().stack.is_empty() {
+                        settled = true;
+                        break;
+                    }
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("resolve the next Kraken trigger");
+                }
+                unexpected => panic!("unexpected Kraken resolution prompt: {unexpected:?}"),
+            }
+        }
+        assert!(
+            settled,
+            "Kraken triggers must settle within the bounded drive"
+        );
+        assert_eq!(accepts, 1);
+        assert_eq!(selections, 1);
+        let state = runner.state();
+        assert!(state.stack.is_empty());
+        assert!(state.objects[&c].tapped);
+        assert_eq!(state.objects[&a].tapped, a_first);
+        assert_eq!(state.objects[&b].tapped, !a_first);
+        for (id, history) in [a, b].iter().zip(&histories) {
+            let o = &state.objects[id];
+            assert_eq!(
+                (
+                    o.owner,
+                    o.controller,
+                    o.entered_battlefield_turn,
+                    o.summoning_sick
+                ),
+                *history
+            );
+            assert_eq!(o.zone, Zone::Battlefield);
+        }
+        let fish: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token && state.objects[id].name == "Fish")
+            .collect();
+        assert_eq!(
+            fish.len(),
+            1,
+            "exactly one successful optional action makes a Fish"
+        );
+        assert_eq!(state.objects[fish[0]].controller, P0);
+        // CR 302.6 + CR 508.1a: the new Fish and original sick B cannot attack.
+        assert!(crate::game::combat::validate_attackers(state, &[*fish[0]]).is_err());
+        assert!(crate::game::combat::validate_attackers(state, &[b]).is_err());
+        let ready = [a, b]
+            .iter()
+            .filter(|id| crate::game::combat::validate_attackers(state, &[**id]).is_ok())
+            .count();
+        attacker_counts.push(ready);
+        runner.advance_to_combat();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+    }
+    // B-first's ready A is the positive reach guard for A-first's zero attackers.
+    assert_eq!(attacker_counts, vec![0, 1]);
 }
