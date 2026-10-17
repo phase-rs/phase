@@ -3402,6 +3402,10 @@ mod tests {
         }
     }
 
+    /// v148: `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
+    /// conditions (and ability/filter definitions) of `GameState`; a v147 peer
+    /// cannot deserialize the new tagged variant. P2P moves in lockstep
+    /// (wire 130); lobby messages unchanged.
     /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
     /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
     /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
@@ -3632,9 +3636,11 @@ mod tests {
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
+    /// The v148 bump adds the `FilterProp::Prepared` tag (CR 722.3a) to the
+    /// serialized trigger-condition carrier.
     #[test]
-    fn protocol_version_is_147_for_physical_contest() {
-        assert_eq!(PROTOCOL_VERSION, 147);
+    fn protocol_version_is_148_for_prepared_designation() {
+        assert_eq!(PROTOCOL_VERSION, 148);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3645,7 +3651,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_147_for_physical_contest` stays
+    /// `protocol_version_is_148_for_prepared_designation` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -215,6 +215,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 148 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
+ *      conditions (and ability/filter definitions) of GameState. A v147 peer
+ *      cannot deserialize the new tagged variant. P2P moves in lockstep to
+ *      wire 130.
  * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
  *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
@@ -898,7 +902,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 147;
+export const PROTOCOL_VERSION = 148;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

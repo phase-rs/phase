@@ -75,6 +75,22 @@ pub(crate) fn source_saddled_filter() -> TargetFilter {
     })
 }
 
+/// CR 722.3a: The runtime filter matching the prepared designation. Shared by
+/// the `parse_source_is_prepared` leaf (oracle_nom/condition.rs) and the
+/// trigger-side bridge, so both compose the same `SourceMatchesFilter {
+/// Typed([Prepared]) }` shape.
+///
+/// Property-only (empty `type_filters`): the designation is a permanent
+/// property, not a card-type fact. A prepared source that lost its creature
+/// type (One with the Stars) stays bound to "this creature" (CR 700.7), so a
+/// creature-type gate would misfire the negated intervening-if.
+pub(crate) fn prepared_source_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        properties: vec![FilterProp::Prepared],
+        ..Default::default()
+    })
+}
+
 fn parse_creature_subtype_or_list_prefix(lower: &str) -> Option<(TargetFilter, &str)> {
     crate::parser::oracle_static::parse_subtype_or_list_insensitive_prefix(lower)
 }

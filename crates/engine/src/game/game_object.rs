@@ -2861,6 +2861,11 @@ impl GameObject {
             // before `move_to_zone` resets the live flag — so an LTB / cost-paid
             // look-back ("the sacrificed creature was suspected") reads it.
             is_suspected: self.is_suspected,
+            // CR 722.3a + CR 603.4: Snapshot the prepared designation at the
+            // moment of the move, before `move_to_zone` clears it — so a
+            // departed source's intervening-if recheck ("isn't prepared")
+            // reads the exit-time value through the LKI record.
+            was_prepared: self.prepared.is_some(),
         }
     }
 
@@ -3170,6 +3175,10 @@ impl GameObject {
             // still on the battlefield (cost-paid snapshot precedes the sacrifice
             // zone-change that resets the flag), so `self.is_suspected` is authoritative.
             is_suspected: self.is_suspected,
+            // CR 722.3a: Capture the live prepared designation. Taken while the
+            // object is still in its public zone, so `self.prepared` is
+            // authoritative.
+            was_prepared: self.prepared.is_some(),
             // Empty by construction, NOT by choice: classifying an attachment as
             // Aura/Equipment requires looking each attached object up in `GameState`
             // (see `zones::capture_attachment_snapshot`), and this method has only

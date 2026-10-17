@@ -12888,6 +12888,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // identically on both legs.
         | FilterProp::PrepareSpell
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::Modified
@@ -15628,27 +15629,13 @@ fn evaluate_trigger_condition_with_source(
         // is "no longer in the public zone it was expected to be in" to its LAST KNOWN
         // INFORMATION, and CR 113.7a keeps the ability resolving regardless.
         //
-        // `subject_filter_matches_with_lki` is the single authority for that fallback
-        // (shared with `match_sacrificed` / `match_connives` / the exploit matcher): it
-        // matches the LIVE object first and consults `state.lki_cache` only when the
-        // object no longer carries its battlefield appearance. Live state always wins,
-        // so this is a strict no-op for any source that still exists on the battlefield.
+        // `filter::source_subject_matches_filter` is the single authority for this
+        // subject read (shared with the resolution-time effect-condition gate of the
+        // same predicate): the live object only while it is still the captured
+        // incarnation in its expected zone, otherwise that incarnation's exit LKI —
+        // falling back to the trigger-time snapshot when no exit record survives.
         TriggerCondition::SourceMatchesFilter { filter } => source_context.is_some_and(|source| {
-            let context = FilterContext::from_trigger_source(source);
-            match source.source_read(state) {
-                crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
-                    matches_target_filter(state, object.id, filter, &context)
-                }
-                crate::types::game_state::TriggerSourceRead::Latched(_) => {
-                    super::filter::matches_target_filter_on_lki_snapshot(
-                        state,
-                        source.identity.reference.object_id,
-                        &source.lki,
-                        filter,
-                        &context,
-                    )
-                }
-            }
+            super::filter::source_subject_matches_filter(state, source, filter)
         }),
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
         // evaluates the triggering damage source as it was when the damage was
@@ -23694,6 +23681,7 @@ pub mod tests {
                 counters,
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );

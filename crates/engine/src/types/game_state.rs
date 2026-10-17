@@ -513,6 +513,16 @@ pub struct LKISnapshot {
     /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
     #[serde(default)]
     pub is_suspected: bool,
+    /// CR 722.3a + CR 608.2h + CR 400.7: Prepared status as it last existed in
+    /// the public zone. Prepared is a battlefield-only designation reset on any
+    /// zone change (`GameObject::prepared` clears when the object moves), so a
+    /// resolution-time intervening-if recheck (CR 603.4) for a departed source
+    /// ("if this creature isn't prepared" — Woodwork Prodigy) must read this
+    /// captured value via `FilterProp::Prepared` on the exit snapshot.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`
+    /// (fail closed, the pre-change behavior).
+    #[serde(default)]
+    pub was_prepared: bool,
     /// CR 608.2h + CR 400.7: Attachments (Auras/Equipment) as they last existed on
     /// the battlefield. A departing battlefield permanent keeps none of its own
     /// attachments — the departure sever unattaches them the instant the host
@@ -802,6 +812,7 @@ impl TriggerSourceContext {
         self.lki.supertypes.clone_from(&record.supertypes);
         self.lki.keywords.clone_from(&record.keywords);
         self.lki.colors.clone_from(&record.colors);
+        self.lki.was_prepared = record.was_prepared;
         self.is_token = record.is_token;
         self.attached_to = record.attached_to;
         self.attachments.clone_from(&record.attachments);
@@ -1634,6 +1645,15 @@ pub struct ZoneChangeRecord {
     /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
     #[serde(default)]
     pub is_suspected: bool,
+    /// CR 722.3a + CR 608.2h: Prepared status as of the zone change. Prepared
+    /// is a battlefield-only designation reset on any zone change, so an
+    /// exit-time look-back (a departed source's "isn't prepared"
+    /// intervening-if recheck, CR 603.4) evaluated via the LKI snapshot
+    /// synthesized in `matches_target_filter_on_lki_snapshot` must read this
+    /// captured value.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
+    #[serde(default)]
+    pub was_prepared: bool,
 }
 
 /// Deserialization shape of [`ZoneChangeRecord`]; a record saved without `arrival` loads with arrival equal to departure.
@@ -1687,6 +1707,8 @@ struct ZoneChangeRecordWire {
     recorded_turn_number: u32,
     #[serde(default)]
     is_suspected: bool,
+    #[serde(default)]
+    was_prepared: bool,
 }
 
 impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
@@ -1723,6 +1745,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             turn_zone_change_index,
             recorded_turn_number,
             is_suspected,
+            was_prepared,
         } = wire;
         Self {
             object_id,
@@ -1756,6 +1779,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             turn_zone_change_index,
             recorded_turn_number,
             is_suspected,
+            was_prepared,
         }
     }
 }
@@ -2066,6 +2090,7 @@ impl ZoneChangeRecord {
             turn_zone_change_index: 0,
             recorded_turn_number: 0,
             is_suspected: false,
+            was_prepared: false,
         }
     }
 }
@@ -40693,6 +40718,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             }
         }
@@ -40951,6 +40977,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: true,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             }
         }
@@ -41052,6 +41079,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: true,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             }
         }
@@ -41253,6 +41281,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: true,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
         let position = |incarnation: u64| {
