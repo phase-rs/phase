@@ -1223,7 +1223,9 @@ mod socket_tests {
 mod transport_fixup_tests {
     use super::*;
     use crate::game_submission_tests::connect_and_hello;
-    use crate::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+    use crate::issue_4548_full_create_tests::{
+        recv_server_message, send_test_message, spawn_full_mode_server,
+    };
     use server_core::protocol::ClientMessage;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -1288,6 +1290,21 @@ mod transport_fixup_tests {
         let (url, server, _directory, app) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(3), async {
             let mut socket = connect_and_hello(url).await;
+            // Observe server-side hello acceptance before exhausting command quota.
+            send_test_message(
+                &mut socket,
+                &ClientMessage::Ping { timestamp: 90_000 },
+                false,
+            )
+            .await;
+            loop {
+                if matches!(
+                    recv_server_message(&mut socket).await,
+                    ServerMessage::Pong { timestamp: 90_000 }
+                ) {
+                    break;
+                }
+            }
             let held = app.lobby.lock().await;
             // Exceed decoder quota without spending the reader's Ping reserve.
             for _ in 0..40 {
