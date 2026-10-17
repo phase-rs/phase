@@ -455,8 +455,11 @@ It exists for hobbyist, educational, and research use only.
 - **No bundled Wizards assets.** This repository does not distribute MTG card
   images, card art, mana symbol artwork, card-frame graphics, or the
   Comprehensive Rules document. Card images and mana symbols are fetched from
-  [Scryfall](https://scryfall.com/) at runtime by the user's browser. Card
-  metadata is sourced from [MTGJSON](https://mtgjson.com/).
+  [Scryfall](https://scryfall.com/) — or, for Simplified-Chinese cards when the
+  user selects that source, from [mtgch.com](https://mtgch.com/) — at runtime by
+  the user's browser. Card metadata is sourced from
+  [MTGJSON](https://mtgjson.com/), and Simplified-Chinese card text from
+  [magic-cards-zhs](https://github.com/HeliumOctahelide/magic-cards-zhs).
 - **No affiliation.** phase.rs is not affiliated with, endorsed by, sponsored
   by, or approved by Wizards of the Coast LLC or Hasbro, Inc.
 
@@ -471,8 +474,17 @@ If you believe content in this repository infringes your rights, please see
 
 - [MTGJSON](https://mtgjson.com/) — Card data (MIT licensed)
 - [Scryfall](https://scryfall.com/) — Card images and search API
+- [magic-cards-zhs](https://github.com/HeliumOctahelide/magic-cards-zhs) —
+  Simplified-Chinese card text (CC BY-SA 4.0)
+- [mtgch.com / 大学院废墟](https://mtgch.com/) — Simplified-Chinese card images
 - [MTGGoldfish](https://www.mtggoldfish.com/) — Metagame deck data
 - [Wizards of the Coast](https://magic.wizards.com/) — Magic: The Gathering
+
+Simplified-Chinese card text is a derivative work of the magic-cards-zhs data
+set and is redistributed under the same CC BY-SA 4.0 license. Neither that
+project nor mtgch.com makes any claim resolving the underlying Wizards of the
+Coast copyright in the card text it translates; see [NOTICE](NOTICE) and
+[DMCA.md](DMCA.md).
 
 ## License
 
