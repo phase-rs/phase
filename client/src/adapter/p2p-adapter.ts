@@ -110,6 +110,7 @@ export type P2PAdapterEvent =
   | { type: "terminalResult"; result: P2PTerminalResult }
   | { type: "terminalUnavailable"; message: string }
   | { type: "error"; message: string }
+  | { type: "operationFailed"; message: string }
   /**
    * Pre-game setup failure on the host side. Distinct from the catch-all
    * `error` event because it carries a typed `reason` for the UI to render
@@ -5020,14 +5021,14 @@ export class P2PGuestAdapter implements EngineAdapter {
             true,
           );
         if (!this.settlePendingSubmission({ kind: "reject", error })) {
-          this.emit({ type: "error", message: error.message });
+          this.emit({ type: "operationFailed", message: error.message });
         }
         break;
       }
       case "action_failed": {
         const failure = new AdapterError("P2P_ERROR", msg.message, true);
         if (!this.settlePendingSubmission({ kind: "reject", error: failure })) {
-          this.emit({ type: "error", message: msg.message });
+          this.emit({ type: "operationFailed", message: msg.message });
         }
         break;
       }

@@ -130,8 +130,15 @@ export function createPeerSession(
     })().finally(() => { statsPending = null; });
     return statsPending;
   };
-  const onTransportState = () => { sampleTransport(); void sampleCandidates(); };
-  const onChannelError = () => { channelError = "data-channel-error"; sampleTransport(); };
+  const onTransportState = (event: Event) => {
+    const transport = sampleTransport();
+    const type = event.type;
+    if (type === "connectionstatechange" || type === "iceconnectionstatechange" || type === "open" || type === "closing" || type === "close" || type === "error") {
+      recordDiagnostic({ kind: "transport-transition", diagnosticId, observedAt: Date.now(), event: type, transport });
+    }
+    void sampleCandidates();
+  };
+  const onChannelError = (event: Event) => { channelError = "data-channel-error"; onTransportState(event); };
   peerConnection?.addEventListener?.("connectionstatechange", onTransportState);
   peerConnection?.addEventListener?.("iceconnectionstatechange", onTransportState);
   for (const event of ["open", "closing", "close"]) dataChannel?.addEventListener?.(event, onTransportState);

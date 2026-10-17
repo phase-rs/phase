@@ -1265,6 +1265,25 @@ describe("GamePage — shared modal return targets", () => {
  * surfaces as `requestRejected`.
  */
 describe("GamePage — a refused request is survivable", () => {
+  it.each(["ai", "host", "p2p-join"] as const)("toasts an operation failure without locking the %s board", (mode) => {
+    const previousStatus = mockMultiplayerState.connectionStatus;
+    mockMultiplayerState.connectionStatus = "connected";
+    try {
+      renderGamePage(`/game/test-game-123?mode=${mode}`);
+      const event = { type: "operationFailed" as const, message: "Operation declined" };
+      act(() => {
+        if (mode === "p2p-join") capturedOnP2PEvent?.(event);
+        else capturedOnWsEvent?.(event);
+      });
+      expect(mockMultiplayerState.showToast).toHaveBeenCalledWith("Operation declined");
+      expect(mockMultiplayerState.connectionStatus).toBe("connected");
+      expect(screen.queryByText("Connection lost")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Return to Menu" })).toBeNull();
+    } finally {
+      mockMultiplayerState.connectionStatus = previousStatus;
+    }
+  });
+
   it("toasts a refused takeback without entering the terminal reconnect state", () => {
     renderGamePage("/game/test-game-123?mode=ai");
 
