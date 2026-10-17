@@ -222,14 +222,14 @@ impl GameSession {
         seq: u32,
         observed_at: Instant,
     ) -> ContestClickReceipt {
-        self.flush_contest_connections();
+        let now = self.contest.clock.at(observed_at);
+        self.flush_contest_connections_until(now);
         let Some(player) = self.player_for_token(player_token) else {
             return ContestClickReceipt::UnknownSeat;
         };
         if !self.contest_active() {
             return ContestClickReceipt::Ignored;
         }
-        let now = self.contest.clock.at(observed_at);
         let policy = self.contest.policy;
         let limiter = self
             .contest
@@ -268,12 +268,12 @@ impl GameSession {
 
     /// A host tick's observation precedes its compute admission.
     pub fn tick_contest_at(&mut self, observed_at: Instant) {
-        self.flush_contest_connections();
+        let now = self.contest.clock.at(observed_at);
+        self.flush_contest_connections_until(now);
         if !self.contest_active() {
             self.contest.ai.clear();
             return;
         }
-        let now = self.contest.clock.at(observed_at);
         self.sync_contest_connections(now);
         let mut events = Vec::new();
         let step = start_contest(
@@ -307,6 +307,11 @@ impl GameSession {
                         .get(player.0 as usize)
                         .copied()
                         .unwrap_or(true)
+                    // The live table can already reflect a later transport edge.
+                    // Do not seed that future presence into this earlier tick.
+                    && !self.contest.connection_edges.iter().any(|edge| {
+                        edge.contest == contest.id && edge.player == *player && edge.at_ms > now
+                    })
             })
             .collect();
         for player in away {
@@ -334,10 +339,6 @@ impl GameSession {
 
     /// Presence bookkeeping may run outside compute workers. Retain each edge
     /// and its contest identity until the next admitted contest operation.
-    pub(crate) fn queue_contest_connection(&mut self, player: PlayerId, presence: ContestPresence) {
-        self.queue_contest_connection_at(player, presence, Instant::now());
-    }
-
     pub(crate) fn queue_contest_connection_at(
         &mut self,
         player: PlayerId,
@@ -347,19 +348,33 @@ impl GameSession {
         let WaitingFor::PhysicalContest { contest, .. } = &self.state.waiting_for else {
             return;
         };
-        self.contest.connection_edges.push(ConnectionEdge {
+        let edge = ConnectionEdge {
             contest: contest.id,
             player,
             presence,
             at_ms: self.contest.clock.at(observed_at),
-        });
+        };
+        // Keep the queue ordered once, rather than sorting at every click/tick.
+        // Insert after equal timestamps to preserve their enqueue order.
+        let index = self
+            .contest
+            .connection_edges
+            .partition_point(|queued| queued.at_ms <= edge.at_ms);
+        self.contest.connection_edges.insert(index, edge);
     }
 
     /// Apply recorded edges without re-stamping them after CPU queueing. The
     /// autonomous tick calls this too, so no further client traffic is needed.
     pub fn flush_contest_connections(&mut self) {
+        self.flush_contest_connections_until(u64::MAX);
+    }
+
+    /// Preserve observation order without moving an older input's clock forward
+    /// to a later edge. Equal timestamps retain their enqueue order.
+    fn flush_contest_connections_until(&mut self, now: u64) {
         let mut edges = std::mem::take(&mut self.contest.connection_edges);
-        for edge in edges.drain(..) {
+        let due = edges.partition_point(|edge| edge.at_ms <= now);
+        for edge in edges.drain(..due) {
             if !matches!(&self.state.waiting_for,
                 WaitingFor::PhysicalContest { contest, .. } if contest.id == edge.contest)
             {
@@ -967,6 +982,145 @@ mod tests {
                 "worker delay must not adjudicate an on-time observation as a late one",
             );
         }
+    }
+
+    #[test]
+    fn a_future_presence_edge_cannot_retime_an_earlier_click() {
+        use std::time::Duration;
+
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let epoch = Instant::now() - Duration::from_secs(10);
+        session.contest.clock.epoch = epoch;
+        session.tick_contest_at(epoch + Duration::from_millis(100));
+        session.tick_contest_at(epoch + Duration::from_millis(101));
+        assert_eq!(phase(session), ContestPhase::Active);
+
+        session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(1_000));
+        assert_eq!(
+            session.handle_contest_click_at(HOST, 1, 1, epoch + Duration::from_millis(500)),
+            ContestClickReceipt::Counted,
+            "the later disconnect must not expire a click received before its deadline",
+        );
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("the on-time click must leave the contest active");
+        };
+        assert_eq!(contest.contestants[0].last_activity_ms, 500);
+        assert_eq!(contest.paused_since_ms, None);
+        assert_eq!(session.contest.connection_edges.len(), 1);
+    }
+
+    #[test]
+    fn an_earlier_tick_defers_future_presence_until_the_autonomous_tick() {
+        use engine::types::contest::{ContestLossReason, ContestOutcome, ContestResult};
+        use std::time::Duration;
+
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let epoch = Instant::now() - Duration::from_secs(10);
+        session.contest.clock.epoch = epoch;
+        session.tick_contest_at(epoch + Duration::from_millis(100));
+        session.tick_contest_at(epoch + Duration::from_millis(101));
+        session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(300));
+
+        session.tick_contest_at(epoch + Duration::from_millis(200));
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("the earlier tick must leave the contest active");
+        };
+        assert_eq!(
+            contest.paused_since_ms, None,
+            "the current connected table must not bypass the queued edge's timestamp",
+        );
+        assert_eq!(session.contest.connection_edges.len(), 1);
+
+        session.tick_contest_at(epoch + Duration::from_millis(300));
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("the next tick pauses the contest");
+        };
+        assert_eq!(contest.paused_since_ms, Some(300));
+        assert!(session.contest.connection_edges.is_empty());
+        session.tick_contest_at(epoch + Duration::from_millis(5_301));
+        assert!(matches!(
+            session.state.waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(session
+            .contest
+            .outbox
+            .iter()
+            .flat_map(|step| &step.events)
+            .any(|event| matches!(
+                event,
+                GameEvent::PhysicalContestResolved {
+                    result: ContestResult::Outcome(ContestOutcome::Decided {
+                        winner: PlayerId(0),
+                        loser: PlayerId(1),
+                        reason: ContestLossReason::Forfeit,
+                    }),
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn queued_presence_is_applied_in_observation_order() {
+        use engine::types::contest::ContestantConnection;
+        use std::time::Duration;
+
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let epoch = Instant::now() - Duration::from_secs(10);
+        session.contest.clock.epoch = epoch;
+        session.tick_contest_at(epoch + Duration::from_millis(100));
+        session.tick_contest_at(epoch + Duration::from_millis(101));
+        // Receipt stamps can differ from the order their workers acquire a lease.
+        session.queue_contest_connection_at(
+            PlayerId(1),
+            ContestPresence::Connected,
+            epoch + Duration::from_millis(250),
+        );
+        session.queue_contest_connection_at(
+            PlayerId(1),
+            ContestPresence::Disconnected,
+            epoch + Duration::from_millis(200),
+        );
+        session.flush_contest_connections();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("the timely return keeps the contest running");
+        };
+        assert_eq!(
+            contest.contestants[1].connection,
+            ContestantConnection::Connected
+        );
+        assert_eq!(contest.paused_since_ms, None);
+        assert!(session.contest.connection_edges.is_empty());
+    }
+
+    #[test]
+    fn a_timely_contest_return_keeps_its_receipt_time_after_worker_delay() {
+        use engine::types::contest::ContestantConnection;
+        use std::time::Duration;
+
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let epoch = Instant::now() - Duration::from_secs(10);
+        session.contest.clock.epoch = epoch;
+        session.tick_contest_at(epoch + Duration::from_millis(100));
+        session.tick_contest_at(epoch + Duration::from_millis(101));
+        session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(200));
+        session.flush_contest_connections();
+        // Receipt is inside the five-second grace; the worker runs at ~10 s.
+        session.mark_connected_at(PlayerId(1), epoch + Duration::from_millis(1_000));
+        session.flush_contest_connections();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("executor delay must not turn a timely return into a forfeit");
+        };
+        assert_eq!(
+            contest.contestants[1].connection,
+            ContestantConnection::Connected
+        );
+        assert_eq!(contest.paused_since_ms, None);
+        assert!(session.connected[1]);
     }
 
     #[test]

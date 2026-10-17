@@ -1855,7 +1855,7 @@ async fn admit_seat_return_while_session_locked(
         // always been allowed to reconnect anyway.
         server_core::reconnect::ReconnectResult::Ok { .. }
         | server_core::reconnect::ReconnectResult::NotFound => {
-            session.mark_connected(player);
+            session.mark_connected_at(player, received_at);
             Ok(())
         }
         server_core::reconnect::ReconnectResult::Expired => {
@@ -13494,6 +13494,68 @@ mod full_socket_authority_tests {
                 generation: 1,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn a_timely_contest_reconnect_retains_receipt_time_through_admission() {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::identifiers::ObjectId;
+        use std::time::{Duration, Instant};
+
+        let (state, _, code, _) = test_session();
+        let handle = state.lock().await.session(&code).expect("session");
+        let mut session = handle.lock().await;
+        let config = ContestConfig {
+            countdown_ms: 0,
+            inactivity_timeout_ms: 60_000,
+            reconnect_grace_ms: 1,
+            settle_window_ms: 0,
+            max_active_ms: 60_000,
+        };
+        session.contest.policy.config = config;
+        session.connected = vec![true, true];
+        session.state.waiting_for = WaitingFor::PhysicalContest {
+            contest: Box::new(ContestState::new(
+                1,
+                ContestKind::Staring,
+                PlayerId(0),
+                PlayerId(1),
+                config,
+            )),
+            source_id: ObjectId(1),
+        };
+        let received_at = Instant::now();
+        session.tick_contest_at(received_at);
+        session.mark_disconnected_at(PlayerId(0), received_at);
+        session.flush_contest_connections();
+        state.lock().await.reconnect.record_disconnect(
+            &code,
+            PlayerId(0),
+            Duration::from_millis(1),
+            received_at,
+        );
+        // Both registries must accept the same on-time receipt, even though
+        // processing occurs after their one-millisecond grace has elapsed.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        admit_seat_return_while_session_locked(&state, &mut session, PlayerId(0), received_at)
+            .await
+            .expect("the registry accepts a receipt at the disconnect instant");
+        assert!(session.connected[0]);
+        assert!(!state
+            .lock()
+            .await
+            .reconnect
+            .is_disconnected(&code, PlayerId(0)));
+        session.flush_contest_connections();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("admission delay must not forfeit a timely contest reconnect");
+        };
+        assert_eq!(
+            contest.contestants[0].connection,
+            engine::types::contest::ContestantConnection::Connected,
+        );
+        assert_eq!(contest.paused_since_ms, None);
     }
 
     #[test]

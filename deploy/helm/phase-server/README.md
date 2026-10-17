@@ -232,6 +232,14 @@ Consequently a pause/grace starts at the later of detection and that last
 observation, rather than being unconditionally backdated to detection.
 Accepted mutations still finish independently.
 
+Clicks and ticks apply queued contest presence edges only through their host
+observation time, in timestamp order; later edges stay queued for the next
+observation or driver drain. The autonomous tick still applies disconnects
+and grace forfeits without further client traffic. An accepted Full reconnect
+stamps its connected edge with the same transport receipt time used by registry
+admission, so executor wait alone cannot turn a timely return into a contest
+forfeit. This does not resolve the separate registry expiry-finalization race.
+
 `ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
 game-command completion. Action/Interaction messages may carry a top-level
 numeric `command_id`; only the originating socket's own StateUpdate,
