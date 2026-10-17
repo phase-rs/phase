@@ -100,6 +100,10 @@ impl Death {
         self.record_details(cause, None, None);
     }
 
+    pub(crate) fn record_quota_discard(&self) {
+        self.metrics.record_ws_quota_discard();
+    }
+
     pub(crate) fn peer_close(&self, code: Option<u16>) {
         self.record_details(Cause::PeerClose, code, None);
     }

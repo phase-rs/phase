@@ -31,10 +31,11 @@ enum RateCharge {
 }
 
 // The ordinary quota admits 30 full commands/s. A separate 30/s allowance
-// admits only top-level correlation metadata scans (including error recovery).
-// Both are capped at MAX_WS_MESSAGE_BYTES, so recovery adds at most one ordinary
-// quota's JSON work, never an unbounded fallback parse or engine deserialization.
+// admits top-level metadata scans (including error recovery). Recovery-admitted
+// ContestClick frames <=1 KiB may also be typed: <=30 extra compact parses/s,
+// never arbitrary engine action deserialization. Both scan paths cap at 64 KiB.
 // Flush-held refusal admission independently bounds retained replies.
+const MAX_RECOVERY_CLICK_BYTES: usize = 1024;
 
 pub(crate) async fn run(
     mut frames: mpsc::Receiver<Received<Message>>,
@@ -79,6 +80,8 @@ pub(crate) async fn run(
             DecoderWake::Frame(Some(frame)) => frame,
             DecoderWake::Frame(None) => break,
         };
+        #[cfg(test)]
+        let _completed = parser_work.as_ref().map(|work| work.frame_guard());
         // Frames read before ClientHello acceptance were not reader-probed.
         // Use the SAME charged allowance once negotiation finishes, never twice.
         if hello.is_none() && matches!(heartbeat, HeartbeatInspection::Deferred) {
@@ -89,9 +92,9 @@ pub(crate) async fn run(
         }
         // Admit before deserialization, metadata recovery or inflation.
         // Every reader parse spends probe-work credit (64 burst + 64/s refill).
-        // Decoder JSON entries are bounded by 30 full parses plus 30 metadata
-        // scans/s. Error metadata shares the SAME scan allowance. Discarding
-        // replenishes no budget and performs zero JSON/decompression work.
+        // Decoder JSON entries: <=30 full parses + 30 metadata scans/s, plus
+        // <=30 typed compact clicks. Normal-error metadata shares the scan
+        // allowance. Discards refill nothing and do no JSON/inflation work.
         // Discard unadmitted traffic UNPARSED rather than disconnecting a
         // legitimate fire-and-forget contest click burst.
         if !matches!(&frame, Message::Text(_) | Message::Binary(_)) {
@@ -111,6 +114,7 @@ pub(crate) async fn run(
             if refusal_inspection.check() {
                 RateCharge::RefusalInspection
             } else {
+                socket.record_quota_discard();
                 continue;
             }
         };
@@ -142,11 +146,25 @@ pub(crate) async fn run(
             if let Some(work) = &parser_work {
                 work.metadata_recovery();
             }
-            let command_id = crate::socket_mailbox::ClientEnvelope::malformed_command_id(&text);
-            if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
-                break;
+            match crate::socket_mailbox::ClientEnvelope::quota_recovery(&text) {
+                Some(crate::socket_mailbox::QuotaRecovery::ContestClick)
+                    if text.len() <= MAX_RECOVERY_CLICK_BYTES => {}
+                Some(crate::socket_mailbox::QuotaRecovery::Correlated(Some(id))) => {
+                    if socket.enqueue_quota_refusal(Some(id)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                Some(
+                    crate::socket_mailbox::QuotaRecovery::Correlated(None)
+                    | crate::socket_mailbox::QuotaRecovery::ContestClick
+                    | crate::socket_mailbox::QuotaRecovery::Other,
+                )
+                | None => {
+                    socket.record_quota_discard();
+                    continue;
+                }
             }
-            continue;
         }
         #[cfg(test)]
         if let Some(work) = &parser_work {
@@ -155,6 +173,10 @@ pub(crate) async fn run(
         let envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text) {
             Ok(message) => message,
             Err(error) => {
+                if matches!(charge, RateCharge::RefusalInspection) {
+                    socket.record_quota_discard();
+                    continue;
+                }
                 let command_id = if refusal_inspection.check() {
                     #[cfg(test)]
                     if let Some(work) = &parser_work {

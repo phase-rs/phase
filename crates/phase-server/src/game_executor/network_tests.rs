@@ -1378,13 +1378,19 @@ fn legitimate_forty_click_bursts_keep_plain_and_gzip_contests_running() {
                             refusal = true;
                         }
                         ServerMessage::ContestProgress { contest: 71, clicks, .. } => {
-                            progress |= clicks.iter().any(|(player, count)| *player == PlayerId(0) && *count > 0);
+                            for (player, count) in clicks {
+                                if player == PlayerId(0) {
+                                    assert!(count <= 40, "a click was applied twice");
+                                    progress |= count == 40;
+                                }
+                            }
                         }
                         _ => {}
                     }
                 }
-                assert_eq!(work.counts(), (crate::RATE_LIMIT_MESSAGES as usize, 13),
-                    "over-quota clicks and the large command must never enter full deserialization");
+                assert_eq!(work.counts(), (crate::RATE_LIMIT_MESSAGES as usize + 12, 13),
+                    "only twelve recovery-admitted compact clicks get an extra typed parse");
+                assert_eq!(table.app.context.metrics.ws_quota_discard_count(), 0);
             }).await;
             table.server.abort();
             outcome.unwrap_or_else(|error| {

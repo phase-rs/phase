@@ -32,6 +32,7 @@ pub(crate) struct ParserWork {
     changed: Notify,
     probe_at: tokio::time::Instant,
     probes: std::sync::atomic::AtomicUsize,
+    completed: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for ParserWork {
@@ -44,6 +45,7 @@ impl Default for ParserWork {
             changed: Default::default(),
             probe_at: tokio::time::Instant::now(),
             probes: Default::default(),
+            completed: Default::default(),
         }
     }
 }
@@ -111,6 +113,33 @@ impl ParserWork {
 
     pub(crate) fn probes(&self) -> usize {
         self.probes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+pub(crate) struct FrameCompletion(Arc<ParserWork>);
+
+impl Drop for FrameCompletion {
+    fn drop(&mut self) {
+        self.0
+            .completed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.changed.notify_one();
+    }
+}
+
+impl ParserWork {
+    pub(crate) fn frame_guard(self: &Arc<Self>) -> FrameCompletion {
+        FrameCompletion(self.clone())
+    }
+
+    pub(crate) async fn wait_completed(&self, count: usize) {
+        loop {
+            let changed = self.changed.notified();
+            if self.completed.load(std::sync::atomic::Ordering::SeqCst) >= count {
+                return;
+            }
+            changed.await;
+        }
     }
 }
 

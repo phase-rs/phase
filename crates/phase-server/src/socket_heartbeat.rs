@@ -2,7 +2,7 @@
 //!
 //! client/src/network/wireEnvelope.ts uses a 256-byte compression threshold;
 //! its ~40-byte Ping is always plain text or FORMAT_RAW. Compressed envelopes
-//! deliberately remain subject to raw decode admission, regardless of content.
+//! deliberately remain subject to bounded decoder work admission.
 
 use axum::extract::ws::Message;
 use serde::Deserialize;

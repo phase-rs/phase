@@ -2177,9 +2177,18 @@ impl GameSession {
     /// entry — is `SessionManager::record_disconnect`, called by the same
     /// caller under the same held session guard.
     pub fn mark_disconnected(&mut self, player: PlayerId) {
+        self.mark_disconnected_at(player, std::time::Instant::now());
+    }
+
+    /// Preserve transport detection time across cleanup and session-lease waits.
+    pub fn mark_disconnected_at(&mut self, player: PlayerId, observed_at: std::time::Instant) {
         self.connected[player.0 as usize] = false;
         // Queue host-stamped presence; the admitted contest driver applies it.
-        self.queue_contest_connection(player, crate::contest::ContestPresence::Disconnected);
+        self.queue_contest_connection_at(
+            player,
+            crate::contest::ContestPresence::Disconnected,
+            observed_at,
+        );
     }
 
     /// Mark a seat connected again, after the registry half

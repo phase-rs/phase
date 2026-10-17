@@ -140,6 +140,10 @@ impl NegotiatedSocket {
         self.command_id
     }
 
+    pub(crate) fn record_quota_discard(&self) {
+        self.death.record_quota_discard();
+    }
+
     pub(crate) fn enqueue_completion(
         &self,
         message: ServerMessage,
@@ -685,7 +689,7 @@ async fn read_socket<S>(
     if death.event().is_some_and(|event| {
         matches!(
             event.cause,
-            Cause::ReadDeadline | Cause::IngressOverflow | Cause::QuotaRefusalOverflow
+            Cause::IngressOverflow | Cause::QuotaRefusalOverflow
         )
     }) {
         // Keep the read half alive while the writer flushes the local policy
@@ -999,6 +1003,10 @@ mod tests {
         assert!(
             matches!(control.take_ready(), Some(Control::Close { frame: Some(frame), origin: CloseOrigin::Server })
             if frame.code == 1001)
+        );
+        assert!(
+            reader.is_finished(),
+            "an idle read deadline must not linger before disconnect cleanup"
         );
         reader.await.unwrap();
         death.record(Cause::ApplicationEnd);
@@ -1408,7 +1416,7 @@ mod transport_fixup_tests {
                 .unwrap();
             loop {
                 match socket.next().await.unwrap().unwrap() {
-                    WsMessage::Pong(payload) if payload.as_ref() == &[19, 77] => break,
+                    WsMessage::Pong(payload) if payload.as_ref() == [19, 77] => break,
                     WsMessage::Text(text) => {
                         let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
                         assert_ne!(
@@ -1601,6 +1609,8 @@ mod transport_fixup_tests {
         format: Option<WireFormat>,
     ) {
         work.wait_rate_limited(limited).await;
+        work.wait_completed(crate::RATE_LIMIT_MESSAGES as usize + limited)
+            .await;
         socket
             .send(parser_test_frame(
                 &serde_json::to_string(&ClientMessage::Ping { timestamp: 8813 }).unwrap(),
@@ -1685,13 +1695,15 @@ mod transport_fixup_tests {
                     .unwrap();
                 work.wait_rate_limited(limited).await;
             }
+            work.wait_completed(crate::RATE_LIMIT_MESSAGES as usize + 256)
+                .await;
             socket
                 .send(WsMessage::Ping(vec![2, 44].into()))
                 .await
                 .unwrap();
             loop {
                 match socket.next().await.unwrap().unwrap() {
-                    WsMessage::Pong(payload) if payload.as_ref() == &[2, 44] => break,
+                    WsMessage::Pong(payload) if payload.as_ref() == [2, 44] => break,
                     WsMessage::Ping(_) | WsMessage::Pong(_) => {}
                     frame => panic!("discarded traffic must not close the transport: {frame:?}"),
                 }
@@ -1702,6 +1714,11 @@ mod transport_fixup_tests {
                 crate::socket_heartbeat::PROBE_WORK_BURST as usize
             );
             assert_eq!((full, metadata), (quota, quota));
+            assert_eq!(
+                app.context.metrics.ws_quota_discard_count(),
+                256,
+                "every discarded frame must have one bounded-label abuse signal"
+            );
             assert!(
                 work.probes() + full + metadata
                     <= crate::socket_heartbeat::PROBE_WORK_BURST as usize + quota + quota
@@ -1942,7 +1959,7 @@ mod transport_fixup_tests {
     }
 
     #[tokio::test]
-    async fn malformed_binary_envelopes_consume_the_raw_decode_quota() {
+    async fn malformed_binary_envelopes_share_bounded_decode_admission() {
         use server_core::protocol::WireFormat;
         let (url, server, _directory, app) = spawn_full_mode_server().await;
         let work = app.context.socket_hooks.arm_parser_work();
@@ -1978,69 +1995,88 @@ mod transport_fixup_tests {
         for format in [None, Some(WireFormat::GzipEnvelopeV1)] {
             let (url, server, _directory, app) = spawn_full_mode_server().await;
             let _work = app.context.socket_hooks.arm_parser_work();
-            let result = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut socket = parser_test_socket(url, format).await;
-            for _ in 0..crate::RATE_LIMIT_MESSAGES {
-                send_test_message(&mut socket, &ClientMessage::SubscribeLobby, format.is_some()).await;
-            }
-            let commands = [
-                ClientMessage::Action {
-                    action: engine::types::actions::GameAction::PassPriority,
-                },
-                ClientMessage::Interaction {
-                    submission: InteractionSubmission {
-                        interaction_id: InteractionId("quota-interaction".to_string()),
-                        response: InteractionResponse::Choose {
-                            choice_id: InteractionChoiceId("quota-choice".to_string()),
+            let scenario = async {
+                let mut socket = parser_test_socket(url, format).await;
+                for _ in 0..crate::RATE_LIMIT_MESSAGES {
+                    send_test_message(
+                        &mut socket,
+                        &ClientMessage::SubscribeLobby,
+                        format.is_some(),
+                    )
+                    .await;
+                }
+                let commands = [
+                    ClientMessage::Action {
+                        action: engine::types::actions::GameAction::PassPriority,
+                    },
+                    ClientMessage::Interaction {
+                        submission: InteractionSubmission {
+                            interaction_id: InteractionId("quota-interaction".to_string()),
+                            response: InteractionResponse::Choose {
+                                choice_id: InteractionChoiceId("quota-choice".to_string()),
+                            },
                         },
                     },
-                },
-            ];
-            for (index, message) in commands
-                .into_iter()
-                .cycle()
-                .take(crate::socket_mailbox::MAX_PENDING_QUOTA_REFUSALS * 2 + 1)
-                .enumerate()
-            {
-                let command_id = 37 + index as u64;
-                let mut frame = serde_json::to_value(message).unwrap();
-                frame["command_id"] = serde_json::json!(command_id);
-                // Exercise compressed correlated recovery as well as plain text.
-                frame["padding"] = serde_json::json!("x".repeat(300));
-                let outgoing = match wire::encode_json_message_sync(frame.to_string(), format.is_some()).unwrap() {
-                    Message::Text(text) => WsMessage::Text(text.to_string().into()),
-                    Message::Binary(bytes) => WsMessage::Binary(bytes),
-                    Message::Ping(_) | Message::Pong(_) | Message::Close(_) => unreachable!(),
-                };
-                socket
-                    .send(outgoing)
-                    .await
-                    .unwrap();
-                loop {
-                    let text = match socket.next().await.unwrap().unwrap() {
-                        WsMessage::Text(text) => text.to_string(),
-                        WsMessage::Binary(bytes) => wire::decode_client_envelope(bytes.to_vec(), 1024).await.unwrap(),
-                        WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
-                        frame => panic!("sequential compact refusals within inspection allowance unexpectedly closed: {frame:?}"),
-                    };
-                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if frame["type"] == "ActionFailed" {
-                        assert_eq!(frame["command_id"], command_id);
-                        assert_eq!(frame["data"]["message"], "Command rate quota exceeded");
-                        break;
+                ];
+                for (index, message) in commands
+                    .into_iter()
+                    .cycle()
+                    .take(crate::socket_mailbox::MAX_PENDING_QUOTA_REFUSALS * 2 + 1)
+                    .enumerate()
+                {
+                    let command_id = 37 + index as u64;
+                    let mut frame = serde_json::to_value(message).unwrap();
+                    frame["command_id"] = serde_json::json!(command_id);
+                    frame["padding"] = serde_json::json!("x".repeat(300));
+                    let outgoing =
+                        match wire::encode_json_message_sync(frame.to_string(), format.is_some())
+                            .unwrap()
+                        {
+                            Message::Text(text) => WsMessage::Text(text.to_string().into()),
+                            Message::Binary(bytes) => WsMessage::Binary(bytes),
+                            Message::Ping(_) | Message::Pong(_) | Message::Close(_) => {
+                                unreachable!()
+                            }
+                        };
+                    socket.send(outgoing).await.unwrap();
+                    loop {
+                        let text = match socket.next().await.unwrap().unwrap() {
+                            WsMessage::Text(text) => text.to_string(),
+                            WsMessage::Binary(bytes) => {
+                                wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES)
+                                    .await
+                                    .unwrap()
+                            }
+                            WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                            frame => {
+                                panic!("a sequential quota refusal closed its socket: {frame:?}")
+                            }
+                        };
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if frame["type"] == "ActionFailed" {
+                            assert_eq!(frame["command_id"], command_id);
+                            assert_eq!(frame["data"]["message"], "Command rate quota exceeded");
+                            break;
+                        }
                     }
                 }
-            }
-            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 91 }, format.is_some()).await;
-            loop {
-                match recv_parser_message(&mut socket, format).await {
-                    ServerMessage::Pong { timestamp: 91 } => break,
-                    ServerMessage::Error { message, .. } => panic!("heartbeat failed: {message}"),
-                    _ => {}
+                send_test_message(
+                    &mut socket,
+                    &ClientMessage::Ping { timestamp: 91 },
+                    format.is_some(),
+                )
+                .await;
+                loop {
+                    match recv_parser_message(&mut socket, format).await {
+                        ServerMessage::Pong { timestamp: 91 } => break,
+                        ServerMessage::Error { message, .. } => {
+                            panic!("heartbeat failed: {message}")
+                        }
+                        _ => {}
+                    }
                 }
-            }
-        })
-        .await;
+            };
+            let result = tokio::time::timeout(Duration::from_secs(10), scenario).await;
             server.abort();
             result.expect("decoded commands must receive an owned refusal");
         }

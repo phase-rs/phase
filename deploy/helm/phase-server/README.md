@@ -60,6 +60,7 @@ Ingress.
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
 | `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow` and `quota_refusal_overflow` |
+| `phase_ws_discarded_frames_total{reason="quota_exhausted"}` | frames discarded after ordinary admission, excluding admitted compact contest clicks and owned refusals |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -177,8 +178,9 @@ WebSocket code 1013 rather than silently discarding a command. Established
 connections may bypass command slots only through a probe of at most 256 bytes.
 Every probe parse, including a non-Ping, spends a separate work allowance
 (burst 64, replenished at 64/s). Recognized Pings and malformed probes also spend
-the reply reserve (burst eight, replenished at two/s). Ordinary command bursts
-therefore preserve heartbeat credit without buying unlimited JSON parsing.
+the reply reserve (burst eight, replenished at two/s). The reply reserve still
+depends on shared probe-work credit: ordinary bursts preserve reply credit,
+but a non-Ping abuse stream can exhaust the work allowance and delay JSON Pong.
 Reader and decoder share these allowances; frames queued before ClientHello
 acceptance are probed only after negotiation, without repeating reader work.
 Replies remain coalesced.
@@ -187,27 +189,33 @@ Every full JSON parse and metadata recovery is admitted before inspecting the
 payload. Ordinary admission permits 30 full parses/s, up to the 64 KiB command
 cap. Recovery permits at most 30 additional top-level metadata scans/s under
 the same cap, skipping the engine payload without per-field allocations.
-Malformed ordinary commands share that recovery allowance. Thus JSON work is
-bounded by at most twice ordinary admission plus the probe bucket, not an
-unlimited fallback. Gzip inflation is admitted first and capped at 64 KiB.
+Malformed ordinary commands share that recovery allowance. Recovery-admitted
+`ContestClick` frames of at most 1 KiB may additionally be typed and dispatched;
+`ContestPolicy` still owns seat-level click rate limiting. The parser-entry
+ceiling is 64 probe entries + 30 ordinary parses + 30 scans + at most 30 compact
+click parses with refills frozen (154), not an unlimited fallback. Gzip inflation
+is admitted first and capped at 64 KiB.
 
 An action larger than 1 KiB just after a legitimate click burst still gets an
 owned CommandIdV1 refusal. Past both work windows, traffic is discarded without
-parsing or decompression, not disconnected. Fire-and-forget contest click
-bursts may legitimately exceed ordinary quota. Discards refill no allowance;
-only abuse rates exhaust both windows. Normal client JSON Pings use plain/raw
-frames and retain their separate credited fast path.
+parsing or decompression, not disconnected. A legitimate 40-click burst is
+dispatched in full, including recovery-admitted clicks. Uncorrelated non-click
+requests over ordinary quota remain dropped (pre-existing behavior), even if
+their metadata is inspected. Discards refill no allowance. Normal client JSON
+Pings use plain/raw frames and their credited fast path.
 Up to eight correlated quota refusals may remain unflushed per connection;
 that admission is released only after socket flush, so a draining client may
 receive later refusals without a lifetime strike limit. Exhausting it closes
 with 1013 and records `quota_refusal_overflow` rather than retaining an
 unbounded reply backlog.
 
-Local policy closes retain the transport's read half for the peer's Close
+Capacity closes retain the transport's read half for the peer's Close
 acknowledgement, bounded by one second, 64 frames and 1 MiB of drained payload.
-The drain parses no JSON, retains no command, and holds no game or CPU permit.
-Disconnect detection and the reconnect clock precede it; an already accepted
-mutation finishes independently rather than delaying the transport Close.
+Idle read-deadline closes do not drain. The drain parses no JSON, retains no
+command, and holds no game or CPU permit. Disconnect detection is immediate;
+seat bookkeeping and notifications follow transport teardown. Both reconnect
+grace and contest presence use the original transport detection timestamp,
+not the later cleanup time. Accepted mutations still finish independently.
 
 `ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
 game-command completion. Action/Interaction messages may carry a top-level

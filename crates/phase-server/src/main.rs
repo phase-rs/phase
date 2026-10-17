@@ -2110,7 +2110,7 @@ async fn depart_full_seat_while_session_locked(
         players.remove(&player_id);
         players.values().cloned().collect::<Vec<_>>()
     };
-    session.mark_disconnected(player_id);
+    session.mark_disconnected_at(player_id, disconnected_at);
     let grace = {
         let mut registry = state.lock().await;
         let grace = registry.reconnect.grace_period;
@@ -4649,6 +4649,7 @@ async fn ws_handler(
     let slot = ConnectionSlot::new(app_state.player_count.clone());
 
     ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_MESSAGE_BYTES)
         .on_upgrade(move |socket| {
             handle_socket(
                 socket,

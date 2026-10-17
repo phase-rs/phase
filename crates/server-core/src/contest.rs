@@ -335,6 +335,15 @@ impl GameSession {
     /// Presence bookkeeping may run outside compute workers. Retain each edge
     /// and its contest identity until the next admitted contest operation.
     pub(crate) fn queue_contest_connection(&mut self, player: PlayerId, presence: ContestPresence) {
+        self.queue_contest_connection_at(player, presence, Instant::now());
+    }
+
+    pub(crate) fn queue_contest_connection_at(
+        &mut self,
+        player: PlayerId,
+        presence: ContestPresence,
+        observed_at: Instant,
+    ) {
         let WaitingFor::PhysicalContest { contest, .. } = &self.state.waiting_for else {
             return;
         };
@@ -342,7 +351,7 @@ impl GameSession {
             contest: contest.id,
             player,
             presence,
-            at_ms: self.contest.clock.now_ms(),
+            at_ms: self.contest.clock.at(observed_at),
         });
     }
 
@@ -993,15 +1002,68 @@ mod tests {
             .expect("a connected player can concede during a contest");
         assert!(matches!(result.0.waiting_for, WaitingFor::GameOver { .. }));
         session.advance_state_revision();
-        let published_revision = session.state_revision;
         let drain = session.drain_contest_outbox();
         assert!(
-            drain
-                .transitions
-                .iter()
-                .all(|transition| transition.state_revision >= published_revision),
-            "ordinary action publication must not be followed by an older presence snapshot",
+            drain.transitions.is_empty(),
+            "the terminal action owns publication; stale presence must not mint a snapshot"
         );
+    }
+
+    #[test]
+    fn queued_presence_after_nonterminal_action_is_published_at_a_newer_revision() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        session.state.format_config.allow_debug_actions = true;
+        session.state.debug_mode = true;
+        session.state.debug_permitted.insert(PlayerId(0));
+        session.mark_disconnected(PlayerId(1));
+        session
+            .handle_action_with_card_db_outcome(
+                HOST,
+                engine::types::actions::GameAction::Debug(
+                    engine::types::actions::DebugAction::SetLife {
+                        player_id: PlayerId(0),
+                        life: 21,
+                    },
+                ),
+                None,
+            )
+            .expect("nonterminal debug action");
+        session.advance_state_revision();
+        let published = session.state_revision;
+        assert!(matches!(
+            session.state.waiting_for,
+            WaitingFor::PhysicalContest { .. }
+        ));
+        session.tick_contest();
+        let drain = session.drain_contest_outbox();
+        assert!(
+            !drain.transitions.is_empty(),
+            "the autonomous driver must apply the queued edge"
+        );
+        assert!(drain
+            .transitions
+            .iter()
+            .all(|step| step.state_revision > published));
+        assert!(drain
+            .transitions
+            .iter()
+            .any(|step| matches!(&step.state.waiting_for,
+            WaitingFor::PhysicalContest { contest, .. } if contest.paused_since_ms.is_some())));
+    }
+
+    #[test]
+    fn disconnect_presence_keeps_transport_observation_time() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let now = Instant::now();
+        session.contest.clock.epoch = now - std::time::Duration::from_secs(10);
+        session.mark_disconnected_at(PlayerId(1), now - std::time::Duration::from_secs(1));
+        session.flush_contest_connections();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("contest remains pending");
+        };
+        assert_eq!(contest.paused_since_ms, Some(9_000));
     }
 
     /// A frame delayed from an earlier contest names that contest's identity; it is
