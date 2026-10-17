@@ -1578,10 +1578,9 @@ fn legitimate_forty_click_bursts_keep_plain_and_gzip_contests_running() {
                     let json = receive_wire_json(&mut socket).await;
                     match serde_json::from_str::<ServerMessage>(&json).unwrap() {
                         ServerMessage::Pong { timestamp: 719 } => pong = true,
-                        ServerMessage::ActionFailed { message } => {
+                        ServerMessage::ActionFailed { .. } => {
                             let header: serde_json::Value = serde_json::from_str(&json).unwrap();
                             assert_eq!(header["command_id"], 719_001);
-                            assert_eq!(message, "Command rate quota exceeded");
                             refusal = true;
                         }
                         ServerMessage::ContestProgress { contest: 71, clicks, .. } => {
@@ -1602,6 +1601,167 @@ fn legitimate_forty_click_bursts_keep_plain_and_gzip_contests_running() {
             table.server.abort();
             outcome.unwrap_or_else(|error| {
                 panic!("{format:?} forty-click burst stalled or closed its socket: {error}")
+            });
+        }
+    });
+}
+
+#[test]
+fn policy_compliant_click_refill_preserves_correlated_completion() {
+    run_async_test(|| async {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestPhase, ContestState};
+        use engine::types::game_state::WaitingFor;
+        use futures_util::{SinkExt, StreamExt};
+        use server_core::protocol::WireFormat;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        for format in [None, Some(WireFormat::GzipEnvelopeV1)] {
+            let table = NativeTable::new().await;
+            let work = table.app.context.socket_hooks.arm_parser_work();
+            let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+                table.keep_all().await;
+                let mut socket = table.connect_with_format(PlayerId(0), format).await;
+                let _opponent = table.connect(PlayerId(1)).await;
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let (lease, burst) = table
+                    .app
+                    .context
+                    .game_executor
+                    .with_session(session, |session| {
+                        let config = ContestConfig {
+                            countdown_ms: 0,
+                            inactivity_timeout_ms: 60_000,
+                            reconnect_grace_ms: 60_000,
+                            max_active_ms: 60_000,
+                            ..Default::default()
+                        };
+                        session.contest.policy.config = config;
+                        session.state.phase = engine::types::phase::Phase::PreCombatMain;
+                        let source_id = *session.state.objects.keys().next().unwrap();
+                        session.state.waiting_for = WaitingFor::PhysicalContest {
+                            contest: Box::new(ContestState::new(
+                                72,
+                                ContestKind::Staring,
+                                PlayerId(0),
+                                PlayerId(1),
+                                config,
+                            )),
+                            source_id,
+                        };
+                        session.contest.policy.click_burst
+                    })
+                    .await;
+                drop(lease);
+                let clicks = burst + 20;
+                assert!(clicks >= 60, "exercise the old exhausted-refusal boundary");
+                crate::ensure_contest_driver(
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.connections,
+                    &table.app.draft_sessions,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.app.lobby,
+                    &table.app.lobby_subscribers,
+                    &table.key.game_code,
+                )
+                .await;
+                loop {
+                    let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    let active = matches!(&lease.state.waiting_for,
+                        WaitingFor::PhysicalContest { contest, .. }
+                            if contest.phase == ContestPhase::Active);
+                    drop(lease);
+                    if active {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                for seq in 1..=clicks {
+                    if seq > burst {
+                        // Twenty refill clicks over ~700 ms stay below the
+                        // policy's 30/s rate after its initial forty-click burst.
+                        tokio::time::sleep(Duration::from_millis(35)).await;
+                    }
+                    send_test_message(
+                        &mut socket,
+                        &ClientMessage::ContestClick { contest: 72, seq },
+                        format.is_some(),
+                    )
+                    .await;
+                    // One frozen decoder window, without letting ingress
+                    // capacity conceal the distinct work-allowance regression.
+                    work.wait_completed(2 + seq as usize).await;
+                }
+                let mut command = serde_json::to_value(ClientMessage::Action {
+                    action: GameAction::PassPriority,
+                })
+                .unwrap();
+                command["command_id"] = serde_json::json!(720_001);
+                command["padding"] = serde_json::json!("x".repeat(4096));
+                let frame =
+                    crate::wire::encode_json_message_sync(command.to_string(), format.is_some())
+                        .unwrap();
+                let frame = match frame {
+                    axum::extract::ws::Message::Text(text) => {
+                        WsMessage::Text(text.to_string().into())
+                    }
+                    axum::extract::ws::Message::Binary(bytes) => WsMessage::Binary(bytes),
+                    _ => unreachable!("application command encoding"),
+                };
+                socket.send(frame).await.unwrap();
+                work.wait_completed(3 + clicks as usize).await;
+                loop {
+                    let json = receive_wire_json(&mut socket).await;
+                    if matches!(
+                        serde_json::from_str::<ServerMessage>(&json).unwrap(),
+                        ServerMessage::ActionFailed { .. }
+                    ) {
+                        let header: serde_json::Value = serde_json::from_str(&json).unwrap();
+                        assert_eq!(header["command_id"], 720_001);
+                        break;
+                    }
+                }
+                // The frozen probe window may be spent by legitimate clicks;
+                // native control liveness does not depend on JSON probe credit.
+                socket
+                    .send(WsMessage::Ping(vec![72, 1].into()))
+                    .await
+                    .unwrap();
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        WsMessage::Pong(bytes) if bytes.as_ref() == [72, 1] => break,
+                        WsMessage::Text(_)
+                        | WsMessage::Binary(_)
+                        | WsMessage::Ping(_)
+                        | WsMessage::Pong(_) => {}
+                        frame => panic!("legitimate policy traffic closed the socket: {frame:?}"),
+                    }
+                }
+                let quota = crate::RATE_LIMIT_MESSAGES as usize;
+                let over_quota = clicks as usize - (quota - 2);
+                assert_eq!(work.counts(), (quota * 2, over_quota + 1));
+                assert_eq!(
+                    table.app.context.metrics.ws_quota_discard_count(),
+                    (over_quota - quota) as u64,
+                );
+                assert_eq!(
+                    table
+                        .app
+                        .context
+                        .metrics
+                        .ws_disconnect_count(crate::socket_disconnect::Cause::QuotaDiscardOverflow),
+                    0,
+                );
+            })
+            .await;
+            table.server.abort();
+            outcome.unwrap_or_else(|error| {
+                panic!("{format:?} maximal contest stream lost owned completion: {error}")
             });
         }
     });

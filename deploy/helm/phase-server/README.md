@@ -59,8 +59,8 @@ Ingress.
 | `phase_drafts_active` / `phase_drafts_with_connected_humans` | the same pair for server-hosted drafts |
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
-| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow` and `quota_refusal_overflow` |
-| `phase_ws_discarded_frames_total{reason="quota_exhausted"}` | frames discarded after ordinary admission is exhausted because recovery admission is exhausted or the recovered header is unhandled; excludes binary envelope decode failures, dispatched compact contest clicks and owned refusals |
+| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow`, `quota_refusal_overflow` and `quota_discard_overflow` |
+| `phase_ws_discarded_frames_total{reason="quota_exhausted"}` | post-ordinary-quota discards when recovery is exhausted or a recovered frame is ineligible for dispatch/refusal, including the abuse-closing frame; excludes binary envelope decode failures, dispatched compact clicks and owned refusals |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -186,41 +186,51 @@ acceptance are probed only after negotiation, without repeating reader work.
 Replies remain coalesced.
 
 Every full JSON parse and metadata recovery is admitted before inspecting the
-payload. Ordinary admission permits 30 full parses/s, up to the 64 KiB command
-cap. Recovery permits at most 30 additional top-level metadata scans/s under
-the same cap, skipping the engine payload without per-field allocations.
-Malformed ordinary commands share that recovery allowance. Recovery-admitted
-`ContestClick` frames of at most 1 KiB may additionally be typed and dispatched;
-`ContestPolicy` still owns seat-level click rate limiting. The parser-entry
-ceiling is 64 probe entries + 30 ordinary parses + 30 scans + at most 30 compact
-click parses with refills frozen (154), not an unlimited fallback. Gzip inflation
-is admitted first and capped at 64 KiB. This is a parsing bound, not a handler
-or outbound-memory bound: ordinary commands plus recovered clicks can dispatch
-up to 60 handler calls/s, each involving a session lease and executor hop.
-Recovered clicks can also produce uncorrelated handshake, mode or wire-guard
-rejections at up to 30/s; those replies do not use the flush-held correlated
-refusal admission described below.
+payload. Ordinary admission permits 30 full parses per configured one-second
+window, up to the 64 KiB command cap. Recovery initially charges each top-level
+metadata scan to a separate 30-entry allowance, skipping the engine payload.
+Malformed ordinary commands share that allowance. A recognized `ContestClick`
+of at most 1 KiB transfers its scan charge to an independent 30-entry click
+allowance before its extra typed parse: only then is the recovery entry refunded.
+Clicks beyond their allowance are discarded and keep the recovery entry spent.
+Thus admitted recovered clicks cannot consume all correlated-refusal capacity.
 
-An action larger than 1 KiB just after a legitimate click burst still gets an
-owned CommandIdV1 refusal. Past both work windows, traffic is discarded without
-parsing or decompression, not disconnected. An isolated legitimate 40-click
-burst is dispatched in full when ingress has capacity, including recovered
-clicks. Recovered clicks retain their ingress admission until handled. At the
-policy-maximal rate (40-click burst plus 30/s), a seconds-long handler stall
-(about 1–2 s under a saturated executor) can exhaust the shared 64-command or
-1 MiB bound and close with 1013 `IngressOverflow` mid-contest. This known limit
-requires both the maximal click stream and the handler stall; recovery does
-not bypass ingress capacity. Uncorrelated non-click
-requests over ordinary quota remain dropped (pre-existing behavior), even if
-their metadata is inspected. Discards refill no allowance. Normal client JSON
-Pings use plain/raw frames and their credited fast path.
+With refills frozen, the exact ceiling is 184 JSON entries: 64 reader probes,
+30 ordinary full parses, 30 nonrefunded recovery scans, 30 transferred click
+scans and 30 compact click parses. Non-click traffic retains the 124-entry
+ceiling. Binary envelope decode/inflation has at most 90 admissions in that
+frozen window (30 ordinary + 30 nonrefunded recovery + 30 transferred clicks),
+each subject to the 64 KiB inflation cap. This is a parsing bound, not a
+handler or outbound-memory bound: ordinary commands plus
+recovered clicks can dispatch up to 60 handler calls per window, each involving
+a session lease and executor hop. Recovered clicks can also produce up to
+30 uncorrelated guard replies per window outside the flush-held correlated
+refusal admission below.
+
+An action larger than 1 KiB after a policy-maximal click stream can still get
+its owned CommandIdV1 refusal; recovered clicks have a separate work allowance.
+Past the parse allowances, excess bursts are discarded without parsing or
+decompression. A per-connection allowance permits 64 quota discards per window;
+the 65th is counted, then closes with 1013 `quota_discard_overflow` and the
+bounded drain below. This deliberately discards for short bursts but closes
+sustained abuse, rather than processing unlimited discarded frames.
+
+An isolated legitimate 40-click burst is dispatched in full when ingress has
+capacity. Recovered clicks retain ingress admission until handled. At the
+policy-maximal rate (40-click burst plus 30/s), an approximately 1–2 s handler
+stall can exhaust the shared 64-command or 1 MiB bound and close with 1013
+`IngressOverflow` mid-contest. This known limit requires both maximal traffic
+and the stall; recovery does not bypass ingress capacity. Uncorrelated non-click
+requests over ordinary quota remain dropped, even if their header is inspected.
+Discards refund no allowance. Normal client JSON Pings use plain/raw frames
+and their credited fast path.
 Up to eight correlated quota refusals may remain unflushed per connection;
 that admission is released only after socket flush, so a draining client may
 receive later refusals without a lifetime strike limit. Exhausting it closes
 with 1013 and records `quota_refusal_overflow` rather than retaining an
 unbounded reply backlog.
 
-Capacity closes retain the transport's read half for the peer's Close
+Capacity and sustained-abuse closes retain the read half for the peer's Close
 acknowledgement, bounded by one second, 64 frames and 1 MiB of drained payload.
 Idle read-deadline closes do not drain. The drain parses no JSON, retains no
 command, and holds no game or CPU permit. Disconnect detection is immediate;

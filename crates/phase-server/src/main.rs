@@ -915,9 +915,10 @@ impl BrokerEnv for SysEnv {
     }
 }
 
-/// Simple per-socket token bucket rate limiter.
+/// Simple per-socket fixed-window work limiter.
 struct RateLimiter {
     count: u32,
+    limit: u32,
     window_start: Instant,
     #[cfg(test)]
     frozen_at: Option<Instant>,
@@ -925,8 +926,13 @@ struct RateLimiter {
 
 impl RateLimiter {
     fn new() -> Self {
+        Self::with_limit(RATE_LIMIT_MESSAGES)
+    }
+
+    fn with_limit(limit: u32) -> Self {
         Self {
             count: 0,
+            limit,
             window_start: Instant::now(),
             #[cfg(test)]
             frozen_at: None,
@@ -944,7 +950,15 @@ impl RateLimiter {
             self.window_start = now;
         }
         self.count += 1;
-        self.count <= RATE_LIMIT_MESSAGES
+        self.count <= self.limit
+    }
+
+    /// Transfer one successful admission to another independently bounded lane.
+    /// The owning decoder is serial, so no later check can reset this window
+    /// between its admission and refund.
+    fn refund(&mut self) {
+        debug_assert!(self.count > 0);
+        self.count = self.count.saturating_sub(1);
     }
 
     #[cfg(test)]

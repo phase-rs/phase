@@ -217,6 +217,10 @@ impl NegotiatedSocket {
         self.close_for_ingress(Cause::IngressOverflow);
     }
 
+    pub(crate) fn quota_discard_overflow(&self) {
+        self.close_for_ingress(Cause::QuotaDiscardOverflow);
+    }
+
     fn close_for_ingress(&self, cause: Cause) {
         self.control.close(
             Some(CloseFrame {
@@ -689,7 +693,7 @@ async fn read_socket<S>(
     if death.event().is_some_and(|event| {
         matches!(
             event.cause,
-            Cause::IngressOverflow | Cause::QuotaRefusalOverflow
+            Cause::IngressOverflow | Cause::QuotaRefusalOverflow | Cause::QuotaDiscardOverflow
         )
     }) {
         // Keep the read half alive while the writer flushes the local policy
@@ -1728,14 +1732,40 @@ mod transport_fixup_tests {
         result.expect("an excess large frame was parsed or blocked a healthy heartbeat");
     }
 
+    async fn expect_discard_budget_close(
+        socket: &mut ParserSocket,
+        metrics: &crate::metrics::ServerMetrics,
+    ) {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                WsMessage::Close(Some(close)) => {
+                    assert_eq!(u16::from(close.code), 1013);
+                    break;
+                }
+                WsMessage::Text(_)
+                | WsMessage::Binary(_)
+                | WsMessage::Ping(_)
+                | WsMessage::Pong(_) => {}
+                frame => panic!("expected the bounded quota-discard close, got {frame:?}"),
+            }
+        }
+        assert_eq!(
+            metrics.ws_quota_discard_count(),
+            u64::from(crate::socket_decode::MAX_QUOTA_DISCARDS_PER_WINDOW) + 1,
+        );
+        assert_eq!(
+            metrics.ws_disconnect_count(crate::socket_disconnect::Cause::QuotaDiscardOverflow),
+            1,
+        );
+    }
+
     #[tokio::test]
     async fn sustained_unparsed_drops_cannot_replenish_any_json_work_budget() {
         let (url, server, _directory, app) = spawn_full_mode_server().await;
         let work = app.context.socket_hooks.arm_parser_work();
         let outcome = tokio::time::timeout(Duration::from_secs(15), async {
             let mut socket = parser_test_socket(url, None).await;
-            // Malformed ordinary commands also need metadata recovery. That
-            // recovery must spend the SAME allowance as over-quota refusals.
+            // Malformed ordinary commands spend the SAME recovery allowance.
             for _ in 1..crate::RATE_LIMIT_MESSAGES {
                 socket
                     .send(WsMessage::Text(r#"{"type":"UnknownCommand"}"#.into()))
@@ -1747,39 +1777,23 @@ mod transport_fixup_tests {
                 ) {}
             }
             let quota = crate::RATE_LIMIT_MESSAGES as usize;
-            // Pace by admission, not by a JSON reply. Every dropped frame has
-            // returned its ingress permit; capacity cannot conceal extra parses.
-            for limited in 1..=256 {
+            let close_at = crate::socket_decode::MAX_QUOTA_DISCARDS_PER_WINDOW as usize + 1;
+            // Pace decoder completion so ingress capacity cannot hide either
+            // extra parsing or the separate sustained-abuse close.
+            for limited in 1..=close_at {
                 socket
                     .send(WsMessage::Text(r#"{"type":"UnknownCommand"}"#.into()))
                     .await
                     .unwrap();
-                work.wait_rate_limited(limited).await;
+                work.wait_completed(quota + limited).await;
             }
-            work.wait_completed(crate::RATE_LIMIT_MESSAGES as usize + 256)
-                .await;
-            socket
-                .send(WsMessage::Ping(vec![2, 44].into()))
-                .await
-                .unwrap();
-            loop {
-                match socket.next().await.unwrap().unwrap() {
-                    WsMessage::Pong(payload) if payload.as_ref() == [2, 44] => break,
-                    WsMessage::Ping(_) | WsMessage::Pong(_) => {}
-                    frame => panic!("discarded traffic must not close the transport: {frame:?}"),
-                }
-            }
+            expect_discard_budget_close(&mut socket, &app.context.metrics).await;
             let (full, metadata) = work.counts();
             assert_eq!(
                 work.probes(),
                 crate::socket_heartbeat::PROBE_WORK_BURST as usize
             );
             assert_eq!((full, metadata), (quota, quota));
-            assert_eq!(
-                app.context.metrics.ws_quota_discard_count(),
-                256,
-                "every discarded frame must have one bounded-label abuse signal"
-            );
             assert!(
                 work.probes() + full + metadata
                     <= crate::socket_heartbeat::PROBE_WORK_BURST as usize + quota + quota
@@ -1787,7 +1801,64 @@ mod transport_fixup_tests {
         })
         .await;
         server.abort();
-        outcome.expect("sustained discard traffic escaped bounded parser admission");
+        outcome.expect("sustained abuse must close without replenishing parser work");
+    }
+
+    #[tokio::test]
+    async fn refunded_click_scans_keep_a_finite_combined_parser_ceiling() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let work = app.context.socket_hooks.arm_parser_work();
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut socket = parser_test_socket(url, None).await;
+            work.wait_completed(1).await;
+            let quota = crate::RATE_LIMIT_MESSAGES as usize;
+            // Fill ordinary work, then the independent click and nonrefunded
+            // scan windows. All valid no-seat clicks use the real decoder.
+            for completed in 2..=quota * 3 {
+                let click = serde_json::to_string(&ClientMessage::ContestClick {
+                    contest: 71,
+                    seq: completed as u32,
+                })
+                .unwrap();
+                socket.send(WsMessage::Text(click.into())).await.unwrap();
+                work.wait_completed(completed).await;
+                // Catch an unbounded-click control before 64 retained commands
+                // could make ingress capacity, rather than parse work, reject it.
+                assert!(
+                    work.counts().0 <= quota * 2,
+                    "typed click admission exceeded its window"
+                );
+            }
+            assert_eq!(work.counts(), (quota * 2, quota * 2));
+            assert_eq!(
+                work.probes(),
+                crate::socket_heartbeat::PROBE_WORK_BURST as usize
+            );
+            assert_eq!(
+                work.probes() + work.counts().0 + work.counts().1,
+                crate::socket_heartbeat::PROBE_WORK_BURST as usize + quota * 4,
+                "every refunded header scan must transfer to finite click admission",
+            );
+            assert_eq!(app.context.metrics.ws_quota_discard_count(), quota as u64);
+            let remaining =
+                crate::socket_decode::MAX_QUOTA_DISCARDS_PER_WINDOW as usize + 1 - quota;
+            for discarded in 1..=remaining {
+                socket
+                    .send(WsMessage::Text(r#"{"type":"UnknownCommand"}"#.into()))
+                    .await
+                    .unwrap();
+                work.wait_completed(quota * 3 + discarded).await;
+            }
+            expect_discard_budget_close(&mut socket, &app.context.metrics).await;
+            assert_eq!(
+                work.counts(),
+                (quota * 2, quota * 2),
+                "exhausted scans stay unparsed"
+            );
+        })
+        .await;
+        server.abort();
+        outcome.expect("refunded clicks escaped the combined parse or discard bound");
     }
 
     #[tokio::test]

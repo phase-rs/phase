@@ -19,10 +19,11 @@ pub(crate) enum Cause {
     IngressOverflow,
     ApplicationEnd,
     QuotaRefusalOverflow,
+    QuotaDiscardOverflow,
 }
 
 impl Cause {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::PeerClose,
         Self::ReadEof,
         Self::ReadError,
@@ -32,6 +33,7 @@ impl Cause {
         Self::IngressOverflow,
         Self::ApplicationEnd,
         Self::QuotaRefusalOverflow,
+        Self::QuotaDiscardOverflow,
     ];
 
     pub(crate) const fn index(self) -> usize {
@@ -45,6 +47,7 @@ impl Cause {
             Self::IngressOverflow => 6,
             Self::ApplicationEnd => 7,
             Self::QuotaRefusalOverflow => 8,
+            Self::QuotaDiscardOverflow => 9,
         }
     }
 
@@ -59,6 +62,7 @@ impl Cause {
             Self::IngressOverflow => "ingress_overflow",
             Self::ApplicationEnd => "application_end",
             Self::QuotaRefusalOverflow => "quota_refusal_overflow",
+            Self::QuotaDiscardOverflow => "quota_discard_overflow",
         }
     }
 }

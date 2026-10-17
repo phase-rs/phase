@@ -30,13 +30,16 @@ enum RateCharge {
     RefusalInspection,
 }
 
-// The ordinary quota admits 30 full commands/s. A separate 30/s allowance
-// admits top-level metadata scans (including error recovery). Recovery-admitted
-// ContestClick frames <=1 KiB may also be typed: <=30 extra compact parses/s,
-// never arbitrary engine action deserialization. Both scan paths cap at 64 KiB.
-// Flush-held admission bounds only correlated quota refusals. Recovered clicks
-// can add <=30 handler calls/s and uncorrelated guard replies outside that bound.
+// Per frozen window: <=30 ordinary parses, <=30 nonrefunded recovery scans,
+// <=30 compact-click scans transferred to their own allowance, and <=30 typed
+// compact clicks. Add <=64 charged reader probes: <=184 JSON entries total.
+// Binary envelope decode/inflation has <=90 admissions in that window
+// (30 ordinary +30 retained recovery +30 transferred clicks), capped at 64 KiB.
+// A click refund is allowed only after its separate bounded admission succeeds,
+// so it cannot replenish unlimited scan work or drain correlated refusals.
+// Flush-held admission bounds only correlated quota refusals, not guard replies.
 const MAX_RECOVERY_CLICK_BYTES: usize = 1024;
+pub(crate) const MAX_QUOTA_DISCARDS_PER_WINDOW: u32 = 64;
 
 pub(crate) async fn run(
     mut frames: mpsc::Receiver<Received<Message>>,
@@ -50,6 +53,8 @@ pub(crate) async fn run(
     let mut hello = Some(hello);
     let mut limiter = IngressRateLimiter::new();
     let mut refusal_inspection = crate::RateLimiter::new();
+    let mut recovered_clicks = crate::RateLimiter::new();
+    let mut discards = crate::RateLimiter::with_limit(MAX_QUOTA_DISCARDS_PER_WINDOW);
     #[cfg(test)]
     let parser_work = socket.bootstrap_hooks().take_parser_work();
     #[cfg(test)]
@@ -57,6 +62,8 @@ pub(crate) async fn run(
         limiter.inner.freeze(work.quota_at());
         socket.observe_probe_work(work.clone());
         refusal_inspection.freeze(work.quota_at());
+        recovered_clicks.freeze(work.quota_at());
+        discards.freeze(work.quota_at());
     }
     let mut refresh: Option<HostRefresh> = None;
     loop {
@@ -93,11 +100,10 @@ pub(crate) async fn run(
         }
         // Admit before deserialization, metadata recovery or inflation.
         // Every reader parse spends probe-work credit (64 burst + 64/s refill).
-        // Decoder JSON entries: <=30 full parses + 30 metadata scans/s, plus
-        // <=30 typed compact clicks. Normal-error metadata shares the scan
-        // allowance. Discards refill nothing and do no JSON/inflation work.
-        // Discard unadmitted traffic UNPARSED rather than disconnecting a
-        // legitimate fire-and-forget contest click burst.
+        // <=30 full parses + <=60 metadata scans + <=30 typed compact clicks.
+        // Refunded click scans have their own 30-entry ceiling. Discarding does
+        // no parsing/inflation; >64 discards in one window closes sustained abuse
+        // without turning a legitimate contest burst into a transport drop.
         if !matches!(&frame, Message::Text(_) | Message::Binary(_)) {
             continue;
         }
@@ -115,7 +121,9 @@ pub(crate) async fn run(
             if refusal_inspection.check() {
                 RateCharge::RefusalInspection
             } else {
-                socket.record_quota_discard();
+                if !discard_quota_frame(&socket, &mut discards) {
+                    break;
+                }
                 continue;
             }
         };
@@ -149,7 +157,10 @@ pub(crate) async fn run(
             }
             match crate::socket_mailbox::ClientEnvelope::quota_recovery(&text) {
                 Some(crate::socket_mailbox::QuotaRecovery::ContestClick)
-                    if text.len() <= MAX_RECOVERY_CLICK_BYTES => {}
+                    if text.len() <= MAX_RECOVERY_CLICK_BYTES && recovered_clicks.check() =>
+                {
+                    refusal_inspection.refund();
+                }
                 Some(crate::socket_mailbox::QuotaRecovery::Correlated(Some(id))) => {
                     if socket.enqueue_quota_refusal(Some(id)).is_err() {
                         break;
@@ -162,7 +173,9 @@ pub(crate) async fn run(
                     | crate::socket_mailbox::QuotaRecovery::Other,
                 )
                 | None => {
-                    socket.record_quota_discard();
+                    if !discard_quota_frame(&socket, &mut discards) {
+                        break;
+                    }
                     continue;
                 }
             }
@@ -175,7 +188,9 @@ pub(crate) async fn run(
             Ok(message) => message,
             Err(error) => {
                 if matches!(charge, RateCharge::RefusalInspection) {
-                    socket.record_quota_discard();
+                    if !discard_quota_frame(&socket, &mut discards) {
+                        break;
+                    }
                     continue;
                 }
                 let command_id = if refusal_inspection.check() {
@@ -302,6 +317,22 @@ pub(crate) async fn run(
                 Err(mpsc::error::TrySendError::Closed(_)) => break,
             }
         }
+    }
+}
+
+/// Count every quota discard, including the frame that exhausts the abuse
+/// allowance. Closing uses the same bounded drain as ingress/refusal overflow.
+fn discard_quota_frame(socket: &NegotiatedSocket, discards: &mut crate::RateLimiter) -> bool {
+    socket.record_quota_discard();
+    if discards.check() {
+        true
+    } else {
+        warn!(
+            allowed_discards_per_window = MAX_QUOTA_DISCARDS_PER_WINDOW,
+            "WebSocket quota discard budget exceeded"
+        );
+        socket.quota_discard_overflow();
+        false
     }
 }
 

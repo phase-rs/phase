@@ -540,6 +540,7 @@ mod tests {
     fn render_preserves_scraper_types_labels_and_values() {
         let mut fixture = snapshot();
         fixture.ws_disconnects[DisconnectCause::QuotaRefusalOverflow.index()] = 9;
+        fixture.ws_disconnects[DisconnectCause::QuotaDiscardOverflow.index()] = 2;
         let body = render(&fixture);
         for expected in [
             "# TYPE phase_connections gauge",
@@ -560,6 +561,7 @@ mod tests {
             "phase_replica_ordinal 3",
             "# TYPE phase_ws_disconnects_total counter",
             "phase_ws_disconnects_total{cause=\"quota_refusal_overflow\"} 9",
+            "phase_ws_disconnects_total{cause=\"quota_discard_overflow\"} 2",
             "phase_ws_disconnects_total{cause=\"peer_close\"} 0",
             "# TYPE phase_ws_discarded_frames_total counter",
             "phase_ws_discarded_frames_total{reason=\"quota_exhausted\"} 12",
