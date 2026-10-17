@@ -285,7 +285,9 @@
     "loading": "読み込み中…"
   },
   "turnBanner": {
-    "turn": "{{number}}ターン目"
+    "turn": "{{number}}ターン目",
+    "yourTurn": "あなたのターン",
+    "opponentTurn": "{{name}}のターン"
   },
   "diceRoll": {
     "rollingForFirst": "先攻を決めるためにダイスを振っています",
