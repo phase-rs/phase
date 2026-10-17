@@ -17493,18 +17493,8 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
 
-    fn install_receipt_eligible_sacrifice_cursor(
-        state: &mut GameState,
-        source_id: ObjectId,
-        chosen: Vec<ObjectId>,
-        paused_at_index: usize,
-        origin: DelayedTriggerOrigin,
-    ) {
-        let selected = chosen
-            .iter()
-            .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
-            .collect();
-        let ability = ResolvedAbility::new(
+    fn optional_sacrifice_payment(source_id: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
             Effect::PayCost {
                 cost: AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1)),
                 scale: None,
@@ -17513,28 +17503,43 @@ mod tests {
             Vec::new(),
             source_id,
             PlayerId(0),
-        );
-        stack::begin_resolving_stack_entry(
-            state,
-            StackEntry {
-                id: ObjectId(99_000),
-                source_id,
-                controller: PlayerId(0),
-                kind: StackEntryKind::TriggeredAbility {
-                    source_id,
-                    ability: Box::new(ability.clone()),
-                    condition: None,
-                    trigger_event: None,
-                    description: Some("receipt stale sacrifice".to_string()),
-                    source_name: "Receipt source".to_string(),
-                    subject_match_count: None,
-                    die_result: None,
-                    provenance: None,
-                },
-            },
-            Some(TriggerFiring::ReceiptEligible(origin)),
         )
-        .expect("the fixture begins with no carrier installed");
+    }
+
+    fn receipt_trigger_carrier(source_id: ObjectId) -> StackEntry {
+        StackEntry {
+            id: ObjectId(99_000),
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(optional_sacrifice_payment(source_id)),
+                condition: None,
+                trigger_event: None,
+                description: Some("receipt stale sacrifice".to_string()),
+                source_name: "Receipt source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    }
+
+    fn install_receipt_eligible_sacrifice_cursor(
+        state: &mut GameState,
+        carrier: StackEntry,
+        firing: Option<TriggerFiring>,
+        chosen: Vec<ObjectId>,
+        paused_at_index: usize,
+    ) {
+        let source_id = carrier.source_id;
+        let selected = chosen
+            .iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
+            .collect();
+        let ability = optional_sacrifice_payment(source_id);
+        stack::begin_resolving_stack_entry(state, carrier, firing)
+            .expect("the fixture begins with no carrier installed");
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
                 Effect::NoOp,
@@ -17591,7 +17596,13 @@ mod tests {
             Zone::Battlefield,
         );
         let origin = receipt_origin(source, 70_001);
-        install_receipt_eligible_sacrifice_cursor(&mut state, source, vec![stale], 0, origin);
+        install_receipt_eligible_sacrifice_cursor(
+            &mut state,
+            receipt_trigger_carrier(source),
+            Some(TriggerFiring::ReceiptEligible(origin)),
+            vec![stale],
+            0,
+        );
         state.objects.get_mut(&stale).unwrap().incarnation += 1;
 
         let lifecycle = crate::game::lifecycle::enter_action_frame();
@@ -17637,10 +17648,10 @@ mod tests {
         let origin = receipt_origin(source, 70_003);
         install_receipt_eligible_sacrifice_cursor(
             &mut state,
-            source,
+            receipt_trigger_carrier(source),
+            Some(TriggerFiring::ReceiptEligible(origin)),
             vec![completed, stale],
             0,
-            origin,
         );
         state.objects.get_mut(&stale).unwrap().incarnation += 1;
 
@@ -17658,6 +17669,87 @@ mod tests {
         assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
         assert!(state.resolving_trigger_firing.is_none());
+    }
+
+    /// CR 608.2n: a stale suffix abandons a sorcery's paused sacrifice, but the
+    /// spell still owes its final part, which then puts it into the graveyard.
+    #[test]
+    fn stale_resolution_sacrifice_resume_keeps_the_spells_final_part() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(70_006),
+            PlayerId(0),
+            "Paused sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Sorcery];
+        let completed = create_object(
+            &mut state,
+            CardId(70_007),
+            PlayerId(0),
+            "Completed fodder".to_string(),
+            Zone::Graveyard,
+        );
+        let stale = create_object(
+            &mut state,
+            CardId(70_008),
+            PlayerId(0),
+            "Stale suffix".to_string(),
+            Zone::Battlefield,
+        );
+        let carrier = StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(70_006),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        install_receipt_eligible_sacrifice_cursor(
+            &mut state,
+            carrier,
+            None,
+            vec![completed, stale],
+            0,
+        );
+        state.resolving_spell_final_part =
+            Some(crate::types::game_state::OwedSpellFinalPart { spell });
+        state.objects.get_mut(&stale).unwrap().incarnation += 1;
+
+        let mut events = Vec::new();
+        resume_sacrifice_for_cost(&mut state, &mut events, 0).unwrap();
+        assert_eq!(
+            state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+            Some(spell)
+        );
+        assert!(state.resolving_spell_final_part.is_some());
+        assert!(state.active_ability_continuation().is_none());
+        assert!(state.pending_cost_move_resume.is_none());
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut events = Vec::new();
+        assert!(super::super::engine::run_spell_final_part_if_due(
+            &mut state,
+            &mut events
+        ));
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::StackResolved { object_id } if *object_id == spell
+                ))
+                .count(),
+            1
+        );
+        assert!(state.resolving_stack_entry.is_none());
     }
 
     fn choice_bearing_offer_test_mana_ability() -> AbilityDefinition {

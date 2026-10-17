@@ -90,8 +90,8 @@ describe("lobby capability floor for the Dandan format", () => {
 });
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v130", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(130);
+  it("pins the P2P wire protocol to v131", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(131);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {

@@ -410,20 +410,7 @@ fn claim_combat_lifelink_batch_events_for_ordinary_collection(
     events: &[GameEvent],
     event_start: usize,
 ) {
-    let occurrences = (event_start..events.len())
-        .map(|index| triggers::ConsumedTriggerEventOccurrence {
-            event: events[index].clone(),
-            occurrence: triggers::trigger_event_occurrence(events, index),
-            scope: triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
-        })
-        .collect();
-    triggers::resolve_and_apply_trigger_collection(
-        state,
-        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
-            occurrences,
-        },
-    )
-    .expect("combat lifelink ordinary trigger claim must have a live journal cause");
+    triggers::claim_events_for_ordinary_collection(state, events, event_start);
 }
 
 /// Returns a terminal or trigger-ordering state produced while combat damage resolves.

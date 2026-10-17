@@ -1178,6 +1178,30 @@ pub fn apply_resolved_trigger_collection(
     Ok(())
 }
 
+/// CR 603.2c: a batch owner that collected its own ordinary triggers from
+/// `events[event_start..]` claims those occurrences, so the generic
+/// post-action ordinary collector does not collect them a second time. The
+/// claim is scoped to ordinary collectors only: delayed collectors keep their
+/// CR 603.7 visibility of the same events.
+pub(crate) fn claim_events_for_ordinary_collection(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let occurrences = (event_start..events.len())
+        .map(|index| ConsumedTriggerEventOccurrence {
+            event: events[index].clone(),
+            occurrence: trigger_event_occurrence(events, index),
+            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("an ordinary-collection claim must have a live journal cause");
+}
+
 /// Resolves, applies, and journals one non-empty trigger/LKI collection append.
 ///
 /// Empty vectors are no-ops, so they deliberately do not allocate a causal
@@ -6996,6 +7020,14 @@ fn ring_level_four_ability(source_id: ObjectId, controller: PlayerId) -> Resolve
 /// Process events and place triggered abilities on the stack in APNAP order.
 /// CR 603.3b: Process triggered abilities waiting to be put on the stack.
 pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
+    // CR 603.3 + CR 603.3b + CR 608.2n: while an instant or sorcery owes its final
+    // part (a copy entry's replayed enters event, CR 614.12a, among others), what
+    // triggers waits in the queue for the resolution's batch instead of being put
+    // on the stack now.
+    if super::stack::resolving_spell_owes_final_part(state) {
+        collect_triggers_into_deferred(state, events);
+        return;
+    }
     let pending = collect_pending_triggers(state, events);
     let mut events_out = Vec::new();
     process_collected_triggers_with_delayed_phase_events(state, pending, &[], &mut events_out);
@@ -10657,8 +10689,9 @@ pub(super) enum DeferredTriggerDrainPolicy {
     /// stack, so parked observers cannot offer ordering mid-resolution.
     ResolutionSafe,
     /// CR 601.2h + CR 602.2b + CR 603.3: a passive announced stack object may
-    /// still be on the stack; its cost/cast observers, and the settled batch a
-    /// direct mana root converges into, drain above it.
+    /// still be on the stack; its cost/cast observers, the settled batch a
+    /// direct mana root converges into, and the batch of a resolution whose
+    /// CR 608.2n final part just ran, drain above it.
     SettledPriority,
 }
 
@@ -10667,6 +10700,20 @@ impl DeferredTriggerDrainPolicy {
         match self {
             DeferredTriggerDrainPolicy::Skip | DeferredTriggerDrainPolicy::ResolutionSafe => false,
             DeferredTriggerDrainPolicy::SettledPriority => true,
+        }
+    }
+
+    /// CR 608.2n + CR 117.5 + CR 603.3: the policy for a pass in which a paused
+    /// instant or sorcery's final part ran. Its resolution is over, so the batch
+    /// it completes is settled and drains above a spell still on the stack, like
+    /// `SettledPriority`; a seam that owns no drain keeps owning none.
+    pub(super) fn after_spell_final_part(self) -> Self {
+        match self {
+            DeferredTriggerDrainPolicy::Skip => DeferredTriggerDrainPolicy::Skip,
+            DeferredTriggerDrainPolicy::ResolutionSafe
+            | DeferredTriggerDrainPolicy::SettledPriority => {
+                DeferredTriggerDrainPolicy::SettledPriority
+            }
         }
     }
 }
@@ -10678,9 +10725,20 @@ fn can_drain_deferred_triggers(state: &GameState, policy: DeferredTriggerDrainPo
     if state.deferred_triggers.is_empty() || !resolution_completion_can_settle(state) {
         return false;
     }
+    // CR 603.3 + CR 603.3b + CR 608.2n: an instant or sorcery that still owes its
+    // final part is still resolving; nothing that triggered during it goes on the
+    // stack before that part runs, so the whole batch is placed together afterwards.
+    // Not part of `resolution_completion_can_settle`: that predicate feeds
+    // `engine::resolution_instructions_are_done`, which gates the final part itself.
+    if super::stack::resolving_spell_owes_final_part(state) {
+        return false;
+    }
     // CR 603.3b + issue #1793: observer triggers parked during a spell's
     // resolution must wait until that spell leaves the stack — draining while
     // a `Spell` entry remains would offer ordering mid player_scope iteration.
+    // A completed resolution's batch is admitted through `after_spell_final_part`;
+    // a resolution still under way keeps a live continuation or frame, which
+    // `resolution_completion_can_settle` refuses under every policy.
     if !policy.allows_spell_on_stack()
         && state
             .stack
@@ -41287,6 +41345,135 @@ pub mod tests {
             "drain must be a no-op while pending_continuation is set"
         );
         assert_eq!(state.deferred_triggers.len(), 2);
+    }
+
+    /// An instant or sorcery carrier, popped from `state.stack` but still in
+    /// the stack zone, installed as the resolving carrier.
+    fn install_resolving_sorcery_carrier(state: &mut GameState) -> ObjectId {
+        let spell = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Paused Sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(spell.0),
+                ability: None,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        spell
+    }
+
+    /// CR 603.3 + CR 603.3b + CR 608.2n: while a resolving instant or sorcery
+    /// owes its final part, its batch waits. The refusal lives in the drain
+    /// gate, not in `resolution_completion_can_settle`, which feeds the
+    /// "instructions done" predicate that gates the final part itself.
+    #[test]
+    fn an_owed_final_part_holds_the_batch_without_entering_the_settlement_predicate() {
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        let spell = install_resolving_sorcery_carrier(&mut state);
+        state.resolving_spell_final_part =
+            Some(crate::types::game_state::OwedSpellFinalPart { spell });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let settles_while_owed = resolution_completion_can_settle(&state);
+        let mut events = Vec::new();
+
+        assert!(drain_deferred_trigger_queue(&mut state, &mut events).is_none());
+        assert_eq!(state.deferred_triggers.len(), 2);
+
+        // Paired positive: with the marker cleared the same batch drains, and
+        // the settlement predicate's answer did not depend on the marker.
+        state.resolving_spell_final_part = None;
+        assert_eq!(resolution_completion_can_settle(&state), settles_while_owed);
+        assert!(matches!(
+            drain_deferred_trigger_queue(&mut state, &mut events),
+            Some(WaitingFor::OrderTriggers { .. })
+        ));
+    }
+
+    /// CR 608.2n + CR 117.5 + CR 603.3 + issue #1793: once a resolution's final
+    /// part has run, its batch may drain above a spell still on the stack; a
+    /// resolution still under way (a live continuation) stays refused even
+    /// under that admitting policy, and a seam that owns no drain keeps none.
+    #[test]
+    fn a_finished_spells_batch_may_drain_above_a_spell_but_not_mid_resolution() {
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        let below_card = CardId(state.next_object_id);
+        let below = create_object(
+            &mut state,
+            below_card,
+            PlayerId(0),
+            "Spell Below".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: below,
+            source_id: below,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(below.0),
+                ability: None,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        assert!(!can_drain_deferred_triggers(
+            &state,
+            DeferredTriggerDrainPolicy::ResolutionSafe
+        ));
+        assert!(can_drain_deferred_triggers(
+            &state,
+            DeferredTriggerDrainPolicy::ResolutionSafe.after_spell_final_part()
+        ));
+
+        state.park_ability_continuation(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(9999),
+                PlayerId(0),
+            )),
+            &state,
+        ));
+        assert!(!can_drain_deferred_triggers(
+            &state,
+            DeferredTriggerDrainPolicy::ResolutionSafe.after_spell_final_part()
+        ));
+
+        assert_eq!(
+            DeferredTriggerDrainPolicy::Skip.after_spell_final_part(),
+            DeferredTriggerDrainPolicy::Skip
+        );
+        assert_eq!(
+            DeferredTriggerDrainPolicy::SettledPriority.after_spell_final_part(),
+            DeferredTriggerDrainPolicy::SettledPriority
+        );
     }
 
     fn reflexive_delayed_trigger(
