@@ -1226,6 +1226,7 @@ mod transport_fixup_tests {
     use crate::issue_4548_full_create_tests::{
         recv_server_message, send_test_message, spawn_full_mode_server,
     };
+    use crate::socket_ingress::MAX_PAYLOAD_BYTES;
     use server_core::protocol::ClientMessage;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -1248,7 +1249,10 @@ mod transport_fixup_tests {
                 "padding": "x".repeat(60 * 1024),
             })
             .to_string();
-            for _ in 0..20 {
+            // Stop at the first frame that exceeds the retained-byte limit so
+            // later writes cannot race the explicit overflow close.
+            let overflow_frames = MAX_PAYLOAD_BYTES / frame.len() + 1;
+            for _ in 0..overflow_frames {
                 socket
                     .send(WsMessage::Text(frame.clone().into()))
                     .await
