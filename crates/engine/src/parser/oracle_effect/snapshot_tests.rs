@@ -220,7 +220,7 @@ fn conditional_search_unsupported_clauses_remain_explicit_gaps() {
         for root in roots {
             let _ = crate::types::ability_visit::visit_ability_def(root, &mut |effect| {
                 search |= matches!(effect, Effect::SearchLibrary { .. });
-                if let Effect::Unimplemented { description, .. } = effect {
+                if let Some(description) = effect.unimplemented_description() {
                     // allow-noncombinator: test inspects retained diagnostic text, not parsing dispatch.
                     gap |= description.to_ascii_lowercase().contains(fragment);
                 }
