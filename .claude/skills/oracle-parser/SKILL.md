@@ -980,6 +980,16 @@ Cross-reference the `/add-trigger` skill. Parser-specific: add pattern in `try_p
 
 ## 11. Diagnostics — Swallow Detectors & `parse_warnings`
 
+To inspect live antecedent decisions, run the normal filtered export with
+`RUST_LOG=engine::parser::binding=debug cargo run -p phase-engine --features cli --bin oracle-gen -- data/ --filter 'Sylvan Library' --output /tmp/binding-cards.json`.
+These stderr logs show card/stage, chain/clause source precision, assembly
+attempts and selection, candidate guard verdicts, and selected arena provenance.
+They cover `AssemblyEnv::resolve` and `resolve_all`; specialized positional
+bindings outside those methods are not covered. These execution logs are
+separate from the stage-comparison JSON report and do not change parse warnings
+or support classification. Node IDs and source offsets retain their local scope.
+
+
 The parser must never silently discard Oracle text. Every clause must either be represented in the parsed AST OR cause the line to fail and yield `Effect::Unimplemented` carrying the original phrase. **Anything in between is a parser lie.**
 
 The `crates/engine/src/parser/swallow_check.rs` module audits each card's parsed `ParsedAbilities` against its original Oracle text and emits a `parse_warning` for every marker phrase that has no AST representation. Findings surface in the coverage report via `CardFace::parse_warnings` (also written into each card's entry in `client/public/card-data.json`).
