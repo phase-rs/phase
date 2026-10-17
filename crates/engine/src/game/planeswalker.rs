@@ -97,15 +97,35 @@ fn can_activate_loyalty_ability_impl(
 
     // CR 606.3: Only if no player has previously activated a loyalty ability of
     // that permanent that turn. The per-permanent activation count is the
-    // authoritative gate; effects like `Effect::GrantExtraLoyaltyActivations`
-    // (The Chain Veil class) raise the per-planeswalker cap for the controller
-    // by adding to `extra_loyalty_activations_this_turn[controller]`.
+    // authoritative gate; `ModifyActivationLimit { keyword: "loyalty" }` statics
+    // (Oath of Teferi class, read live per CR 611.3a) SET the base cap via max
+    // semantics, while effects like `Effect::GrantExtraLoyaltyActivations`
+    // (The Chain Veil class) ADD to it via
+    // `extra_loyalty_activations_this_turn[controller]`.
     let extra_grants = state
         .extra_loyalty_activations_this_turn
         .get(&player)
         .copied()
         .unwrap_or(0);
-    let cap = 1u32.saturating_add(extra_grants);
+    // CR 606.3: static `ModifyActivationLimit` terms only RAISE the cap above
+    // the `1 + extra_grants` base (max semantics, floor 1), so when the count
+    // is already below the base cap the static scan cannot change the outcome
+    // and is skipped. Besides saving the walk, this keeps priority loyalty
+    // candidate production at a single exact static scan (the ActivateAsInstant
+    // permission consult): the pre-flush `all_present` presence default would
+    // otherwise fall through to a redundant exact scan here.
+    let base_cap = 1u32.saturating_add(extra_grants);
+    let cap = if obj.loyalty_activations_this_turn < base_cap {
+        base_cap
+    } else {
+        super::restrictions::loyalty_activation_cap_from_statics(
+            state,
+            player,
+            planeswalker_id,
+            restriction_gates,
+        )
+        .saturating_add(extra_grants)
+    };
     if obj.loyalty_activations_this_turn >= cap {
         return false;
     }

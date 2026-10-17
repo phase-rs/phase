@@ -224,6 +224,18 @@ html.game-viewport-lock #root {
   overflow: hidden;
 }
 
+/* Hidden tab (attribute owned by animation/hiddenDocumentMotion.ts): no CSS
+   animation or transition may start. A hidden tab renders no frames, so
+   Chromium holds every CSSAnimation/CSSTransition created by a forced style
+   pass, and with it the element, until the tab is shown. Each unmounted
+   pulsing badge or transitioning card would otherwise stay as detached DOM. */
+html[data-document-hidden] *,
+html[data-document-hidden] *::before,
+html[data-document-hidden] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
 /* The locked game document cannot act as a fallback scroll container. Keep the
    in-game menu within the visible viewport and let it own vertical touch scroll. */
 .game-menu-scroll {

@@ -514,7 +514,6 @@ impl Broker {
     pub fn heartbeat_reply(timestamp: u64) -> LobbyServerMessage {
         LobbyServerMessage::Pong { timestamp }
     }
-
     /// The reply to a frame that needs no broker state and has no side effects,
     /// or `None` when the frame must go through [`Broker::handle`].
     ///

@@ -846,7 +846,16 @@
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
     "pwControllerTrample": "PWコントローラー（PW越しのトランプル）"
   },
+  "cardTextReference": {
+    "title": "日本語カード本文（参考）",
+    "hint": "印刷されたカード本文全体です。現在のOracleや、この能力の文面と異なる場合があります。",
+    "originalAbility": "能力の原文"
+  },
   "stack": {
+    "activatedAbility": "起動型能力",
+    "activatedAbilityNumber": "起動型能力 {{number}}",
+    "triggeredAbility": "誘発型能力",
+    "readAbility": "能力の原文とカード本文を見る",
     "title": "スタック",
     "collapsePanel": "スタックパネルを折りたたむ",
     "expandPanel": "スタックパネルを展開",

@@ -137,8 +137,9 @@ mod support {
         with_protection_does_not_remove, RuleStaticPredicate,
     };
     pub(super) use super::restriction::{
-        parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
-        parse_relative_count_typed_cast_prohibitions, strip_casting_prohibition_subject,
+        parse_cant_be_activated_exemption_in_text, parse_cant_draw_cards_or_gain_life,
+        parse_cast_and_activate_only_during, parse_relative_count_typed_cast_prohibitions,
+        strip_casting_prohibition_subject,
     };
     pub(super) use super::shared::*;
     pub(super) use super::static_helpers::*;

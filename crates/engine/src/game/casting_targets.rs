@@ -151,6 +151,8 @@ pub(crate) fn handle_select_modes(
     // Build a chain of ResolvedAbility from chosen modes (in order)
     let mut resolved = build_chained_resolved(&abilities, &indices, pending.object_id, controller)?;
     resolved.set_context_recursive(pending.ability.context.clone());
+    // CR 601.2b + CR 601.2c: the chosen modes declare only the targets chosen for them.
+    resolved.start_target_record_recursive();
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
     // CR 700.2a + CR 700.2d + CR 601.2b: latch the chosen modal-mode indices onto
     // the spell's context so finalize can stamp them on the stack object (read by

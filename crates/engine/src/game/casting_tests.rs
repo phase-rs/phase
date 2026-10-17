@@ -14279,21 +14279,28 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         let obj = state.objects.get_mut(&opposing_bolt).unwrap();
         obj.card_types.core_types.push(CoreType::Instant);
     }
+    let mut opposing_bolt_ability = ResolvedAbility::new(
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+        vec![],
+        opposing_bolt,
+        PlayerId(1),
+    );
+    assign_targets_in_chain(
+        &state,
+        &mut opposing_bolt_ability,
+        &[TargetRef::Object(large_creature)],
+    )
+    .expect("the spell takes one target");
     state.stack.push_back(StackEntry {
         id: opposing_bolt,
         source_id: opposing_bolt,
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(997),
-            ability: Some(Box::new(ResolvedAbility::new(
-                Effect::Destroy {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    cant_regenerate: false,
-                },
-                vec![TargetRef::Object(large_creature)],
-                opposing_bolt,
-                PlayerId(1),
-            ))),
+            ability: Some(Box::new(opposing_bolt_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 1,
         },
@@ -14337,21 +14344,28 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
     );
     let stack_ability_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
+    let mut stack_ability = ResolvedAbility::new(
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+        vec![],
+        ability_source,
+        PlayerId(1),
+    );
+    assign_targets_in_chain(
+        &state,
+        &mut stack_ability,
+        &[TargetRef::Object(large_creature)],
+    )
+    .expect("the ability takes one target");
     state.stack.push_back(StackEntry {
         id: stack_ability_id,
         source_id: ability_source,
         controller: PlayerId(1),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ability_source,
-            ability: Box::new(ResolvedAbility::new(
-                Effect::Destroy {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    cant_regenerate: false,
-                },
-                vec![TargetRef::Object(large_creature)],
-                ability_source,
-                PlayerId(1),
-            )),
+            ability: Box::new(stack_ability),
         },
     });
     let not_of_this_world_targeting_ability = ResolvedAbility::new(
@@ -24882,14 +24896,14 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         .push(CoreType::Creature);
     add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
 
-    let ability = ResolvedAbility::new(
+    let mut ability = ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Player,
             damage_source: None,
             excess: None,
         },
-        vec![TargetRef::Player(PlayerId(1))],
+        vec![],
         object_id,
         PlayerId(0),
     )
@@ -24898,10 +24912,16 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
             target: TargetFilter::Typed(TypedFilter::creature()),
             cant_regenerate: false,
         },
-        vec![TargetRef::Object(creature)],
+        vec![],
         object_id,
         PlayerId(0),
     ));
+    assign_targets_in_chain(
+        &state,
+        &mut ability,
+        &[TargetRef::Player(PlayerId(1)), TargetRef::Object(creature)],
+    )
+    .expect("the chain takes one target per node");
 
     let mut events = Vec::new();
 

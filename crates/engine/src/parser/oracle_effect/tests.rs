@@ -85955,6 +85955,125 @@ mod bare_pronoun_after_object_creation_tests {
             grants[0]
         );
     }
+
+    fn trigger_json(text: &str) -> serde_json::Value {
+        let parsed = parse_oracle_text(text, "Row", &[], &["Creature".to_string()], &[]);
+        serde_json::to_value(&parsed.triggers).unwrap()
+    }
+
+    /// CR 111.3: a "They have" sentence after a trigger's token clause is the tokens' own text,
+    /// whoever the trigger's event player is (Rapacious One).
+    #[test]
+    fn they_have_after_a_triggered_token_clause_is_the_tokens_own_ability() {
+        let parsed = parse_oracle_text(
+            "Trample\nWhenever this creature deals combat damage to a player, create that many 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\"",
+            "Rapacious One",
+            &["trample".to_string()],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string(), "Drone".to_string()],
+        );
+        let json = serde_json::to_value(&parsed.triggers).unwrap();
+        let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        let statics = &tokens[0]["static_abilities"];
+        assert_eq!(statics.as_array().map_or(0, Vec::len), 1, "{}", tokens[0]);
+        assert_eq!(statics[0]["affected"]["type"], "SelfRef", "{}", tokens[0]);
+        assert_eq!(
+            statics[0]["modifications"][0]["type"], "GrantAbility",
+            "{}",
+            tokens[0]
+        );
+        assert!(grants.is_empty(), "{json}");
+        assert!(!json.to_string().contains("TriggeringPlayer"), "{json}");
+    }
+
+    /// CR 608.2c: "They" as the object of a grant reads the tokens the chain just created, under
+    /// an event player and under a targeted player alike.
+    #[test]
+    fn they_gain_after_a_token_clause_reads_the_tokens_under_a_player_scoped_chain() {
+        for json in [
+            trigger_json(
+                "Whenever this creature deals combat damage to a player, create two 1/1 red Goblin creature tokens. They gain haste until end of turn.",
+            ),
+            chain_json(
+                "Target player creates two 1/1 white Soldier creature tokens. They gain haste until end of turn.",
+            ),
+        ] {
+            let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+            effect_nodes(&json, "Token", &mut tokens);
+            effect_nodes(&json, "GenericEffect", &mut grants);
+            assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+            assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+            assert_eq!(
+                grants[0]["static_abilities"][0]["affected"]["type"], "LastCreated",
+                "{}",
+                grants[0]
+            );
+            assert_eq!(grants[0]["duration"], "UntilEndOfTurn", "{}", grants[0]);
+        }
+    }
+
+    /// CR 701.9a: only a player discards, so "They" as the actor stays the damaged player after a
+    /// token clause.
+    #[test]
+    fn they_as_an_actor_after_a_token_clause_stays_the_event_player() {
+        let json = trigger_json(
+            "Whenever this creature deals combat damage to a player, create a Treasure token. They discard a card.",
+        );
+        let (mut tokens, mut discards) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "Discard", &mut discards);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        assert_eq!(discards.len(), 1, "reach guard: the Discard node: {json}");
+        assert_eq!(
+            discards[0]["target"],
+            serde_json::json!({ "type": "TriggeringPlayer" }),
+            "{json}"
+        );
+    }
+
+    /// CR 119.3: with nothing created, "They" as the object of a restriction is the damaged
+    /// player.
+    #[test]
+    fn they_as_a_grant_object_with_nothing_created_stays_the_event_player() {
+        let json = trigger_json(
+            "Whenever this creature deals combat damage to a player, you draw a card. They can't gain life this turn.",
+        );
+        let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert!(tokens.is_empty(), "{json}");
+        assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+        assert_eq!(
+            grants[0]["static_abilities"][0]["affected"]["type"], "TriggeringPlayer",
+            "{}",
+            grants[0]
+        );
+    }
+
+    /// CR 608.2c: an "each …" population named after the token clause is the nearer antecedent
+    /// of "They".
+    #[test]
+    fn they_after_a_token_clause_and_a_mass_clause_reads_the_mass_population() {
+        let json = trigger_json(
+            "Whenever you cast a white spell, create a 1/1 white Soldier creature token. Put a +1/+1 counter on each legendary creature you control. They gain vigilance until end of turn.",
+        );
+        let (mut tokens, mut counters, mut grants) = (Vec::new(), Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "PutCounterAll", &mut counters);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        assert_eq!(counters.len(), 1, "reach guard: the mass node: {json}");
+        assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+        assert_eq!(counters[0]["target"]["type"], "Typed", "{}", counters[0]);
+        assert_eq!(
+            grants[0]["static_abilities"][0]["affected"], counters[0]["target"],
+            "{}",
+            grants[0]
+        );
+    }
 }
 
 const FINALE_OF_PROMISE: &str = "You may cast up to one target instant card and/or up to one target sorcery card from your graveyard each with mana value X or less without paying their mana costs. If a spell cast this way would be put into your graveyard, exile it instead. If X is 10 or more, copy each of those spells twice. You may choose new targets for the copies.";
@@ -87681,4 +87800,308 @@ fn subject_creatures_not_of_chosen_type_pumps_all_excluding_chosen_type() {
     );
     // Without the duration the mass -3/-3 would never wear off.
     assert_eq!(pump.duration, Some(Duration::UntilEndOfTurn));
+}
+
+// ── #9658: producer-bound entry-counter riders (CR 608.2c + CR 614.1c) ──────
+
+/// Every ability definition reachable from `def` (sub and else branches).
+fn walk_ability_chain<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+    out.push(def);
+    if let Some(sub) = def.sub_ability.as_deref() {
+        walk_ability_chain(sub, out);
+    }
+    if let Some(else_branch) = def.else_ability.as_deref() {
+        walk_ability_chain(else_branch, out);
+    }
+}
+
+fn spell_chain_definitions(text: &str) -> Vec<AbilityDefinition> {
+    parse_oracle_text(text, "Test Sorcery", &[], &["Sorcery".to_string()], &[]).abilities
+}
+
+fn chain_definitions(abilities: &[AbilityDefinition]) -> Vec<&AbilityDefinition> {
+    let mut out = Vec::new();
+    for ability in abilities {
+        walk_ability_chain(ability, &mut out);
+    }
+    out
+}
+
+fn has_parent_target_put(defs: &[&AbilityDefinition]) -> bool {
+    defs.iter().any(|def| {
+        matches!(
+            &*def.effect,
+            Effect::PutCounter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
+    })
+}
+
+fn has_unimplemented_rider(defs: &[&AbilityDefinition]) -> bool {
+    defs.iter().any(|def| {
+        def.effect
+            .unimplemented_description()
+            .is_some_and(|text| text.to_lowercase().contains("enters with"))
+    })
+}
+
+/// CR 608.2c + CR 614.1c + CR 122.6: an "it enters with an additional +1/+1
+/// counter on it" rider is read only under a battlefield mover whose rider is
+/// gated on an object entering this way; that rider folds into the move's
+/// entry counters. Under any other producer (or none) the rider stays an
+/// explicit gap, never a dangling `PutCounter { ParentTarget }`.
+#[test]
+fn entry_counter_riders_are_producer_bound() {
+    // Reach guard: Recommission (verbatim) still folds into its ChangeZone.
+    let recommission = spell_chain_definitions(
+        "Return target artifact or creature card with mana value 3 or less from your graveyard to the battlefield. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+    );
+    let defs = chain_definitions(&recommission);
+    assert!(
+        defs.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                conditional_enter_with_counters,
+                ..
+            } if !conditional_enter_with_counters.is_empty()
+        )),
+        "reach guard: the battlefield-mover rider folds, got {recommission:?}"
+    );
+    assert!(!has_parent_target_put(&defs));
+    assert!(defs
+        .iter()
+        .all(|def| def.effect.unimplemented_description().is_none()));
+
+    let exile_mover = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        )
+    };
+    let battlefield_mover = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+    };
+    let sacrifice = |effect: &Effect| matches!(effect, Effect::Sacrifice { .. });
+    let discard = |effect: &Effect| matches!(effect, Effect::Discard { .. });
+    let gain_life = |effect: &Effect| matches!(effect, Effect::GainLife { .. });
+    // Each case names the preceding instructions that must parse (the positive
+    // reach guard for the rider assertions below).
+    struct RiderGapCase<'a> {
+        text: &'static str,
+        predecessors: &'a [fn(&Effect) -> bool],
+    }
+    let cases = [
+        // Exile parent.
+        RiderGapCase {
+            text: "Exile target creature card from your graveyard. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[exile_mover],
+        },
+        // Sacrifice parent.
+        RiderGapCase {
+            text: "Sacrifice a creature. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[sacrifice],
+        },
+        // Discard parent.
+        RiderGapCase {
+            text: "Discard a card. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[discard],
+        },
+        // An intervening instruction between the mover and the rider.
+        RiderGapCase {
+            text: "Return target creature card from your graveyard to the battlefield. You gain 2 life. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[battlefield_mover, gain_life],
+        },
+        // No predecessor at all: this row expects only the rider gap, so it
+        // has no preceding-instruction reach guard.
+        RiderGapCase {
+            text: "If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[],
+        },
+        // The reanimation witness: a battlefield mover, but no "this way" gate.
+        RiderGapCase {
+            text: "Return target creature card from your graveyard to the battlefield. It enters with a +1/+1 counter on it.",
+            predecessors: &[battlefield_mover],
+        },
+    ];
+    for RiderGapCase { text, predecessors } in cases {
+        let abilities = spell_chain_definitions(text);
+        let defs = chain_definitions(&abilities);
+        for (index, predecessor) in predecessors.iter().enumerate() {
+            assert!(
+                defs.iter().any(|def| predecessor(&def.effect)),
+                "{text:?}: reach guard: preceding instruction {index} parses, got {abilities:?}"
+            );
+        }
+        assert!(
+            !has_parent_target_put(&defs),
+            "{text:?}: no dangling PutCounter {{ ParentTarget }}, got {abilities:?}"
+        );
+        assert!(
+            has_unimplemented_rider(&defs),
+            "{text:?}: the rider must stay an explicit gap, got {abilities:?}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 614.1c: What Must Be Done's second mode (verbatim, MTGJSON).
+/// The rider is gated on a trailing "if it's a creature" (a card-type
+/// condition, not "enters this way"), so the battlefield-mover arm refuses it
+/// and the rider stays an explicit gap. It is never a post-move
+/// `PutCounter { ParentTarget }`, which would put counters after the entry
+/// rather than as the permanent enters.
+#[test]
+fn what_must_be_done_rider_is_not_a_post_move_put() {
+    let abilities = spell_chain_definitions(
+        "Return target historic permanent card from your graveyard to the battlefield. It enters with two additional +1/+1 counters on it if it's a creature.",
+    );
+    let defs = chain_definitions(&abilities);
+    assert!(
+        defs.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )),
+        "reach guard: the battlefield ChangeZone exists, got {abilities:?}"
+    );
+    assert!(
+        !has_parent_target_put(&defs),
+        "no post-move PutCounter, got {abilities:?}"
+    );
+    assert!(
+        defs.iter()
+            .all(|def| def.effect.unimplemented_description().is_some()
+                || !matches!(
+                    def.condition,
+                    Some(AbilityCondition::RevealedHasCardType { .. })
+                )),
+        "no RevealedHasCardType-gated put, got {abilities:?}"
+    );
+    assert!(has_unimplemented_rider(&defs), "got {abilities:?}");
+}
+
+/// CR 608.2c + CR 614.1c: the cast-this-way entry rider is read only under a
+/// lingering graveyard cast permission with a stated window, the one shape
+/// whose runtime (`grant_lingering_permissions`) consumes it. Immediate and
+/// windowless casts have no consumer, so their rider stays an explicit gap
+/// instead of a silently dropped `AddPendingETBCounters`.
+#[test]
+fn cast_permission_rider_requires_the_lingering_shape() {
+    let pending_counters = |defs: &[&AbilityDefinition]| {
+        defs.iter()
+            .any(|def| matches!(&*def.effect, Effect::AddPendingETBCounters { .. }))
+    };
+    // Reach guards: Osteomancer Adept (verbatim activated line) keeps its rider,
+    // and the separate when-next delayed rider is untouched.
+    let osteomancer = parse_oracle_text(
+        "{T}: Until end of turn, you may cast creature spells from your graveyard by foraging in addition to paying their other costs. If you cast a spell this way, that creature enters with a finality counter on it.",
+        "Osteomancer Adept",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(pending_counters(&chain_definitions(&osteomancer.abilities)));
+    // The Tomb of Aclazotz (verbatim back face): its "If you do," lead is the
+    // performed-signal condition of the rider clause.
+    let tomb = parse_oracle_text(
+        "{T}: Add {B}.\n{T}: You may cast a creature spell from your graveyard this turn. If you do, it enters with a finality counter on it and is a Vampire in addition to its other types. (If a creature with a finality counter on it would die, exile it instead.)",
+        "The Tomb of Aclazotz",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let tomb_defs = chain_definitions(&tomb.abilities);
+    assert!(pending_counters(&tomb_defs), "got {:?}", tomb.abilities);
+    assert!(
+        tomb_defs
+            .iter()
+            .any(|def| matches!(&*def.effect, Effect::AddPendingEntersModifications { .. })),
+        "the Vampire type grant rides with the counter, got {:?}",
+        tomb.abilities
+    );
+    assert!(tomb_defs
+        .iter()
+        .all(|def| def.effect.unimplemented_description().is_none()));
+    let when_next = spell_chain_definitions(
+        "When you next cast a creature spell this turn, that creature enters with an additional +1/+1 counter on it.",
+    );
+    assert!(
+        format!("{when_next:?}").contains("AddPendingETBCounters"),
+        "reach guard: the when-next rider is untouched, got {when_next:?}"
+    );
+
+    let graveyard_cast = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.properties.contains(&crate::types::ability::FilterProp::InZone {
+                zone: Zone::Graveyard,
+            })
+        )
+    };
+    let graveyard_exile = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                ..
+            }
+        )
+    };
+    // The cast grant parses, then the final-tree gate replaces it with this
+    // named gap because its "If you do" rider cannot reach the spell.
+    let refused_cast_grant = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::Unimplemented { name, .. }
+                if name == super::lower::CAST_RIDER_ON_LINGERING_GRANT_GAP
+        )
+    };
+    type Producer = fn(&Effect) -> bool;
+    let cases: [(&str, &[Producer]); 2] = [
+        // Windowless (duration None) cast.
+        (
+            "Cast target creature card from your graveyard without paying its mana cost. It enters with a finality counter on it.",
+            &[graveyard_cast],
+        ),
+        // The nearest producer is not a lingering cast grant the rider can ride.
+        (
+            "Exile target creature card from a graveyard. You may cast it this turn. If you do, it enters with a finality counter on it.",
+            &[graveyard_exile, refused_cast_grant],
+        ),
+    ];
+    for (text, producers) in cases {
+        let abilities = spell_chain_definitions(text);
+        let defs = chain_definitions(&abilities);
+        for (index, producer) in producers.iter().enumerate() {
+            assert!(
+                defs.iter().any(|def| producer(&def.effect)),
+                "{text:?}: reach guard: producer {index} parses, got {abilities:?}"
+            );
+        }
+        assert!(
+            !pending_counters(&defs),
+            "{text:?}: no rider without a lingering producer, got {abilities:?}"
+        );
+        assert!(
+            has_unimplemented_rider(&defs),
+            "{text:?}: the rider stays an explicit gap, got {abilities:?}"
+        );
+    }
 }

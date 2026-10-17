@@ -2755,6 +2755,28 @@ fn rekey_counter_slot_in_chain(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 608.2c + CR 614.1c + CR 122.6: the one producer/condition shape under which an
+/// "… enters this way" entry-counter rider folds into its mover: the nearest
+/// preceding instruction moves an object onto the battlefield, and the rider is
+/// gated on an object entering this way. Shared by the fold below and the
+/// chain-ladder rider dispatch, so the two cannot disagree about which riders
+/// have a producer.
+pub(super) fn entry_rider_folds_into(prior: &Effect, cond: &AbilityCondition) -> bool {
+    matches!(
+        prior,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        }
+    ) && matches!(
+        cond,
+        AbilityCondition::ZoneChangedThisWay {
+            destination: None | Some(Zone::Battlefield),
+            ..
+        }
+    )
+}
+
 pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
     let parent_moves_to_battlefield = matches!(
         *def.effect,
@@ -2782,24 +2804,21 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
 
     // CR 122.6: counters given as an object enters the battlefield use the
     // same entry-counter representation as counters put on a battlefield object.
-    // The parent is itself a battlefield-entry effect, so both legacy
-    // destination-agnostic conditions and explicit battlefield-arrival
-    // conditions describe this typed entry-counter slot. Other named
-    // destinations must remain standalone riders.
-    let Some(AbilityCondition::ZoneChangedThisWay {
-        filter,
-        destination,
-    }) = sub.condition.clone()
-    else {
-        def.sub_ability = Some(sub);
-        fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
-        return;
+    // Only the shared producer/condition shape folds (`entry_rider_folds_into`);
+    // a `Dig` parent, other named destinations and non-this-way conditions
+    // remain standalone riders.
+    let filter = match sub.condition.as_ref() {
+        Some(condition @ AbilityCondition::ZoneChangedThisWay { filter, .. })
+            if entry_rider_folds_into(&def.effect, condition) =>
+        {
+            filter.clone()
+        }
+        _ => {
+            def.sub_ability = Some(sub);
+            fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
+            return;
+        }
     };
-    if !matches!(destination, None | Some(Zone::Battlefield)) {
-        def.sub_ability = Some(sub);
-        fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
-        return;
-    }
 
     if let Effect::PutCounter {
         counter_type,

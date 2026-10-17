@@ -1872,6 +1872,23 @@ pub(super) fn match_spell_cast(
             return false;
         }
     }
+    // CR 115.9a / CR 115.9c: a single target, counted as the requirement says.
+    if let Some(count) = trigger
+        .valid_card
+        .as_ref()
+        .and_then(super::filter::single_target_count)
+    {
+        let targets = state
+            .stack
+            .iter()
+            .find(|e| e.id == *object_id)
+            .and_then(|e| e.ability())
+            .map(super::ability_utils::declared_targets_in_chain)
+            .unwrap_or_default();
+        if !count.admits(&targets) {
+            return false;
+        }
+    }
     // CR 115.9b: Check "that targets [X]" constraint (.any() semantics).
     if let Some(targets_filter) = trigger
         .valid_card
@@ -5563,13 +5580,14 @@ fn stack_entry_targets_only(
     let Some(ability) = entry.ability() else {
         return false;
     };
+    let targets = super::ability_utils::declared_targets_in_chain(ability);
     // A spell with no targets doesn't "target only X" — it doesn't target at all.
-    if ability.targets.is_empty() {
+    if targets.is_empty() {
         return false;
     }
     let source_controller = Some(source_context.source_read(state).controller());
     let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-    ability.targets.iter().all(|t| match t {
+    targets.iter().all(|t| match t {
         TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
         TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
             state,
@@ -5596,12 +5614,13 @@ fn stack_entry_targets_any(
     let Some(ability) = entry.ability() else {
         return false;
     };
-    if ability.targets.is_empty() {
+    let targets = super::ability_utils::declared_targets_in_chain(ability);
+    if targets.is_empty() {
         return false;
     }
     let source_controller = Some(source_context.source_read(state).controller());
     let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-    ability.targets.iter().any(|t| match t {
+    targets.iter().any(|t| match t {
         TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
         TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
             state,

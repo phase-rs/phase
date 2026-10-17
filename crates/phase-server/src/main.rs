@@ -8224,6 +8224,7 @@ async fn handle_full_game_submission(
             let _ = reply.send(ServerMessage::ActionNoOp);
             return;
         }
+
         Err(error) => {
             let message = match error {
                 SessionActionError::Operational(message) => ServerMessage::ActionFailed { message },
@@ -20701,6 +20702,7 @@ mod issue_4548_deadlock_tests {
     }
 
     #[tokio::test]
+
     async fn lobby_expiry_releases_broker_before_waiting_for_connections() {
         let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
         let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));

@@ -1312,6 +1312,12 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // modes above; without it the swallow auditor false-positives an
             // Optional_YouMay clause and demotes the card from "supported."
             | StaticMode::CastFromHandFree { .. }
+    ) || matches!(
+        // CR 606.3 + CR 602.5b: "You may activate ... twice ... rather than
+        // (only) once" (Oath of Teferi class) — the "you may" is the
+        // loyalty permission itself, not an exemption for unrelated keywords.
+        mode,
+        StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
     )
 }
 
@@ -8998,6 +9004,36 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 606.3: Oath of Teferi's verbatim full text types line 2 as a
+    /// `ModifyActivationLimit` permission static, so neither `Optional_YouMay`
+    /// (the "you may" IS the permission) nor `DynamicQty` (the "twice" is an
+    /// activation limit, not a quantity) may fire. The static-presence
+    /// assertion is the reach-guard: without the grammar the line is
+    /// `Unimplemented`, which suppresses all detectors and would pass vacuously.
+    /// Reverting the `static_mode_is_optional_permission` arm trips
+    /// `Optional_YouMay` here.
+    #[test]
+    fn optional_you_may_accepts_oath_of_teferi_loyalty_limit_static() {
+        let parsed = parse_named(
+            "When Oath of Teferi enters, exile another target permanent you control. Return it to the battlefield under its owner's control at the beginning of the next end step.\n\
+             You may activate the loyalty abilities of planeswalkers you control twice each turn rather than only once.",
+            "Oath of Teferi",
+            &["Enchantment"],
+        );
+
+        assert!(
+            parsed.statics.iter().any(|d| matches!(
+                &d.mode,
+                StaticMode::ModifyActivationLimit { keyword, new_limit: 2 }
+                    if keyword == "loyalty"
+            )),
+            "reach-guard: line 2 must type as the loyalty limit static, got {:?}",
+            parsed.statics
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
     }
 
     /// CR 701.20a + CR 608.2c: RevealUntil's "you may put that card onto the

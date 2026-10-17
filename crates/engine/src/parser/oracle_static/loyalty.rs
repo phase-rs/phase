@@ -7,6 +7,8 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::TypedFilter;
+use nom::bytes::complete::take_till;
+use nom::combinator::map_opt;
 
 pub(crate) fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()> {
     value(
@@ -91,6 +93,95 @@ pub(crate) fn parse_tagged_ability_activation_timing_permission(
             keyword: Some(tag_value),
         })
         .affected(TargetFilter::Typed(TypedFilter::permanent()))
+        .description(text.to_string()),
+    )
+}
+
+/// CR 606.3: "You may activate [the] loyalty abilities of \<subject\> \<count\>
+/// each turn rather than only once" — the loyalty-activation SET-cap static
+/// (Oath of Teferi: subject "planeswalkers you control"; Urza, Planeswalker:
+/// subject `~` after card-name normalization).
+///
+/// Composes the boast count axis (`twice`/`thrice`/N, mirroring the
+/// `dispatch.rs` boast branch rather than extracting it) with the Eidolon
+/// subject axis ("loyalty abilities of \<subject\>"). Emits the existing
+/// `StaticMode::ModifyActivationLimit` with the `"loyalty"` keyword
+/// convention the cost gate already matches (`casting.rs`), consumed by the
+/// loyalty legality check against `is_loyalty_ability_cost` — never by
+/// `AbilityTag`, which loyalty abilities deliberately lack.
+///
+/// Scope wording selects mechanism: only the "each turn" continuous scope is
+/// accepted. A "this turn" one-shot scope fails the tail and returns `None`,
+/// failing closed to today's honest `Unimplemented` so a future
+/// permanent-printed "twice this turn" line can never silently acquire
+/// permanent semantics. An unrecognized subject (including empty) is likewise
+/// rejected rather than emitting a match-anything filter.
+pub(crate) fn parse_loyalty_activation_limit_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject, new_limit) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("you may activate ").parse(i)?;
+        let (i, _) = opt(tag("the ")).parse(i)?;
+        let (i, _) = tag("loyalty abilities of ").parse(i)?;
+        let (i, (subject, new_limit)) = alt((
+            map(
+                terminated(
+                    take_until(" twice each turn rather than "),
+                    tag(" twice each turn rather than "),
+                ),
+                |subject: &str| (subject.to_string(), 2u8),
+            ),
+            map(
+                terminated(
+                    take_until(" thrice each turn rather than "),
+                    tag(" thrice each turn rather than "),
+                ),
+                |subject: &str| (subject.to_string(), 3u8),
+            ),
+            map(
+                (
+                    take_till(|c: char| c.is_ascii_digit()),
+                    map_opt(nom_primitives::parse_number, |n| {
+                        u8::try_from(n).ok().filter(|&limit| limit != 0)
+                    }),
+                    tag(" times each turn rather than "),
+                ),
+                |(subject, new_limit, _)| (subject.to_string(), new_limit),
+            ),
+        ))
+        .parse(i)?;
+        let (i, _) = opt(tag("only ")).parse(i)?;
+        let (i, _) = tag("once").parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = all_consuming(value((), tag(""))).parse(i)?;
+        Ok((i, (subject, new_limit)))
+    })
+    .map(|((subject, new_limit), _)| (subject, new_limit))?;
+
+    // CR 201.5 + CR 201.5c: a self-reference subject scopes the static to its source
+    // (the `dispatch.rs` "~" pattern); anything else folds through the typed
+    // subject phrase. Reject an empty or unrecognized subject outright.
+    let trimmed = subject.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let affected = if trimmed == "~" {
+        TargetFilter::SelfRef
+    } else {
+        let (affected, rest) = parse_type_phrase_folding(trimmed);
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        affected
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit,
+        })
+        .affected(affected)
         .description(text.to_string()),
     )
 }
