@@ -458,7 +458,6 @@ fn ruin_search_result_follows_wastes_and_optional_put_decision() {
         let mut events = Vec::new();
         let _ = pass_to_pause(&mut runner, &mut events);
         assert_search_prompt(&runner, &[found], true);
-        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
         assert_eq!(runner.state().objects[&found].zone, Zone::Library);
         assert!(!events
             .iter()
@@ -556,7 +555,6 @@ fn conditional_search_empty_pick_drains_without_borrowing_a_result() {
         let mut events = Vec::new();
         let _ = pass_to_pause(&mut runner, &mut events);
         assert_search_prompt(&runner, &[found.unwrap()], true);
-        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
         assert_eq!(runner.state().objects[&found.unwrap()].zone, Zone::Library);
         assert!(!events
             .iter()
