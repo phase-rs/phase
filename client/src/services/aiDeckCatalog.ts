@@ -29,6 +29,12 @@ export interface AiDeckCandidate {
 export interface AiDeckCatalogOptions {
   selectedFormat?: GameFormat | null;
   selectedMatchType?: MatchType | null;
+  /**
+   * Set false when the caller receives the catalog from a hoisted call
+   * instead (e.g. `AiOpponentConfig` under `GameSetupPage`, which shares one
+   * analysis with the human pool): the hook stays idle and returns empty.
+   */
+  enabled?: boolean;
 }
 
 export interface AiDeckCatalogResult {
@@ -154,14 +160,16 @@ export async function buildLegalAiDeckCatalog(
 export function useAiDeckCatalog({
   selectedFormat,
   selectedMatchType,
+  enabled = true,
 }: AiDeckCatalogOptions): UseAiDeckCatalogResult {
   const [result, setResult] = useState<UseAiDeckCatalogResult>({
     candidates: [],
-    loading: true,
+    loading: enabled,
     error: null,
   });
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     setResult((current) => ({ ...current, loading: true, error: null }));
     buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType })
@@ -180,7 +188,7 @@ export function useAiDeckCatalog({
     return () => {
       cancelled = true;
     };
-  }, [selectedFormat, selectedMatchType]);
+  }, [selectedFormat, selectedMatchType, enabled]);
 
   return result;
 }
