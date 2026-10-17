@@ -33175,6 +33175,7 @@ mod sacrifice_cost_context_identity_tests {
                 None,
                 false,
                 None,
+                false,
                 &mut vec![],
             )
             .unwrap();

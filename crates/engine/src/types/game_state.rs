@@ -8755,20 +8755,8 @@ impl GameState {
             .or_else(|| owners.first().copied())
     }
 
-    /// Temporarily removes the announcement-local trigger transaction from the
-    /// pending cast that currently owns it (any [`PendingCastOwner`]).
-    pub(crate) fn take_pending_activation_trigger_collection(
-        &mut self,
-    ) -> Option<Box<crate::game::triggers::PendingActivationTriggerCollection>> {
-        let owner = self.pending_trigger_carrier_owner()?;
-        self.pending_cast_at_mut(owner)?
-            .activation_trigger_collection
-            .take()
-    }
-
-    /// Restores the transaction removed by
-    /// [`Self::take_pending_activation_trigger_collection`] to the same active
-    /// casting continuation.
+    /// Restores a transaction taken from the announcement's `PendingCast` to
+    /// the same active casting continuation.
     pub(crate) fn restore_pending_activation_trigger_collection(
         &mut self,
         collection: Box<crate::game::triggers::PendingActivationTriggerCollection>,

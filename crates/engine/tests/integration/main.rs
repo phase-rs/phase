@@ -49,6 +49,7 @@ mod announced_counter_recipient_set;
 mod announced_target_set_placement;
 mod announced_x_discard_cost;
 mod announced_x_effect_counts;
+mod announcement_trigger_collection;
 mod another_round_repeat;
 mod anya_merciless_angel_5920;
 mod april_oneil_card_types_among_spells_cast;
