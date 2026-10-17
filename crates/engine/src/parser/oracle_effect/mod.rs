@@ -41659,6 +41659,7 @@ fn unsupported_search_result_guard(
     clauses: &[ClauseIr],
     ctx: &ParseContext,
 ) -> Option<(String, ParsedEffectClause)> {
+    adjacent_search_result_owners(clauses, ctx)?;
     let mut trial = ctx.clone_throwaway();
     let ClauseAst::Conditional {
         guard: ConditionalGuard::Unlowered(GuardReading::State),
@@ -41681,7 +41682,6 @@ fn unsupported_search_result_guard(
     {
         return None;
     }
-    adjacent_search_result_owners(clauses, ctx)?;
     Some((clause_text, body))
 }
 

@@ -1,10 +1,19 @@
+use engine::game::game_object::AttachTarget;
+use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
-use engine::types::ability::{EffectKind, TargetRef};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, AttachSelection, ContinuousModification, ControllerRef,
+    DoubleTarget, Duration, Effect, EffectKind, FilterProp, QuantityExpr,
+    SearchSelectionConstraint, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{GameRng, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, TrackedSetId};
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -1155,4 +1164,767 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
             .iter()
             .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
     }
+}
+
+// Synthetic typed API contracts: no printed card is claimed to combine these
+// instructions. The bare tracked-set movement demands real search-finalizer
+// publication, rather than assuming that a membership property publishes a set.
+fn synthetic_optional_search(mut sibling: AbilityDefinition) -> AbilityDefinition {
+    sibling.sub_link = SubAbilityLink::SequentialSibling;
+    let shuffle = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Shuffle {
+            target: TargetFilter::Controller,
+        },
+    )
+    .sub_ability(sibling);
+    let mut movement: Effect = serde_json::from_value(serde_json::json!({
+        "type":"ChangeZone", "origin":"Library", "destination":"Battlefield",
+        "target":{"type":"TrackedSet","id":0}
+    }))
+    .unwrap();
+    let Effect::ChangeZone {
+        enter_with_counters,
+        ..
+    } = &mut movement
+    else {
+        unreachable!()
+    };
+    *enter_with_counters = vec![
+        (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 }),
+        (CounterType::Lore, QuantityExpr::Fixed { value: 3 }),
+    ];
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SearchLibrary {
+            source_zones: vec![Zone::Library],
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: true,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+        },
+    )
+    .optional()
+    .sub_ability(AbilityDefinition::new(AbilityKind::Spell, movement).sub_ability(shuffle))
+}
+
+#[test]
+fn declined_search_keeps_described_counter_survivors() {
+    for typed in [false, true] {
+        for accept in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let survivor = scenario
+                .add_artifact_from_oracle(P0, "Independent artifact", "")
+                .id();
+            let other = scenario.add_creature(P0, "Nonartifact creature", 3, 3).id();
+            let another = scenario
+                .add_creature(P0, "Second nonartifact creature", 3, 3)
+                .id();
+            let opponent = scenario
+                .add_artifact_from_oracle(P1, "Opponent artifact", "")
+                .id();
+            for id in [survivor, other, another, opponent] {
+                scenario
+                    .with_counter(id, CounterType::Plus1Plus1, 2)
+                    .with_counter(id, CounterType::Lore, 3);
+            }
+            let found = scenario
+                .add_spell_to_library_top(P0, "Selected creature", false)
+                .as_creature()
+                .id();
+            let cover = scenario
+                .add_spell_to_library_top(P0, "Hidden cover", false)
+                .id();
+            let descriptor = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::InTrackedSet {
+                            id: TrackedSetId(0),
+                        },
+                    ])),
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                    ),
+                ],
+            };
+            assert!(descriptor.names_enumerable_population());
+            let effect = if typed {
+                Effect::MultiplyCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    multiplier: 2,
+                    target: descriptor,
+                }
+            } else {
+                Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    target: descriptor,
+                }
+            };
+            let sibling = AbilityDefinition::new(AbilityKind::Spell, effect)
+                .target_choice_timing(TargetChoiceTiming::Resolution);
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic search and counters", false)
+                .with_ability_definition(synthetic_optional_search(sibling))
+                .mana_cost(ManaCost::generic(1))
+                .id();
+            fund(&mut scenario, 1, &[]);
+            let mut runner = scenario.build();
+            assert_library_order(&runner, &[cover, found]);
+            runner.cast(spell).commit();
+            let mut events = Vec::new();
+            let _ = pass_to_pause(&mut runner, &mut events);
+            assert_optional_prompt(&runner);
+            let mut last = runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap()
+                .events;
+            events.extend(last.clone());
+            if accept {
+                assert_search_prompt(&runner, &[found], true);
+                last = runner
+                    .act(GameAction::SelectCards { cards: vec![found] })
+                    .unwrap()
+                    .events;
+                events.extend(last.clone());
+                assert_search_reveal_and_delivery(
+                    &runner,
+                    &events,
+                    spell,
+                    Some((found, Zone::Battlefield)),
+                    cover,
+                    true,
+                );
+                assert_complete(&runner, &last);
+            } else {
+                assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
+                assert_settled(&runner);
+            }
+            // CR 701.10e: each existing counter kind doubles; the typed sibling
+            // changes only the named kind. Hostile objects already have counters.
+            assert_eq!(
+                runner.state().objects[&survivor].counters[&CounterType::Plus1Plus1],
+                4
+            );
+            assert_eq!(
+                runner.state().objects[&survivor].counters[&CounterType::Lore],
+                if typed { 3 } else { 6 }
+            );
+            for id in [other, another, opponent] {
+                assert_eq!(
+                    runner.state().objects[&id].counters[&CounterType::Plus1Plus1],
+                    2
+                );
+                assert_eq!(runner.state().objects[&id].counters[&CounterType::Lore], 3);
+            }
+            if accept {
+                assert_eq!(
+                    runner.state().objects[&found].counters[&CounterType::Plus1Plus1],
+                    4
+                );
+                assert_eq!(
+                    runner.state().objects[&found].counters[&CounterType::Lore],
+                    if typed { 3 } else { 6 }
+                );
+            }
+            assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        }
+    }
+}
+
+#[test]
+fn declined_search_keeps_described_host_choice() {
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let equipment = scenario
+            .add_artifact_from_oracle(P0, "Independent Equipment", "")
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let first = scenario.add_creature(P0, "First host", 3, 3).id();
+        let second = scenario.add_creature(P0, "Second host", 3, 3).id();
+        let opponent = scenario.add_creature(P1, "Opponent nonhost", 3, 3).id();
+        let found = scenario
+            .add_spell_to_library_top(P0, "Delivered host", false)
+            .as_creature()
+            .id();
+        let cover = scenario
+            .add_spell_to_library_top(P0, "Hidden cover", false)
+            .id();
+        let host = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::InTrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                ])),
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            ],
+        };
+        assert!(host.names_enumerable_population());
+        assert!(host.denotes_battlefield_objects());
+        let sibling = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Attach {
+                attachment: TargetFilter::SpecificObject { id: equipment },
+                target: host,
+                selection: AttachSelection::Targeted,
+            },
+        )
+        .target_choice_timing(TargetChoiceTiming::Resolution);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic search and attachment", false)
+            .with_ability_definition(synthetic_optional_search(sibling))
+            .mana_cost(ManaCost::generic(1))
+            .id();
+        fund(&mut scenario, 1, &[]);
+        let mut runner = scenario.build();
+        assert_library_order(&runner, &[cover, found]);
+        runner.cast(spell).commit();
+        let mut events = Vec::new();
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_optional_prompt(&runner);
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap()
+                .events,
+        );
+        if accept {
+            assert_search_prompt(&runner, &[found], true);
+            events.extend(
+                runner
+                    .act(GameAction::SelectCards { cards: vec![found] })
+                    .unwrap()
+                    .events,
+            );
+            assert_search_reveal_and_delivery(
+                &runner,
+                &events,
+                spell,
+                Some((found, Zone::Battlefield)),
+                cover,
+                true,
+            );
+        }
+        let WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            effect_kind,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "described host choice must survive: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*effect_kind, EffectKind::Attach);
+        let mut expected = vec![first, second];
+        if accept {
+            expected.push(found);
+        }
+        let mut actual = cards.clone();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+        let last = runner
+            .act(GameAction::SelectCards {
+                cards: vec![second],
+            })
+            .unwrap()
+            .events;
+        assert_eq!(
+            runner.state().objects[&equipment].attached_to,
+            Some(AttachTarget::Object(second))
+        );
+        for id in [first, opponent, found] {
+            assert_ne!(
+                runner.state().objects[&equipment].attached_to,
+                Some(AttachTarget::Object(id))
+            );
+        }
+        assert_settled(&runner);
+        assert_eq!(
+            runner.state().objects[&found].zone,
+            if accept {
+                Zone::Battlefield
+            } else {
+                Zone::Library
+            }
+        );
+        assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+        assert!(last.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                ..
+            }
+        )));
+    }
+}
+
+#[test]
+fn declined_search_preserves_own_announced_generic_grant() {
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let chosen = scenario.add_creature(P0, "Announced recipient", 3, 3).id();
+        let other = scenario
+            .add_creature(P0, "Other legal recipient", 3, 3)
+            .id();
+        let found = scenario
+            .add_spell_to_library_top(P0, "Search creature", false)
+            .as_creature()
+            .id();
+        let cover = scenario
+            .add_spell_to_library_top(P0, "Hidden cover", false)
+            .id();
+        let grant = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::Typed(TypedFilter::creature())),
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                end_cost: None,
+            },
+        );
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic search and announced grant", false)
+            .with_ability_definition(synthetic_optional_search(grant))
+            .mana_cost(ManaCost::generic(1))
+            .id();
+        fund(&mut scenario, 1, &[]);
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(chosen).commit();
+        let entry = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == spell)
+            .unwrap();
+        let mut announced = entry.ability().expect("cast spell has its resolved chain");
+        while !matches!(announced.effect, Effect::GenericEffect { .. }) {
+            announced = announced
+                .sub_ability
+                .as_deref()
+                .expect("grant follows search/move/shuffle");
+        }
+        assert_eq!(announced.targets, vec![TargetRef::Object(chosen)]);
+        assert_eq!(announced.target_reads, TargetReadOrigin::OwnAnnouncement);
+        let mut events = Vec::new();
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_optional_prompt(&runner);
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap()
+                .events,
+        );
+        if accept {
+            assert_search_prompt(&runner, &[found], true);
+            let last = runner
+                .act(GameAction::SelectCards { cards: vec![found] })
+                .unwrap()
+                .events;
+            events.extend(last.clone());
+            assert_complete(&runner, &last);
+            assert_search_reveal_and_delivery(
+                &runner,
+                &events,
+                spell,
+                Some((found, Zone::Battlefield)),
+                cover,
+                true,
+            );
+        } else {
+            assert_settled(&runner);
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+        }
+        assert!(has_keyword(
+            &runner.state().objects[&chosen],
+            &Keyword::Flying
+        ));
+        for id in [other, found, cover, spell] {
+            assert!(!has_keyword(&runner.state().objects[&id], &Keyword::Flying));
+        }
+    }
+}
+
+#[test]
+fn declined_search_broadcast_binds_alternatives_exclusions_and_properties() {
+    for shape in 0..5 {
+        for accept in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let survivor = scenario
+                .add_creature(P0, "Independent tapped recipient", 3, 3)
+                .id();
+            let other = scenario
+                .add_creature(P0, "Independent untapped recipient", 3, 3)
+                .id();
+            let opponent = scenario.add_creature(P1, "Opponent creature", 3, 3).id();
+            let found = scenario
+                .add_spell_to_library_top(P0, "Delivered creature", false)
+                .as_creature()
+                .id();
+            let prior = scenario
+                .add_spell_to_library_top(P0, "Earlier actual reveal", false)
+                .as_artifact()
+                .id();
+            let cover = scenario
+                .add_spell_to_library_top(P0, "Hidden cover", false)
+                .id();
+            let absent = TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                },
+            ]));
+            let creatures =
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+            let tapped = TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Tapped]),
+            );
+            let affected = match shape {
+                0 => TargetFilter::And {
+                    filters: vec![
+                        creatures.clone(),
+                        TargetFilter::Not {
+                            filter: Box::new(absent.clone()),
+                        },
+                    ],
+                },
+                1 => TargetFilter::Or {
+                    filters: vec![absent, tapped],
+                },
+                2 => TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::AnyOf {
+                            props: vec![
+                                FilterProp::InTrackedSet {
+                                    id: TrackedSetId(0),
+                                },
+                                FilterProp::Tapped,
+                            ],
+                        }]),
+                ),
+                3 => TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Not {
+                            prop: Box::new(FilterProp::InTrackedSet {
+                                id: TrackedSetId(0),
+                            }),
+                        }]),
+                ),
+                4 => TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::DistinctFrom {
+                            reference: Box::new(TargetFilter::ParentTarget),
+                        }]),
+                ),
+                _ => unreachable!(),
+            };
+            let grant = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    target: None,
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(affected)
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying,
+                        }])],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    end_cost: None,
+                },
+            );
+            let mut search = synthetic_optional_search(grant);
+            search.sub_link = SubAbilityLink::SequentialSibling;
+            let root = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Reveal {
+                    target: TargetFilter::SpecificObject { id: prior },
+                },
+            )
+            .sub_ability(search);
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic reveal search and broadcast", false)
+                .with_ability_definition(root)
+                .mana_cost(ManaCost::generic(1))
+                .id();
+            fund(&mut scenario, 1, &[]);
+            let mut runner = scenario.build();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&survivor)
+                .unwrap()
+                .tapped = true;
+            assert_library_order(&runner, &[cover, prior, found]);
+            runner.cast(spell).commit();
+            let mut events = Vec::new();
+            let _ = pass_to_pause(&mut runner, &mut events);
+            assert_optional_prompt(&runner);
+            assert_eq!(runner.state().last_revealed_ids, vec![prior]);
+            events.extend(
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .unwrap()
+                    .events,
+            );
+            if accept {
+                assert_search_prompt(&runner, &[found], true);
+                let last = runner
+                    .act(GameAction::SelectCards { cards: vec![found] })
+                    .unwrap()
+                    .events;
+                events.extend(last.clone());
+                assert_complete(&runner, &last);
+                assert_eq!(runner.state().objects[&found].zone, Zone::Battlefield);
+            } else {
+                assert_settled(&runner);
+                assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+            }
+            assert!(has_keyword(
+                &runner.state().objects[&survivor],
+                &Keyword::Flying
+            ));
+            assert_eq!(
+                has_keyword(&runner.state().objects[&other], &Keyword::Flying),
+                !matches!(shape, 1 | 2)
+            );
+            assert_eq!(
+                has_keyword(&runner.state().objects[&found], &Keyword::Flying),
+                accept && matches!(shape, 1 | 2)
+            );
+            for id in [opponent, prior, cover, spell] {
+                assert!(!has_keyword(&runner.state().objects[&id], &Keyword::Flying));
+            }
+            let reveals: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                reveals,
+                if accept {
+                    vec![vec![prior], vec![found]]
+                } else {
+                    vec![vec![prior]]
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn declined_search_impossible_counter_unit_keeps_later_player_work() {
+    for typed in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario
+            .add_creature(P0, "Hostile existing creature", 3, 3)
+            .id();
+        scenario.with_counter(creature, CounterType::Plus1Plus1, 2);
+        let found = scenario
+            .add_spell_to_library_top(P0, "Unchosen creature", false)
+            .as_creature()
+            .id();
+        let target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            },
+        ]));
+        let effect = if typed {
+            Effect::MultiplyCounter {
+                counter_type: CounterType::Plus1Plus1,
+                multiplier: 2,
+                target,
+            }
+        } else {
+            Effect::Double {
+                target_kind: DoubleTarget::Counters { counter_type: None },
+                target,
+            }
+        };
+        let mut life = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        life.sub_link = SubAbilityLink::SequentialSibling;
+        let sibling = AbilityDefinition::new(AbilityKind::Spell, effect)
+            .target_choice_timing(TargetChoiceTiming::Resolution)
+            .sub_ability(life);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic impossible population", false)
+            .with_ability_definition(synthetic_optional_search(sibling))
+            .mana_cost(ManaCost::generic(1))
+            .id();
+        fund(&mut scenario, 1, &[]);
+        let mut runner = scenario.build();
+        runner.cast(spell).commit();
+        let mut events = Vec::new();
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_optional_prompt(&runner);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+        assert_eq!(runner.state().players[0].life, 23);
+        assert_eq!(
+            runner.state().objects[&creature].counters[&CounterType::Plus1Plus1],
+            2
+        );
+        assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+        assert_settled(&runner);
+    }
+}
+
+#[test]
+fn declined_search_keeps_chosen_counter_target_and_player_double_roles() {
+    for target_kind in [
+        DoubleTarget::Counters { counter_type: None },
+        DoubleTarget::LifeTotal,
+        DoubleTarget::ManaPool { color: None },
+    ] {
+        let counters = matches!(target_kind, DoubleTarget::Counters { .. });
+        let life = matches!(target_kind, DoubleTarget::LifeTotal);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let chosen = scenario
+            .add_creature(P0, "Chosen counter recipient", 3, 3)
+            .id();
+        let other = scenario
+            .add_creature(P0, "Other counter recipient", 3, 3)
+            .id();
+        scenario
+            .with_counter(chosen, CounterType::Plus1Plus1, 2)
+            .with_counter(other, CounterType::Plus1Plus1, 2);
+        let found = scenario
+            .add_spell_to_library_top(P0, "Unchosen search creature", false)
+            .as_creature()
+            .id();
+        let target = if counters {
+            TargetFilter::Typed(TypedFilter::creature())
+        } else {
+            TargetFilter::Controller
+        };
+        let sibling = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Double {
+                target_kind,
+                target,
+            },
+        );
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic preserved double role", false)
+            .with_ability_definition(synthetic_optional_search(sibling))
+            .mana_cost(ManaCost::generic(1))
+            .id();
+        fund(&mut scenario, 2, &[]);
+        let mut runner = scenario.build();
+        if counters {
+            runner.cast(spell).target_object(chosen).commit();
+        } else {
+            runner.cast(spell).commit();
+        }
+        let mut events = Vec::new();
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_optional_prompt(&runner);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+        assert_eq!(
+            runner.state().objects[&chosen].counters[&CounterType::Plus1Plus1],
+            if counters { 4 } else { 2 }
+        );
+        assert_eq!(
+            runner.state().objects[&other].counters[&CounterType::Plus1Plus1],
+            2
+        );
+        assert_eq!(runner.state().players[0].life, if life { 40 } else { 20 });
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            if counters || life { 1 } else { 2 }
+        );
+        assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+        assert_settled(&runner);
+    }
+}
+
+#[test]
+fn declined_search_empty_described_host_keeps_later_player_work() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let equipment = scenario
+        .add_artifact_from_oracle(P0, "Independent Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let host = scenario
+        .add_creature(P0, "Existing nonrecipient", 3, 3)
+        .id();
+    let found = scenario
+        .add_spell_to_library_top(P0, "Unchosen creature", false)
+        .as_creature()
+        .id();
+    let mut life = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+    );
+    life.sub_link = SubAbilityLink::SequentialSibling;
+    let sibling = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Attach {
+            attachment: TargetFilter::SpecificObject { id: equipment },
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                },
+            ])),
+            selection: AttachSelection::Targeted,
+        },
+    )
+    .target_choice_timing(TargetChoiceTiming::Resolution)
+    .sub_ability(life);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic empty described host", false)
+        .with_ability_definition(synthetic_optional_search(sibling))
+        .mana_cost(ManaCost::generic(1))
+        .id();
+    fund(&mut scenario, 1, &[]);
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    let mut events = Vec::new();
+    let _ = pass_to_pause(&mut runner, &mut events);
+    assert_optional_prompt(&runner);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .unwrap();
+    assert_eq!(runner.state().players[0].life, 23);
+    assert_eq!(runner.state().objects[&equipment].attached_to, None);
+    assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+    assert_settled(&runner);
 }
