@@ -6591,6 +6591,14 @@ pub enum BatchCompletion {
         exiled_misses: Vec<ObjectId>,
         current_card: ObjectId,
     },
+    /// CR 701.13a + CR 608.2c + CR 616.1: One top-card exile contest round
+    /// (Timesifter) settled. Keep the contest ability and each contender's
+    /// proposed card so the comparison, any tie-repeat round, and the winner's
+    /// instruction run only after the round's simultaneous batch is delivered.
+    TopCardContestRoundComplete {
+        ability: Box<ResolvedAbility>,
+        round: Vec<(PlayerId, ObjectId)>,
+    },
     /// CR 702.85a + CR 616.1: A no-hit Cascade's randomized bottom batch has
     /// settled (including any redirected cards), so its completion events may
     /// fire exactly once.

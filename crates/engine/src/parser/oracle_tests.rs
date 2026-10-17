@@ -31481,7 +31481,7 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 237;
+    const EFFECT_VARIANT_PIN: usize = 238;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
@@ -31504,6 +31504,7 @@ fn render_net_effect_carrier_census() {
         "CreatePlaneswalkReplacement",
         "EachPlayerCopyChosen",
         "ExileResolvingSpellInsteadOfGraveyard",
+        "ExileTopCardContest",
         "FlipCoin",
         "FlipCoinUntilLose",
         "FlipCoins",
@@ -31992,6 +31993,11 @@ fn render_net_reaches_every_nested_description_carrier() {
         unchosen_pile_effect: Some(Box::new(ability("piles_unchosen"))),
     }));
     tags.extend(["piles_chosen", "piles_unchosen"]);
+
+    parsed.abilities.push(carrier(Effect::ExileTopCardContest {
+        winner_effect: Box::new(ability("contest_winner")),
+    }));
+    tags.push("contest_winner");
 
     let mut token_static = static_def("token_static");
     token_static.modifications.push(granted("token_static_mod"));

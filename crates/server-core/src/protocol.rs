@@ -3473,6 +3473,10 @@ mod tests {
         }
     }
 
+    /// v148: Timesifter's top-card exile contest — `Effect::ExileTopCardContest`
+    /// in serialized ability definitions and the parked
+    /// `BatchCompletion::TopCardContestRoundComplete`; a v147 peer cannot parse
+    /// either tag, so it must be refused before it receives v148 state.
     /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
     /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
     /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
@@ -3704,8 +3708,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_147_for_physical_contest() {
-        assert_eq!(PROTOCOL_VERSION, 147);
+    fn protocol_version_is_148_for_top_card_contest() {
+        assert_eq!(PROTOCOL_VERSION, 148);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3716,7 +3720,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_147_for_physical_contest` stays
+    /// `protocol_version_is_148_for_top_card_contest` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

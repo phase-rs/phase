@@ -18080,6 +18080,28 @@ pub enum Effect {
     Populate,
     /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
     Clash,
+    /// CR 701.13a + CR 202.3: A card-defined top-card contest: "each player exiles
+    /// the top card of their library. The player who exiled the card with the
+    /// greatest mana value <winner_effect>. If two or more players' cards are
+    /// tied for greatest, the tied players repeat this process until the tie is
+    /// broken." (Timesifter).
+    ///
+    /// The whole contest is one resolution step (CR 608.2c): every remaining
+    /// contender exiles their top card, the contenders whose exiled card has the
+    /// greatest mana value stay in, and the exile-and-compare repeats among them
+    /// until exactly one remains. A contender who exiles no card (empty library)
+    /// drops out — per the card's ruling, a player who fails to exile a card
+    /// can't win — so the loop is bounded by library sizes and ends with one
+    /// winner or with nobody.
+    ///
+    /// `winner_effect` resolves once for the winner, with the winner bound as the
+    /// acting (scoped) player the same way a `player_scope` iteration binds its
+    /// seat (CR 109.5: the printed controller stays the ability's controller), so
+    /// an imperative "take an extra turn after this one" names the winner. It
+    /// does not resolve when nobody wins.
+    ExileTopCardContest {
+        winner_effect: Box<AbilityDefinition>,
+    },
     /// CR 701.4a: Behold a [quality] — "Reveal a [quality] card from your hand or
     /// choose a [quality] permanent you control on the battlefield." The quality is
     /// a subtype/type `filter` shared by both legs (Sarkhan, Dragon Ascendant beholds
@@ -21101,6 +21123,7 @@ pub enum NestedDefinitionEdge {
     VoteObjectOutcome,
     SeparateIntoPilesChosen,
     SeparateIntoPilesUnchosen,
+    ExileTopCardContestWinner,
     RevealFromHandOnDecline,
     CreateDelayedTriggerEffect,
     CreateBoonTrigger,
@@ -22829,6 +22852,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -23080,6 +23104,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -23825,6 +23850,7 @@ impl Effect {
             // CR 700.3b: SeparateIntoPiles has no targeting slot — partitioning
             // is a resolution-time set computation against `object_filter`.
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
             // it has no discrete `target` field for the generic targeting layer.
             | Effect::RevealFromHand { .. }
@@ -24277,6 +24303,7 @@ impl Effect {
             | Effect::Unimplemented { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::RevealFromHand { .. }
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. }
@@ -24365,6 +24392,8 @@ impl Effect {
             | Effect::ExploreAll { .. }
             // Exiles the top N cards of a player's library.
             | Effect::ExileTop { .. }
+            // CR 701.13a: each contender exiles the top card of their library.
+            | Effect::ExileTopCardContest { .. }
             // Exiles one explicit object AND the top `count` cards of a library.
             | Effect::ExileFaceDownPile { .. }
             // CR 701.50a: connive "draws a card, then discards".
@@ -25519,6 +25548,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::Myriad
@@ -25711,6 +25741,13 @@ impl Effect {
                         unchosen_pile_effect,
                     );
                 }
+            }
+            // CR 608.2c: the contest winner's effect, run once for the winner.
+            Effect::ExileTopCardContest { winner_effect } => {
+                f(
+                    NestedDefinitionEdge::ExileTopCardContestWinner,
+                    winner_effect,
+                );
             }
             // CR 701.20: reveal. This is the branch taken when the player
             // DECLINES to reveal, so it is a payload rather than the reveal.
@@ -26132,6 +26169,7 @@ impl Effect {
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -26400,6 +26438,7 @@ impl Effect {
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -26614,6 +26653,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::EndCombatPhase => "EndCombatPhase",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
+        Effect::ExileTopCardContest { .. } => "ExileTopCardContest",
         Effect::Behold { .. } => "Behold",
         Effect::Vote { .. } => "Vote",
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
@@ -26869,6 +26909,8 @@ pub enum EffectKind {
     ProliferateTarget,
     Populate,
     Clash,
+    /// CR 701.13a + CR 202.3: a top-card exile contest won by greatest mana value.
+    ExileTopCardContest,
     /// CR 608.2d + CR 608.2e: an opponent / the defending player guesses a
     /// committed value or proposition during resolution.
     OpponentGuess,
@@ -27135,6 +27177,7 @@ impl From<&Effect> for EffectKind {
             Effect::EndCombatPhase => EffectKind::EndCombatPhase,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
+            Effect::ExileTopCardContest { .. } => EffectKind::ExileTopCardContest,
             Effect::Behold { .. } => EffectKind::Behold,
             Effect::Vote { .. } => EffectKind::Vote,
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
@@ -36366,6 +36409,7 @@ impl ResolvedAbility {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }

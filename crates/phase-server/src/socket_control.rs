@@ -72,6 +72,7 @@ struct Shared {
     changed: Notify,
     application_activity: Notify,
     encoding: AtomicU8,
+    heartbeat: Mutex<crate::socket_heartbeat::HeartbeatProbe>,
 }
 
 #[derive(Clone, Default)]
@@ -93,6 +94,18 @@ impl ControlLane {
             2 => Encoding::GzipEnvelope,
             _ => unreachable!("only typed negotiated encodings are stored"),
         }
+    }
+
+    pub(crate) fn probe_heartbeat(&self, frame: &axum::extract::ws::Message) -> Option<u64> {
+        self.0
+            .heartbeat
+            .lock()
+            .timestamp(frame, self.encoding().wire_format())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_probe_work(&self, work: Arc<crate::socket_test_hooks::ParserWork>) {
+        self.0.heartbeat.lock().observe(work);
     }
 
     pub(crate) fn note_application_activity(&self) {

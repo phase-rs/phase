@@ -24,6 +24,12 @@ const WARN_PENDING_FRAMES: usize = 500;
 const WARN_PENDING_BYTES: usize = 64 * 1024 * 1024;
 static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HeartbeatInspection {
+    Deferred,
+    Complete,
+}
+
 /// Server-observed ingress time travels with the payload through both queues.
 /// It is never taken from a client-controlled timestamp.
 #[derive(Debug)]
@@ -31,6 +37,7 @@ pub(crate) struct Received<T> {
     pub(crate) message: T,
     pub(crate) received_at: Instant,
     pub(crate) admission: Admission,
+    pub(crate) heartbeat: HeartbeatInspection,
 }
 
 #[derive(Debug, Default)]
@@ -133,6 +140,10 @@ impl NegotiatedSocket {
         self.command_id
     }
 
+    pub(crate) fn record_quota_discard(&self) {
+        self.death.record_quota_discard();
+    }
+
     pub(crate) fn enqueue_completion(
         &self,
         message: ServerMessage,
@@ -178,6 +189,7 @@ impl NegotiatedSocket {
             self.uses_gzip_envelope()
                 .then_some(WireFormat::GzipEnvelopeV1),
         );
+        self.control.note_application_activity();
     }
 
     pub(crate) async fn application_activity(&self) {
@@ -193,13 +205,20 @@ impl NegotiatedSocket {
     pub(crate) fn bootstrap_hooks(&self) -> crate::socket_test_hooks::Hooks {
         self.hooks.clone()
     }
+    pub(crate) fn probe_heartbeat(&self, frame: &Message) -> Option<u64> {
+        self.control.probe_heartbeat(frame)
+    }
+    #[cfg(test)]
+    pub(crate) fn observe_probe_work(&self, work: Arc<crate::socket_test_hooks::ParserWork>) {
+        self.control.observe_probe_work(work);
+    }
 
     pub(crate) fn ingress_overflow(&self) {
         self.close_for_ingress(Cause::IngressOverflow);
     }
 
-    pub(crate) fn raw_decode_quota(&self) {
-        self.close_for_ingress(Cause::RawDecodeQuota);
+    pub(crate) fn quota_discard_overflow(&self) {
+        self.close_for_ingress(Cause::QuotaDiscardOverflow);
     }
 
     fn close_for_ingress(&self, cause: Cause) {
@@ -572,7 +591,6 @@ async fn read_socket<S>(
 {
     let mut closed = death.closed();
     let mut activity = liveness.reader();
-    let mut heartbeat_probe = crate::socket_heartbeat::HeartbeatProbe::default();
     loop {
         let deadline = activity.borrow_and_update().deadline();
         let next = tokio::select! {
@@ -609,17 +627,17 @@ async fn read_socket<S>(
                 // Only bounded, rate-admitted probes may bypass command slots.
                 // Other frames retain normal ingress and decoder rate limits.
                 let encoding = control.encoding();
-                let ping = match encoding {
-                    Encoding::Pending => None,
+                let heartbeat = match encoding {
+                    Encoding::Pending => HeartbeatInspection::Deferred,
                     Encoding::Plain | Encoding::GzipEnvelope => {
-                        heartbeat_probe.timestamp(&frame, encoding.wire_format())
+                        if let Some(timestamp) = control.probe_heartbeat(&frame) {
+                            control.application_pong(timestamp, encoding.wire_format());
+                            control.note_application_activity();
+                            continue;
+                        }
+                        HeartbeatInspection::Complete
                     }
                 };
-                if let Some(timestamp) = ping {
-                    control.application_pong(timestamp, encoding.wire_format());
-                    control.note_application_activity();
-                    continue;
-                }
                 let bytes = match &frame {
                     Message::Text(text) => text.len(),
                     Message::Binary(bytes) => bytes.len(),
@@ -644,6 +662,7 @@ async fn read_socket<S>(
                     message: frame,
                     received_at: Instant::now(),
                     admission,
+                    heartbeat,
                 }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -670,6 +689,37 @@ async fn read_socket<S>(
                 break;
             }
         }
+    }
+    if death.event().is_some_and(|event| {
+        matches!(
+            event.cause,
+            Cause::IngressOverflow | Cause::QuotaRefusalOverflow | Cause::QuotaDiscardOverflow
+        )
+    }) {
+        // Keep the read half alive while the writer flushes the local policy
+        // Close: dropping TCP with pipelined input unread can erase that frame.
+        // No game/session/executor ownership is taken here. An already accepted
+        // mutation finishes independently; transport teardown never waits for it.
+        drop(incoming);
+        drop(budget);
+        let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+            let mut bytes = 0usize;
+            for _ in 0..MAX_COMMANDS {
+                // Leave room for one maximum-sized frame before polling it.
+                // The upgrade enforces MAX_WS_MESSAGE_BYTES per message.
+                if bytes > crate::socket_ingress::MAX_PAYLOAD_BYTES - crate::MAX_WS_MESSAGE_BYTES {
+                    break;
+                }
+                match stream.next().await {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(Message::Text(text))) => bytes += text.len(),
+                    Some(Ok(Message::Binary(data) | Message::Ping(data) | Message::Pong(data))) => {
+                        bytes += data.len()
+                    }
+                }
+            }
+        })
+        .await;
     }
     death.record(Cause::ApplicationEnd);
 }
@@ -957,6 +1007,10 @@ mod tests {
         assert!(
             matches!(control.take_ready(), Some(Control::Close { frame: Some(frame), origin: CloseOrigin::Server })
             if frame.code == 1001)
+        );
+        assert!(
+            reader.is_finished(),
+            "an idle read deadline must not linger before disconnect cleanup"
         );
         reader.await.unwrap();
         death.record(Cause::ApplicationEnd);
@@ -1253,15 +1307,21 @@ mod transport_fixup_tests {
             // later writes cannot race the explicit overflow close.
             let overflow_frames = MAX_PAYLOAD_BYTES / frame.len() + 1;
             for _ in 0..overflow_frames {
-                socket
+                if socket
                     .send(WsMessage::Text(frame.clone().into()))
                     .await
-                    .unwrap();
+                    .is_err()
+                {
+                    // Overflow can close concurrently with a pipelined send;
+                    // only receiving the policy Close proves graceful teardown.
+                    break;
+                }
             }
             loop {
                 match socket.next().await {
                     Some(Ok(WsMessage::Close(Some(close)))) => {
                         assert_eq!(u16::from(close.code), 1013);
+                        let _ = socket.close(None).await;
                         break;
                     }
                     Some(Ok(_)) => {}
@@ -1287,6 +1347,118 @@ mod transport_fixup_tests {
         .await;
         server.abort();
         result.expect("a blocked handler retained an unbounded ingress backlog");
+    }
+
+    #[tokio::test]
+    async fn local_capacity_close_drains_peer_ack_with_bounded_bytes() {
+        for (text, expected_reads) in [
+            (r#"{"type":"SubscribeLobby"}"#.to_string(), MAX_COMMANDS + 2),
+            (
+                "x".repeat(crate::MAX_WS_MESSAGE_BYTES),
+                2 * crate::socket_ingress::MAX_PAYLOAD_BYTES / crate::MAX_WS_MESSAGE_BYTES + 1,
+            ),
+        ] {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = reads.clone();
+            let frames =
+                std::iter::repeat_with(|| Ok::<_, axum::Error>(Message::text(text.clone())))
+                    .take(MAX_COMMANDS + 1)
+                    .chain([Ok(Message::Close(None))]);
+            let stream = futures_util::stream::iter(frames).inspect(move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+            });
+            let control = ControlLane::default();
+            let death = Death::new(Arc::default(), 1);
+            let (incoming, _commands) = mpsc::channel(MAX_COMMANDS);
+            read_socket(
+                stream,
+                control.clone(),
+                incoming,
+                death.clone(),
+                Liveness::default(),
+                IngressBudget::default(),
+                1,
+            )
+            .await;
+            assert_eq!(death.event().unwrap().cause, Cause::IngressOverflow);
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                expected_reads,
+                "finish a peer acknowledgement, but never drain over 1 MiB"
+            );
+            assert!(matches!(control.take_ready(),
+                Some(Control::Close { frame: Some(frame), origin: CloseOrigin::Server })
+                if frame.code == 1013));
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_pre_hello_command_burst_still_allows_ping() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let hello = app.context.socket_hooks.arm_hello_accept();
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut socket = connect_and_hello(url).await;
+            hello.entered.notified().await;
+            let held = app.lobby.lock().await;
+            // Keep negotiation pending until the reader has queued the entire
+            // burst. An ordered native Ping/Pong proves that without sleeps.
+            for _ in 0..40 {
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&ClientMessage::SubscribeLobby)
+                            .unwrap()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Ping { timestamp: 90_001 })
+                        .unwrap()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(WsMessage::Ping(vec![19, 77].into()))
+                .await
+                .unwrap();
+            loop {
+                match socket.next().await.unwrap().unwrap() {
+                    WsMessage::Pong(payload) if payload.as_ref() == [19, 77] => break,
+                    WsMessage::Text(text) => {
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        assert_ne!(
+                            frame["type"], "Pong",
+                            "application Ping must wait for ClientHello acceptance"
+                        );
+                    }
+                    WsMessage::Close(close) => {
+                        panic!("burst closed before hello acceptance: {close:?}")
+                    }
+                    _ => {}
+                }
+            }
+            hello.release.notify_one();
+            loop {
+                let message: ServerMessage = match socket.next().await.unwrap().unwrap() {
+                    WsMessage::Text(text) => serde_json::from_str(&text).unwrap(),
+                    // Tungstenite may already have flushed its automatic Pong
+                    // before the control writer sends the coalesced proof reply.
+                    WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                    frame => panic!("expected the post-hello application reply, got {frame:?}"),
+                };
+                if matches!(message, ServerMessage::Pong { timestamp: 90_001 }) {
+                    break;
+                }
+            }
+            drop(held);
+        })
+        .await;
+        hello.release.notify_one();
+        server.abort();
+        result.expect("a normal command burst blocked the reserved heartbeat");
     }
 
     #[tokio::test]
@@ -1423,7 +1595,11 @@ mod transport_fixup_tests {
 
     async fn parser_test_socket(url: String, format: Option<WireFormat>) -> ParserSocket {
         use crate::issue_4548_full_create_tests::{send_test_message, test_client_hello};
-        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        // Admission observers pace requests without application replies; disable
+        // Nagle so platform delayed-ACK timers cannot stretch this test stream.
+        let (mut socket, _) = tokio_tungstenite::connect_async_with_config(url, None, true)
+            .await
+            .unwrap();
         assert!(matches!(
             recv_server_message(&mut socket).await,
             ServerMessage::ServerHello { .. }
@@ -1437,6 +1613,17 @@ mod transport_fixup_tests {
         socket
     }
 
+    async fn recv_parser_message(
+        socket: &mut ParserSocket,
+        format: Option<WireFormat>,
+    ) -> ServerMessage {
+        if format.is_some() {
+            crate::issue_4548_full_create_tests::recv_enveloped_server_message(socket).await
+        } else {
+            recv_server_message(socket).await
+        }
+    }
+
     async fn exhaust_parser_work_quota(socket: &mut ParserSocket, format: Option<WireFormat>) {
         let ping = serde_json::json!({
             "type": "Ping", "data": { "timestamp": 7712 },
@@ -1448,39 +1635,67 @@ mod transport_fixup_tests {
         for _ in 1..crate::RATE_LIMIT_MESSAGES {
             socket.send(parser_test_frame(&ping, format)).await.unwrap();
             loop {
-                let reply = if format.is_some() {
-                    crate::issue_4548_full_create_tests::recv_enveloped_server_message(socket).await
-                } else {
-                    recv_server_message(socket).await
-                };
-                if matches!(reply, ServerMessage::Pong { timestamp: 7712 }) {
+                if matches!(
+                    recv_parser_message(socket, format).await,
+                    ServerMessage::Pong { timestamp: 7712 },
+                ) {
                     break;
                 }
             }
         }
     }
 
-    async fn expect_parser_quota_close(
+    async fn exhaust_metadata_work_quota(
+        socket: &mut ParserSocket,
+        work: &crate::socket_test_hooks::ParserWork,
+        format: Option<WireFormat>,
+    ) {
+        for limited in 1..=crate::RATE_LIMIT_MESSAGES as usize {
+            socket
+                .send(parser_test_frame(r#"{"type":"UnknownCommand"}"#, format))
+                .await
+                .unwrap();
+            work.wait_rate_limited(limited).await;
+        }
+        // Raw envelopes also cross wire::decode_client_envelope's blocking
+        // boundary AFTER admission. Admission does not prove parser entry yet.
+        work.wait_counts((
+            crate::RATE_LIMIT_MESSAGES as usize,
+            crate::RATE_LIMIT_MESSAGES as usize,
+        ))
+        .await;
+    }
+
+    async fn expect_parser_quota_drop(
         socket: &mut ParserSocket,
         work: &crate::socket_test_hooks::ParserWork,
         expected: (usize, usize),
+        limited: usize,
+        format: Option<WireFormat>,
     ) {
+        work.wait_rate_limited(limited).await;
+        work.wait_completed(crate::RATE_LIMIT_MESSAGES as usize + limited)
+            .await;
+        socket
+            .send(parser_test_frame(
+                &serde_json::to_string(&ClientMessage::Ping { timestamp: 8813 }).unwrap(),
+                format,
+            ))
+            .await
+            .unwrap();
         loop {
-            let next = socket.next().await;
-            assert_eq!(
-                work.counts(),
-                expected,
-                "an excess frame entered full JSON parsing or metadata recovery",
-            );
-            match next {
-                Some(Ok(WsMessage::Close(Some(close)))) => {
-                    assert_eq!(u16::from(close.code), 1013);
-                    break;
-                }
-                Some(Ok(_)) => {}
-                other => panic!("raw work exhaustion must close explicitly: {other:?}"),
+            if matches!(
+                recv_parser_message(socket, format).await,
+                ServerMessage::Pong { timestamp: 8813 }
+            ) {
+                break;
             }
         }
+        assert_eq!(
+            work.counts(),
+            expected,
+            "quota exhaustion entered a full parser or metadata recovery"
+        );
     }
 
     async fn assert_excess_large_frame_is_unparsed(format: Option<WireFormat>, excess: String) {
@@ -1489,27 +1704,161 @@ mod transport_fixup_tests {
         let result = tokio::time::timeout(Duration::from_secs(20), async {
             let mut socket = parser_test_socket(url, format).await;
             exhaust_parser_work_quota(&mut socket, format).await;
-            let expected = (crate::RATE_LIMIT_MESSAGES as usize, 0);
+            exhaust_metadata_work_quota(&mut socket, &work, format).await;
+            let expected = (
+                crate::RATE_LIMIT_MESSAGES as usize,
+                crate::RATE_LIMIT_MESSAGES as usize,
+            );
             assert_eq!(
                 work.counts(),
                 expected,
-                "reach guard: the quota was consumed by full parses"
+                "reach guard: both independently admitted JSON work windows are exhausted"
             );
             socket
                 .send(parser_test_frame(&excess, format))
                 .await
                 .unwrap();
-            expect_parser_quota_close(&mut socket, &work, expected).await;
+            expect_parser_quota_drop(
+                &mut socket,
+                &work,
+                expected,
+                crate::RATE_LIMIT_MESSAGES as usize + 1,
+                format,
+            )
+            .await;
+        })
+        .await;
+        server.abort();
+        result.expect("an excess large frame was parsed or blocked a healthy heartbeat");
+    }
+
+    async fn expect_discard_budget_close(
+        socket: &mut ParserSocket,
+        metrics: &crate::metrics::ServerMetrics,
+    ) {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                WsMessage::Close(Some(close)) => {
+                    assert_eq!(u16::from(close.code), 1013);
+                    break;
+                }
+                WsMessage::Text(_)
+                | WsMessage::Binary(_)
+                | WsMessage::Ping(_)
+                | WsMessage::Pong(_) => {}
+                frame => panic!("expected the bounded quota-discard close, got {frame:?}"),
+            }
+        }
+        assert_eq!(
+            metrics.ws_quota_discard_count(),
+            u64::from(crate::socket_decode::MAX_QUOTA_DISCARDS_PER_WINDOW) + 1,
+        );
+        assert_eq!(
+            metrics.ws_disconnect_count(crate::socket_disconnect::Cause::QuotaDiscardOverflow),
+            1,
+        );
+    }
+
+    #[tokio::test]
+    async fn sustained_unparsed_drops_cannot_replenish_any_json_work_budget() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let work = app.context.socket_hooks.arm_parser_work();
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut socket = parser_test_socket(url, None).await;
+            // Malformed ordinary commands spend the SAME recovery allowance.
+            for _ in 1..crate::RATE_LIMIT_MESSAGES {
+                socket
+                    .send(WsMessage::Text(r#"{"type":"UnknownCommand"}"#.into()))
+                    .await
+                    .unwrap();
+                while !matches!(
+                    recv_server_message(&mut socket).await,
+                    ServerMessage::Error { .. }
+                ) {}
+            }
+            let quota = crate::RATE_LIMIT_MESSAGES as usize;
+            let close_at = crate::socket_decode::MAX_QUOTA_DISCARDS_PER_WINDOW as usize + 1;
+            // Pace decoder completion so ingress capacity cannot hide either
+            // extra parsing or the separate sustained-abuse close.
+            for limited in 1..=close_at {
+                socket
+                    .send(WsMessage::Text(r#"{"type":"UnknownCommand"}"#.into()))
+                    .await
+                    .unwrap();
+                work.wait_completed(quota + limited).await;
+            }
+            expect_discard_budget_close(&mut socket, &app.context.metrics).await;
+            let (full, metadata) = work.counts();
             assert_eq!(
-                app.context
-                    .metrics
-                    .ws_disconnect_count(Cause::RawDecodeQuota),
-                1,
+                work.probes(),
+                crate::socket_heartbeat::PROBE_WORK_BURST as usize
+            );
+            assert_eq!((full, metadata), (quota, quota));
+            assert!(
+                work.probes() + full + metadata
+                    <= crate::socket_heartbeat::PROBE_WORK_BURST as usize + quota + quota
             );
         })
         .await;
         server.abort();
-        result.expect("an excess large frame was parsed or failed to close its raw-work route");
+        outcome.expect("sustained abuse must close without replenishing parser work");
+    }
+
+    #[tokio::test]
+    async fn refunded_click_scans_keep_a_finite_combined_parser_ceiling() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let work = app.context.socket_hooks.arm_parser_work();
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut socket = parser_test_socket(url, None).await;
+            work.wait_completed(1).await;
+            let quota = crate::RATE_LIMIT_MESSAGES as usize;
+            // Fill ordinary work, then the independent click and nonrefunded
+            // scan windows. All valid no-seat clicks use the real decoder.
+            for completed in 2..=quota * 3 {
+                let click = serde_json::to_string(&ClientMessage::ContestClick {
+                    contest: 71,
+                    seq: completed as u32,
+                })
+                .unwrap();
+                socket.send(WsMessage::Text(click.into())).await.unwrap();
+                work.wait_completed(completed).await;
+                // Catch an unbounded-click control before 64 retained commands
+                // could make ingress capacity, rather than parse work, reject it.
+                assert!(
+                    work.counts().0 <= quota * 2,
+                    "typed click admission exceeded its window"
+                );
+            }
+            assert_eq!(work.counts(), (quota * 2, quota * 2));
+            assert_eq!(
+                work.probes(),
+                crate::socket_heartbeat::PROBE_WORK_BURST as usize
+            );
+            assert_eq!(
+                work.probes() + work.counts().0 + work.counts().1,
+                crate::socket_heartbeat::PROBE_WORK_BURST as usize + quota * 4,
+                "every refunded header scan must transfer to finite click admission",
+            );
+            assert_eq!(app.context.metrics.ws_quota_discard_count(), quota as u64);
+            let remaining =
+                crate::socket_decode::MAX_QUOTA_DISCARDS_PER_WINDOW as usize + 1 - quota;
+            for discarded in 1..=remaining {
+                socket
+                    .send(WsMessage::Text(r#"{"type":"UnknownCommand"}"#.into()))
+                    .await
+                    .unwrap();
+                work.wait_completed(quota * 3 + discarded).await;
+            }
+            expect_discard_budget_close(&mut socket, &app.context.metrics).await;
+            assert_eq!(
+                work.counts(),
+                (quota * 2, quota * 2),
+                "exhausted scans stay unparsed"
+            );
+        })
+        .await;
+        server.abort();
+        outcome.expect("refunded clicks escaped the combined parse or discard bound");
     }
 
     #[tokio::test]
@@ -1573,7 +1922,7 @@ mod transport_fixup_tests {
                 }
             }
             let expected = (
-                2 * crate::RATE_LIMIT_MESSAGES as usize,
+                crate::RATE_LIMIT_MESSAGES as usize,
                 crate::RATE_LIMIT_MESSAGES as usize,
             );
             assert_eq!(
@@ -1585,13 +1934,14 @@ mod transport_fixup_tests {
                 .send(WsMessage::Text(malformed.into()))
                 .await
                 .unwrap();
-            expect_parser_quota_close(&mut socket, &work, expected).await;
-            assert_eq!(
-                app.context
-                    .metrics
-                    .ws_disconnect_count(Cause::RawDecodeQuota),
-                1,
-            );
+            expect_parser_quota_drop(
+                &mut socket,
+                &work,
+                expected,
+                crate::RATE_LIMIT_MESSAGES as usize + 1,
+                None,
+            )
+            .await;
         })
         .await;
         server.abort();
@@ -1741,45 +2091,30 @@ mod transport_fixup_tests {
     }
 
     #[tokio::test]
-    async fn malformed_binary_envelopes_consume_the_raw_decode_quota() {
-        use crate::issue_4548_full_create_tests::{send_test_message, test_client_hello};
+    async fn malformed_binary_envelopes_share_bounded_decode_admission() {
         use server_core::protocol::WireFormat;
         let (url, server, _directory, app) = spawn_full_mode_server().await;
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-            recv_server_message(&mut socket).await;
-            send_test_message(
-                &mut socket,
-                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
-                false,
-            )
-            .await;
-            for _ in 0..crate::RATE_LIMIT_MESSAGES {
+        let work = app.context.socket_hooks.arm_parser_work();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut socket = parser_test_socket(url, Some(WireFormat::GzipEnvelopeV1)).await;
+            for _ in 0..2 * crate::RATE_LIMIT_MESSAGES {
                 socket
                     .send(WsMessage::Binary(vec![1, 1, 2, 3].into()))
                     .await
                     .unwrap();
             }
-            loop {
-                match socket.next().await {
-                    Some(Ok(WsMessage::Close(Some(close)))) => {
-                        assert_eq!(u16::from(close.code), 1013);
-                        break;
-                    }
-                    Some(Ok(_)) => {}
-                    other => panic!("raw decode quota must close explicitly: {other:?}"),
-                }
-            }
-            assert_eq!(
-                app.context
-                    .metrics
-                    .ws_disconnect_count(Cause::RawDecodeQuota),
-                1,
-            );
+            expect_parser_quota_drop(
+                &mut socket,
+                &work,
+                (1, 0),
+                crate::RATE_LIMIT_MESSAGES as usize + 1,
+                Some(WireFormat::GzipEnvelopeV1),
+            )
+            .await;
         })
         .await;
         server.abort();
-        result.expect("malformed binary traffic must produce its classified close");
+        result.expect("malformed binary traffic escaped bounded decode work or closed the socket");
     }
 
     #[tokio::test]
@@ -1789,65 +2124,94 @@ mod transport_fixup_tests {
             InteractionChoiceId, InteractionId, InteractionResponse, InteractionSubmission,
         };
 
-        let (url, server, _directory, _app) = spawn_full_mode_server().await;
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut socket = connect_and_hello(url).await;
-            for _ in 0..crate::RATE_LIMIT_MESSAGES {
-                send_test_message(&mut socket, &ClientMessage::SubscribeLobby, false).await;
-            }
-            let commands = [
-                ClientMessage::Action {
-                    action: engine::types::actions::GameAction::PassPriority,
-                },
-                ClientMessage::Interaction {
-                    submission: InteractionSubmission {
-                        interaction_id: InteractionId("quota-interaction".to_string()),
-                        response: InteractionResponse::Choose {
-                            choice_id: InteractionChoiceId("quota-choice".to_string()),
+        for format in [None, Some(WireFormat::GzipEnvelopeV1)] {
+            let (url, server, _directory, app) = spawn_full_mode_server().await;
+            let _work = app.context.socket_hooks.arm_parser_work();
+            let scenario = async {
+                let mut socket = parser_test_socket(url, format).await;
+                for _ in 0..crate::RATE_LIMIT_MESSAGES {
+                    send_test_message(
+                        &mut socket,
+                        &ClientMessage::SubscribeLobby,
+                        format.is_some(),
+                    )
+                    .await;
+                }
+                let commands = [
+                    ClientMessage::Action {
+                        action: engine::types::actions::GameAction::PassPriority,
+                    },
+                    ClientMessage::Interaction {
+                        submission: InteractionSubmission {
+                            interaction_id: InteractionId("quota-interaction".to_string()),
+                            response: InteractionResponse::Choose {
+                                choice_id: InteractionChoiceId("quota-choice".to_string()),
+                            },
                         },
                     },
-                },
-            ];
-            for (index, message) in commands
-                .into_iter()
-                .cycle()
-                .take(crate::socket_mailbox::MAX_PENDING_QUOTA_REFUSALS * 2 + 1)
-                .enumerate()
-            {
-                let command_id = 37 + index as u64;
-                let mut frame = serde_json::to_value(message).unwrap();
-                frame["command_id"] = serde_json::json!(command_id);
-                socket
-                    .send(WsMessage::Text(frame.to_string().into()))
-                    .await
-                    .unwrap();
-                loop {
-                    match socket.next().await.unwrap().unwrap() {
-                        WsMessage::Text(text) => {
-                            let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
-                            if frame["type"] == "ActionFailed" {
-                                assert_eq!(frame["command_id"], command_id);
-                                break;
+                ];
+                for (index, message) in commands
+                    .into_iter()
+                    .cycle()
+                    .take(crate::socket_mailbox::MAX_PENDING_QUOTA_REFUSALS * 2 + 1)
+                    .enumerate()
+                {
+                    let command_id = 37 + index as u64;
+                    let mut frame = serde_json::to_value(message).unwrap();
+                    frame["command_id"] = serde_json::json!(command_id);
+                    frame["padding"] = serde_json::json!("x".repeat(300));
+                    let outgoing =
+                        match wire::encode_json_message_sync(frame.to_string(), format.is_some())
+                            .unwrap()
+                        {
+                            Message::Text(text) => WsMessage::Text(text.to_string().into()),
+                            Message::Binary(bytes) => WsMessage::Binary(bytes),
+                            Message::Ping(_) | Message::Pong(_) | Message::Close(_) => {
+                                unreachable!()
                             }
-                        }
-                        WsMessage::Ping(_) | WsMessage::Pong(_) => {}
-                        frame => {
-                            panic!("ordinary command quota must not close the transport: {frame:?}")
+                        };
+                    socket.send(outgoing).await.unwrap();
+                    loop {
+                        let text = match socket.next().await.unwrap().unwrap() {
+                            WsMessage::Text(text) => text.to_string(),
+                            WsMessage::Binary(bytes) => wire::decode_client_envelope(
+                                bytes.to_vec(),
+                                crate::MAX_WS_MESSAGE_BYTES,
+                            )
+                            .await
+                            .unwrap(),
+                            WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                            frame => {
+                                panic!("a sequential quota refusal closed its socket: {frame:?}")
+                            }
+                        };
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if frame["type"] == "ActionFailed" {
+                            assert_eq!(frame["command_id"], command_id);
+                            assert_eq!(frame["data"]["message"], "Command rate quota exceeded");
+                            break;
                         }
                     }
                 }
-            }
-            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 91 }, false).await;
-            loop {
-                match recv_server_message(&mut socket).await {
-                    ServerMessage::Pong { timestamp: 91 } => break,
-                    ServerMessage::Error { message, .. } => panic!("heartbeat failed: {message}"),
-                    _ => {}
+                send_test_message(
+                    &mut socket,
+                    &ClientMessage::Ping { timestamp: 91 },
+                    format.is_some(),
+                )
+                .await;
+                loop {
+                    match recv_parser_message(&mut socket, format).await {
+                        ServerMessage::Pong { timestamp: 91 } => break,
+                        ServerMessage::Error { message, .. } => {
+                            panic!("heartbeat failed: {message}")
+                        }
+                        _ => {}
+                    }
                 }
-            }
-        })
-        .await;
-        server.abort();
-        result.expect("decoded commands must receive an owned refusal");
+            };
+            let result = tokio::time::timeout(Duration::from_secs(10), scenario).await;
+            server.abort();
+            result.expect("decoded commands must receive an owned refusal");
+        }
     }
 }

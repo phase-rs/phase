@@ -23,6 +23,12 @@ pub(crate) struct ClientEnvelope {
     command_id: Option<CommandId>,
 }
 
+pub(crate) enum QuotaRecovery {
+    Correlated(Option<CommandId>),
+    ContestClick,
+    Other,
+}
+
 impl ClientEnvelope {
     pub(crate) fn command_id(&self) -> Option<CommandId> {
         match self.message {
@@ -31,11 +37,21 @@ impl ClientEnvelope {
         }
     }
 
-    /// Error-only recovery: a malformed action can still name its command.
+    /// Recover valid or malformed command correlation without decoding its body.
+    /// Serde skips all fields except this fixed-size header with `IgnoredAny`;
+    /// no engine action/interaction or per-payload-field structure is allocated.
     pub(crate) fn malformed_command_id(text: &str) -> Option<CommandId> {
+        match Self::quota_recovery(text)? {
+            QuotaRecovery::Correlated(id) => id,
+            QuotaRecovery::ContestClick | QuotaRecovery::Other => None,
+        }
+    }
+
+    pub(crate) fn quota_recovery(text: &str) -> Option<QuotaRecovery> {
         #[derive(Deserialize)]
         enum Kind {
             Action,
+            ContestClick,
             Interaction,
             #[serde(other)]
             Other,
@@ -47,10 +63,11 @@ impl ClientEnvelope {
             command_id: Option<CommandId>,
         }
         let header: Header = serde_json::from_str(text).ok()?;
-        match header.kind {
-            Kind::Action | Kind::Interaction => header.command_id,
-            Kind::Other => None,
-        }
+        Some(match header.kind {
+            Kind::Action | Kind::Interaction => QuotaRecovery::Correlated(header.command_id),
+            Kind::ContestClick => QuotaRecovery::ContestClick,
+            Kind::Other => QuotaRecovery::Other,
+        })
     }
 }
 

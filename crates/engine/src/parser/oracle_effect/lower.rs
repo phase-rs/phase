@@ -1576,12 +1576,16 @@ pub(super) fn fold_search_choose_type_conditional_destination(def: &mut AbilityD
 /// is returned only if every difference from the unseeded one is confined to the
 /// positions the bindings may occupy (`accepting_bindings_confined`).
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
-    let unseeded = super::assembly::assemble_effect_chain(ir);
+    let unseeded = {
+        let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "unseeded").entered();
+        super::assembly::assemble_effect_chain(ir)
+    };
     if ir
         .clauses
         .iter()
         .all(|clause| clause.accepting_player_bindings.is_empty())
     {
+        tracing::debug!(target: "engine::parser::binding", selected_pass = "unseeded", "assembly selected");
         return unseeded;
     }
     let mut seeded_ir = ir.clone();
@@ -1589,8 +1593,13 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         .clauses
         .iter_mut()
         .for_each(transplant_accepting_player_bindings);
-    let seeded = super::assembly::assemble_effect_chain(&seeded_ir);
-    if accepting_bindings_confined(&unseeded, &seeded) {
+    let seeded = {
+        let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "seeded").entered();
+        super::assembly::assemble_effect_chain(&seeded_ir)
+    };
+    let confined = accepting_bindings_confined(&unseeded, &seeded);
+    tracing::debug!(target: "engine::parser::binding", confined, selected_pass = if confined { "seeded" } else { "unseeded" }, "assembly selected");
+    if confined {
         seeded
     } else {
         unseeded
@@ -3051,6 +3060,7 @@ impl ReflexiveGateParent {
             | Effect::EndTheTurn
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }

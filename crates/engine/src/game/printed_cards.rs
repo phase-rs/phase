@@ -4419,6 +4419,11 @@ mod tests {
         };
         walk_effect(&until_lose, &mut names);
 
+        let contest = Effect::ExileTopCardContest {
+            winner_effect: Box::new(conjure_ability("contest_winner", Zone::Hand)),
+        };
+        walk_effect(&contest, &mut names);
+
         let roll = Effect::RollDie {
             count: QuantityExpr::Fixed { value: 1 },
             sides: 6,
@@ -4630,6 +4635,7 @@ mod tests {
             "flip_win",
             "flip_lose",
             "until_lose",
+            "contest_winner",
             "roll",
             "choose_one",
             "trigger",

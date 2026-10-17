@@ -19,6 +19,7 @@ pub(crate) struct Hooks {
     terminal_prepare: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
+    hello_accept: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
 }
 
 /// One connection's real parser calls, with a frozen quota window so wire tests
@@ -27,6 +28,11 @@ pub(crate) struct ParserWork {
     quota_at: std::time::Instant,
     deserializations: std::sync::atomic::AtomicUsize,
     metadata_recoveries: std::sync::atomic::AtomicUsize,
+    limited: std::sync::atomic::AtomicUsize,
+    changed: Notify,
+    probe_at: tokio::time::Instant,
+    probes: std::sync::atomic::AtomicUsize,
+    completed: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for ParserWork {
@@ -35,6 +41,11 @@ impl Default for ParserWork {
             quota_at: std::time::Instant::now(),
             deserializations: Default::default(),
             metadata_recoveries: Default::default(),
+            limited: Default::default(),
+            changed: Default::default(),
+            probe_at: tokio::time::Instant::now(),
+            probes: Default::default(),
+            completed: Default::default(),
         }
     }
 }
@@ -55,11 +66,80 @@ impl ParserWork {
     pub(crate) fn deserialization(&self) {
         self.deserializations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.changed.notify_one();
     }
 
     pub(crate) fn metadata_recovery(&self) {
         self.metadata_recoveries
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.changed.notify_one();
+    }
+
+    pub(crate) fn rate_limited(&self) {
+        self.limited
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.changed.notify_one();
+    }
+
+    pub(crate) async fn wait_rate_limited(&self, count: usize) {
+        loop {
+            let changed = self.changed.notified();
+            if self.limited.load(std::sync::atomic::Ordering::SeqCst) >= count {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) async fn wait_counts(&self, expected: (usize, usize)) {
+        loop {
+            let changed = self.changed.notified();
+            let observed = self.counts();
+            if observed.0 >= expected.0 && observed.1 >= expected.1 {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) fn probe_at(&self) -> tokio::time::Instant {
+        self.probe_at
+    }
+
+    pub(crate) fn probe_parse(&self) {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn probes(&self) -> usize {
+        self.probes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+pub(crate) struct FrameCompletion(Arc<ParserWork>);
+
+impl Drop for FrameCompletion {
+    fn drop(&mut self) {
+        self.0
+            .completed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.changed.notify_one();
+    }
+}
+
+impl ParserWork {
+    pub(crate) fn frame_guard(self: &Arc<Self>) -> FrameCompletion {
+        FrameCompletion(self.clone())
+    }
+
+    pub(crate) async fn wait_completed(&self, count: usize) {
+        loop {
+            let changed = self.changed.notified();
+            if self.completed.load(std::sync::atomic::Ordering::SeqCst) >= count {
+                return;
+            }
+            changed.await;
+        }
     }
 }
 
@@ -70,6 +150,20 @@ pub(crate) struct BootstrapGate {
 }
 
 impl Hooks {
+    pub(crate) fn arm_hello_accept(&self) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.hello_accept.lock() = Some(gate.clone());
+        gate
+    }
+
+    pub(crate) async fn before_hello_accept(&self) {
+        let gate = self.hello_accept.lock().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
     pub(crate) fn arm_parser_work(&self) -> Arc<ParserWork> {
         let work = Arc::new(ParserWork::default());
         *self.parser_work.lock() = Some(work.clone());

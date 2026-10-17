@@ -1737,13 +1737,13 @@ fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
 /// interchangeable superlatives for the same `AggregateFunction::Max`
 /// ("greatest power", "highest mana value"); they are one axis, not one phrase
 /// each. Verdant Rejuvenation prints "highest".
-fn parse_max_extremum_adjective(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_max_extremum_adjective(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("greatest"), tag("highest"), tag("largest")))).parse(input)
 }
 
 /// CR 208.1 + CR 202.3: The aggregable object properties. Shared by every
 /// aggregate form so the property axis is declared once.
-fn parse_aggregate_property(input: &str) -> OracleResult<'_, ObjectProperty> {
+pub(crate) fn parse_aggregate_property(input: &str) -> OracleResult<'_, ObjectProperty> {
     alt((
         value(ObjectProperty::Power, tag("power")),
         value(ObjectProperty::Toughness, tag("toughness")),

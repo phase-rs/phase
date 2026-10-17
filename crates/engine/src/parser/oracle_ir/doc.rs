@@ -1388,6 +1388,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
                 stamp_retained_printed_slot(outcome_template, slot, kind);
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => {
+            stamp_retained_printed_slot(winner_effect, slot, kind);
+        }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
