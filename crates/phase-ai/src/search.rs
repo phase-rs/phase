@@ -15,8 +15,8 @@ use engine::ai_support::{
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
 use engine::types::ability::{
-    AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility, StaticDefinition,
-    TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility,
+    StaticDefinition, TargetFilter, TargetRef,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
@@ -26,7 +26,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -417,6 +417,16 @@ fn choose_action_with_session_inner(
             })
             .and_then(&bind_specialist)
         {
+            return direct(Some(action));
+        }
+    }
+
+    // CR 118.5 + CR 118.12a: A {0} unless-cost needs only an acknowledgment and
+    // no resources, and declining only lets the effect happen. Paying it is not
+    // a payment decision, so it is answered ahead of the scored path, where no
+    // difficulty (including the Easy/VeryEasy softmax) can decline it.
+    if free_unless_payment_owed_by(&state.waiting_for, ai_player) {
+        if let Some(action) = bind_specialist(GameAction::PayUnlessCost { pay: true }) {
             return direct(Some(action));
         }
     }
@@ -1214,6 +1224,23 @@ fn issued_selection(contract: &AiDecisionContract) -> Option<GameAction> {
         .map(|(_, action)| action.clone())
 }
 
+/// Whether `waiting_for` is an unless-payment owed by `payer` whose whole cost
+/// is a payable {0} (`AbilityCost::Mana` carrying `ManaCost::zero()`).
+/// CR 118.5: such a cost is paid by acknowledging it and spends no resources;
+/// CR 118.12a: declining only lets the unless-effect happen. `ManaCost::NoCost`
+/// (CR 118.6, unpayable), a zero `PayLife`, and every other cost shape are not
+/// free payments and keep the scored/fallback path.
+fn free_unless_payment_owed_by(waiting_for: &WaitingFor, payer: PlayerId) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::UnlessPayment {
+            player,
+            cost: AbilityCost::Mana { cost },
+            ..
+        } if *player == payer && *cost == ManaCost::zero()
+    )
+}
+
 /// Produce a safe action when the AI has no scored candidates.
 /// During combat, submit empty declarations. During active play, pass priority.
 /// Returns None only for terminal states (GameOver) where no action is possible.
@@ -1671,8 +1698,11 @@ pub fn fallback_action(
             ..
         } => Some(GameAction::DecideOptionalEffect { accept: false }),
 
-        // Unless payment: decline to pay (let the effect resolve).
-        WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+        // Unless payment: decline a real cost (let the effect resolve); pay a
+        // free {0} (CR 118.5), which spends nothing.
+        WaitingFor::UnlessPayment { player, .. } => Some(GameAction::PayUnlessCost {
+            pay: free_unless_payment_owed_by(&state.waiting_for, *player),
+        }),
 
         // Disjunctive activation costs: default to the first payable branch.
         WaitingFor::ActivationCostOneOfChoice {
@@ -6711,6 +6741,249 @@ mod tests {
             .or_else(|| state.waiting_for.acting_players().first().copied())
             .unwrap_or(P0);
         AiDecisionContract::issue(state, owner)
+    }
+
+    /// A bare unless-payment prompt owed by `payer` for `cost`, with a 1-damage
+    /// pending effect (the shape `spell_target_selection_state` builds).
+    fn unless_payment_state(
+        cost: AbilityCost,
+        payer: PlayerId,
+        remaining: Vec<PlayerId>,
+    ) -> GameState {
+        let mut state = make_state();
+        let source = ObjectId(900);
+        let pending_effect = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: payer,
+            cost,
+            pending_effect: Box::new(pending_effect),
+            trigger_event: None,
+            effect_description: None,
+            remaining,
+        };
+        state
+    }
+
+    fn mana_unless_cost(cost: ManaCost) -> AbilityCost {
+        AbilityCost::Mana { cost }
+    }
+
+    const UNLESS_LEVELS: [AiDifficulty; 5] = [
+        AiDifficulty::VeryEasy,
+        AiDifficulty::Easy,
+        AiDifficulty::Medium,
+        AiDifficulty::Hard,
+        AiDifficulty::VeryHard,
+    ];
+
+    /// (pays, declines) over seeds 0..40 for `payer` answering `state`.
+    fn unless_answers(
+        state: &GameState,
+        payer: PlayerId,
+        difficulty: AiDifficulty,
+    ) -> (usize, usize) {
+        let config = create_config(difficulty, Platform::Native);
+        let mut tally = (0, 0);
+        for seed in 0..40u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            match choose_action(state, payer, &config, &mut rng) {
+                Some(GameAction::PayUnlessCost { pay: true }) => tally.0 += 1,
+                Some(GameAction::PayUnlessCost { pay: false }) => tally.1 += 1,
+                other => panic!("{difficulty:?} seed {seed}: unexpected answer {other:?}"),
+            }
+        }
+        tally
+    }
+
+    /// CR 118.5: a free {0} unless-payment is answered `pay: true` at VeryEasy through
+    /// VeryHard and every seed (the engine now asks for it instead of auto-paying). The pre-emption precedes every difficulty-keyed
+    /// branch, so CEDH takes it too.
+    #[test]
+    fn free_unless_payment_is_paid_at_every_difficulty() {
+        let payer = PlayerId(1);
+        for remaining in [vec![], vec![PlayerId(0)]] {
+            let state =
+                unless_payment_state(mana_unless_cost(ManaCost::zero()), payer, remaining.clone());
+            // Reach guard: the prompt is the payer's, and the engine issued both
+            // answers, so the pre-emption chose between two issued actions.
+            assert!(state.waiting_for.acting_players().contains(&payer));
+            let contract = AiDecisionContract::issue(&state, payer);
+            assert!(contract.contains_action(&state, &GameAction::PayUnlessCost { pay: true }));
+            assert!(contract.contains_action(&state, &GameAction::PayUnlessCost { pay: false }));
+            for difficulty in UNLESS_LEVELS {
+                assert_eq!(
+                    unless_answers(&state, payer, difficulty),
+                    (40, 0),
+                    "{difficulty:?}, remaining {remaining:?}"
+                );
+            }
+        }
+    }
+
+    /// The paired control: a real {1} cost keeps the scored path (both answers
+    /// occur at every level), and the zero-cost predicate matches nothing else.
+    #[test]
+    fn real_unless_payment_keeps_the_scored_path() {
+        let payer = PlayerId(1);
+        let one = unless_payment_state(mana_unless_cost(ManaCost::generic(1)), payer, vec![]);
+        let zero = unless_payment_state(mana_unless_cost(ManaCost::zero()), payer, vec![]);
+        for difficulty in UNLESS_LEVELS {
+            // Reach guard: the identical harness and seeds at {0} pay 40/40.
+            assert_eq!(unless_answers(&zero, payer, difficulty), (40, 0));
+            let (pays, declines) = unless_answers(&one, payer, difficulty);
+            assert!(
+                pays > 0 && declines > 0,
+                "{difficulty:?}: a {{1}} cost is not pre-empted (pays {pays}, declines {declines})"
+            );
+        }
+        let no_cost = mana_unless_cost(ManaCost::NoCost);
+        let pay_life_zero = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 0 },
+        };
+        for cost in [no_cost, pay_life_zero] {
+            let state = unless_payment_state(cost.clone(), payer, vec![]);
+            assert!(
+                !free_unless_payment_owed_by(&state.waiting_for, payer),
+                "{cost:?}"
+            );
+        }
+        assert!(free_unless_payment_owed_by(&zero.waiting_for, payer));
+        assert!(
+            !free_unless_payment_owed_by(&zero.waiting_for, PlayerId(0)),
+            "the predicate is keyed to the prompted seat"
+        );
+    }
+
+    /// `fallback_action` pays a free {0} and still declines a real cost.
+    #[test]
+    fn fallback_pays_a_free_unless_payment_and_declines_a_real_one() {
+        let payer = PlayerId(1);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        for (cost, expected) in [(ManaCost::zero(), true), (ManaCost::generic(1), false)] {
+            let state = unless_payment_state(mana_unless_cost(cost.clone()), payer, vec![]);
+            let contract = test_contract(&state);
+            let answer = fallback_action(&state, &config, &contract);
+            assert_eq!(
+                answer,
+                Some(GameAction::PayUnlessCost { pay: expected }),
+                "{cost:?}"
+            );
+            assert!(contract.contains_action(&state, &answer.expect("answer")));
+        }
+    }
+
+    /// The seat that owes nothing is left alone.
+    #[test]
+    fn bystander_is_not_asked_to_answer_a_free_unless_payment() {
+        let state = unless_payment_state(mana_unless_cost(ManaCost::zero()), PlayerId(1), vec![]);
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(0);
+        // Reach guard: the payer is answered for the same state.
+        assert_eq!(
+            choose_action(&state, PlayerId(1), &config, &mut rng),
+            Some(GameAction::PayUnlessCost { pay: true })
+        );
+        assert_eq!(choose_action(&state, PlayerId(0), &config, &mut rng), None);
+    }
+
+    /// End to end with a real engine prompt: P1's Override (verbatim text) with
+    /// no artifacts raises the {0} prompt for the AI seat P0, which pays it.
+    #[test]
+    fn ai_pays_the_free_unless_prompt_the_engine_raises() {
+        for artifacts in [0usize, 1] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let bear = scenario
+                .add_creature_to_hand(P0, "Bear", 2, 2)
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            scenario.add_basic_land(P0, ManaColor::Green);
+            scenario.add_basic_land(P0, ManaColor::Green);
+            let counter = scenario
+                .add_spell_to_hand_from_oracle(
+                    P1,
+                    "Override",
+                    true,
+                    "Counter target spell unless its controller pays {1} for each artifact you control.",
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 2,
+                })
+                .id();
+            for _ in 0..3 {
+                scenario.add_basic_land(P1, ManaColor::Blue);
+            }
+            for i in 0..artifacts {
+                scenario.add_artifact_from_oracle(P1, &format!("Trinket {i}"), "");
+            }
+            let mut runner = scenario.build();
+            {
+                let state = runner.state_mut();
+                state.turn_number = 3;
+                state.active_player = P0;
+                state.phase = Phase::PreCombatMain;
+                state.waiting_for = WaitingFor::Priority { player: P0 };
+            }
+            runner.cast(bear).commit();
+            let bear_spell = runner.state().stack.back().expect("bear spell").id;
+            engine::game::engine::apply_as_current_for_simulation(
+                runner.state_mut(),
+                GameAction::PassPriority,
+            )
+            .expect("P0 passes");
+            runner.cast(counter).target_object(bear_spell).commit();
+            runner.resolve_top();
+
+            let config = create_config(AiDifficulty::Easy, Platform::Native);
+            let mut rng = SmallRng::seed_from_u64(7);
+            let answer = choose_action(runner.state(), P0, &config, &mut rng);
+            match (&runner.state().waiting_for, artifacts) {
+                (
+                    WaitingFor::UnlessPayment {
+                        player: P0,
+                        cost: AbilityCost::Mana { cost },
+                        ..
+                    },
+                    0,
+                ) => {
+                    assert_eq!(*cost, ManaCost::zero());
+                    assert_eq!(answer, Some(GameAction::PayUnlessCost { pay: true }));
+                    runner
+                        .act(answer.expect("answer"))
+                        .expect("the AI's answer applies");
+                    assert_eq!(
+                        runner.state().objects[&bear_spell].zone,
+                        Zone::Stack,
+                        "paying the free {{0}} leaves the spell on the stack"
+                    );
+                }
+                (
+                    WaitingFor::UnlessPayment {
+                        player: P0,
+                        cost: AbilityCost::Mana { cost },
+                        ..
+                    },
+                    1,
+                ) => {
+                    // Reach guard: with one artifact the prompt is a real {1}, not
+                    // pre-empted; the answer is whichever the scored path picked.
+                    assert_eq!(*cost, ManaCost::generic(1));
+                    assert!(matches!(answer, Some(GameAction::PayUnlessCost { .. })));
+                }
+                (other, _) => panic!("artifacts {artifacts}: expected the prompt, got {other:?}"),
+            }
+        }
     }
 
     fn resolution_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {

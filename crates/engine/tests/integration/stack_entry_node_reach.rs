@@ -2288,7 +2288,7 @@ fn embersmith_damage_node_below_its_payment_acts_on_nothing() {
 const CLASH_OF_WILLS: &str = "Counter target spell unless its controller pays {X}.";
 
 #[test]
-fn clash_of_wills_with_x_zero_counters_nothing() {
+fn clash_of_wills_asks_for_zero_at_x_zero() {
     for x in [0, 1] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -2319,11 +2319,9 @@ fn clash_of_wills_with_x_zero_counters_nothing() {
         .expect("P0 passes");
         runner.cast(clash).x(x).target_object(bear_spell).commit();
         let entry = runner.state().stack.back().expect("Clash of Wills").id;
-        let expected = if x == 0 {
-            Vec::new()
-        } else {
-            vec![TargetRef::Object(bear_spell)]
-        };
+        // CR 118.12a + CR 118.5: a {0} unless cost is asked like any other, so
+        // the counter is pending against the Bear spell at X = 0 as at X = 1.
+        let expected = vec![TargetRef::Object(bear_spell)];
         assert_eq!(reach(runner.state(), entry)[0].2, expected, "X = {x}");
         runner.resolve_top();
         let asked = matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. });
@@ -2332,12 +2330,8 @@ fn clash_of_wills_with_x_zero_counters_nothing() {
                 asked,
                 runner.state().objects.get(&bear_spell).map(|o| o.zone)
             ),
-            if x == 0 {
-                (false, Some(Zone::Stack))
-            } else {
-                (true, Some(Zone::Stack))
-            },
-            "engine agreement, X = {x}: at X = 0 the spell stays unasked"
+            (true, Some(Zone::Stack)),
+            "engine agreement, X = {x}: the controller is asked"
         );
     }
 }

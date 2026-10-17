@@ -16879,21 +16879,13 @@ fn resolve_chain_body(
             // that has no mana cost (lands, tokens, other costless permanents)
             // is UNPAYABLE — attempting to pay it is an illegal action. No
             // payment is offered and the unless-effect always resolves; even a
-            // Counter is not prevented (its controller cannot pay). This is the
-            // inverse of the `{0}` "players can always pay 0" branch below, and
-            // the two must stay distinct: `ManaCost::NoCost != ManaCost::zero()`.
+            // Counter is not prevented (its controller cannot pay). A payable
+            // {0} is different: CR 118.5 makes it an acknowledgment the payer
+            // is still asked for, like any other cost. `ManaCost::NoCost !=
+            // ManaCost::zero()` matters because the first falls through and the
+            // second prompts.
             if unless_cost_is_unpayable(&resolved_cost) {
                 // Unpayable: fall through to execute the effect unconditionally.
-            } else if matches!(ability.effect, Effect::Counter { .. })
-                && matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
-            {
-                // Legacy {0} counter auto-pay; aligning it with CR 118.5's acknowledgment is separate.
-                events.push(GameEvent::EffectResolved {
-                    kind: EffectKind::Counter,
-                    source_id: ability.source_id,
-                    subject: None,
-                });
-                return Ok(());
             } else if let Some((&payer, remaining_payers)) = unless_payers
                 .iter()
                 .position(|p| {
@@ -19674,11 +19666,9 @@ fn resolved_unless_cost(
                 other => {
                     // CR 702.24a: No current mechanic constructs a
                     // non-SelfRef `PerCounter`. If one ever does,
-                    // returning 0 routes through the CR 118.5 zero-
-                    // cost short-circuit (the unless-effect proceeds
-                    // without prompting), which is the least-
-                    // surprising default until the target-resolution
-                    // branch is implemented.
+                    // returns {0}, which is asked (CR 118.5), the
+                    // least-surprising default until the
+                    // target-resolution branch is implemented.
                     // CR 113.6b: TargetFilter resolution against game
                     // state belongs in `game/filter.rs`; wire it here
                     // when the second mechanic lands.
@@ -19696,7 +19686,8 @@ fn resolved_unless_cost(
             // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
             // X drives the unless-cost. The plain resolve_quantity path
             // passes chosen_x=None, making a bare {X} unless-cost always
-            // resolve to 0 and wrongly short-circuit via CR 118.5.
+            // resolve to the wrong cost, {0}, which would be asked for instead
+            // of the announced X.
             let amount =
                 crate::game::quantity::resolve_quantity_with_targets(state, quantity, ability);
             AbilityCost::Mana {
@@ -21366,8 +21357,8 @@ fn resolve_unless_payers(
 }
 
 /// CR 702.24a: Expand `pay [base] for each counter on it` into the
-/// concrete N-fold cost the player actually pays. N=0 short-circuits to
-/// a zero mana cost (CR 118.5 — players can always pay 0). `OneOf`
+/// concrete N-fold cost the player actually pays. N=0 yields a {0} cost
+/// (CR 118.3a), which is still asked (CR 118.5). `OneOf`
 /// unfolds into a `Composite` of N independent disjunctive choices
 /// (CR 702.24a: each choice is made separately).
 fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
@@ -27254,7 +27245,7 @@ mod tests {
     /// must resolve against the carrying ability's announced `chosen_x`. The
     /// interceptor folds the dynamic cost into a fixed `Mana` cost before
     /// arming `WaitingFor::UnlessPayment` — without threading `chosen_x` the
-    /// value resolves to 0 and the unless prompt is wrongly skipped (CR 118.5).
+    /// value resolves to 0 and the prompt would carry {0} instead of the announced X.
     #[test]
     fn unless_pay_bare_x_threads_chosen_x_into_resolved_cost() {
         let mut state = GameState::new_two_player(42);
