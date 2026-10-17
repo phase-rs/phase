@@ -2276,8 +2276,12 @@ pub(super) fn handle_resolution_choice(
                 // in place for that continuation to read. Restoring `prev` here
                 // would wipe the surviving-dice aggregate out from under the
                 // re-parked frame. Matches `drain_active_die_roll`.
-                Some(wf) => wf,
-                None => {
+                effects::ResolutionProgress::Waiting => state.waiting_for.clone(),
+                effects::ResolutionProgress::Queued => {
+                    finish_with_continuation(state, player, events)
+                }
+                effects::ResolutionProgress::Complete => {
+                    effects::roll_die::publish_completed_result_to_parent(state);
                     let wf = finish_with_continuation(state, player, events);
                     state.die_result_this_resolution = prev_die_result;
                     wf
@@ -2779,8 +2783,15 @@ pub(super) fn handle_resolution_choice(
                 // accept is a fresh top-level `apply()`, so depth never
                 // accumulates across prompts and the `depth > 20` guard never
                 // applies — CR 107.1c permits looping a whole library.
-                effects::resolve_ability_chain(state, &ability, events, 1)
+                let progress = effects::resolve_ability_chain_step(state, &ability, events, 1)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                match progress {
+                    effects::ResolutionProgress::Waiting => {}
+                    effects::ResolutionProgress::Complete | effects::ResolutionProgress::Queued => {
+                        super::engine::resume_pending_continuation_if_priority(state, events)
+                            .expect("a ready repeat decision must resume its continuation");
+                    }
+                }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
                 // CR 107.1c: declining ends the loop; drain any trailing chain.
@@ -3845,16 +3856,15 @@ pub(super) fn handle_resolution_choice(
                     "Chosen clash opponent {opponent:?} is not a legal opponent"
                 )));
             }
-            effects::clash::perform_clash(state, &ability, opponent, events)
+            set_priority(state, player);
+            let clash = effects::clash::perform_clash(state, &ability, opponent, events)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            // CR 701.30a: With at least one revealed card, `perform_clash` queued
-            // the APNAP placement (which drains the clash's sub_ability). With
-            // both libraries empty, no placement was queued, so drain the stashed
-            // sub_ability here and hand priority back to the clashing player.
-            if !matches!(state.waiting_for, WaitingFor::ClashCardPlacement { .. }) {
-                set_priority(state, player);
-                super::engine::resume_pending_continuation_if_priority(state, events)
-                    .expect("a settled clash choice must resume its continuation");
+            match effects::finish_clash_resolution(state, &ability, clash).progress {
+                effects::ResolutionProgress::Waiting => {}
+                effects::ResolutionProgress::Complete | effects::ResolutionProgress::Queued => {
+                    super::engine::resume_pending_continuation_if_priority(state, events)
+                        .expect("a settled clash choice must resume its continuation");
+                }
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -3958,19 +3968,29 @@ pub(super) fn handle_resolution_choice(
                 player,
                 card,
                 remaining,
+                mut bottom_cards,
             },
             GameAction::ChooseTopOrBottom { top },
         ) => {
-            // allow-raw-zone: clash reveal/return keeps the card in its library (CR 701.30a + CR 701.20b).
-            zones::move_to_library_position(state, card, top, events);
+            // CR 701.30c: record the decision before moving any revealed card.
+            if !top {
+                bottom_cards.push(card);
+            }
             if let Some(((next_player, next_card), rest)) = remaining.split_first() {
                 state.waiting_for = WaitingFor::ClashCardPlacement {
                     player: *next_player,
                     card: *next_card,
                     remaining: rest.to_vec(),
+                    bottom_cards,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
+                // CR 701.30c: all placements happen together after the last choice;
+                // no priority, trigger collection or state-based actions intervene.
+                for card in bottom_cards {
+                    // allow-raw-zone: Clash keeps each revealed card in its library.
+                    zones::move_to_library_position(state, card, false, events);
+                }
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
