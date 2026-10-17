@@ -4331,10 +4331,24 @@ fn def_is_delivered_gains_rider_carrier(
         // carrier whose `cast_filter` is absent or names a different quality
         // cannot clear the warning for this sentence.
         Effect::AddPendingEntersModifications { rider } => rider.cast_filter.as_ref() == quality,
-        _ => def
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| def_is_delivered_gains_rider_carrier(sub, quality)),
+        _ => {
+            // Mirror the runtime authority's METADATA-chain bound: only the
+            // enters-with-counter rider and the graveyard-destination rider are
+            // transparent links to the gains rider; any other node ends the
+            // chain, so a rider stored under an unrelated instruction is not
+            // delivered and must not exempt the sentence.
+            let transparent = matches!(&*def.effect, Effect::AddPendingETBCounters { .. })
+                || crate::game::effects::cast_from_zone::graveyard_destination_rider(
+                    &def.effect,
+                    def.condition.as_ref(),
+                )
+                .is_some();
+            transparent
+                && def
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|sub| def_is_delivered_gains_rider_carrier(sub, quality))
+        }
     }
 }
 

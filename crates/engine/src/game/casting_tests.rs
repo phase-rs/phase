@@ -55694,6 +55694,10 @@ fn paid_offer_accept_applies_the_gains_rider() {
     apply_as_current(&mut state, GameAction::PassPriority)
         .expect("paying the {U} cost must finalize the empty-rider cast");
     assert!(
+        state.stack.iter().any(|entry| entry.source_id == creature),
+        "reach guard: the empty-rider cast must have finalized onto the stack"
+    );
+    assert!(
         state.transient_continuous_effects.iter().all(|effect| {
             !(effect.affected == TargetFilter::SpecificObject { id: creature }
                 && effect.modifications == rider)

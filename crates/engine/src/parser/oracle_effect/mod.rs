@@ -4560,18 +4560,28 @@ pub(crate) fn try_parse_cast_this_way_gains_rider_body(
     ))
     .parse(text)
     .ok()?;
+    // `strip_trailing_duration` TRIMS both ends before parsing (its no-duration
+    // return is `rest.trim()`), and the body grammar's remainder is relative to
+    // that trimmed slice. Assemble the consumed span from the slice's own offset
+    // inside `text` plus the portion consumed from `body`, and re-slice the
+    // returned remainder from `text`: otherwise every caller's
+    // `text.len() - remainder.len()` span arithmetic is off by the trimmed
+    // bytes (and a populated `parse_continuous_modifications` window can reach
+    // into the unconsumed tail).
+    let rest_offset = text.len() - rest.len();
     let (body, duration) = strip_trailing_duration(rest);
     if duration.is_some() {
         return None;
     }
+    let body_offset = rest_offset + (rest.len() - rest.trim_start().len());
     let (remainder, ()) = parse_cast_this_way_gains_rider_body_grammar(body).ok()?;
-    let consumed_len = text.len() - remainder.len();
+    let consumed_len = body_offset + (body.len() - remainder.len());
     let modifications =
         crate::parser::oracle_static::parse_continuous_modifications(&text[..consumed_len]);
     if modifications.is_empty() {
         return None;
     }
-    Some((remainder, modifications))
+    Some((&text[consumed_len..], modifications))
 }
 
 /// The gains-rider body grammar: one or more modification segments (an

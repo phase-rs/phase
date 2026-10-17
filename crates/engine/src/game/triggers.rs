@@ -15892,9 +15892,10 @@ fn evaluate_trigger_condition_with_source(
             state.players_attacked_this_turn.contains(&controller)
         }
         // CR 500.8 + CR 506.1 + CR 603.4: Intervening-if for "if it's the
-        // first combat phase of the turn".
+        // first combat phase of the turn" — the phase must be the one in
+        // progress (shared predicate with the static/ability evaluators).
         TriggerCondition::FirstCombatPhaseOfTurn => {
-            state.steps_started_this_turn.count(Phase::BeginCombat) == 1
+            super::conditions::first_combat_phase_in_progress(state)
         }
         // CR 603.4: "if you cast a [type] spell this turn" — check per-player cast history.
         TriggerCondition::CastSpellThisTurn { filter } => match filter {
@@ -24002,11 +24003,13 @@ pub mod tests {
     }
 
     #[test]
-    fn first_combat_phase_condition_checks_turn_counter() {
+    fn first_combat_phase_condition_requires_the_phase_in_progress() {
         let mut state = setup();
         let condition = TriggerCondition::FirstCombatPhaseOfTurn;
 
+        // The counter is set but the phase has not started: false.
         state.steps_started_this_turn.clear();
+        state.phase = Phase::DeclareAttackers;
         assert!(!check_trigger_condition(
             &state,
             &condition,
@@ -24015,6 +24018,7 @@ pub mod tests {
             None,
         ));
 
+        // The turn's first combat phase is in progress: true.
         state.steps_started_this_turn.record(Phase::BeginCombat);
         assert!(check_trigger_condition(
             &state,
@@ -24024,7 +24028,22 @@ pub mod tests {
             None,
         ));
 
+        // An added combat phase is in progress: false.
         state.steps_started_this_turn.record(Phase::BeginCombat);
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            None,
+        ));
+
+        // Review control: the phase counter alone is not the answer — after the
+        // first combat phase ended, a phase that merely STARTED earlier this
+        // turn does not satisfy the condition.
+        state.steps_started_this_turn.clear();
+        state.steps_started_this_turn.record(Phase::BeginCombat);
+        state.phase = Phase::PostCombatMain;
         assert!(!check_trigger_condition(
             &state,
             &condition,

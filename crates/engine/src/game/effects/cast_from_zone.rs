@@ -2287,6 +2287,17 @@ fn cast_from_zone_enters_with_modifications(
         if let Effect::AddPendingEntersModifications { rider } = &sub.effect {
             return rider.clone();
         }
+        // The rider rides the parent's METADATA chain: only the sibling
+        // enters-with-counter rider and the graveyard-destination rider are
+        // transparent links to it. Any other node ends the chain — a rider
+        // stored under an unrelated instruction is not permission metadata for
+        // this cast and must not be read (the detector's delivery walk mirrors
+        // this bound).
+        if !(is_enters_with_counter_rider_subability(sub)
+            || graveyard_destination_rider(&sub.effect, sub.condition.as_ref()).is_some())
+        {
+            break;
+        }
         cursor = sub.sub_ability.as_deref();
     }
     Default::default()
@@ -5712,6 +5723,66 @@ mod tests {
             ),
             other => panic!("expected GraveyardPaidCast, got {other:?}"),
         }
+    }
+
+    /// CR 608.2c + CR 611.2a (structural review): the delivering read is bounded
+    /// to the parent's METADATA chain — the sibling enters-with-counter rider
+    /// and the graveyard-destination rider. A rider stored under any other
+    /// sub-ability is not this cast's permission metadata and must not be read;
+    /// the paired positive proves the metadata chain still reaches it.
+    #[test]
+    fn enters_with_modifications_reader_stops_at_unrelated_nodes() {
+        let source = ObjectId(9210);
+
+        // Negative — host → unrelated instruction → APEM: not delivered.
+        let mut grant = paid_during_resolution_grant(source, ObjectId(9211));
+        let mut unrelated = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        unrelated.sub_ability = Some(Box::new(gains_rider_sub_ability(source)));
+        grant.sub_ability = Some(Box::new(unrelated));
+        assert!(
+            cast_from_zone_enters_with_modifications(&grant).is_empty(),
+            "a rider under an unrelated node must not be read"
+        );
+
+        // Positive — host → graveyard-destination rider → APEM: delivered.
+        let mut grant = paid_during_resolution_grant(source, ObjectId(9212));
+        let mut destination_rider = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        destination_rider.sub_ability = Some(Box::new(gains_rider_sub_ability(source)));
+        grant.sub_ability = Some(Box::new(destination_rider));
+        assert_eq!(
+            cast_from_zone_enters_with_modifications(&grant)
+                .modifications
+                .len(),
+            1,
+            "the metadata chain must still deliver the rider"
+        );
     }
 
     /// CR 608.2c + CR 611.2a (row 6.4): the per-opponent fanout conversion

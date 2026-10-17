@@ -285,7 +285,7 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
 /// trigger/static paths (via `parse_inner_condition`).
 fn parse_first_combat_phase_of_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, possessive) = preceded(
-        tag("it's the first combat phase of "),
+        (parse_it_is, tag(" the first combat phase of ")),
         alt((value(false, tag("the turn")), value(true, tag("your turn")))),
     )
     .parse(input)?;
@@ -14090,6 +14090,12 @@ mod tests {
                 ],
             }
         );
+
+        // Review control: the "it is" expansion is the same condition.
+        let (rest, condition) = parse_inner_condition("it is the first combat phase of the turn")
+            .expect("the 'it is' form must parse in the shared authority");
+        assert_eq!(rest, "");
+        assert_eq!(condition, StaticCondition::FirstCombatPhaseOfTurn);
     }
 
     /// `ControllerRef`. Self form ("you control three or more creatures") pins
@@ -25755,6 +25761,10 @@ mod tests {
             ),
             ("it's your turn", "it\u{2019}s your turn"),
             ("it's not your turn", "it\u{2019}s not your turn"),
+            (
+                "it's the first combat phase of the turn",
+                "it\u{2019}s the first combat phase of the turn",
+            ),
             (
                 "~ hasn't dealt damage yet",
                 "~ hasn\u{2019}t dealt damage yet",

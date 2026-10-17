@@ -2273,10 +2273,10 @@ fn evaluate_condition_inner(
             super::players::is_opponent(state, source_controller, state.active_player)
         }
         // CR 500.8 + CR 506.1 + CR 608.2c: the first combat phase of the turn
-        // has begun exactly once (the composed possessive form carries its
-        // `DuringYourTurn` scope separately).
+        // must be the phase in progress (shared predicate; the composed
+        // possessive form carries its `DuringYourTurn` scope separately).
         StaticCondition::FirstCombatPhaseOfTurn => {
-            state.steps_started_this_turn.count(Phase::BeginCombat) == 1
+            super::conditions::first_combat_phase_in_progress(state)
         }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.

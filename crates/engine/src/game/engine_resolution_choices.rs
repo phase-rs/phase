@@ -11451,6 +11451,7 @@ mod tests {
         source: ObjectId,
         candidates: Vec<ObjectId>,
         rider: Vec<crate::types::ability::ContinuousModification>,
+        cast_filter: Option<TargetFilter>,
     ) -> WaitingFor {
         WaitingFor::CastOffer {
             player: PlayerId(0),
@@ -11468,7 +11469,7 @@ mod tests {
                 graveyard_replacement: None,
                 enters_with_modifications: crate::types::ability::PendingEntersModifications {
                     modifications: rider,
-                    cast_filter: None,
+                    cast_filter,
                 },
                 member_pool: candidates,
             },
@@ -11502,7 +11503,7 @@ mod tests {
 
         let outcome = handle_resolution_choice(
             &mut state,
-            window_with_rider(source, vec![first, second], rider.clone()),
+            window_with_rider(source, vec![first, second], rider.clone(), None),
             GameAction::FreeCastWindowChoice {
                 selection: Some(first),
             },
@@ -11632,7 +11633,7 @@ mod tests {
         let mut events = Vec::new();
         handle_resolution_choice(
             &mut state,
-            window_with_rider(source, vec![solo], Vec::new()),
+            window_with_rider(source, vec![solo], Vec::new(), None),
             GameAction::FreeCastWindowChoice {
                 selection: Some(solo),
             },
@@ -11650,6 +11651,121 @@ mod tests {
                     && effect.modifications == rider)
             }),
             "an empty-rider window must apply no rider"
+        );
+    }
+
+    /// CR 608.2c + CR 601.2a (review): the window rider's typed `cast_filter` is
+    /// enforced per cast and survives the re-offer. A matching creature cast
+    /// receives exactly one rider effect; a noncreature cast reaches the stack
+    /// with no rider effect; the re-offered window keeps the filter.
+    #[test]
+    fn window_rider_quality_filter_gates_each_cast_and_survives_reoffer() {
+        use crate::types::ability::{ContinuousModification, TypeFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let rider = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        }];
+        let creature_filter =
+            TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature));
+        let mut state = GameState::new_two_player(44);
+        let source = create_object(
+            &mut state,
+            CardId(90_220),
+            PlayerId(0),
+            "Filtered window source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = window_rider_creature(&mut state, PlayerId(0), "Filtered Creature", 90_221);
+        let instant = policy_bridge_exiled_instant(&mut state, PlayerId(0), "Filtered Instant", 0);
+        let mut events = Vec::new();
+
+        // Cast #1 — the matching creature receives exactly one rider effect.
+        let outcome = handle_resolution_choice(
+            &mut state,
+            window_with_rider(
+                source,
+                vec![creature, instant],
+                rider.clone(),
+                Some(creature_filter.clone()),
+            ),
+            GameAction::FreeCastWindowChoice {
+                selection: Some(creature),
+            },
+            &mut events,
+        )
+        .expect("the filtered window's creature cast must be accepted");
+        let ResolutionChoiceOutcome::WaitingFor(reoffered) = outcome else {
+            panic!("the first window cast must return the re-offer");
+        };
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Stack,
+            "reach guard: the filtered creature cast reached the stack"
+        );
+        let applied: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .filter(|effect| {
+                effect.affected == TargetFilter::SpecificObject { id: creature }
+                    && effect.modifications == rider
+            })
+            .collect();
+        assert_eq!(
+            applied.len(),
+            1,
+            "the matching creature cast must receive the rider exactly once"
+        );
+
+        // The re-offer retains the filter.
+        let WaitingFor::CastOffer {
+            kind:
+                CastOfferKind::FreeCastWindow {
+                    enters_with_modifications,
+                    ..
+                },
+            ..
+        } = &reoffered
+        else {
+            panic!("expected the re-offered FreeCastWindow, got {reoffered:?}");
+        };
+        assert_eq!(
+            enters_with_modifications.cast_filter,
+            Some(creature_filter),
+            "the re-offered window must retain the cast-quality filter"
+        );
+
+        // Cast #2 — the noncreature reaches the stack with no rider effect.
+        handle_resolution_choice(
+            &mut state,
+            reoffered.clone(),
+            GameAction::FreeCastWindowChoice {
+                selection: Some(instant),
+            },
+            &mut events,
+        )
+        .expect("the noncreature window cast must be accepted");
+        assert_eq!(
+            state.objects[&instant].zone,
+            Zone::Stack,
+            "reach guard: the noncreature cast reached the stack"
+        );
+        assert!(
+            state.transient_continuous_effects.iter().all(|effect| {
+                !(effect.affected == TargetFilter::SpecificObject { id: instant }
+                    && effect.modifications == rider)
+            }),
+            "a noncreature cast under the creature filter must receive no rider effect"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider must never resolve standalone; events: {events:?}"
         );
     }
 
@@ -11688,7 +11804,7 @@ mod tests {
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(
             &mut state,
-            window_with_rider(source, vec![chosen, retained], rider.clone()),
+            window_with_rider(source, vec![chosen, retained], rider.clone(), None),
             GameAction::FreeCastWindowChoice {
                 selection: Some(chosen),
             },

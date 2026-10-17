@@ -55740,6 +55740,32 @@ fn cast_this_way_gains_rider_consumed_len_requires_a_complete_clause() {
     );
 }
 
+/// CR 608.2c: the body helper's remainder must be relative to the ORIGINAL
+/// text, not the duration-stripped slice (`strip_trailing_duration` trims both
+/// ends). A trailing-whitespace input with a partial body would otherwise
+/// over-count the consumed span and let `parse_continuous_modifications` read
+/// into the unconsumed tail.
+#[test]
+fn gains_rider_body_span_is_text_relative_with_trailing_whitespace() {
+    let text = "it gains haste and \"granted\". leftover \n";
+    let (remainder, modifications) = try_parse_cast_this_way_gains_rider_body(text)
+        .expect("the partial body must still classify its consumed span");
+    assert_eq!(
+        remainder, " leftover \n",
+        "the remainder must be a suffix of the original text"
+    );
+    assert_eq!(
+        modifications.len(),
+        2,
+        "only the consumed span may classify (quoted grant + keyword), got {modifications:?}"
+    );
+    assert_eq!(
+        &text[..text.len() - remainder.len()],
+        "it gains haste and \"granted\".",
+        "the consumed span must end at the grammar's own stop"
+    );
+}
+
 /// CR 608.2c + CR 611.2a: whole-card production parse of Strago and Relm
 /// (verbatim Oracle). The rider clause must attach to the activated ability's
 /// `CastFromZone` grant as its `AddPendingEntersModifications` sub-ability —

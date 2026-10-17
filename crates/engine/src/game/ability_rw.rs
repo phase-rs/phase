@@ -7155,6 +7155,12 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             p.merge(frozen_source_read());
             p
         }
+        // CR 500.8 + CR 506.1: the phase-occurrence gate reads whether the
+        // turn's first combat phase is the one in progress — the same
+        // sequencing channel `Effect::AdditionalPhase` writes (an added combat
+        // phase changes the answer), so the profile records the `TurnStructure`
+        // kind rather than staying empty.
+        StaticCondition::FirstCombatPhaseOfTurn => reads_player_of(StateKind::TurnStructure),
         StaticCondition::SourceMatchesFilter { filter: _ } => {
             let mut p = reads_src_of(StateKind::ObjectPt);
             p.current_pt_reads.add(PtReadScope::Source);
@@ -7220,7 +7226,6 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
-        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => RwProfile::empty(),
         // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
         // Shared with the `AbilityCondition` / `TriggerCondition` mirrors of the
@@ -9337,6 +9342,21 @@ mod tests {
         assert!(
             d.reads_player.turn_structure,
             "but does read the turn-history snapshot"
+        );
+    }
+
+    /// CR 500.8 + CR 506.1 (structural review): the first-combat-phase gate
+    /// reads the turn's phase history — the `TurnStructure` sequencing channel
+    /// `Effect::AdditionalPhase` writes (pinned as a write by the sibling test
+    /// above) — so an empty read profile would let the pair coexist without the
+    /// CR 603.3b ordering prompt the `feeds` matrix already proves for
+    /// TurnStructure × TurnStructure.
+    #[test]
+    fn first_combat_phase_gate_reads_turn_structure() {
+        let gate = rw_static_condition(&StaticCondition::FirstCombatPhaseOfTurn);
+        assert!(
+            gate.reads_player.turn_structure,
+            "the phase-occurrence gate must record the TurnStructure read, got {gate:?}"
         );
     }
 

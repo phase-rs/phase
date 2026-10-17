@@ -21105,9 +21105,11 @@ pub(crate) fn evaluate_condition(
             state.active_player == ability.scoped_player.unwrap_or(ability.controller)
         }
         // CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase
-        // of the turn" gates follow-up effects such as additional combats.
+        // of the turn" gates follow-up effects such as additional combats —
+        // the phase must be the one in progress (shared predicate with the
+        // static/trigger evaluators).
         AbilityCondition::FirstCombatPhaseOfTurn => {
-            state.steps_started_this_turn.count(Phase::BeginCombat) == 1
+            super::conditions::first_combat_phase_in_progress(state)
         }
         // CR 500.8 + CR 513.1 + CR 608.2c: "if it's the first end step of the
         // turn" gates the additional-end-step follow-up (Y'shtola Rhul); only
@@ -39657,13 +39659,16 @@ mod tests {
             PlayerId(0),
         );
 
+        // The counter is set but the phase has not started: false.
         state.steps_started_this_turn.clear();
+        state.phase = Phase::DeclareAttackers;
         assert!(!evaluate_condition(
             &AbilityCondition::FirstCombatPhaseOfTurn,
             &state,
             &ability,
         ));
 
+        // The turn's first combat phase is in progress: true.
         state.steps_started_this_turn.record(Phase::BeginCombat);
         assert!(evaluate_condition(
             &AbilityCondition::FirstCombatPhaseOfTurn,
@@ -39671,7 +39676,19 @@ mod tests {
             &ability,
         ));
 
+        // An added combat phase is in progress: false.
         state.steps_started_this_turn.record(Phase::BeginCombat);
+        assert!(!evaluate_condition(
+            &AbilityCondition::FirstCombatPhaseOfTurn,
+            &state,
+            &ability,
+        ));
+
+        // Review control: a phase that merely STARTED earlier this turn does
+        // not satisfy the condition after the phase has ended.
+        state.steps_started_this_turn.clear();
+        state.steps_started_this_turn.record(Phase::BeginCombat);
+        state.phase = Phase::PostCombatMain;
         assert!(!evaluate_condition(
             &AbilityCondition::FirstCombatPhaseOfTurn,
             &state,
