@@ -27522,7 +27522,7 @@ fn activate_with_cost_carrier(
                     kind: PayCostKind::ReturnToHand,
                     choices: eligible,
                     count: count as usize,
-                    min_count: 0,
+                    min_count: count as usize,
                     resume: CostResume::Spell {
                         spell: Box::new(pending_return),
                     },
