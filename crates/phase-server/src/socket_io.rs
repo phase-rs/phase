@@ -2103,11 +2103,12 @@ mod transport_fixup_tests {
                     loop {
                         let text = match socket.next().await.unwrap().unwrap() {
                             WsMessage::Text(text) => text.to_string(),
-                            WsMessage::Binary(bytes) => {
-                                wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES)
-                                    .await
-                                    .unwrap()
-                            }
+                            WsMessage::Binary(bytes) => wire::decode_client_envelope(
+                                bytes.to_vec(),
+                                crate::MAX_WS_MESSAGE_BYTES,
+                            )
+                            .await
+                            .unwrap(),
                             WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
                             frame => {
                                 panic!("a sequential quota refusal closed its socket: {frame:?}")
