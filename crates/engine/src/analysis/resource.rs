@@ -844,7 +844,8 @@ mod map_key_pairs {
 
 /// CR 732.2a: the resource signature of ONE repetition of a certified loop — what the
 /// offer publishes so a bounded drive can check that each committed cycle actually
-/// conformed, and so the CR 704 count bound has a per-period magnitude to divide by.
+/// conformed, and so the CR 704 count bound has a per-period magnitude to divide by. An offer
+/// publishes it inside a [`PeriodSignature`], which says which repetitions it states.
 ///
 /// The `Vec` victim term (rather than a `BTreeMap` keyed by [`DecisionSlot`]) is
 /// deliberate: a struct map key hits exactly the `serde_json` restriction
@@ -943,6 +944,81 @@ pub struct PeriodicDelta {
     /// CR 514.1: the hand a turn-cycle period carries into each cleanup; `None` off that cover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<CleanupPair>,
+}
+
+/// CR 732.2a: an offer's published per-period signature, by which repetitions it states. A
+/// reader that multiplies it by a count names the arm it multiplies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SignatureWire", into = "SignatureWire")]
+pub enum PeriodSignature {
+    /// The threshold authority's period: every repetition moves what it states, so a count's
+    /// consequence is it times the count.
+    EveryRepetition(PeriodicDelta),
+    /// The counting replay's period: what one performed repetition moved; a later one may move a
+    /// different amount, so no multiple of it is a count's consequence.
+    OneRepetition(PeriodicDelta),
+}
+
+impl PeriodSignature {
+    /// The signature a count's consequence is read from; a one-repetition signature has none.
+    pub fn every_repetition(&self) -> Option<&PeriodicDelta> {
+        match self {
+            PeriodSignature::EveryRepetition(period) => Some(period),
+            PeriodSignature::OneRepetition(_) => None,
+        }
+    }
+
+    /// How many retained frames one repetition spans, whichever repetitions the signature states.
+    pub fn frames_per_period(&self) -> u32 {
+        match self {
+            PeriodSignature::EveryRepetition(period) | PeriodSignature::OneRepetition(period) => {
+                period.frames_per_period
+            }
+        }
+    }
+}
+
+/// The wire shape of a [`PeriodSignature`]: the period's own fields, and `scope` only when it
+/// states one repetition, so a signature saved before the scope existed reads as every
+/// repetition's.
+#[derive(Serialize, Deserialize)]
+struct SignatureWire {
+    #[serde(flatten)]
+    period: PeriodicDelta,
+    #[serde(default, skip_serializing_if = "SignatureScope::is_every_repetition")]
+    scope: SignatureScope,
+}
+
+#[derive(Default, PartialEq, Serialize, Deserialize)]
+enum SignatureScope {
+    #[default]
+    EveryRepetition,
+    OneRepetition,
+}
+
+impl SignatureScope {
+    fn is_every_repetition(&self) -> bool {
+        *self == SignatureScope::EveryRepetition
+    }
+}
+
+impl From<SignatureWire> for PeriodSignature {
+    fn from(wire: SignatureWire) -> Self {
+        match wire.scope {
+            SignatureScope::EveryRepetition => PeriodSignature::EveryRepetition(wire.period),
+            SignatureScope::OneRepetition => PeriodSignature::OneRepetition(wire.period),
+        }
+    }
+}
+
+impl From<PeriodSignature> for SignatureWire {
+    fn from(signature: PeriodSignature) -> Self {
+        let (period, scope) = match signature {
+            PeriodSignature::EveryRepetition(period) => (period, SignatureScope::EveryRepetition),
+            PeriodSignature::OneRepetition(period) => (period, SignatureScope::OneRepetition),
+        };
+        SignatureWire { period, scope }
+    }
 }
 
 /// CR 514.1: how a turn-cycle period moves its caster's hand toward the cleanup discard.
@@ -2003,7 +2079,7 @@ impl SlotCharge {
 /// PAIRED RATHER THAN TWO PARALLEL LISTS, for the reason
 /// [`EliminationBound::predicted_departure`] gives: a caller holding a seat set beside a loose
 /// index can compare the wrong one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PredictedDeparture {
     /// CR 732.2a: which repetition of the period this crossing falls on, counted from 1 — the
     /// same index a drive compares its own loop position against.
@@ -2756,31 +2832,28 @@ impl ResourceVector {
         ])
     }
 
-    /// CR 732.2a: **controller-scoped** net-progress — the single authority shared
-    /// by Engine A ([`crate::analysis::detect_loop`]) and Engine B
-    /// ([`crate::analysis::candidate_cycles`]). Returns true iff the cycle makes
+    /// CR 732.2a: **controller-scoped** net-progress. Returns true iff the cycle makes
     /// unbounded progress on ≥1 axis without leaving the loop's controller with an
     /// unsustainable net deficit on a *consumed* axis (their own life or mana).
     ///
     /// Distinct from [`Self::is_net_progress`] only in *who* the consumed-axis
     /// constraint applies to: the controller's life going negative is unsustainable
     /// (false), but an *opponent's* life/library going negative is the drain/mill win
-    /// (progress). Engine B layers an `unbounded_production` override on top of this
-    /// base check for dynamic production.
+    /// (progress).
     pub(crate) fn net_progress_for(&self, controller: PlayerId) -> bool {
-        // CR 106.1: a loop that net-spends mana across the whole pool is not
-        // sustainable. Mana is not attributed per player in the summed `mana`
-        // array, so any net-negative color is a controller-side deficit.
-        if self.mana.iter().any(|&n| n < 0) {
-            return false;
-        }
-        // CR 119: the controller losing life across the cycle is unsustainable.
-        for (pid, &n) in &self.life {
-            if *pid == controller && n < 0 {
-                return false;
-            }
-        }
-        !self.unbounded_axes_for(controller).is_empty()
+        self.progress_for(controller) && !self.life_falls_for(controller)
+    }
+
+    /// CR 106.1 + CR 732.2a: no color of mana falls and at least one axis grows without bound.
+    /// Mana is not attributed per player in the summed `mana` array, so any net-negative color
+    /// is a controller-side deficit.
+    pub(crate) fn progress_for(&self, controller: PlayerId) -> bool {
+        self.mana.iter().all(|&n| n >= 0) && !self.unbounded_axes_for(controller).is_empty()
+    }
+
+    /// CR 119.3: `controller`'s own life falls across the cycle.
+    pub(crate) fn life_falls_for(&self, controller: PlayerId) -> bool {
+        self.life.get(&controller).is_some_and(|&n| n < 0)
     }
 
     /// CR 732.2a + CR 704.5a: the unbounded axes of this delta with the
@@ -2791,7 +2864,7 @@ impl ResourceVector {
     /// `unbounded_components` only reports positive life (lifegain), so a pure
     /// drain loop would otherwise name no axis. Single authority shared by Engine
     /// A and Engine B.
-    pub(crate) fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
+    pub fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
         let mut out: Vec<ResourceAxis> = self
             .unbounded_components()
             .into_iter()
@@ -4668,8 +4741,11 @@ pub enum ObjectGrowthVerdict {
     /// One homogeneous class was minted: each frame pair's fodder-cover refusals.
     FodderGrowth([Vec<FodderCoverRefusal>; 2]),
     /// Nothing was minted: the latest arm of the no-mint cover either pair needed, or `None` when
-    /// a pair does not recur.
+    /// a pair does not recur even with its spend set aside.
     ResourceRecurrence(Option<RecurrenceCover>),
+    /// CR 118.3: a pair of the no-mint cover recurs only with what its proposer spent across it
+    /// set aside, so the period is not shown to repeat and this never certifies.
+    Spend,
 }
 
 impl ObjectGrowthVerdict {
@@ -4677,6 +4753,7 @@ impl ObjectGrowthVerdict {
         match self {
             ObjectGrowthVerdict::FodderGrowth(pairs) => pairs.iter().all(Vec::is_empty),
             ObjectGrowthVerdict::ResourceRecurrence(cover) => cover.is_some(),
+            ObjectGrowthVerdict::Spend => false,
         }
     }
 }
@@ -4692,6 +4769,11 @@ pub enum CoveredGrowth {
     /// trigger acts on it alone, another player controls it, or a certified instructed departure
     /// moved it, so only performing the period makes it.
     PerformedOnly,
+}
+
+impl CoveredGrowth {
+    /// CR 732.2a: equalized history is not made by a mint, so only performing the period makes it.
+    const EQUALIZED_HISTORY: CoveredGrowth = CoveredGrowth::PerformedOnly;
 }
 
 /// Every condition of [`loop_states_cover_modulo_fodder_growth`] that refuses this pair, empty
@@ -4762,6 +4844,12 @@ pub(crate) fn fodder_growth_cover_refusals(
     // The growth-invariant non-object remainder, grown pile stripped. NOTE:
     // `GameState::PartialEq` compares only `objects.len()`, so stable-engine object CONTENT is
     // covered by `board_covers_modulo_fodder`'s `objects_content_eq` above, not here.
+    // CR 608.2h + CR 111.7: last-known records the history authority reads as unread are no
+    // part of the remainder; this comparison drops the stack, so it asks only when none was held.
+    let equalized_history = pf.stack.is_empty()
+        && cf.stack.is_empty()
+        && last_known_records_grow_unread(&pa, &pb)
+        && HistoryMember::LastKnownRecords.equalize(&mut pb, &pa);
     if !eq_except_growable(&pa, &pb, &growing) {
         refusals.push(FodderCoverRefusal::NonObjectRemainder);
     }
@@ -4788,6 +4876,8 @@ pub(crate) fn fodder_growth_cover_refusals(
     // CR 701.17b: no mint makes a certified departure, so only performing the period does.
     let growth = if keyword || delayed_trigger || other_controller || certified.is_some() {
         CoveredGrowth::PerformedOnly
+    } else if equalized_history {
+        CoveredGrowth::EQUALIZED_HISTORY
     } else {
         CoveredGrowth::Mintable
     };
@@ -4826,13 +4916,98 @@ pub enum RecurrenceCover {
     TurnCycle,
 }
 
-/// CR 732.2a: the no-mint arm's cover of one frame pair, with the growth it admits and the arm
-/// that admitted it. The pair covers when it is equal modulo projected resources or covers
-/// modulo preserved-`Generic` counter growth, or does so once the ids of a certified
-/// instructed departure are stripped from both frames, or once the history it grew that no
-/// live surface reads is equalized, or once the caster's own turns are; the offer is declinable
-/// and never crowns a `GameOver`.
+/// CR 732.2a: what the no-mint cover answers of one frame pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairCover {
+    /// The pair recurs: the growth it admits and the arm that admitted it.
+    Certified(CoveredGrowth, RecurrenceCover),
+    /// CR 118.3: the pair recurs only with what its proposer spent across it set aside.
+    Spend,
+}
+
+impl PairCover {
+    /// The verdict of a period's two pairs and the growth they admit: a pair that does not recur
+    /// refuses both, and a spend in either is a spend.
+    pub(crate) fn of_pairs(
+        first: Option<Self>,
+        second: Option<Self>,
+    ) -> (ObjectGrowthVerdict, CoveredGrowth) {
+        match (first, second) {
+            (None, _) | (_, None) => (
+                ObjectGrowthVerdict::ResourceRecurrence(None),
+                CoveredGrowth::Mintable,
+            ),
+            (Some(PairCover::Certified(a, a_cover)), Some(PairCover::Certified(b, b_cover))) => (
+                ObjectGrowthVerdict::ResourceRecurrence(Some(a_cover.max(b_cover))),
+                a.max(b),
+            ),
+            (Some(PairCover::Spend), Some(_)) | (Some(_), Some(PairCover::Spend)) => {
+                (ObjectGrowthVerdict::Spend, CoveredGrowth::PerformedOnly)
+            }
+        }
+    }
+}
+
+/// CR 732.2a: the no-mint arm's cover of one frame pair: the certifying arm that admits it, or,
+/// when none does, a spend where one admits it with what `caster` spent across it set aside. The
+/// offer is declinable and never crowns a `GameOver`.
 pub(crate) fn resource_recurrence_covers(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+) -> Option<PairCover> {
+    if let Some((growth, cover)) = certifying_cover(prior, current, caster) {
+        return Some(PairCover::Certified(growth, cover));
+    }
+    let (prior, current) = without_spend(prior, current, caster)?;
+    certifying_cover(&prior, &current, caster).map(|_| PairCover::Spend)
+}
+
+/// CR 701.21a + CR 701.26a: the pair with what `caster` spent across it set aside: a permanent of
+/// its that left the battlefield, sacrificed or otherwise, is taken out of both frames, and one
+/// that became tapped is tapped in `prior`. `None` when it spent nothing.
+fn without_spend(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+) -> Option<(GameState, GameState)> {
+    let on_battlefield = |state: &GameState, id: &ObjectId| {
+        state
+            .objects
+            .get(id)
+            .filter(|object| object.zone == Zone::Battlefield)
+            .map(|object| object.tapped)
+    };
+    let mine = prior
+        .objects
+        .iter()
+        .filter(|(_, object)| object.zone == Zone::Battlefield && object.controller == caster);
+    let (mut left, mut tapped) = (Vec::new(), Vec::new());
+    for (id, object) in mine {
+        match on_battlefield(current, id) {
+            None => left.push(*id),
+            Some(true) if !object.tapped => tapped.push(*id),
+            Some(_) => {}
+        }
+    }
+    if left.is_empty() && tapped.is_empty() {
+        return None;
+    }
+    let mut prior = frame_without(prior, &left);
+    for id in tapped {
+        if let Some(object) = prior.objects.get_mut(&id) {
+            object.tapped = true;
+        }
+    }
+    Some((prior, frame_without(current, &left)))
+}
+
+/// CR 732.2a: the certifying arm of the no-mint cover that admits a frame pair, with the growth
+/// it admits. The pair covers when it is equal modulo projected resources or covers modulo
+/// preserved-`Generic` counter growth, or does so once the ids of a certified instructed
+/// departure are stripped from both frames, or once the history it grew that no live surface
+/// reads is equalized, or once the caster's own turns are.
+fn certifying_cover(
     prior: &GameState,
     current: &GameState,
     caster: PlayerId,
@@ -4860,12 +5035,11 @@ pub(crate) fn resource_recurrence_covers(
     if departure {
         return Some((CoveredGrowth::PerformedOnly, RecurrenceCover::Departure));
     }
-    // CR 732.2a: equalized history is not made by a mint, so only performing the period makes it.
     if history_covers(prior, current) {
-        return Some((CoveredGrowth::PerformedOnly, RecurrenceCover::History));
+        return Some((CoveredGrowth::EQUALIZED_HISTORY, RecurrenceCover::History));
     }
     turn_cycle_covers(prior, current, caster)
-        .then_some((CoveredGrowth::PerformedOnly, RecurrenceCover::TurnCycle))
+        .then_some((CoveredGrowth::EQUALIZED_HISTORY, RecurrenceCover::TurnCycle))
 }
 
 /// The equality or counter-growth disjunct of the no-mint cover.
@@ -4887,6 +5061,8 @@ macro_rules! history_members {
             $($pv,)*
             /// The tracked object set store (CR 608.2c), with its id counter and member causes.
             TrackedObjectSets,
+            /// The id-keyed last-known records of objects that left their zone (CR 608.2h).
+            LastKnownRecords,
         }
 
         impl HistoryMember {
@@ -4911,16 +5087,23 @@ macro_rules! history_members {
                             || sets
                             || causes
                     }
+                    HistoryMember::LastKnownRecords => {
+                        let records = equalize_field(&mut into.lki_cache, &from.lki_cache);
+                        equalize_field(&mut into.lki_copiable_values, &from.lki_copiable_values)
+                            || records
+                    }
                 }
             }
 
             /// Whether every read of this member is reached through an AST arm or legality gate the
-            /// scanner attributes to it; an unattributed member's growth always refuses.
+            /// scanner attributes to it; an unattributed member's growth refuses, unless
+            /// `history_covers_reading` judges the member by its own predicate.
             fn is_attributed(self) -> bool {
                 match self {
                     $(HistoryMember::$sv => $sa,)*
                     $(HistoryMember::$pv => $pa,)*
                     HistoryMember::TrackedObjectSets => true,
+                    HistoryMember::LastKnownRecords => false,
                 }
             }
         }
@@ -4952,9 +5135,6 @@ history_members! {
         HandCastFreePermissionsUsed => hand_cast_free_permissions_used: false,
         LandsPlayedThisTurn => lands_played_this_turn: false,
         LandsPlayedThisTurnByPlayer => lands_played_this_turn_by_player: false,
-        LkiByIncarnation => lki_by_incarnation: false,
-        LkiCache => lki_cache: false,
-        LkiCopiableValues => lki_copiable_values: false,
         ModalModesChosenThisTurn => modal_modes_chosen_this_turn: true,
         PendingSpellCostReductions => pending_spell_cost_reductions: false,
         PlayersAttackedThisTurn => players_attacked_this_turn: true,
@@ -5056,10 +5236,12 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
     if grown.is_empty() && !collapsed {
         return false;
     }
-    if grown
-        .iter()
-        .any(|member| !member.is_attributed() || reads.reads(*member))
-    {
+    // A last-known record (CR 608.2h) is read by id from whatever holds the id, so the scanned
+    // reads cannot attribute it; its own predicate judges it below.
+    if grown.iter().any(|member| {
+        *member != HistoryMember::LastKnownRecords
+            && (!member.is_attributed() || reads.reads(*member))
+    }) {
         return false;
     }
     if grown.contains(&HistoryMember::TrackedObjectSets)
@@ -5067,7 +5249,108 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
     {
         return false;
     }
+    if grown.contains(&HistoryMember::LastKnownRecords)
+        && !last_known_records_grow_unread(prior, current)
+    {
+        return false;
+    }
     covers_modulo_resources(prior, &copy)
+}
+
+/// CR 608.2h + CR 111.7: the period only added last-known records, each of an object that exists
+/// in neither frame, and the floating replacements not yet used up (CR 614.3, CR 615.3) that can
+/// name an object, which no comparison compares and which read a record by the id they hold, are
+/// the same in both frames. A caller whose comparison also drops the stack asks only while both
+/// stacks are empty.
+fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> bool {
+    let gone = |id: &ObjectId| !prior.objects.contains_key(id) && !current.objects.contains_key(id);
+    let naming = |frame| {
+        live_floating_replacement_defs(frame)
+            .map(|(_, def)| def)
+            .filter(|def| floating_replacement_can_name_object(def, [prior, current]))
+    };
+    prior
+        .lki_cache
+        .iter()
+        .all(|(id, record)| current.lki_cache.get(id) == Some(record))
+        && prior
+            .lki_copiable_values
+            .iter()
+            .all(|(id, values)| current.lki_copiable_values.get(id) == Some(values))
+        && current
+            .lki_cache
+            .keys()
+            .all(|id| prior.lki_cache.contains_key(id) || gone(id))
+        && current
+            .lki_copiable_values
+            .keys()
+            .all(|id| prior.lki_copiable_values.contains_key(id) || gone(id))
+        && naming(prior).eq(naming(current))
+}
+
+/// Whether a floating replacement holds anything that can name an object by id, and so ask for
+/// its last-known information (CR 608.2h): an ability, a cost, an object filter, a condition, a
+/// damage formula, a token template, a granter, or a host missing from a frame. No rest pattern,
+/// so a new field is classified before it compiles.
+fn floating_replacement_can_name_object(
+    def: &crate::types::ability::ReplacementDefinition,
+    frames: [&GameState; 2],
+) -> bool {
+    let crate::types::ability::ReplacementDefinition {
+        execute,
+        runtime_execute,
+        mode,
+        valid_card,
+        condition,
+        damage_modification,
+        damage_source_filter,
+        redirect_target,
+        additional_token_spec,
+        ensure_token_specs,
+        granting_object,
+        source_object,
+        // Event kinds, zones, players, scopes relative to the host or the event, fixed amounts,
+        // flags and a label.
+        event: _,
+        choice_authority: _,
+        description: _,
+        destination_zone: _,
+        active_zones: _,
+        damage_target_filter: _,
+        combat_scope: _,
+        draw_scope: _,
+        die_ignore_rule: _,
+        planeswalk_scope: _,
+        shield_kind: _,
+        quantity_modification: _,
+        token_owner_scope: _,
+        token_owner_redirect: _,
+        valid_player: _,
+        consume_on_apply: _,
+        is_consumed: _,
+        expiry: _,
+        mana_modification: _,
+        mana_replacement_scope: _,
+        counter_match: _,
+        enters_under: _,
+        source_controller: _,
+        origin: _,
+        counter_replacement_subject: _,
+    } = def;
+    execute.is_some()
+        || runtime_execute.is_some()
+        || !matches!(mode, crate::types::ability::ReplacementMode::Mandatory)
+        || valid_card.is_some()
+        || condition.is_some()
+        || damage_modification.is_some()
+        || damage_source_filter.is_some()
+        || redirect_target.is_some()
+        || additional_token_spec.is_some()
+        || ensure_token_specs.is_some()
+        || granting_object.is_some()
+        // A host both frames hold is read live, as an object the comparison compares.
+        || source_object
+            .is_some_and(|host| frames.iter().any(|frame| !frame.objects.contains_key(&host)))
 }
 
 /// [`history_covers`] for the integration suite.
@@ -7818,13 +8101,16 @@ pub(crate) fn driving_resources_non_decreasing(
     //     destroyed, so a board-growing loop that ALSO accrues damage on the controller's own
     //     engine each cycle is self-terminating, not a sustainable CR 732.2a shortcut.
     //     `project_out_resources` zeroes `damage_marked` (invisible to strict loop-equality);
-    //     this recovers the sign. Summed across the controller's battlefield (damage is one
-    //     scalar per object, no per-kind split). A DECREASE (heal) is allowed.
+    //     this recovers the sign. Summed across the controller's battlefield permanents that
+    //     lethal damage can destroy (damage is one scalar per object, no per-kind split);
+    //     CR 702.12b: a permanent with indestructible ignores that state-based action. A
+    //     DECREASE (heal) is allowed.
     let damage_total = |s: &GameState| -> u64 {
         s.battlefield
             .iter()
             .filter_map(|id| s.objects.get(id))
             .filter(|o| o.controller == controller)
+            .filter(|o| !o.has_keyword(&crate::types::keywords::Keyword::Indestructible))
             .map(|o| o.damage_marked as u64)
             .sum()
     };
@@ -11784,6 +12070,7 @@ mod tests {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes the per-period signature its bound was divided by");
 
         assert!(
@@ -14327,6 +14614,27 @@ mod tests {
             sign_check(&prior, &healed),
             "reach-guard: a damage_marked DECREASE (2→0 heal) must still PASS"
         );
+    }
+
+    /// CR 702.12b + CR 704.5g: damage marked on an indestructible permanent never destroys it,
+    /// so its growth is not a consumed engine.
+    #[test]
+    fn sign_check_damage_marked_on_indestructible_not_vetoed() {
+        let mut prior = GameState::new_two_player(7);
+        let oid = inert_token(&mut prior, 620, 0, "Engine");
+        prior.objects.get_mut(&oid).unwrap().damage_marked = 2;
+        let mut current = prior.clone();
+        current.objects.get_mut(&oid).unwrap().damage_marked = 3;
+        assert!(!sign_check(&prior, &current));
+        for frame in [&mut prior, &mut current] {
+            frame
+                .objects
+                .get_mut(&oid)
+                .unwrap()
+                .keywords
+                .push(crate::types::keywords::Keyword::Indestructible);
+        }
+        assert!(sign_check(&prior, &current));
     }
 
     /// carry b controller-scoping: an OPPONENT's damage_marked increase is NOT vetoed (the
@@ -18931,10 +19239,11 @@ mod tests {
         // The ACTUAL wire payload: the `WaitingFor` variant that carries it.
         let cert = LoopCertificate {
             unbounded: vec![],
-            win_kind: WinKind::LethalDamage,
+            win_kind: Some(WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: BoardDelta::default(),
-            per_cycle: Some(populated),
+            per_cycle: Some(PeriodSignature::EveryRepetition(populated.clone())),
         };
         let offer = WaitingFor::LoopShortcut {
             proposer: PlayerId(0),
@@ -18971,6 +19280,27 @@ mod tests {
             !shipped_json.contains("per_cycle"),
             "an offer stating no per-period signature must be byte-identical to BASE; got \
              {shipped_json}"
+        );
+
+        // CR 732.2a: a signature's scope rides beside the period's own fields, named only for
+        // one repetition, so a signature saved before the scope reads as every repetition's.
+        let period_json = serde_json::to_value(&populated).expect("serializes");
+        let every = PeriodSignature::EveryRepetition(populated.clone());
+        assert_eq!(
+            serde_json::to_value(&every).expect("serializes"),
+            period_json
+        );
+        assert_eq!(
+            serde_json::from_value::<PeriodSignature>(period_json.clone()).expect("decodes"),
+            every
+        );
+        let one = PeriodSignature::OneRepetition(populated);
+        let one_json = serde_json::to_value(&one).expect("serializes");
+        assert_eq!(one_json["scope"], "OneRepetition");
+        assert_eq!(one_json["delta"], period_json["delta"]);
+        assert_eq!(
+            serde_json::from_value::<PeriodSignature>(one_json).expect("decodes"),
+            one
         );
     }
 
@@ -19091,16 +19421,17 @@ mod tests {
             predicted_winner: Some(PlayerId(0)),
             count: IterationCount::UntilLethal,
             unbounded: vec![],
-            win_kind: WinKind::LethalDamage,
+            win_kind: Some(WinKind::LethalDamage),
+            win_kind_at: None,
             template: None,
-            per_cycle: Some(PeriodicDelta {
+            per_cycle: Some(PeriodSignature::EveryRepetition(PeriodicDelta {
                 frames_per_period: 2,
                 delta,
                 victim_slot: vec![],
                 declarable_victims: vec![],
                 seat_life_charge: vec![],
                 cleanup: None,
-            }),
+            })),
             shortened_by: None,
             published_declaration: None,
             road: crate::analysis::loop_check::OfferRoad::Ring,
@@ -24790,14 +25121,20 @@ mod tests {
         cover_library_card(&mut prior, 900, PlayerId(1));
         assert_eq!(
             resource_recurrence_covers(&prior, &prior.clone(), PlayerId(0)),
-            Some((CoveredGrowth::Mintable, RecurrenceCover::Equal)),
+            Some(PairCover::Certified(
+                CoveredGrowth::Mintable,
+                RecurrenceCover::Equal
+            )),
             "reach: the departure-free pair covers"
         );
 
         let (prior, current) = no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard);
         assert_eq!(
             resource_recurrence_covers(&prior, &current, PlayerId(0)),
-            Some((CoveredGrowth::PerformedOnly, RecurrenceCover::Departure))
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            ))
         );
 
         let (prior, current) = no_mint_pair_with_departure(PlayerId(0), Zone::Graveyard);
@@ -24824,7 +25161,10 @@ mod tests {
         cover_library_card(&mut current, 901, PlayerId(1));
         assert_eq!(
             resource_recurrence_covers(&prior, &current, PlayerId(0)),
-            Some((CoveredGrowth::PerformedOnly, RecurrenceCover::Departure)),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            )),
             "reach: a second, motionless library card does not disturb the cover"
         );
         current
@@ -24838,6 +25178,190 @@ mod tests {
             None,
             "the strip relieves only the certified ids"
         );
+    }
+
+    /// Two equal frames holding P0's untapped card 800 and untapped token 802, and P1's untapped
+    /// card 801.
+    fn spend_pair() -> (GameState, GameState) {
+        let mut prior = GameState::new_two_player(42);
+        battlefield_creature(&mut prior, 800, 0);
+        battlefield_creature(&mut prior, 801, 1);
+        token_on_battlefield(&mut prior, 802, true);
+        let current = prior.clone();
+        (prior, current)
+    }
+
+    fn set_tapped(state: &mut GameState, id: u64, tapped: bool) {
+        state
+            .objects
+            .get_mut(&ObjectId(id))
+            .expect("the permanent is live")
+            .tapped = tapped;
+    }
+
+    /// Moves P0's permanent `id` off the battlefield to `to`, or, with `to` `None`, out of the
+    /// game as a token that ceased to exist (CR 111.7).
+    fn leave_battlefield(state: &mut GameState, id: u64, to: Option<Zone>) {
+        use crate::game::zones::{add_to_zone, remove_from_zone};
+        let id = ObjectId(id);
+        remove_from_zone(state, id, Zone::Battlefield, PlayerId(0));
+        match to {
+            Some(zone) => {
+                add_to_zone(state, id, zone, PlayerId(0));
+                state.objects.get_mut(&id).expect("the card is live").zone = zone;
+            }
+            None => {
+                state.objects.remove(&id);
+            }
+        }
+    }
+
+    /// CR 118.3 + CR 701.21a + CR 701.26a: a pair no certifying arm admits is a spend when it
+    /// recurs once the caster's permanents that left the battlefield or became tapped are set
+    /// aside, whatever moved them; another player's permanent, an untap, or any other difference
+    /// leaves it refused.
+    #[test]
+    fn the_pair_question_answers_a_spend_only_for_the_casters_departed_or_tapped_permanents() {
+        let caster = PlayerId(0);
+        let (prior, current) = spend_pair();
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster),
+            Some(PairCover::Certified(
+                CoveredGrowth::Mintable,
+                RecurrenceCover::Equal
+            )),
+            "reach: the unspent pair covers"
+        );
+
+        type SpendMove = fn(&mut GameState);
+        let spent: [(&str, SpendMove); 4] = [
+            ("card tapped", |current| set_tapped(current, 800, true)),
+            ("card put into a graveyard", |current| {
+                leave_battlefield(current, 800, Some(Zone::Graveyard))
+            }),
+            ("token that ceased to exist", |current| {
+                leave_battlefield(current, 802, None)
+            }),
+            ("card tapped, beside its token exiled", |current| {
+                set_tapped(current, 800, true);
+                leave_battlefield(current, 802, Some(Zone::Exile));
+            }),
+        ];
+        for (how, spend) in spent {
+            let (prior, mut current) = spend_pair();
+            spend(&mut current);
+            assert_eq!(
+                resource_recurrence_covers(&prior, &current, caster),
+                Some(PairCover::Spend),
+                "the caster's permanent {how}"
+            );
+        }
+
+        let (prior, mut current) = spend_pair();
+        set_tapped(&mut current, 801, true);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster),
+            None,
+            "another player's permanent became tapped"
+        );
+
+        let (mut prior, current) = spend_pair();
+        set_tapped(&mut prior, 800, true);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster),
+            None,
+            "the caster's permanent became untapped"
+        );
+
+        let (prior, mut current) = spend_pair();
+        set_tapped(&mut current, 800, true);
+        current
+            .objects
+            .get_mut(&ObjectId(801))
+            .expect("the other permanent is live")
+            .counters
+            .insert(CounterType::Stun, 1);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster),
+            None,
+            "the remainder still differs"
+        );
+
+        // The remainder is put to every certifying arm, not to equality alone.
+        let (mut prior, mut current) = no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard);
+        for frame in [&mut prior, &mut current] {
+            battlefield_creature(frame, 800, 0);
+        }
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            )),
+            "reach: the departure arm admits the unspent pair"
+        );
+        set_tapped(&mut current, 800, true);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster),
+            Some(PairCover::Spend),
+            "the departure arm admits the remainder"
+        );
+    }
+
+    /// CR 732.2a + CR 118.3: a period's two pairs are refused when either does not recur, a spend
+    /// when either recurs only with a spend set aside, and otherwise covered by the latest arm and
+    /// the larger growth either needed.
+    #[test]
+    fn two_pairs_combine_a_refusal_over_a_spend_over_a_certified_cover() {
+        use RecurrenceCover::{Equal, History};
+        let performed = PairCover::Certified(CoveredGrowth::PerformedOnly, Equal);
+        let history = PairCover::Certified(CoveredGrowth::Mintable, History);
+        let answers = [None, Some(performed), Some(history), Some(PairCover::Spend)];
+        let refused = || {
+            (
+                ObjectGrowthVerdict::ResourceRecurrence(None),
+                CoveredGrowth::Mintable,
+            )
+        };
+        let spend = || (ObjectGrowthVerdict::Spend, CoveredGrowth::PerformedOnly);
+        let covered =
+            |cover, growth| (ObjectGrowthVerdict::ResourceRecurrence(Some(cover)), growth);
+        // A row is the first pair's answer and a column the second's, each in `answers` order.
+        let expected = [
+            [refused(), refused(), refused(), refused()],
+            [
+                refused(),
+                covered(Equal, CoveredGrowth::PerformedOnly),
+                covered(History, CoveredGrowth::PerformedOnly),
+                spend(),
+            ],
+            [
+                refused(),
+                covered(History, CoveredGrowth::PerformedOnly),
+                covered(History, CoveredGrowth::Mintable),
+                spend(),
+            ],
+            [refused(), spend(), spend(), spend()],
+        ];
+        for (first, row) in answers.iter().zip(&expected) {
+            for (second, want) in answers.iter().zip(row) {
+                assert_eq!(
+                    &PairCover::of_pairs(*first, *second),
+                    want,
+                    "{first:?} then {second:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 118.3: a spend verdict does not certify, beside a covered verdict that does.
+    #[test]
+    fn a_spend_verdict_does_not_certify() {
+        assert!(
+            ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::Equal)).certifies(),
+            "reach: a covered verdict certifies"
+        );
+        assert!(!ObjectGrowthVerdict::Spend.certifies());
     }
 
     /// Two frames a turn of `caster`'s apart, with `caster` drawing the library card at `drawn`.

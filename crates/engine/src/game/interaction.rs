@@ -1335,7 +1335,7 @@ struct LoopShortcutProjection {
     /// The count-keyed magnitudes are minted downstream by `loop_shortcut_preview`, which
     /// needs the offer's interaction id to speak the published candidate ids — a binding
     /// this projection's own parameter list is pinned against holding.
-    per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
+    per_cycle: Option<crate::analysis::resource::PeriodSignature>,
     points: Vec<LoopShortcutPointProjection>,
     candidates: Vec<LoopShortcutCandidateValue>,
 }
@@ -3102,7 +3102,7 @@ fn shortcut_allocation_domain<'a>(
 /// The announced-choice half is `ShortcutAllocationDomain`, folded in flat: an offer publishing
 /// no announced-target decision has no domain, and states its magnitudes unsplit.
 struct ShortcutPreviewBasis<'a> {
-    delta: &'a crate::analysis::resource::ResourceVector,
+    signature: &'a crate::analysis::resource::PeriodSignature,
     group: Option<u32>,
     ids: Vec<InteractionChoiceId>,
     seats: Option<Vec<PlayerId>>,
@@ -3119,7 +3119,9 @@ fn shortcut_preview_basis<'a>(
     interaction_id: &InteractionId,
     projection: &'a LoopShortcutProjection,
 ) -> Option<ShortcutPreviewBasis<'a>> {
-    let periodic = projection.per_cycle.as_ref()?;
+    let signature = projection.per_cycle.as_ref()?;
+    let (crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)
+    | crate::analysis::resource::PeriodSignature::OneRepetition(periodic)) = signature;
     if shortcut_preview_entries(&periodic.delta, 1, None).is_empty() {
         return None;
     }
@@ -3128,13 +3130,14 @@ fn shortcut_preview_basis<'a>(
             let charge = domain
                 .seats
                 .as_deref()
-                .and_then(|seats| victim_charge(periodic, domain.point, seats));
+                .zip(signature.every_repetition())
+                .and_then(|(seats, periodic)| victim_charge(periodic, domain.point, seats));
             (Some(domain.group), domain.ids, domain.seats, charge)
         }
         None => (None, Vec::new(), None, None),
     };
     Some(ShortcutPreviewBasis {
-        delta: &periodic.delta,
+        signature,
         group,
         ids,
         seats,
@@ -3152,20 +3155,24 @@ fn shortcut_preview_basis<'a>(
 /// A `None` basis is a declaration whose PARTITION is known and whose magnitudes are not: the
 /// count and the allocation are still the proposer's own, and no magnitude is invented beside
 /// them. Only the declared side passes one — an offer with no basis publishes no element at all.
+/// A basis whose signature states one repetition mints the partition alone, for the same reason.
 fn shortcut_preview_element(
     basis: Option<&ShortcutPreviewBasis<'_>>,
     count: u32,
     allocation: Vec<AmountAssignment>,
 ) -> InteractionShortcutPreview {
-    let entries =
-        basis
-            .map(|basis| {
+    let entries = basis
+        .map(|basis| match basis.signature {
+            crate::analysis::resource::PeriodSignature::EveryRepetition(periodic) => {
                 let split = basis.charge.as_ref().zip(basis.seats.as_deref()).and_then(
                     |(charge, seats)| VictimSplit::new(charge, &basis.ids, seats, &allocation),
                 );
-                shortcut_preview_entries(basis.delta, count, split.as_ref())
-            })
-            .unwrap_or_default();
+                shortcut_preview_entries(&periodic.delta, count, split.as_ref())
+            }
+            // The count's consequence is the take's replay, which nothing here performs.
+            crate::analysis::resource::PeriodSignature::OneRepetition(_) => Vec::new(),
+        })
+        .unwrap_or_default();
     InteractionShortcutPreview {
         count,
         entries,
@@ -3721,7 +3728,13 @@ fn declared_sequence_preview(
     let basis = shortcut_preview_basis(interaction_id, &declared.projection);
     let charge_escapes_declaration = basis
         .as_ref()
-        .zip(declared.projection.per_cycle.as_ref())
+        .zip(
+            declared
+                .projection
+                .per_cycle
+                .as_ref()
+                .and_then(crate::analysis::resource::PeriodSignature::every_repetition),
+        )
         .is_some_and(|(basis, periodic)| {
             basis.seats.as_deref().is_some_and(|announced| {
                 let life_seats: Vec<PlayerId> = periodic.delta.life.keys().copied().collect();
@@ -3802,12 +3815,13 @@ fn loop_shortcut_projection(
             // restored dump into an engine panic.
             //
             // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
-            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has THREE call sites and
+            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has four call sites and
             // derives every capacity itself: `interactive_loop_bridge` and the unbounded
             // recorded offer measure no threshold, so theirs is
             // `MAX_SHORTCUT_CYCLES`, while `bounded_offer_tail` hands it a measured
             // threshold that cannot be `0` — that producer refuses outright unless the reduction
-            // measured one of at least 1. The per-viewer projection in
+            // measured one of at least 1 — and `counted_offer` the repetitions the counting
+            // replay performed, at least one. The per-viewer projection in
             // `game/visibility.rs` only re-projects an existing schema's pair; and
             // `ShortcutDecisionSchema::default()` seeds the capacity at `MAX_SHORTCUT_CYCLES`
             // (`analysis/decision_template.rs`), which is also its `#[serde(default)]` for a save
@@ -3830,13 +3844,13 @@ fn loop_shortcut_projection(
         }
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
-    // state their consequence instead of standing alone. It is published only by
-    // `bounded_offer_tail`, for a ring period and a recorded loss period alike; every other mint
-    // carries `None`, as
-    // does every save written before the field existed. The other authority the magnitudes
-    // need — a FINITE count — is `count` above, and the two coincide by construction rather
-    // than by luck: that same producer mints a `Fixed` VARIANT, which is what selects the finite
-    // arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
+    // state their consequence instead of standing alone. It is published by
+    // `bounded_offer_tail`, for a ring period and a recorded loss period alike, and by
+    // `counted_offer`, whose signature states one repetition and so no count's magnitude; every
+    // other mint carries `None`, as does every save written before the field existed. The other
+    // authority the magnitudes need — a FINITE count — is `count` above, and the two coincide by
+    // construction rather than by luck: each producer mints a `Fixed` VARIANT, which is what
+    // selects the finite arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
     let per_cycle = certificate.per_cycle.clone();
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -11998,7 +12012,8 @@ mod tests {
                 predicted_winner: Some(viewer),
                 certificate: LoopCertificate {
                     unbounded: Vec::new(),
-                    win_kind: WinKind::LethalDamage,
+                    win_kind: Some(WinKind::LethalDamage),
+                    win_kind_at: None,
                     mandatory: false,
                     residual_board_delta: BoardDelta::default(),
                     per_cycle: None,

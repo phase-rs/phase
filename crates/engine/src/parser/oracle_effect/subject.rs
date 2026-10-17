@@ -3720,8 +3720,17 @@ fn parse_subject_application_for(
     )))
     .parse(lower.as_str())
     {
+        // CR 608.2c + CR 111.3: after a clause that created tokens, "they" as the object of a
+        // grant is those tokens — the sentence defines what the tokens have.
+        let names_created_tokens = consumer == AnaphorConsumer::AffectedObject
+            && ctx.token_created_in_chain
+            && ctx.chain_prior_mass_population.is_none();
         return Some(SubjectApplication {
-            affected: resolve_they_pronoun(ctx, consumer),
+            affected: if names_created_tokens {
+                TargetFilter::LastCreated
+            } else {
+                resolve_they_pronoun(ctx, consumer)
+            },
             target: None,
             multi_target: None,
             inherits_parent: false,

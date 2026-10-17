@@ -6890,7 +6890,8 @@ mod tests {
             predicted_winner: Some(PlayerId(0)),
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
@@ -9759,7 +9760,8 @@ mod tests {
             predicted_winner: None,
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: crate::analysis::loop_check::WinKind::Advantage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::Advantage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
                 per_cycle: None,

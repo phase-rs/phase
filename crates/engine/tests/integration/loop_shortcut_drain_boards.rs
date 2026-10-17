@@ -263,6 +263,7 @@ pub(crate) fn rederive_live_offer_bound(state: &GameState, aimed_at: PlayerId) -
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-cycle signature");
 
     assert_eq!(
@@ -340,6 +341,7 @@ fn charged_slots(state: &GameState) -> Vec<(DecisionSlot, i64)> {
     certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-cycle signature")
         .victim_slot
         .clone()
@@ -403,6 +405,7 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-cycle signature");
 
     assert_eq!(*proposer, offer.proposer);
@@ -614,6 +617,7 @@ fn declarable_victims_are_empty_when_restored_and_populated_when_live() {
         let restored = certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("the restored offer carries its per-cycle signature")
             .declarable_victims
             .clone();
@@ -630,6 +634,7 @@ fn declarable_victims_are_empty_when_restored_and_populated_when_live() {
             !certificate
                 .per_cycle
                 .as_ref()
+                .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
                 .expect("the live offer carries its per-cycle signature")
                 .declarable_victims
                 .is_empty(),
@@ -739,6 +744,7 @@ fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-period signature")
         .clone();
     assert_eq!(proposer, live.proposer);
@@ -983,6 +989,7 @@ fn both_drain_boards_publish_no_aim_independent_charge_at_their_live_offer() {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature");
         let seats = published_aimable_seats(&schema.points);
         crate::fantastic_four_bounded_loop::assert_no_aim_independent_charge(

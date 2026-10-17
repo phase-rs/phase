@@ -32,6 +32,17 @@ fn resolve_library_owner(
     ability: &ResolvedAbility,
     target_player: &TargetFilter,
 ) -> PlayerId {
+    // CR 608.2c: "that player ... searches their library" under a player-scoped
+    // trigger (Mornsong Aria, Maralen of the Mornsong: "each player's draw step")
+    // names the scoped player's library, not the source controller's.
+    // Resolved by the shared context resolver, the same authority the chained
+    // `Shuffle { ScopedPlayer }` uses, so the search and the shuffle name the
+    // same player.
+    if matches!(target_player, TargetFilter::ScopedPlayer) {
+        if let Some(player) = super::resolve_player_for_context_ref(state, ability, target_player) {
+            return player;
+        }
+    }
     // Pre-resolved: a TargetRef::Player was picked at cast time.
     if let Some(pid) = ability.targets.iter().find_map(|t| match t {
         TargetRef::Player(pid) => Some(*pid),
@@ -93,6 +104,10 @@ fn searcher_is_library_owner(target_player: &TargetFilter) -> bool {
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
+            // "At the beginning of each player's draw step, that player ...
+            // searches their library" (Mornsong Aria, Maralen of the
+            // Mornsong): the scoped player searches, not the source's controller.
+            | TargetFilter::ScopedPlayer
     )
 }
 
@@ -3654,6 +3669,54 @@ mod tests {
                 .contains(&PlayerId(0)),
             "caster is the searcher for 'search target opponent's library'"
         );
+    }
+
+    /// CR 701.23a + CR 608.2c: Mornsong Aria / Maralen of the Mornsong — "that
+    /// player ... searches their library". Under a draw-step trigger scoped to
+    /// the opponent, the opponent browses their own library; the trigger's
+    /// controller must not pick the card for them.
+    #[test]
+    fn scoped_player_search_makes_the_scoped_player_the_searcher() {
+        let mut state = GameState::new_two_player(42);
+        let _own_card = add_library_creature(&mut state, 2, PlayerId(0), "Controller Bear");
+        let opp_card = add_library_creature(&mut state, 1, PlayerId(1), "Scoped Bear");
+
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ScopedPlayer),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![],
+            ObjectId(9995),
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "the scoped player searches their own library"
+                );
+                assert_eq!(cards.as_slice(), [opp_card], "the scoped player's library");
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+        assert!(state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(1)));
+        assert!(!state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
     }
 
     #[test]

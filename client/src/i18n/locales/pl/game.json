@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stos",
     "collapsePanel": "Zwiń panel stosu",
     "expandPanel": "Rozwiń panel stosu",

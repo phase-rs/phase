@@ -6288,7 +6288,7 @@ pub enum TypeFilter {
 }
 
 /// Filter for damage type on trigger definitions.
-/// CR 120.3: Combat damage is dealt during the combat damage step; all other damage is noncombat.
+/// CR 120.2a + CR 120.2b: Damage is dealt as a result of combat (combat damage) or as an effect of a spell or ability (noncombat damage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DamageKindFilter {
     /// Matches both combat and noncombat damage.
@@ -31784,7 +31784,7 @@ pub struct TriggerDefinition {
     pub phase: Option<Phase>,
     #[serde(default)]
     pub optional: bool,
-    /// CR 120.3: Filter for combat vs noncombat damage on damage triggers.
+    /// CR 120.2a + CR 120.2b: Filter for combat vs noncombat damage on damage triggers.
     #[serde(default)]
     pub damage_kind: DamageKindFilter,
     #[serde(default)]

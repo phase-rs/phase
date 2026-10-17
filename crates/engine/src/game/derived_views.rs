@@ -94,6 +94,11 @@ pub struct StackEntryDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
     pub kind_label: String,
+    /// Typed form of `kind_label` for activated/triggered ability entries, so a
+    /// localized display layer renders the label from structured data instead
+    /// of re-parsing the English `kind_label`. `None` for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_kind: Option<StackAbilityKindView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -117,6 +122,19 @@ pub struct StackEntryDisplay {
     /// renders one engine-provided value and never picks between two.
     #[serde(default)]
     pub controller: PlayerId,
+}
+
+/// Presentation-only discriminant for an activated or triggered ability on the
+/// stack, carried beside `kind_label` so the display layer can localize the
+/// label without parsing English text. Never feeds game logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StackAbilityKindView {
+    /// `number` is the 1-based printed ability number, when the ability has one.
+    Activated {
+        number: Option<usize>,
+    },
+    Triggered,
 }
 
 /// A single player-affecting condition the HUD surfaces as a status icon.
@@ -2641,36 +2659,44 @@ fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay
 fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
     let source_name = stack_source_name(state, entry);
     let effective_ability = effective_stack_ability(state, entry);
-    let (kind_label, ability_description) = match &entry.kind {
+    let (kind_label, ability_kind, ability_description) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (
             "Spell".to_string(),
+            None,
             ability
                 .as_ref()
                 .and_then(|ability| ability.description.clone()),
         ),
-        StackEntryKind::ActivatedAbility { ability, .. } => (
-            ability
-                .ability_index
-                .map(|idx| format!("Activated ability {}", idx + 1))
-                .unwrap_or_else(|| "Activated ability".to_string()),
-            ability.description.clone(),
-        ),
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            let number = ability.ability_index.map(|idx| idx + 1);
+            (
+                number
+                    .map(|n| format!("Activated ability {n}"))
+                    .unwrap_or_else(|| "Activated ability".to_string()),
+                Some(StackAbilityKindView::Activated { number }),
+                ability.description.clone(),
+            )
+        }
         StackEntryKind::TriggeredAbility {
             ability,
             description,
             ..
         } => (
             "Triggered ability".to_string(),
+            Some(StackAbilityKindView::Triggered),
             description.clone().or_else(|| ability.description.clone()),
         ),
-        StackEntryKind::KeywordAction { action } => (keyword_action_label(action), None),
-        StackEntryKind::CombatDamage { sub_step, .. } => (combat_damage_label(*sub_step), None),
+        StackEntryKind::KeywordAction { action } => (keyword_action_label(action), None, None),
+        StackEntryKind::CombatDamage { sub_step, .. } => {
+            (combat_damage_label(*sub_step), None, None)
+        }
     };
 
     StackEntryDisplay {
         source_name,
         token_image_ref: stack_source_token_image_ref(state, entry),
         kind_label,
+        ability_kind,
         ability_description,
         selected_mode_labels: effective_ability
             .ability
@@ -5207,6 +5233,7 @@ mod tests {
             source_name: "Spell".to_string(),
             token_image_ref: None,
             kind_label: "Spell".to_string(),
+            ability_kind: None,
             ability_description: None,
             selected_mode_labels: Vec::new(),
             is_pending: false,

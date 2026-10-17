@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Giocatore in difesa (Travolgere)",
     "pwControllerTrample": "Controllore del PW (Travolgere sul PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Pila",
     "collapsePanel": "Comprimi il pannello della pila",
     "expandPanel": "Espandi il pannello della pila",

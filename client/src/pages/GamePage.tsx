@@ -34,6 +34,8 @@ import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
+import { CardTextReference } from "../components/card/CardTextReference.tsx";
 import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
@@ -3333,6 +3335,7 @@ function AbilityChoiceModal() {
   const obj = useGameStore((s) =>
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
+  const localized = useLocalizedCardContent(obj?.name ?? null);
   const objects = useGameStore((s) => s.gameState?.objects);
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
@@ -3388,7 +3391,9 @@ function AbilityChoiceModal() {
 
   return (
     <ChoiceModal
-      title={obj.name}
+      title={localized?.name || obj.name}
+      scrollable
+      footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
       previewCardTypes={obj.card_types}

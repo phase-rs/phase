@@ -211,6 +211,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 146 — ConfirmedPeriod gains counted_by (CR 732.2a: a loop offer counted by
+ *      replaying its period, with the seats that left in each repetition, a
+ *      per_cycle scope stating one repetition, and an optional win_kind with
+ *      the count it is decided at) and performance, carried in
+ *      WaitingFor::LoopShortcut — see PROTOCOL_VERSION's own `/// 146` entry in
+ *      crates/lobby-broker/src/protocol.rs. Wire 128 moves with it.
  * 145 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
  *      on ResolvedAbility.parent_target_missing_reason; a v144 peer cannot
  *      parse the tag. P2P moves in lockstep (wire 127); lobby messages unchanged.
@@ -883,7 +889,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 145;
+export const PROTOCOL_VERSION = 146;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

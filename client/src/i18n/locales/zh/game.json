@@ -2438,7 +2438,16 @@
     "leave": "离开",
     "watchingWith": "同时观战：{{names}}"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "activated": "起动式",
     "casting": "正在施放…",
     "collapsePanel": "折叠堆叠面板",

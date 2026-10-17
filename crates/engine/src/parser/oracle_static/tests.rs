@@ -27366,6 +27366,46 @@ fn static_life_total_cant_change_opponent_scope() {
     }
 }
 
+/// CR 101.2 + CR 121.3 + CR 119.7: "[Subject] can't draw cards or gain life." emits both
+/// prohibitions, and the life clause binds the same subject as the draw clause
+/// (Mornsong Aria: "Players"; an opponent subject scopes both to opponents).
+#[test]
+fn static_cant_draw_cards_or_gain_life_binds_one_subject() {
+    let defs = parse_static_line_multi("Players can't draw cards or gain life.");
+    let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers
+            },
+            StaticMode::CantGainLife,
+        ]
+    );
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(TypedFilter::default()))
+    );
+
+    let defs = parse_static_line_multi("Each opponent can't draw cards or gain life.");
+    let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantDraw {
+                who: ProhibitionScope::Opponents
+            },
+            StaticMode::CantGainLife,
+        ]
+    );
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
 #[test]
 fn static_life_total_cannot_change_alt_spelling() {
     // "cannot" alternative phrasing should also work.
