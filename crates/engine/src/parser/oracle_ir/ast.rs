@@ -582,9 +582,21 @@ pub(crate) enum ContinuationAst {
     /// (Stangg / Shark Shredder). Only ChangeZone honors the gate;
     /// CopyTokenOf / Token always enter unconditionally.
     EntersTappedAttacking { moved_filter: Option<TargetFilter> },
-    /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
-    /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
+    /// CR 614.1c + CR 122.6a: declarative "The token enters with X +1/+1
+    /// counters on it[, where X is …]" — absorbs into the preceding Token
+    /// effect's `enter_with_counters`. The imperative "put … counters on it"
+    /// form is [`Self::PutCountersOnLastCreated`].
     TokenEntersWithCounters {
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
+    /// CR 608.2c + CR 122.1: imperative "put N <type> counter(s) on it" after a
+    /// create-token clause — a separate, later instruction on the token(s) that
+    /// clause just created, not counters the token enters with. Lowers to a
+    /// `ContinuationStep` `Effect::PutCounter { target: LastCreated }` sub
+    /// directly under the `Effect::Token`: the token enters first, then
+    /// receives the counters (Zaxara, the Exemplary rulings).
+    PutCountersOnLastCreated {
         counter_type: CounterType,
         count: QuantityExpr,
     },

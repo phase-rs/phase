@@ -3473,6 +3473,18 @@ mod tests {
         }
     }
 
+    /// v148: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+    /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
+    /// (CR 107.1, CR 603.4), carried in `GameState` ability definitions; a v147
+    /// peer cannot decode the new tag, so it must be refused before it receives
+    /// v148 state.
+    /// The same bump adds the optional `created_tokens` channel to the private
+    /// player-scope tail sidecar that `PendingContinuation` carries under its
+    /// existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+    /// tokens every seat created, for a paused "each player creates … The
+    /// tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+    /// as the linked-exile-only sidecar.
+    ///
     /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
     /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
     /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
@@ -3704,8 +3716,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_147_for_physical_contest() {
-        assert_eq!(PROTOCOL_VERSION, 147);
+    fn protocol_version_is_148_for_number_quality_conditions() {
+        assert_eq!(PROTOCOL_VERSION, 148);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3716,7 +3728,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_147_for_physical_contest` stays
+    /// `protocol_version_is_148_for_number_quality_conditions` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

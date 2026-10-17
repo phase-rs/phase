@@ -28,6 +28,8 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::statics::{HandSizeModification, StaticMode};
 
+use crate::ability_chain::{created_token_placement_source, AbilityWalk};
+
 /// True when the spell-object-on-stack's printed triggers or replacement
 /// effects reference X. Covers X-cost creature spells whose X is consumed by
 /// cast triggers or ETB replacements rather than the resolving spell effect
@@ -310,6 +312,34 @@ pub(crate) fn effect_references_x(effect: &Effect) -> bool {
     }
 }
 
+/// CR 107.3 + CR 608.2c: a `Token` whose own chain later puts counters on it
+/// (a created-token placement) is sized by that placement, exactly as
+/// [`effect_references_x`] / [`effect_references_previous_amount`] read
+/// `Token { enter_with_counters }`. True iff `pred(effect)`, or `effect` is a
+/// chain `Token` with a later placement paired to it for which `pred` holds.
+///
+/// `pred` is one of this module's per-effect X predicates; the walk supplies
+/// the ability whose unconditional chain the pairing is read from.
+pub(crate) fn effect_matches_in_walk(
+    walk: &AbilityWalk<'_>,
+    effect: &Effect,
+    pred: fn(&Effect) -> bool,
+) -> bool {
+    if pred(effect) {
+        return true;
+    }
+    if !matches!(effect, Effect::Token { .. }) {
+        return false;
+    }
+    let chain = walk.chain();
+    let Some(token_index) = chain.iter().position(|entry| std::ptr::eq(*entry, effect)) else {
+        return false;
+    };
+    (token_index + 1..chain.len()).any(|index| {
+        created_token_placement_source(&chain, index) == Some(token_index) && pred(chain[index])
+    })
+}
+
 /// True when a `Pump` power/toughness modifier scales with the chosen X.
 /// `PtValue::Quantity` delegates to the engine's `contains_x` authority like
 /// every other detector in this module; `PtValue::Variable` is the one
@@ -579,5 +609,101 @@ mod tests {
                 .any(|line| line.trim_start().starts_with("// CR 120.10")),
             "an AI scoring heuristic implements no game rule, so it carries no CR annotation"
         );
+    }
+
+    use super::*;
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, last_created_placement, token_effect, x_quantity,
+    };
+    use engine::types::ability::{
+        AbilityKind, AggregateFunction, DamageChannel, SubAbilityLink, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+
+    fn chain_of(effects: Vec<Effect>) -> AbilityDefinition {
+        effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            effects,
+        )
+    }
+
+    /// Whether the chain entry at `index` is X-scaled, read in its own walk.
+    fn x_scaled_at(ability: &AbilityDefinition, index: usize, pred: fn(&Effect) -> bool) -> bool {
+        let walk = AbilityWalk::unconditional(ability);
+        let effect = walk.effects()[index];
+        effect_matches_in_walk(&walk, effect, pred)
+    }
+
+    /// CR 107.3 + CR 608.2c: a `Token` whose created-token placement is
+    /// X-scaled is X-scaled itself, as `Token { enter_with_counters: X }` is.
+    #[test]
+    fn token_is_sized_by_its_x_scaled_placement() {
+        let ability = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, x_quantity()),
+        ]);
+        // Reach guard: the bare `Token` is not X-scaled on its own.
+        assert!(!effect_references_x(&ability.effect));
+        assert!(x_scaled_at(&ability, 0, effect_references_x));
+        // The declarative twin reads the same through the plain predicate.
+        let declarative = token_effect(0, 0, vec![(CounterType::Plus1Plus1, x_quantity())]);
+        assert!(effect_references_x(&declarative));
+    }
+
+    /// Only the nearest preceding `Token` is sized, and only by a placement on
+    /// the token it created whose count satisfies the predicate.
+    #[test]
+    fn only_the_paired_token_is_sized() {
+        let nearest = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, x_quantity()),
+        ]);
+        assert!(!x_scaled_at(&nearest, 0, effect_references_x));
+        assert!(x_scaled_at(&nearest, 1, effect_references_x));
+
+        let fixed = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 }),
+        ]);
+        assert!(!x_scaled_at(&fixed, 0, effect_references_x));
+
+        let typed = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: x_quantity(),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+        assert!(!x_scaled_at(&typed, 0, effect_references_x));
+
+        // A walk with no ability behind it never pairs.
+        let walk = AbilityWalk::unpaired(vec![&*nearest.effect]);
+        assert!(!effect_matches_in_walk(
+            &walk,
+            &nearest.effect,
+            effect_references_x
+        ));
+    }
+
+    /// The companion is parameterized: the gate's chain-relative
+    /// `PreviousEffectAmount` reading pairs the same way.
+    #[test]
+    fn token_is_sized_by_a_previous_amount_placement() {
+        let previous = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
+            },
+        };
+        let ability = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, previous),
+        ]);
+        assert!(!effect_references_previous_amount(&ability.effect));
+        assert!(x_scaled_at(&ability, 0, effect_references_previous_amount));
+        assert!(!x_scaled_at(&ability, 0, effect_references_x));
     }
 }

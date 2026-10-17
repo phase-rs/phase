@@ -3575,6 +3575,12 @@ pub(crate) fn rebind_source_object_quantities_to_recipient(
             comparator,
             rhs: rebind_source_object_quantity_expr_to_recipient(rhs),
         },
+        StaticCondition::QuantityQuality { quantity, quality } => {
+            StaticCondition::QuantityQuality {
+                quantity: rebind_source_object_quantity_expr_to_recipient(quantity),
+                quality,
+            }
+        }
         StaticCondition::And { conditions } => StaticCondition::And {
             conditions: conditions
                 .into_iter()

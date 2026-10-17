@@ -8,7 +8,6 @@ use crate::game::conditions::{
 };
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
-use crate::parser::oracle_effect::publishes_chain_created_referent;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally, CardPlayMode,
     CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, CommanderOwnership,
@@ -31,9 +30,9 @@ use crate::types::format::ZoneScope;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor, GameState,
     LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation,
-    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeLinkedExile,
-    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
-    PendingPlayerScopeSacrificeFollowUp, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
+    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
+    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
+    PendingPlayerScopeTail, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
     ReturnResultOccurrenceId, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
@@ -1251,17 +1250,54 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
-        let scoped_source = state
+        // Each sidecar channel is extended only when it is live: the linked
+        // batch when the detached tail holds a linked-exile consumer, the
+        // created-token union when the driver opened it.
+        //
+        // Bound of the created-token read: `events` is the action-local buffer
+        // (`apply_action` builds one per action), and this drain returned above
+        // while the clause's own choice was still pending
+        // (`waits_for_resolution_choice` includes `ReplacementChoice`). The
+        // clause's frame is taken by the first drain that passes that guard, so
+        // on that frame this read covers exactly the action that answered the
+        // clause's pause — the paused seat's resumed creation and any
+        // replacement-made tokens of that same event (CR 614.1a). An id already
+        // present is not re-added. A later drain in the same action (the
+        // recursive drain after `finish_active_paused_post_replacement_dispatch`)
+        // reaches a created-channel frame only while that clause is still in
+        // progress: the channel is set only by the driver on the clause's own
+        // frame or cloned into frames created while its sidecar resolves, and
+        // the clause's generated legs never re-enter the driver, so at most one
+        // created-channel sidecar is live at a time.
+        let scoped_channels = state
             .active_ability_continuation()
-            .and_then(|pending| pending.player_scope_linked_exile.as_ref())
-            .map(|scope| scope.source_id);
-        if let Some(source_id) = scoped_source {
-            let additions = linked_exile_batch_from_events(state, source_id, events);
+            .and_then(|pending| pending.player_scope_tail.as_ref())
+            .map(|scope| {
+                (
+                    scope.source_id,
+                    tail_links_exile(scope),
+                    scope.created_tokens.is_some(),
+                )
+            });
+        if let Some((source_id, links, collects)) = scoped_channels {
+            let linked_additions = if links {
+                linked_exile_batch_from_events(state, source_id, events)
+            } else {
+                Vec::new()
+            };
+            let created_additions = if collects {
+                created_token_union_from_events(state, events)
+            } else {
+                Vec::new()
+            };
             if let Some(scope) = state
                 .active_ability_continuation_frame_mut()
-                .and_then(|frame| frame.pending.player_scope_linked_exile.as_mut())
+                .and_then(|frame| frame.pending.player_scope_tail.as_mut())
             {
-                extend_linked_exile_batch(&mut scope.batch, additions);
+                extend_pinned_batch(&mut scope.linked_exile_batch, linked_additions);
+                if let Some(created) = scope.created_tokens.as_mut() {
+                    extend_pinned_batch(created, created_additions);
+                }
             }
         }
         let discard_frame = state
@@ -1299,7 +1335,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             trigger_firing,
             attachment_choice,
             attachment_remainder: _,
-            player_scope_linked_exile,
+            player_scope_tail,
             player_scope_queue_end,
         } = cont;
         debug_assert!(
@@ -1312,10 +1348,8 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         );
         restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
-        let previous_scope = std::mem::replace(
-            &mut state.resolving_player_scope_linked_exile,
-            player_scope_linked_exile,
-        );
+        let previous_scope =
+            std::mem::replace(&mut state.resolving_player_scope_tail, player_scope_tail);
         let source_id = chain.source_id;
         let prior_occurrence = std::mem::replace(
             &mut state.active_return_result_occurrence,
@@ -1351,20 +1385,35 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 let _ = resolve_ability_chain(state, &chain, events, 1);
             }
         }
-        if let Some(scope) = state.resolving_player_scope_linked_exile.as_ref() {
-            mark_exile_choice_tracks_by_source(state, scope.source_id);
+        if let Some(source_id) = state
+            .resolving_player_scope_tail
+            .as_ref()
+            .filter(|scope| tail_links_exile(scope))
+            .map(|scope| scope.source_id)
+        {
+            mark_exile_choice_tracks_by_source(state, source_id);
         }
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
-        let completed_scope = std::mem::take(&mut state.resolving_player_scope_linked_exile);
-        state.resolving_player_scope_linked_exile = previous_scope;
+        let completed_scope = std::mem::take(&mut state.resolving_player_scope_tail);
+        state.resolving_player_scope_tail = previous_scope;
         state.resolving_continuation_attach_host = None;
         if !waits_for_resolution_choice(&state.waiting_for)
             && state.active_ability_continuation().is_none()
         {
             if let Some(mut scope) = completed_scope {
-                bind_resolution_exile_batch_paths(&mut scope.after_scope, &scope.batch);
+                if tail_links_exile(&scope) {
+                    bind_resolution_exile_batch_paths(
+                        &mut scope.after_scope,
+                        &scope.linked_exile_batch,
+                    );
+                }
+                // CR 608.2c + CR 608.2f: the paused clause has completed, so its
+                // one action's created referent is every token it made.
+                if let Some(union) = scope.created_tokens.as_deref() {
+                    publish_created_token_union(state, union);
+                }
                 let _ = resolve_ability_chain(state, &scope.after_scope, events, 1);
             }
         }
@@ -2899,7 +2948,7 @@ fn prepend_to_pending_continuation_with_producer(
             trigger_firing,
             attachment_choice,
             attachment_remainder,
-            player_scope_linked_exile,
+            player_scope_tail,
             player_scope_queue_end,
         } = existing;
         assert!(
@@ -2922,7 +2971,7 @@ fn prepend_to_pending_continuation_with_producer(
                 trigger_firing,
                 attachment_choice,
                 attachment_remainder,
-                player_scope_linked_exile,
+                player_scope_tail,
                 player_scope_queue_end,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
@@ -3609,12 +3658,18 @@ fn build_reflexive_pending_trigger(
     // `WhenYouDo` creation gate (both dispatch here at the call sites); the
     // consume below strips only `WhenYouDo`, so a `QuantityCheck` survives onto
     // the stack object and is re-checked at resolution per CR 603.4.
+    // CR 603.12: a quantity gate on a targeted sub defers target choice until
+    // the gate is evaluated, the same class as QuantityCheck.
     debug_assert!(
         ability.condition.as_ref().is_some_and(|condition| {
             condition.has_when_you_do_marker()
-                || matches!(condition, AbilityCondition::QuantityCheck { .. })
+                || matches!(
+                    condition,
+                    AbilityCondition::QuantityCheck { .. }
+                        | AbilityCondition::QuantityQuality { .. }
+                )
         }),
-        "build_reflexive_pending_trigger requires a WhenYouDo or QuantityCheck gate"
+        "build_reflexive_pending_trigger requires a WhenYouDo, QuantityCheck, or QuantityQuality gate"
     );
     consume_reflexive_creation_gate(&mut ability);
 
@@ -5079,8 +5134,8 @@ fn declined_gate_surviving_instructions(gate: &ResolvedAbility) -> Vec<&Resolved
     // moves the object or declares a target of its own.
     let mut parent_target_is_declared = gate_declares_target_it_leaves_in_place(gate);
     // Each kept node with its instruction number and printed position; the
-    // kept nodes whose object a later `LastCreated` names (the parser's
-    // publisher authority, `publishes_chain_created_referent`); and those
+    // kept nodes whose object a later `LastCreated` names (the publisher
+    // classification, `Effect::publishes_created_referent`); and those
     // skipped with a later node.
     let mut kept = Vec::new();
     let mut producers = Vec::new();
@@ -5114,7 +5169,7 @@ fn declined_gate_surviving_instructions(gate: &ResolvedAbility) -> Vec<&Resolved
             dropped || !instruction_outlives_declined_gate(node, &audit, parent_target_is_declared);
         if !dropped {
             kept.push((instruction, position, node));
-            if publishes_chain_created_referent(&node.effect) {
+            if node.effect.publishes_created_referent() {
                 producers.push((instruction, position));
             }
         } else {
@@ -6266,6 +6321,10 @@ fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bo
             quantity_expr_counts_population_matching(lhs, &filter_contains_last_zone_changed)
                 || quantity_expr_counts_population_matching(rhs, &filter_contains_last_zone_changed)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_counts_population_matching(quantity, &filter_contains_last_zone_changed),
         AbilityCondition::Not { condition } => condition_depends_on_zone_change_this_way(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
             .iter()
@@ -6283,6 +6342,10 @@ fn condition_depends_on_graveyard_size(condition: &AbilityCondition) -> bool {
             quantity_expr_any_ref(lhs, &mut quantity_ref_reads_graveyard_card_count)
                 || quantity_expr_any_ref(rhs, &mut quantity_ref_reads_graveyard_card_count)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_any_ref(quantity, &mut quantity_ref_reads_graveyard_card_count),
         AbilityCondition::Not { condition } => condition_depends_on_graveyard_size(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_depends_on_graveyard_size)
@@ -6398,6 +6461,10 @@ fn condition_reads_filter_population(
         }
         // Conditions that COUNT a population.
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => has_quantity(lhs) || has_quantity(rhs),
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => has_quantity(quantity),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => has_quantity(rhs),
         // Leaves: nothing filter- or quantity-shaped to read.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
@@ -6897,6 +6964,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::CastVariantPaid { .. }
             | AbilityCondition::CastVariantPaidInstead { .. }
             | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::QuantityQuality { .. }
             | AbilityCondition::PreviousEffectAmount { .. }
             | AbilityCondition::HasMaxSpeed
             | AbilityCondition::IsMonarch
@@ -13567,6 +13635,11 @@ fn install_previous_effect_counts_by_player(
 /// `scoped_events` is the clause's full event span. The driver passes its live
 /// slice; a resumed batch passes its pre-pause span reunited with the resumed
 /// action's buffer.
+///
+/// It also returns the clause's created-token union (CR 608.2c + CR 608.2f) for
+/// a token-creation clause — every token created inside `scoped_events`, which
+/// is the clause's own window; the caller publishes it when the clause has
+/// completed (`publish_created_token_union`), never mid-fan-out.
 fn publish_player_scope_clause_results(
     state: &mut GameState,
     outer: &ResolvedAbility,
@@ -13574,7 +13647,7 @@ fn publish_player_scope_clause_results(
     zero_fill_domain: &[PlayerId],
     after_scope_needs_linked_exile: bool,
     scoped_events: &[GameEvent],
-) -> Vec<ObjectIncarnationRef> {
+) -> PlayerScopeClauseBatches {
     let counts_by_player = previous_effect_counts_by_player_from_events(
         EffectKind::from(&scoped_template.effect),
         scoped_template.source_id,
@@ -13648,7 +13721,170 @@ fn publish_player_scope_clause_results(
             },
         );
     }
-    linked_exile_batch_from_events(state, outer.source_id, scoped_events)
+    let linked_exile = linked_exile_batch_from_events(state, outer.source_id, scoped_events);
+    let created_tokens = if scoped_template.effect.is_token_creator() {
+        created_token_union_from_events(state, scoped_events)
+    } else {
+        Vec::new()
+    };
+    PlayerScopeClauseBatches {
+        linked_exile,
+        created_tokens,
+    }
+}
+
+/// The pinned batches one completed (or paused) `player_scope` clause span
+/// yields for its detached tail: the linked-exile batch and the created-token
+/// union.
+struct PlayerScopeClauseBatches {
+    linked_exile: Vec<ObjectIncarnationRef>,
+    created_tokens: Vec<ObjectIncarnationRef>,
+}
+
+/// CR 111.1 + CR 400.7 + CR 608.2f + CR 614.1a: the tokens created inside one
+/// observation window of a multi-player token-creation instruction, in event
+/// order, each pinned to the incarnation it has while it is on the battlefield.
+/// Membership is the window, not the event's `source_id`: a replacement that
+/// substitutes or appends tokens (CR 614.1a) stamps its own source on them, yet
+/// they are created by this action. Callers pass only the clause's own windows.
+fn created_token_union_from_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Vec<ObjectIncarnationRef> {
+    let mut union: Vec<ObjectIncarnationRef> = Vec::new();
+    for id in events.iter().filter_map(|event| match event {
+        GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+        _ => None,
+    }) {
+        if union.iter().any(|pin| pin.object_id == id) {
+            continue;
+        }
+        if let Some(object) = state
+            .objects
+            .get(&id)
+            .filter(|object| object.zone == Zone::Battlefield)
+        {
+            union.push(ObjectIncarnationRef::from_object(object));
+        }
+    }
+    union
+}
+
+/// CR 608.2c + CR 608.2f + CR 609.3: publish a completed player-scope token
+/// clause's created referent — every token its one action created — keeping
+/// only members that are still the object they were when created (CR 400.7).
+/// Called only at clause completion: a paused copy-token creation resumes from
+/// the ledger, so it must never be overwritten mid-fan-out.
+fn publish_created_token_union(state: &mut GameState, union: &[ObjectIncarnationRef]) {
+    state.last_created_token_ids = union
+        .iter()
+        .filter(|pin| pin.is_current(state))
+        .map(|pin| pin.object_id)
+        .collect();
+}
+
+/// CR 607.2a: the linked-exile channel is live exactly when the detached tail
+/// holds a linked-exile consumer — the predicate that opened every linked
+/// sidecar, legacy saves included.
+fn tail_links_exile(scope: &PendingPlayerScopeTail) -> bool {
+    crate::game::exile_links::ability_contains_linked_exile_consumer(&scope.after_scope)
+}
+
+/// CR 608.2c: does `tail` read the created referent ("the tokens", "it") that
+/// the preceding player-scope token clause publishes? A node reads it through
+/// its effect ([`effect_reads_created_referent`]), its condition, or its
+/// `repeat_for` count ([`node_reads_created_referent`]).
+/// The walk stops at the tail's first own created-referent publisher: a later
+/// anaphor names that publisher's product, not the clause's (nearest publisher).
+/// A node that both reads and publishes reads first, so the read check precedes
+/// the publisher stop.
+fn tail_reads_created_referent(tail: &ResolvedAbility) -> bool {
+    for node in std::iter::successors(Some(tail), |node| node.sub_ability.as_deref()) {
+        if node_reads_created_referent(
+            &node.effect,
+            node.condition.as_ref(),
+            node.repeat_for.as_ref(),
+        ) || node
+            .else_ability
+            .as_deref()
+            .is_some_and(tail_reads_created_referent)
+        {
+            return true;
+        }
+        if node.effect.publishes_created_referent() {
+            return false;
+        }
+    }
+    false
+}
+
+/// [`tail_reads_created_referent`] over a delayed trigger's payload definition
+/// chain, with the same nearest-publisher stop inside the payload.
+fn definition_reads_created_referent(definition: &AbilityDefinition) -> bool {
+    for node in std::iter::successors(Some(definition), |node| node.sub_ability.as_deref()) {
+        if node_reads_created_referent(
+            &node.effect,
+            node.condition.as_ref(),
+            node.repeat_for.as_ref(),
+        ) || node
+            .else_ability
+            .as_deref()
+            .is_some_and(definition_reads_created_referent)
+        {
+            return true;
+        }
+        if node.effect.publishes_created_referent() {
+            return false;
+        }
+    }
+    false
+}
+
+/// One chain node's reader positions for the created referent: its effect, a
+/// condition over the referent, and a `repeat_for` count over the referent's
+/// population (`quantity_expr_counts_population_matching`).
+fn node_reads_created_referent(
+    effect: &Effect,
+    condition: Option<&AbilityCondition>,
+    repeat_for: Option<&QuantityExpr>,
+) -> bool {
+    effect_reads_created_referent(effect)
+        || condition.is_some_and(condition_depends_on_last_created)
+        || repeat_for.is_some_and(|quantity| {
+            quantity_expr_counts_population_matching(quantity, &filter_contains_last_created)
+        })
+}
+
+/// Whether one effect reads the created referent: through its target filter, a
+/// `GenericEffect` grant's `affected`, a quantity it resolves that counts the
+/// referent's population (`Effect::for_each_quantity_expr`, the exhaustive
+/// quantity authority), or a delayed trigger's payload. CR 603.7c: a delayed
+/// trigger that refers to "those tokens" affects the objects fixed when it is
+/// created, in this resolution (`delayed_trigger::resolve` snapshots a payload
+/// whose root target is `LastCreated`); a payload that reads the referent
+/// elsewhere is evaluated against the ledger when the trigger resolves.
+fn effect_reads_created_referent(effect: &Effect) -> bool {
+    let mut counts_referent = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        counts_referent = counts_referent
+            || quantity_expr_counts_population_matching(quantity, &filter_contains_last_created);
+    });
+    counts_referent
+        || effect
+            .target_filter()
+            .is_some_and(filter_contains_last_created)
+        || matches!(
+            effect,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities
+                    .iter()
+                    .any(|s| s.affected.as_ref().is_some_and(filter_contains_last_created))
+        )
+        || matches!(
+            effect,
+            Effect::CreateDelayedTrigger { effect: definition, .. }
+                if definition_reads_created_referent(definition)
+        )
 }
 
 /// CR 400.7 + CR 608.2f: capture only current incarnations exiled by this
@@ -13678,7 +13914,7 @@ pub(super) fn linked_exile_batch_from_events(
     batch
 }
 
-fn extend_linked_exile_batch(
+fn extend_pinned_batch(
     batch: &mut Vec<ObjectIncarnationRef>,
     additions: impl IntoIterator<Item = ObjectIncarnationRef>,
 ) {
@@ -14905,6 +15141,12 @@ fn condition_awaits_resolution_only_referent(
                 state, rhs, ability,
             )
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+            state, quantity, ability,
+        ),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
             .iter()
             .any(|c| condition_awaits_resolution_only_referent(c, state, ability)),
@@ -16014,6 +16256,16 @@ fn resolve_chain_body(
         let after_scope_needs_linked_exile = after_scope.as_ref().is_some_and(|tail| {
             crate::game::exile_links::ability_contains_linked_exile_consumer(tail)
         });
+        // CR 608.2c + CR 608.2f: "Each player creates … The tokens …" — a detached
+        // tail that reads the created referent must see every token this one action
+        // created, so a paused fan-out keeps that tail on the sidecar until the last
+        // seat leg drains. A tail that does not read it keeps the linearized route.
+        let after_scope_needs_created_union = scoped_template.effect.is_token_creator()
+            && after_scope
+                .as_deref()
+                .is_some_and(tail_reads_created_referent);
+        let after_scope_owned_by_sidecar =
+            after_scope_needs_linked_exile || after_scope_needs_created_union;
 
         if should_collect_player_scope_sacrifice_choices(&scoped_template) {
             start_player_scope_sacrifice_choices(
@@ -16149,10 +16401,10 @@ fn resolve_chain_body(
         // choice and the seats that complete after it. This is a known gap,
         // filed separately.
         //
-        // A tail that needs linked exile is not linearized: it rides the
-        // frame's `player_scope_linked_exile` sidecar, which that predicate
-        // does not read, so on that branch neither the legs nor the paused
-        // seat publish.
+        // A tail that needs linked exile or reads the created referent is not
+        // linearized: it rides the frame's `player_scope_tail` sidecar, which
+        // that predicate does not read, so on that branch neither the legs nor
+        // the paused seat publish.
         let mut applied_domain_end = matching_players.len();
         // CR 608.2e: each clause's equalization minimum is fixed when that
         // clause begins; the snapshot is per `player_scope` link, captured
@@ -16161,6 +16413,9 @@ fn resolve_chain_body(
         // the driver with the field `None` and re-captures against the
         // post-clause-N board. See §8 of the Balance plan.
         capture_clause_minimum_snapshot(state, &scoped_template);
+        // CR 608.2e: a co-scoped second action ("… and puts counters on it")
+        // reads each seat's own created tokens; snapshot them before any seat acts.
+        let created_referent = seat_created_referent_snapshot(state, &scoped_template);
         for (i, pid) in matching_players.iter().enumerate() {
             // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
             // sub-resolution of the scoped template — read the whole
@@ -16175,7 +16430,14 @@ fn resolve_chain_body(
             // safety: no corpus card relies on cross-iteration carry-over
             // of this flag.
             state.cost_payment_failed_flag = false;
-            let scoped = bind_scoped_seat(&scoped_template, controller, *pid);
+            let Some(scoped) = bind_seat_created_referent(
+                state,
+                bind_scoped_seat(&scoped_template, controller, *pid),
+                *pid,
+                created_referent.as_deref(),
+            ) else {
+                continue;
+            };
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
@@ -16236,7 +16498,7 @@ fn resolve_chain_body(
                 // The unscoped tail is owned explicitly by the continuation
                 // sidecar below. Only generated per-seat nodes are linearized
                 // here, so no ordinary scoped sibling can impersonate them.
-                let mut tail = if after_scope_needs_linked_exile {
+                let mut tail = if after_scope_owned_by_sidecar {
                     None
                 } else {
                     after_scope.clone()
@@ -16245,8 +16507,17 @@ fn resolve_chain_body(
                 // Each remaining player gets the scoped instruction only; the
                 // unscoped tail runs once after the final scoped iteration.
                 for &remaining_pid in remaining.iter().rev() {
-                    let mut remaining_scoped =
-                        bind_scoped_seat(&scoped_template, controller, remaining_pid);
+                    // Each pending leg carries its own binding, so a pause in
+                    // this action (e.g. a counter-replacement order, CR 616.1)
+                    // resumes against the same objects.
+                    let Some(mut remaining_scoped) = bind_seat_created_referent(
+                        state,
+                        bind_scoped_seat(&scoped_template, controller, remaining_pid),
+                        remaining_pid,
+                        created_referent.as_deref(),
+                    ) else {
+                        continue;
+                    };
                     // CR 608.2c: each remaining player's clause is an INDEPENDENT
                     // following instruction, not a continuation of the prior
                     // player's. When the scoped template carries a conditional
@@ -16280,7 +16551,7 @@ fn resolve_chain_body(
                 break;
             }
         }
-        let linked_batch = publish_player_scope_clause_results(
+        let batches = publish_player_scope_clause_results(
             state,
             ability,
             &scoped_template,
@@ -16294,11 +16565,16 @@ fn resolve_chain_body(
             // tail is another `player_scope` clause, that recursive entry will
             // capture its own fresh snapshot against the post-this-clause board.
             state.clause_minimum_snapshot = None;
+            // CR 608.2c + CR 608.2f: one action ⇒ one created referent — every
+            // token this clause created, for every seat.
+            if scoped_template.effect.is_token_creator() {
+                publish_created_token_union(state, &batches.created_tokens);
+            }
             if let Some(mut after_scope) = after_scope {
-                bind_resolution_exile_batch_paths(&mut after_scope, &linked_batch);
+                bind_resolution_exile_batch_paths(&mut after_scope, &batches.linked_exile);
                 resolve_ability_chain(state, &after_scope, events, depth + 1)?;
             }
-        } else if after_scope_needs_linked_exile {
+        } else if after_scope_owned_by_sidecar {
             if let Some(after_scope) = after_scope {
                 if state.active_ability_continuation().is_none() {
                     park_player_scope_queue_end(state, after_scope.as_ref().clone());
@@ -16307,10 +16583,12 @@ fn resolve_chain_body(
                     // CR 608.2f: generated APNAP nodes and their exact union are
                     // explicit pause authority. The detached tail resolves once only
                     // after every generated seat has drained.
-                    frame.pending.player_scope_linked_exile = Some(PendingPlayerScopeLinkedExile {
+                    frame.pending.player_scope_tail = Some(PendingPlayerScopeTail {
                         source_id: ability.source_id,
                         after_scope,
-                        batch: linked_batch,
+                        linked_exile_batch: batches.linked_exile,
+                        created_tokens: after_scope_needs_created_union
+                            .then_some(batches.created_tokens),
                     });
                 }
             }
@@ -16547,8 +16825,13 @@ fn resolve_chain_body(
         // interactive `DiscardChoice`) carries its gate on `ability.condition`
         // itself, not as a parent's `sub_ability`. Mirror the reflexive target
         // selection path used for inline sub-chains.
+        // CR 603.12: a quantity gate on a targeted sub defers target choice until
+        // the gate is evaluated, the same class as QuantityCheck.
         if (condition.has_when_you_do_marker()
-            || matches!(condition, AbilityCondition::QuantityCheck { .. }))
+            || matches!(
+                condition,
+                AbilityCondition::QuantityCheck { .. } | AbilityCondition::QuantityQuality { .. }
+            ))
             && try_materialize_reflexive_trigger(state, ability, None, None, events, depth)?
         {
             return Ok(());
@@ -17656,8 +17939,28 @@ fn resolve_chain_body(
     }
     let linked_batch =
         linked_exile_batch_from_events(state, ability.source_id, &events[events_before..]);
-    if let Some(scope) = state.resolving_player_scope_linked_exile.as_mut() {
-        extend_linked_exile_batch(&mut scope.batch, linked_batch.iter().copied());
+    // A node resolving under a player-scope sidecar is a generated leg of the
+    // clause in progress (the detached tail runs only after the sidecar is
+    // restored), so its own events extend each live channel: the linked batch
+    // when the tail links exile, the created-token union (CR 608.2f) when open.
+    let scope_channels = state
+        .resolving_player_scope_tail
+        .as_ref()
+        .map(|scope| (tail_links_exile(scope), scope.created_tokens.is_some()));
+    if let Some((links, collects)) = scope_channels {
+        let created_additions = if collects {
+            created_token_union_from_events(state, &events[events_before..])
+        } else {
+            Vec::new()
+        };
+        if let Some(scope) = state.resolving_player_scope_tail.as_mut() {
+            if links {
+                extend_pinned_batch(&mut scope.linked_exile_batch, linked_batch.iter().copied());
+            }
+            if let Some(created) = scope.created_tokens.as_mut() {
+                extend_pinned_batch(created, created_additions);
+            }
+        }
     }
     let linked_batch_owned;
     let ability = if linked_batch.is_empty() || ability.sub_ability.is_none() {
@@ -18063,7 +18366,7 @@ fn resolve_chain_body(
 
     if ability.sub_ability.is_none()
         && waits_for_resolution_choice(&state.waiting_for)
-        && state.resolving_player_scope_linked_exile.is_some()
+        && state.resolving_player_scope_tail.is_some()
         && state.active_ability_continuation().is_none()
     {
         park_player_scope_queue_end(state, ability.clone());
@@ -18889,8 +19192,14 @@ fn resolve_chain_body(
             }
 
             // CR 603.12: Deferred reflexive target selection for inline sub-chains.
+            // A quantity gate on a targeted sub defers target choice until the
+            // gate is evaluated, the same class as QuantityCheck.
             if (condition.has_when_you_do_marker()
-                || matches!(condition, AbilityCondition::QuantityCheck { .. }))
+                || matches!(
+                    condition,
+                    AbilityCondition::QuantityCheck { .. }
+                        | AbilityCondition::QuantityQuality { .. }
+                ))
                 && try_materialize_reflexive_trigger(
                     state,
                     sub,
@@ -19572,6 +19881,80 @@ fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEven
     }
 }
 
+/// CR 608.2e + CR 111.2 + CR 400.7: the created referent a co-scoped second
+/// action reads ("Each player creates a token and puts counters on it"),
+/// snapshotted once when that action's all-seats loop begins — after every
+/// seat's creation and after the clause published its created-token union.
+/// `None` unless the scoped template's own target is `LastCreated`; that is
+/// the only reader slot the per-seat binding rewrites. A template reading the
+/// referent elsewhere (a grant's `affected`, a condition, a sub) keeps reading
+/// the published union, and the binding assumes the referent was produced by
+/// a co-scoped creation (no printed card has a scoped reader of any other
+/// producer).
+fn seat_created_referent_snapshot(
+    state: &GameState,
+    template: &ResolvedAbility,
+) -> Option<Vec<ObjectIncarnationRef>> {
+    matches!(
+        template.effect.target_filter(),
+        Some(TargetFilter::LastCreated)
+    )
+    .then(|| {
+        state
+            .last_created_token_ids
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.zone == Zone::Battlefield)
+            .map(ObjectIncarnationRef::from_object)
+            .collect()
+    })
+}
+
+/// CR 608.2e + CR 111.2: bind `seat`'s leg of a co-scoped second action to
+/// the tokens that seat created — the ones it owns (control may have changed
+/// since; ownership cannot) — as explicit objects pinned to their current
+/// incarnations (CR 400.7), rewriting `LastCreated` to `ParentTarget` as the
+/// delayed-trigger snapshot does. These are affected objects, not targets
+/// (CR 115.10a). Returns `None` when the seat created none: its "puts
+/// counters on it" has nothing to act on (CR 609.3), and an empty
+/// `ParentTarget` would fall back to unrelated referents. The caller then
+/// skips the seat's whole leg, which is exact only while the template is the
+/// placement alone (no printed card keeps a continuation under it).
+fn bind_seat_created_referent(
+    state: &GameState,
+    mut seat_leg: ResolvedAbility,
+    seat: PlayerId,
+    snapshot: Option<&[ObjectIncarnationRef]>,
+) -> Option<ResolvedAbility> {
+    let Some(snapshot) = snapshot else {
+        return Some(seat_leg);
+    };
+    let owned: Vec<ObjectIncarnationRef> = snapshot
+        .iter()
+        .filter(|pin| {
+            state
+                .objects
+                .get(&pin.object_id)
+                .is_some_and(|object| object.owner == seat)
+        })
+        .cloned()
+        .collect();
+    if owned.is_empty() {
+        return None;
+    }
+    if let Some(filter) = seat_leg.effect.target_filter_mut() {
+        *filter = TargetFilter::ParentTarget;
+    }
+    seat_leg.set_unpinned_targets(
+        owned
+            .iter()
+            .map(|pin| TargetRef::Object(pin.object_id))
+            .collect(),
+    );
+    seat_leg.set_target_incarnations_recursive(owned);
+    Some(seat_leg)
+}
+
 /// CR 608.2 + CR 109.5: `template` bound to run for `seat`. The scoped player is
 /// the acting controller for the whole per-player chain; the printed controller
 /// stays in `original_controller` so "you" references are stable.
@@ -20097,10 +20480,22 @@ fn revealed_card_type_condition_subject<'a>(
         })
 }
 
-/// CR 608.2c + CR 700.1: `RevealedHasCardType` riders (including `Not` for
-/// nonland branches) must not evaluate when no card was revealed or moved this
-/// way — negating a failed land match must not become true (issue #2871).
-fn subject_dependent_type_condition_has_no_subject(
+/// CR 608.2c: a subject-dependent condition whose single resolution-only subject
+/// is absent tests nothing, so negating it must not make it true.
+///
+/// - CR 608.2c + CR 700.1: `RevealedHasCardType` riders (including `Not` for
+///   nonland branches) must not evaluate when no card was revealed or moved this
+///   way — negating a failed land match must not become true (issue #2871).
+/// - CR 608.2c: `QuantityCheck` (either operand) and `QuantityQuality` over a
+///   quantity whose resolution-only referent is absent
+///   (`quantity_expr_missing_resolution_only_referent`) — `Not` of a predicate
+///   over "the cost-paid object's mana value" with no such object is not true.
+///
+/// Known limitation: `And` / `Or` are not recursed. The guard covers a negated
+/// subject-dependent leaf; a negated compound with a subject-dependent operand
+/// (for example `Not(And(QuantityQuality { absent }, …))`) remains vacuously
+/// true. No printed card reaches it.
+fn subject_dependent_condition_has_no_subject(
     condition: &AbilityCondition,
     state: &GameState,
     ability: &ResolvedAbility,
@@ -20109,8 +20504,20 @@ fn subject_dependent_type_condition_has_no_subject(
         AbilityCondition::RevealedHasCardType { .. } => {
             revealed_card_type_condition_subject(state, ability).is_none()
         }
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, lhs, ability,
+            ) || crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, rhs, ability,
+            )
+        }
+        AbilityCondition::QuantityQuality { quantity, .. } => {
+            crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, quantity, ability,
+            )
+        }
         AbilityCondition::Not { condition } => {
-            subject_dependent_type_condition_has_no_subject(condition, state, ability)
+            subject_dependent_condition_has_no_subject(condition, state, ability)
         }
         _ => false,
     }
@@ -20595,6 +21002,21 @@ pub(crate) fn evaluate_condition(
                 crate::game::quantity::resolve_quantity_for_ability_condition(state, rhs, ability);
             comparator.evaluate(l, r)
         }
+        AbilityCondition::QuantityQuality { quantity, quality } => {
+            // CR 608.2c: same absent-referent guard as `QuantityCheck` above —
+            // an absent resolution-only referent makes the predicate false
+            // rather than testing the `0` fallback (zero is even).
+            if crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, quantity, ability,
+            ) {
+                return false;
+            }
+            // CR 608.2h: determined once, when the effect is applied.
+            let value = crate::game::quantity::resolve_quantity_for_ability_condition(
+                state, quantity, ability,
+            );
+            quality.matches(i64::from(value))
+        }
         AbilityCondition::PreviousEffectAmount {
             comparator,
             rhs,
@@ -21044,7 +21466,7 @@ pub(crate) fn evaluate_condition(
             .any(|c| evaluate_condition(c, state, ability)),
         // CR 608.2c: Logical negation — true when the inner condition is false.
         AbilityCondition::Not { condition } => {
-            if subject_dependent_type_condition_has_no_subject(condition, state, ability) {
+            if subject_dependent_condition_has_no_subject(condition, state, ability) {
                 return false;
             }
             !evaluate_condition(condition, state, ability)
@@ -37316,6 +37738,321 @@ mod tests {
         assert!(matches!(tail.effect, Effect::ChangeZone { .. }));
     }
 
+    /// CR 608.2e — "Each player creates a … token and puts … counters on it"
+    /// (Oversimplify): the co-scoped `ContinuationStep` `PutCounter
+    /// { LastCreated }` is the same players' SECOND action, so it detaches from
+    /// the `Token` template as the tail with its own `player_scope` intact and
+    /// re-enters the driver as a second all-seats loop after every seat
+    /// created. The hostile siblings detach too.
+    #[test]
+    fn split_player_scope_detaches_co_scoped_created_token_placement() {
+        let make_chain = |child_effect: Effect, link: SubAbilityLink| {
+            let mut token = ResolvedAbility::new(
+                Effect::Token {
+                    name: "Fractal".to_string(),
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(0),
+                    types: vec!["Creature".to_string(), "Fractal".to_string()],
+                    colors: vec![ManaColor::Green, ManaColor::Blue],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            token.player_scope = Some(PlayerFilter::All);
+            let mut child = ResolvedAbility::new(child_effect, vec![], ObjectId(1), PlayerId(0));
+            child.player_scope = Some(PlayerFilter::All);
+            child.sub_link = link;
+            token.sub_ability = Some(Box::new(child));
+            token
+        };
+        let placement = |target: TargetFilter| Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target,
+        };
+
+        let chain = make_chain(
+            placement(TargetFilter::LastCreated),
+            SubAbilityLink::ContinuationStep,
+        );
+        let (scoped, tail) = split_player_scope_chain(&chain, &PlayerFilter::All);
+        assert!(matches!(scoped.effect, Effect::Token { .. }));
+        assert!(
+            scoped.sub_ability.is_none(),
+            "the template is the creation alone: {:?}",
+            scoped.sub_ability
+        );
+        let tail = tail.expect("the placement detaches as the co-scoped tail");
+        assert!(matches!(
+            tail.effect,
+            Effect::PutCounter {
+                target: TargetFilter::LastCreated,
+                ..
+            }
+        ));
+        assert_eq!(
+            tail.player_scope,
+            Some(PlayerFilter::All),
+            "the tail keeps its scope so it re-enters the driver as the second action"
+        );
+        assert_eq!(tail.sub_link, SubAbilityLink::ContinuationStep);
+
+        // Hostile siblings: a non-`LastCreated` recipient, an independent
+        // instruction, and a non-counter `LastCreated` consumer (F-U2) detach.
+        for (label, effect, link) in [
+            (
+                "PutCounter { Any }",
+                placement(TargetFilter::Any),
+                SubAbilityLink::ContinuationStep,
+            ),
+            (
+                "SequentialSibling placement",
+                placement(TargetFilter::LastCreated),
+                SubAbilityLink::SequentialSibling,
+            ),
+            (
+                "GenericEffect { LastCreated }",
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: Some(TargetFilter::LastCreated),
+                    end_cost: None,
+                },
+                SubAbilityLink::ContinuationStep,
+            ),
+        ] {
+            let (scoped, tail) =
+                split_player_scope_chain(&make_chain(effect, link), &PlayerFilter::All);
+            assert!(scoped.sub_ability.is_none(), "{label}: detaches");
+            assert!(tail.is_some(), "{label}: runs as the tail");
+        }
+    }
+
+    /// CR 608.2e + CR 111.2 + CR 400.7 — the per-seat binding of a co-scoped
+    /// second action's created referent: each seat's leg names exactly the
+    /// tokens that seat owns, as pinned explicit objects behind a
+    /// `ParentTarget`; a seat that owns none gets no leg (CR 609.3); a template
+    /// not reading `LastCreated` is untouched; and a pin that went stale before
+    /// placement is dropped by the consumer.
+    #[test]
+    fn bind_seat_created_referent_binds_each_seat_to_the_tokens_it_owns() {
+        let mut state = GameState::new_two_player(42);
+        let token = |state: &mut GameState, owner: PlayerId, name: &str| {
+            let id = create_object(state, CardId(0), owner, name.to_string(), Zone::Battlefield);
+            state.objects.get_mut(&id).unwrap().is_token = true;
+            id
+        };
+        let p0_first = token(&mut state, PlayerId(0), "Angel A");
+        let p0_second = token(&mut state, PlayerId(0), "Angel B");
+        let p1_only = token(&mut state, PlayerId(1), "Fractal");
+        state.last_created_token_ids = vec![p0_first, p0_second, p1_only];
+
+        let placement = |target: TargetFilter| {
+            let mut leg = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target,
+                },
+                vec![],
+                ObjectId(99),
+                PlayerId(0),
+            );
+            leg.player_scope = Some(PlayerFilter::All);
+            leg
+        };
+        let template = placement(TargetFilter::LastCreated);
+        let snapshot = seat_created_referent_snapshot(&state, &template)
+            .expect("a LastCreated template snapshots the created referent");
+        assert_eq!(snapshot.len(), 3);
+        let pin = |id: ObjectId| ObjectIncarnationRef::from_object(&state.objects[&id]);
+
+        let p0_leg =
+            bind_seat_created_referent(&state, template.clone(), PlayerId(0), Some(&snapshot))
+                .expect("P0 owns two created tokens");
+        assert!(matches!(
+            p0_leg.effect,
+            Effect::PutCounter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+        assert_eq!(
+            p0_leg.targets,
+            vec![TargetRef::Object(p0_first), TargetRef::Object(p0_second)]
+        );
+        assert_eq!(
+            p0_leg.target_incarnations,
+            vec![pin(p0_first), pin(p0_second)]
+        );
+
+        let p1_leg =
+            bind_seat_created_referent(&state, template.clone(), PlayerId(1), Some(&snapshot))
+                .expect("P1 owns one created token");
+        assert_eq!(p1_leg.targets, vec![TargetRef::Object(p1_only)]);
+        assert_eq!(p1_leg.target_incarnations, vec![pin(p1_only)]);
+
+        // A seat that owns none of the referent has no "it" (CR 609.3).
+        let p1_only_snapshot = vec![pin(p1_only)];
+        assert!(bind_seat_created_referent(
+            &state,
+            template.clone(),
+            PlayerId(0),
+            Some(&p1_only_snapshot),
+        )
+        .is_none());
+
+        // Gate: a template whose own target is not `LastCreated` reads no
+        // created referent, and with no snapshot the binder is the identity.
+        let any = placement(TargetFilter::Any);
+        assert!(seat_created_referent_snapshot(&state, &any).is_none());
+        let unchanged = bind_seat_created_referent(&state, any.clone(), PlayerId(0), None)
+            .expect("no snapshot leaves the leg as bound");
+        assert!(matches!(
+            unchanged.effect,
+            Effect::PutCounter {
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+        assert!(unchanged.targets.is_empty());
+        assert!(unchanged.target_incarnations.is_empty());
+
+        // CR 400.7 + CR 704.5d: a member that left the battlefield before
+        // placement is a new object (or none); the bound pin no longer matches
+        // and the consumer drops it.
+        assert_eq!(p0_leg.live_object_targets(&state).len(), 2);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, p0_second, Zone::Exile, &mut events);
+        assert_eq!(
+            p0_leg.live_object_targets(&state),
+            vec![TargetRef::Object(p0_first)]
+        );
+    }
+
+    /// CR 608.2c — the created-token channel of a paused player-scope token
+    /// fan-out opens only for a detached tail that reads the created referent
+    /// ("The tokens are goaded …"), and the walk stops at the tail's own
+    /// nearest publisher. Tempting-offer tails (a controller-only `Token` per
+    /// accepting opponent) read nothing and keep the linearized route.
+    #[test]
+    fn tail_reads_created_referent_keys_on_a_last_created_reader() {
+        let node = |effect: Effect| ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+        let goad_last_created = || Effect::GenericEffect {
+            static_abilities: vec![
+                StaticDefinition::new(StaticMode::Continuous).affected(TargetFilter::LastCreated)
+            ],
+            duration: None,
+            target: None,
+            end_cost: None,
+        };
+        let elemental = || Effect::Token {
+            name: "Elemental".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Elemental".to_string()],
+            colors: vec![ManaColor::Red],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 2 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        // (i) War Games tail shape: a goad grant whose `affected` is the referent.
+        assert!(tail_reads_created_referent(&node(goad_last_created())));
+
+        // (ii) Tempt with Vengeance tail shape: the controller's own creation,
+        // repeated per accepting opponent, reads no created referent.
+        let mut tempt_tail = node(elemental());
+        tempt_tail.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::AcceptedOptionalEffect,
+                },
+            },
+        });
+        assert!(!tail_reads_created_referent(&tempt_tail));
+
+        // (iii) Nearest publisher: a reader after the tail's own creation names
+        // that creation's product, not the clause's.
+        let mut own_creation = node(elemental());
+        own_creation.sub_ability = Some(Box::new(node(goad_last_created())));
+        assert!(!tail_reads_created_referent(&own_creation));
+
+        // (iv) A counter placement on the referent reads it.
+        assert!(tail_reads_created_referent(&node(Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::LastCreated,
+        })));
+
+        // (v) A condition over the referent reads it.
+        let mut gated = node(Effect::NoOp);
+        gated.condition = Some(AbilityCondition::ControllerControlsMatching {
+            filter: TargetFilter::LastCreated,
+        });
+        assert!(tail_reads_created_referent(&gated));
+
+        let sacrifice_last_created = || Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        };
+        let delayed = |payload: AbilityDefinition| Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(payload),
+            uses_tracked_set: false,
+        };
+        let count_last_created = || QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::LastCreated,
+            },
+        };
+
+        // (vi) "At the beginning of the next end step, sacrifice those tokens":
+        // the delayed trigger snapshots the referent when it is created
+        // (CR 603.7c), so its payload reads it.
+        assert!(tail_reads_created_referent(&node(delayed(
+            AbilityDefinition::new(AbilityKind::Spell, sacrifice_last_created())
+        ))));
+
+        // (vii) Nearest publisher inside the payload: the payload's own creation
+        // names the referent its later anaphor reads.
+        let mut own_payload = AbilityDefinition::new(AbilityKind::Spell, elemental());
+        own_payload.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            sacrifice_last_created(),
+        )));
+        assert!(!tail_reads_created_referent(&node(delayed(own_payload))));
+
+        // (viii) An effect quantity counting the referent's population reads it.
+        assert!(tail_reads_created_referent(&node(Effect::GainLife {
+            amount: count_last_created(),
+            player: TargetFilter::Controller,
+        })));
+
+        // (ix) A `repeat_for` count over the referent's population reads it.
+        let mut repeated = node(Effect::NoOp);
+        repeated.repeat_for = Some(count_last_created());
+        assert!(tail_reads_created_referent(&repeated));
+    }
+
     /// CR 608.2c — a non-choosing per-player reveal introduces no per-iteration
     /// referent, so the next co-scoped instruction (the per-player card choice and
     /// its `ParentTarget` consumer) detaches and fans out as its own pass after
@@ -37997,6 +38734,315 @@ mod tests {
         assert!(
             evaluate_condition(ability.condition.as_ref().unwrap(), &state, &ability),
             "the condition must count P0's creatures, not the scoped opponent's"
+        );
+    }
+
+    #[test]
+    fn quantity_quality_ability_condition_evaluates_at_resolution() {
+        use crate::types::ability::{NumberQuality, Parity};
+        // CR 608.2h: the quality is read once, when the effect is applied.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0x0C000),
+            PlayerId(0),
+            "Quality Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let add_land = |state: &mut GameState, i: u64| {
+            let id = create_object(
+                state,
+                CardId(0x0C100 + i),
+                PlayerId(0),
+                format!("Land {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let prime_lands = AbilityCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+                },
+            },
+            quality: NumberQuality::Prime,
+        };
+        add_land(&mut state, 1);
+        add_land(&mut state, 2);
+        assert!(
+            evaluate_condition(&prime_lands, &state, &ability),
+            "2 lands is prime"
+        );
+        add_land(&mut state, 3);
+        add_land(&mut state, 4);
+        assert!(
+            !evaluate_condition(&prime_lands, &state, &ability),
+            "4 lands is not prime"
+        );
+
+        // CR 608.2c absent-referent guard: the unguarded read of a missing
+        // cost-paid object's mana value is 0, which is even — the guard must make
+        // the predicate false instead.
+        let absent_even = AbilityCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            },
+            quality: NumberQuality::Parity(Parity::Even),
+        };
+        assert!(
+            !evaluate_condition(&absent_even, &state, &ability),
+            "an absent resolution-only referent is a false predicate, not an even 0"
+        );
+        // Paired positive: the same quality over a present (fixed) value holds.
+        let fixed_even = AbilityCondition::QuantityQuality {
+            quantity: QuantityExpr::Fixed { value: 2 },
+            quality: NumberQuality::Parity(Parity::Even),
+        };
+        assert!(evaluate_condition(&fixed_even, &state, &ability));
+    }
+
+    /// The subject a negated subject-dependent condition reads, supplied per row.
+    enum ConditionSubject {
+        /// No resolution-only referent at all.
+        Absent,
+        /// A cost-paid object with this mana value.
+        CostPaid(u32),
+        /// No cost-paid object, but an effect-context object with this mana value.
+        EffectContext(u32),
+        /// An object target with this power.
+        TargetPower(i32),
+    }
+
+    /// Resolves "You gain 3 life." gated on `condition` through
+    /// `resolve_ability_chain` (the production entry that evaluates
+    /// `ability.condition`) and returns P0's life gained.
+    fn life_gained_under_condition(condition: AbilityCondition, subject: ConditionSubject) -> i32 {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0x0C200),
+            PlayerId(0),
+            "Condition Source".to_string(),
+            Zone::Battlefield,
+        );
+        let referent = create_object(
+            &mut state,
+            CardId(0x0C201),
+            PlayerId(0),
+            "Condition Subject".to_string(),
+            Zone::Battlefield,
+        );
+        let snapshot = |state: &GameState, mana_value: u32| {
+            let obj = &state.objects[&referent];
+            let mut lki = obj.snapshot_for_mana_spent();
+            lki.mana_value = mana_value;
+            CostPaidObjectSnapshot::capture(obj, lki)
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .condition(condition);
+        match subject {
+            ConditionSubject::Absent => {}
+            ConditionSubject::CostPaid(mana_value) => {
+                ability.cost_paid_object = Some(snapshot(&state, mana_value));
+            }
+            ConditionSubject::EffectContext(mana_value) => {
+                ability.effect_context_object = Some(snapshot(&state, mana_value));
+            }
+            ConditionSubject::TargetPower(power) => {
+                let obj = state.objects.get_mut(&referent).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.power = Some(power);
+                obj.toughness = Some(power);
+                ability.targets = vec![TargetRef::Object(referent)];
+            }
+        }
+        let before = state.players[0].life;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        state.players[0].life - before
+    }
+
+    fn cost_paid_mana_value() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
+        }
+    }
+
+    fn cost_paid_mana_value_is_even() -> AbilityCondition {
+        use crate::types::ability::{NumberQuality, Parity};
+        AbilityCondition::QuantityQuality {
+            quantity: cost_paid_mana_value(),
+            quality: NumberQuality::Parity(Parity::Even),
+        }
+    }
+
+    fn negated(condition: AbilityCondition) -> AbilityCondition {
+        AbilityCondition::Not {
+            condition: Box::new(condition),
+        }
+    }
+
+    /// CR 608.2c + CR 608.2h: `Not(QuantityQuality)` over a resolution-only
+    /// referent. With no cost-paid object the negation tests nothing and is false;
+    /// with one present it is the plain negation of the quality.
+    #[test]
+    fn subject_dependent_negated_quantity_quality_needs_its_subject() {
+        // Negated, absent: not vacuously true.
+        assert_eq!(
+            life_gained_under_condition(
+                negated(cost_paid_mana_value_is_even()),
+                ConditionSubject::Absent
+            ),
+            0,
+            "no cost-paid object: the negated quality must not hold"
+        );
+        // Negated, present, quality fails (MV 3 is odd): the negation holds.
+        // Reach-guard: the subject is read at all.
+        let mut state = GameState::new_two_player(42);
+        let referent = create_object(
+            &mut state,
+            CardId(0x0C202),
+            PlayerId(0),
+            "Read Guard".to_string(),
+            Zone::Battlefield,
+        );
+        let mut probe = ResolvedAbility::new(Effect::NoOp, vec![], referent, PlayerId(0));
+        let mut lki = state.objects[&referent].snapshot_for_mana_spent();
+        lki.mana_value = 3;
+        probe.cost_paid_object = Some(CostPaidObjectSnapshot::capture(
+            &state.objects[&referent],
+            lki,
+        ));
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_for_ability_condition(
+                &state,
+                &cost_paid_mana_value(),
+                &probe,
+            ),
+            3
+        );
+        assert_eq!(
+            life_gained_under_condition(
+                negated(cost_paid_mana_value_is_even()),
+                ConditionSubject::CostPaid(3)
+            ),
+            3
+        );
+        // Negated, present, quality holds (MV 2 is even): the negation fails.
+        assert_eq!(
+            life_gained_under_condition(
+                negated(cost_paid_mana_value_is_even()),
+                ConditionSubject::CostPaid(2)
+            ),
+            0
+        );
+        // Positive, present and absent.
+        assert_eq!(
+            life_gained_under_condition(
+                cost_paid_mana_value_is_even(),
+                ConditionSubject::CostPaid(2)
+            ),
+            3
+        );
+        assert_eq!(
+            life_gained_under_condition(cost_paid_mana_value_is_even(), ConditionSubject::Absent),
+            0
+        );
+    }
+
+    /// CR 608.2c: `Not(QuantityCheck)` with an operand over a resolution-only
+    /// referent. Presence, not the value 0, decides: an absent subject makes the
+    /// negation false, a present MV-0 subject is an ordinary comparison.
+    #[test]
+    fn subject_dependent_negated_quantity_check_needs_its_subject() {
+        let mana_value_at_least_one = AbilityCondition::QuantityCheck {
+            lhs: cost_paid_mana_value(),
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        assert_eq!(
+            life_gained_under_condition(
+                negated(mana_value_at_least_one.clone()),
+                ConditionSubject::Absent
+            ),
+            0,
+            "no cost-paid object: the negated comparison must not hold"
+        );
+        assert_eq!(
+            life_gained_under_condition(
+                negated(mana_value_at_least_one),
+                ConditionSubject::CostPaid(0)
+            ),
+            3,
+            "a present MV-0 subject: 0 >= 1 is false, so the negation holds"
+        );
+
+        // Another resolution-only scope: the target's power.
+        let target_power_at_least_three = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        };
+        assert_eq!(
+            life_gained_under_condition(
+                negated(target_power_at_least_three.clone()),
+                ConditionSubject::Absent
+            ),
+            0,
+            "no object target: the negated comparison must not hold"
+        );
+        assert_eq!(
+            life_gained_under_condition(
+                negated(target_power_at_least_three),
+                ConditionSubject::TargetPower(2)
+            ),
+            3,
+            "a target with power 2: 2 >= 3 is false, so the negation holds"
+        );
+    }
+
+    /// CR 608.2c: the presence ladder's fallback. With no cost-paid object but an
+    /// effect-context object, the cost-paid scope's subject is present, so the
+    /// guard stays quiet and the negation is read from the fallback's value.
+    #[test]
+    fn subject_dependent_negated_condition_reads_the_fallback_subject() {
+        assert_eq!(
+            life_gained_under_condition(
+                negated(cost_paid_mana_value_is_even()),
+                ConditionSubject::EffectContext(3)
+            ),
+            3
         );
     }
 

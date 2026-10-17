@@ -3255,6 +3255,12 @@ pub(crate) fn rebind_declared_groups_in_condition(
             rebind_declared_groups_in_quantity(lhs, resolve);
             rebind_declared_groups_in_quantity(rhs, resolve);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => {
+            rebind_declared_groups_in_quantity(quantity, resolve);
+        }
         AbilityCondition::PreviousEffectAmount { rhs, .. } => {
             rebind_declared_groups_in_quantity(rhs, resolve);
         }
@@ -8478,20 +8484,12 @@ fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Op
     }
 }
 
-fn mana_value_matches_parity(mana_value: u32, parity: Parity) -> bool {
-    match parity {
-        Parity::Odd => !mana_value.is_multiple_of(2),
-        Parity::Even => mana_value.is_multiple_of(2),
-    }
-}
-
 fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
     choice: Option<&ChoiceValue>,
 ) -> bool {
-    parity_from_source(source, choice)
-        .is_some_and(|parity| mana_value_matches_parity(mana_value, parity))
+    parity_from_source(source, choice).is_some_and(|parity| parity.matches(i64::from(mana_value)))
 }
 
 fn attacking_defender_matches(

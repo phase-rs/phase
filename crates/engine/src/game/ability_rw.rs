@@ -1891,6 +1891,10 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
             legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs)
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => legacy_quantity_expr(quantity),
         TriggerCondition::DuringPlayersTurn { player } => legacy_player_filter(player),
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions.iter().any(legacy_trigger_condition)
@@ -1988,6 +1992,10 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => legacy_quantity_expr(quantity),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => legacy_quantity_expr(rhs),
         AbilityCondition::ScopedPlayerMatches { filter } => legacy_player_filter(filter),
         AbilityCondition::DiscardedCardMatchesFilter { filter } => legacy_target_filter(filter),
@@ -2062,6 +2070,10 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => legacy_quantity_expr(quantity),
         StaticCondition::IsTapped { scope, .. } => legacy_object_scope(scope),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().any(legacy_static_condition)
@@ -6787,6 +6799,10 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             p.merge(rw_quantity_expr(rhs));
             p
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rw_quantity_expr(quantity),
         AbilityCondition::PreviousEffectAmount {
             rhs,
             comparator: _,
@@ -6993,6 +7009,10 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
             p.merge(rw_quantity_expr(rhs));
             p
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rw_quantity_expr(quantity),
         TriggerCondition::HadCounters { .. } => reads_frozen_of(StateKind::ObjectCounters),
         TriggerCondition::HasCounters { .. } => reads_src_of(StateKind::ObjectCounters),
         TriggerCondition::CounterAddedThisTurn => reads_board_of(StateKind::ObjectCounters),
@@ -7122,6 +7142,10 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             p.merge(rw_quantity_expr(rhs));
             p
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rw_quantity_expr(quantity),
         StaticCondition::HasCounters { .. } => reads_src_of(StateKind::ObjectCounters),
         StaticCondition::IsTapped { scope, .. } => read_object_scope(scope, StateKind::TapState),
         StaticCondition::SourceIsTapped => reads_src_of(StateKind::TapState),
@@ -7523,6 +7547,61 @@ mod tests {
     };
 
     use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// A unary arithmetic quality reads exactly its quantity — the same profile
+    /// as a `QuantityComparison` of that quantity against a constant (whose
+    /// `Fixed` operand contributes nothing), and never the empty profile.
+    #[test]
+    fn quantity_quality_rw_profile_is_its_quantity_profile() {
+        use crate::types::ability::NumberQuality;
+        let q = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TypedFilter::land().controller(ControllerRef::You).into(),
+            },
+        };
+        let one = QuantityExpr::Fixed { value: 1 };
+
+        let tq = TriggerCondition::QuantityQuality {
+            quantity: q.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let tc = TriggerCondition::QuantityComparison {
+            lhs: q.clone(),
+            comparator: Comparator::GE,
+            rhs: one.clone(),
+        };
+        assert_eq!(
+            trigger_condition_rw_profile(&tq),
+            trigger_condition_rw_profile(&tc)
+        );
+        assert_ne!(trigger_condition_rw_profile(&tq), RwProfile::empty());
+
+        let sq = StaticCondition::QuantityQuality {
+            quantity: q.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let sc = StaticCondition::QuantityComparison {
+            lhs: q.clone(),
+            comparator: Comparator::GE,
+            rhs: one.clone(),
+        };
+        assert_eq!(rw_static_condition(&sq), rw_static_condition(&sc));
+        assert_eq!(legacy_static_condition(&sq), legacy_static_condition(&sc));
+        assert_ne!(rw_static_condition(&sq), RwProfile::empty());
+
+        let aq = AbilityCondition::QuantityQuality {
+            quantity: q.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let ac = AbilityCondition::QuantityCheck {
+            lhs: q,
+            comparator: Comparator::GE,
+            rhs: one,
+        };
+        assert_eq!(rw_ability_condition(&aq), rw_ability_condition(&ac));
+        assert_eq!(legacy_ability_condition(&aq), legacy_ability_condition(&ac));
+        assert_ne!(rw_ability_condition(&aq), RwProfile::empty());
+    }
 
     /// U-b. CR 603.2: `OpponentAttacked { EventAttackers }` reads the trigger event
     /// live, like `OpponentOtherThanTriggering`; the controller's attacks read none.

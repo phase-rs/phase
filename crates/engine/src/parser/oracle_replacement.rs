@@ -6918,6 +6918,9 @@ fn replacement_condition_from_static(
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        // No ReplacementCondition carrier for an arithmetic quality; callers
+        // must treat None as fail-closed.
+        | StaticCondition::QuantityQuality { .. }
         // Digital-only Alchemy (no CR entry): "if you have a boon" has no
         // `ReplacementCondition` carrier — fail closed like the other
         // uncarriable gates.
@@ -30490,6 +30493,46 @@ mod tests {
             lhs: QuantityExpr::Ref { qty: lhs },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value },
+        }
+    }
+
+    /// An arithmetic quality has no `ReplacementCondition` carrier: the bridge
+    /// declines it in both polarities so callers fail closed.
+    #[test]
+    fn replacement_condition_bridge_declines_quantity_quality() {
+        use crate::types::ability::NumberQuality;
+        use GatePolarity::{OnlyIf, Unless};
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        };
+        for polarity in [OnlyIf, Unless] {
+            // No `ReplacementCondition` carrier for an arithmetic quality.
+            assert_eq!(
+                replacement_condition_from_static(
+                    StaticCondition::QuantityQuality {
+                        quantity: quantity.clone(),
+                        quality: NumberQuality::Prime,
+                    },
+                    polarity
+                ),
+                None,
+                "QuantityQuality must not bridge ({polarity:?})"
+            );
+            // Paired positive: the same quantity as a comparison does bridge.
+            assert!(
+                replacement_condition_from_static(
+                    StaticCondition::QuantityComparison {
+                        lhs: quantity.clone(),
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    },
+                    polarity
+                )
+                .is_some(),
+                "QuantityComparison over the same quantity bridges ({polarity:?})"
+            );
         }
     }
 
