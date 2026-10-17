@@ -60,7 +60,7 @@ Ingress.
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
 | `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow` and `quota_refusal_overflow` |
-| `phase_ws_discarded_frames_total{reason="quota_exhausted"}` | frames discarded after ordinary admission, excluding admitted compact contest clicks and owned refusals |
+| `phase_ws_discarded_frames_total{reason="quota_exhausted"}` | frames discarded after ordinary admission is exhausted because recovery admission is exhausted or the recovered header is unhandled; excludes binary envelope decode failures, dispatched compact contest clicks and owned refusals |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -194,12 +194,23 @@ Malformed ordinary commands share that recovery allowance. Recovery-admitted
 `ContestPolicy` still owns seat-level click rate limiting. The parser-entry
 ceiling is 64 probe entries + 30 ordinary parses + 30 scans + at most 30 compact
 click parses with refills frozen (154), not an unlimited fallback. Gzip inflation
-is admitted first and capped at 64 KiB.
+is admitted first and capped at 64 KiB. This is a parsing bound, not a handler
+or outbound-memory bound: ordinary commands plus recovered clicks can dispatch
+up to 60 handler calls/s, each involving a session lease and executor hop.
+Recovered clicks can also produce uncorrelated handshake, mode or wire-guard
+rejections at up to 30/s; those replies do not use the flush-held correlated
+refusal admission described below.
 
 An action larger than 1 KiB just after a legitimate click burst still gets an
 owned CommandIdV1 refusal. Past both work windows, traffic is discarded without
-parsing or decompression, not disconnected. A legitimate 40-click burst is
-dispatched in full, including recovery-admitted clicks. Uncorrelated non-click
+parsing or decompression, not disconnected. An isolated legitimate 40-click
+burst is dispatched in full when ingress has capacity, including recovered
+clicks. Recovered clicks retain their ingress admission until handled. At the
+policy-maximal rate (40-click burst plus 30/s), a seconds-long handler stall
+(about 1–2 s under a saturated executor) can exhaust the shared 64-command or
+1 MiB bound and close with 1013 `IngressOverflow` mid-contest. This known limit
+requires both the maximal click stream and the handler stall; recovery does
+not bypass ingress capacity. Uncorrelated non-click
 requests over ordinary quota remain dropped (pre-existing behavior), even if
 their metadata is inspected. Discards refill no allowance. Normal client JSON
 Pings use plain/raw frames and their credited fast path.
@@ -213,9 +224,13 @@ Capacity closes retain the transport's read half for the peer's Close
 acknowledgement, bounded by one second, 64 frames and 1 MiB of drained payload.
 Idle read-deadline closes do not drain. The drain parses no JSON, retains no
 command, and holds no game or CPU permit. Disconnect detection is immediate;
-seat bookkeeping and notifications follow transport teardown. Both reconnect
-grace and contest presence use the original transport detection timestamp,
-not the later cleanup time. Accepted mutations still finish independently.
+seat bookkeeping and notifications follow transport teardown. Reconnect grace
+uses the original transport detection timestamp, not later cleanup time.
+Contest presence carries that timestamp too, but the contest's monotonic
+observation clock clamps it to at least its last tick/click observation.
+Consequently a pause/grace starts at the later of detection and that last
+observation, rather than being unconditionally backdated to detection.
+Accepted mutations still finish independently.
 
 `ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
 game-command completion. Action/Interaction messages may carry a top-level

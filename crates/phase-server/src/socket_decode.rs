@@ -34,7 +34,8 @@ enum RateCharge {
 // admits top-level metadata scans (including error recovery). Recovery-admitted
 // ContestClick frames <=1 KiB may also be typed: <=30 extra compact parses/s,
 // never arbitrary engine action deserialization. Both scan paths cap at 64 KiB.
-// Flush-held refusal admission independently bounds retained replies.
+// Flush-held admission bounds only correlated quota refusals. Recovered clicks
+// can add <=30 handler calls/s and uncorrelated guard replies outside that bound.
 const MAX_RECOVERY_CLICK_BYTES: usize = 1024;
 
 pub(crate) async fn run(
