@@ -18,7 +18,8 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, TriggeringObjectRef,
+    LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
@@ -6693,20 +6694,79 @@ pub enum AttackerBlockStatus {
 }
 
 /// Combat relationship required by `FilterProp::CombatRelation`.
+/// CR 509.1g/509.1h: Direction of a combat relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatRelationDirection {
+    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by the subject.
+    Either,
+    /// CR 509.1g: Candidate is blocking the subject.
+    Blocking,
+    /// CR 509.1g: Candidate is blocked by the subject.
+    BlockedBy,
+}
+
+/// Combat relationship required by `FilterProp::CombatRelation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum CombatRelation {
-    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it.
-    BlockingOrBlockedBy,
-    /// CR 509.1g + CR 400.7: Candidate is an attacking creature the subject was
-    /// recorded as blocking, within `scope`. Unlike `BlockingOrBlockedBy`, which
-    /// reads live `combat.blocker_to_attacker` and empties when CR 506.4 removes
-    /// either creature from combat, this reads the block-history ledgers
-    /// (`CombatState::creature_blocked_attackers_this_combat` /
-    /// `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
-    /// not prune. Each record pins both creatures' exact incarnations, so a
-    /// creature that left and returned matches none of its predecessor's
-    /// records.
-    BlockedBySubject { scope: CombatHistoryScope },
+    /// CR 509.1g: Candidate bears the specified live combat relationship to `subject`.
+    Live(CombatRelationDirection),
+    /// CR 509.1g + CR 400.7 / CR 603.10a: Candidate bore the specified combat relationship
+    /// to `subject` within `scope`, preserved in history ledgers or pre-death context.
+    Historical {
+        direction: CombatRelationDirection,
+        scope: CombatHistoryScope,
+    },
+}
+
+impl<'de> Deserialize<'de> for CombatRelation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CombatRelationRepr {
+            LegacyUnit(String),
+            Standard(CombatRelationWire),
+        }
+
+        #[derive(Deserialize)]
+        enum CombatRelationWire {
+            Live(CombatRelationDirection),
+            Historical {
+                direction: CombatRelationDirection,
+                scope: CombatHistoryScope,
+            },
+        }
+
+        match CombatRelationRepr::deserialize(deserializer)? {
+            CombatRelationRepr::Standard(CombatRelationWire::Live(dir)) => {
+                Ok(CombatRelation::Live(dir))
+            }
+            CombatRelationRepr::Standard(CombatRelationWire::Historical { direction, scope }) => {
+                Ok(CombatRelation::Historical { direction, scope })
+            }
+            CombatRelationRepr::LegacyUnit(s) => match s.as_str() {
+                "BlockingOrBlockedBy" => Ok(CombatRelation::Live(CombatRelationDirection::Either)),
+                "BlockedBySubjectLive" => {
+                    Ok(CombatRelation::Live(CombatRelationDirection::BlockedBy))
+                }
+                "BlockingSubjectLive" => {
+                    Ok(CombatRelation::Live(CombatRelationDirection::Blocking))
+                }
+                other => Err(serde::de::Error::unknown_variant(
+                    other,
+                    &[
+                        "Live",
+                        "Historical",
+                        "BlockingOrBlockedBy",
+                        "BlockedBySubjectLive",
+                        "BlockingSubjectLive",
+                    ],
+                )),
+            },
+        }
+    }
 }
 
 /// CR 702.122b + CR 702.122c: which side of a crew payment the candidate of a
@@ -6728,6 +6788,10 @@ pub enum CombatRelationSubject {
     Source,
     /// The first selected object target of the resolving spell or ability.
     ParentTarget,
+    /// CR 608.2c: The object that triggered the ability.
+    TriggeringObject,
+    /// CR 301.5 + CR 303.4: The creature the source is attached to.
+    AttachedTo,
 }
 
 /// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
@@ -35191,6 +35255,20 @@ impl AttachTargetBindings {
     }
 }
 
+/// CR 608.2c: Semantic role for anaphoric referents (`TargetFilter::TriggeringSource`)
+/// in triggered abilities. Distinguishes whether the ability addresses the watched subject
+/// (e.g. creature that attacked/blocked/died), the attached host (Aura/Equipment host),
+/// or the combat counterpart (the creature blocking or blocked by this creature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggeringSemanticRole {
+    /// The subject object that performed the triggering action (e.g. attacked, blocked, died, entered).
+    Subject,
+    /// The combat counterpart (e.g. the creature blocking or blocked by this creature).
+    Counterpart,
+    /// The attached host permanent (e.g. enchanted/equipped creature).
+    Host,
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 ///
 /// Serde goes through the derived implementation (`remote = "Self"`) plus the
@@ -35243,6 +35321,24 @@ pub struct ResolvedAbility {
     /// deliberately separate from the parsed grammatical selector on `Effect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_block_attacker: Option<ObjectIncarnationRef>,
+    /// CR 301.5a + CR 608.2c: Exact host permanent an Aura/Equipment trigger was attached to
+    /// when the trigger fired. Bound at stack construction so a later re-attachment before
+    /// resolution does not redirect or empty the filter population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_host: Option<ObjectIncarnationRef>,
+    /// CR 509.3c + CR 608.2c: Exact triggering object (such as the watched attacker that
+    /// became blocked) bound when the trigger fired / was placed on the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_object: Option<TriggeringObjectRef>,
+    /// CR 509.3c + CR 509.3d + CR 400.7: Exact counterpart combatant (such as the blocker
+    /// of an attacking creature, or the attacker of a blocking creature) bound when a
+    /// combatant trigger fired / was placed on the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_counterpart: Option<ObjectIncarnationRef>,
+    /// CR 608.2c: Typed semantic role disambiguating whether `TargetFilter::TriggeringSource`
+    /// refers to the triggering subject, the attached host, or the combat counterpart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_role: Option<TriggeringSemanticRole>,
     /// CR 400.7 + CR 603.7c: Incarnation pins for the object referents in
     /// `targets`, captured when a delayed triggered ability snapshotted its
     /// `ParentTarget` referent at creation. A delayed ability that refers to a
@@ -35728,6 +35824,10 @@ impl PartialEq for ResolvedAbility {
             trigger_definition_ref: a_trigger_definition_ref,
             delayed_origin: a_delayed_origin,
             force_block_attacker: a_force_block_attacker,
+            triggering_host: a_triggering_host,
+            triggering_object: a_triggering_object,
+            triggering_counterpart: a_triggering_counterpart,
+            triggering_role: a_triggering_role,
             target_incarnations: a_target_incarnations,
             target_pins: _,
             legacy_selected_target_incarnations: _,
@@ -35802,6 +35902,10 @@ impl PartialEq for ResolvedAbility {
             trigger_definition_ref: b_trigger_definition_ref,
             delayed_origin: b_delayed_origin,
             force_block_attacker: b_force_block_attacker,
+            triggering_host: b_triggering_host,
+            triggering_object: b_triggering_object,
+            triggering_counterpart: b_triggering_counterpart,
+            triggering_role: b_triggering_role,
             target_incarnations: b_target_incarnations,
             target_pins: _,
             legacy_selected_target_incarnations: _,
@@ -35876,6 +35980,10 @@ impl PartialEq for ResolvedAbility {
             && a_trigger_definition_ref == b_trigger_definition_ref
             && a_delayed_origin == b_delayed_origin
             && a_force_block_attacker == b_force_block_attacker
+            && a_triggering_host == b_triggering_host
+            && a_triggering_object == b_triggering_object
+            && a_triggering_counterpart == b_triggering_counterpart
+            && a_triggering_role == b_triggering_role
             && a_target_incarnations == b_target_incarnations
             // CR 400.7: occurrence pins compare in their normalized, aligned
             // form, so a legacy keyed decode equals its positional re-encode.
@@ -36300,6 +36408,10 @@ impl ResolvedAbility {
             trigger_definition_ref: None,
             delayed_origin: None,
             force_block_attacker: None,
+            triggering_host: None,
+            triggering_object: None,
+            triggering_counterpart: None,
+            triggering_role: None,
             target_incarnations: Vec::new(),
             target_pins: Vec::new(),
             legacy_selected_target_incarnations: Vec::new(),
@@ -36576,6 +36688,59 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 301.5a + CR 608.2c: Recursively binds the exact host permanent an Aura/Equipment
+    /// trigger was attached to when the trigger fired.
+    pub fn bind_triggering_host_recursive(&mut self, host: Option<ObjectIncarnationRef>) {
+        self.triggering_host = host;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_host_recursive(host);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_host_recursive(host);
+        }
+    }
+
+    /// CR 509.3c + CR 608.2c: Recursively binds the exact triggering object (such as the
+    /// watched attacker that became blocked) bound when the trigger fired.
+    pub fn bind_triggering_object_recursive(
+        &mut self,
+        triggering_object: Option<TriggeringObjectRef>,
+    ) {
+        self.triggering_object = triggering_object;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_object_recursive(triggering_object);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_object_recursive(triggering_object);
+        }
+    }
+
+    /// CR 509.3c + CR 509.3d + CR 400.7: Recursively binds the exact counterpart combatant
+    /// (such as the blocker of an attacking creature, or the attacker of a blocking creature).
+    pub fn bind_triggering_counterpart_recursive(
+        &mut self,
+        triggering_counterpart: Option<ObjectIncarnationRef>,
+    ) {
+        self.triggering_counterpart = triggering_counterpart;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_counterpart_recursive(triggering_counterpart);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_counterpart_recursive(triggering_counterpart);
+        }
+    }
+
+    /// CR 608.2c: Recursively binds the semantic role for anaphoric referents.
+    pub fn bind_triggering_role_recursive(&mut self, role: Option<TriggeringSemanticRole>) {
+        self.triggering_role = role;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_role_recursive(role);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_role_recursive(role);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context
@@ -36586,6 +36751,10 @@ impl ResolvedAbility {
         self.trigger_source = None;
         self.trigger_definition_ref = None;
         self.force_block_attacker = None;
+        self.triggering_host = None;
+        self.triggering_object = None;
+        self.triggering_counterpart = None;
+        self.triggering_role = None;
         // CR 104.4b: the pin names an advancing incarnation of the triggering
         // spell (CR 400.7), so it is cleared alongside the other per-instance
         // identity fields above for the same loop-equality reason.
@@ -41503,7 +41672,7 @@ mod tests {
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
                 subject: CombatRelationSubject::ParentTarget,
             },
             FilterProp::BlockStatus {

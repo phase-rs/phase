@@ -185,7 +185,20 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
+    let parked_simultaneous_combat_snapshots = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.simultaneous_combat_snapshots.clone())
+        .unwrap_or_default();
     let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // CR 704.3 + CR 603.10a: Retiring every original member of the simultaneous batch
+    // when the batch reaches terminal completion ensures survivors (e.g. Umbra armor)
+    // do not retain stale combat snapshots after their batch lifetime ends.
+    if state.pending_replacement.is_none() {
+        for obj_id in &parked_simultaneous_combat_snapshots {
+            state.simultaneous_combat_snapshots.remove(obj_id);
+        }
+    }
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
@@ -216,6 +229,11 @@ fn handle_replacement_choice_inner(
         )));
     }
     let replacement_action_event_start = events.len();
+    let parked_simultaneous_combat_snapshots = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.simultaneous_combat_snapshots.clone())
+        .unwrap_or_default();
     let parked_search_found_replacement = state
         .pending_replacement
         .as_ref()
@@ -409,6 +427,12 @@ fn handle_replacement_choice_inner(
                         // epilogue still owns the continuation drain). Surface
                         // the parked prompt; the epilogue must not run yet.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                            if let Some(pending) = state.pending_replacement.as_mut() {
+                                if pending.simultaneous_combat_snapshots.is_empty() {
+                                    pending.simultaneous_combat_snapshots =
+                                        parked_simultaneous_combat_snapshots.clone();
+                                }
+                            }
                             if let (Some(provenance), Some(pending)) = (
                                 parked_sacrifice_provenance,
                                 state.pending_replacement.as_mut(),
@@ -904,6 +928,12 @@ fn handle_replacement_choice_inner(
                 // `state.waiting_for` and we propagate it back below.
                 destroy @ ProposedEvent::Destroy { .. } => {
                     if !apply_destroy_after_replacement(state, destroy, events) {
+                        if let Some(pending) = state.pending_replacement.as_mut() {
+                            if pending.simultaneous_combat_snapshots.is_empty() {
+                                pending.simultaneous_combat_snapshots =
+                                    parked_simultaneous_combat_snapshots.clone();
+                            }
+                        }
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -916,6 +946,12 @@ fn handle_replacement_choice_inner(
                     if let SacrificeApply::NeedsChoice(_) =
                         apply_sacrifice_after_replacement(state, sacrifice, events)
                     {
+                        if let Some(pending) = state.pending_replacement.as_mut() {
+                            if pending.simultaneous_combat_snapshots.is_empty() {
+                                pending.simultaneous_combat_snapshots =
+                                    parked_simultaneous_combat_snapshots.clone();
+                            }
+                        }
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -1454,6 +1490,10 @@ fn handle_replacement_choice_inner(
                         pending.sacrifice_provenance = Some(provenance);
                     }
                 }
+                if pending.simultaneous_combat_snapshots.is_empty() {
+                    pending.simultaneous_combat_snapshots =
+                        parked_simultaneous_combat_snapshots.clone();
+                }
                 // CR 616.1f + CR 614.12a: a re-park of the SAME zone change keeps
                 // the event its logical owner parked on, so the eventual resume
                 // settles that owner's paused delivery even though an answered
@@ -1504,6 +1544,12 @@ fn handle_replacement_choice_inner(
                     WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
                 )
             {
+                if let Some(pending) = state.pending_replacement.as_mut() {
+                    if pending.simultaneous_combat_snapshots.is_empty() {
+                        pending.simultaneous_combat_snapshots =
+                            parked_simultaneous_combat_snapshots.clone();
+                    }
+                }
                 return Ok(state.waiting_for.clone());
             }
             if let Some(loser) = pending_phase_drain_life_loser {
@@ -3986,6 +4032,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
@@ -4663,6 +4710,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);

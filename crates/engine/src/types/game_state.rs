@@ -808,7 +808,7 @@ impl TriggerSourceContext {
         self.lki.attachments.clone_from(&record.attachments);
         self.linked_exile_snapshot
             .clone_from(&record.linked_exile_snapshot);
-        self.combat_status = record.combat_status;
+        self.combat_status.clone_from(&record.combat_status);
         self.cast_from_zone = record.cast_from_zone;
         self.played_from_zone = record.played_from_zone;
     }
@@ -1907,7 +1907,7 @@ pub(crate) fn terminal_battlefield_departure_row(
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneChangeCombatStatus {
     #[serde(default)]
     pub attacking: bool,
@@ -1928,6 +1928,15 @@ pub struct ZoneChangeCombatStatus {
     pub blocking_alone: bool,
     #[serde(default)]
     pub defending_player: Option<PlayerId>,
+    /// CR 509.1g + CR 400.7: Attackers this creature was blocking immediately prior to leaving combat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_creatures: Vec<ObjectIncarnationRef>,
+    /// CR 509.1h + CR 400.7: Blockers assigned to this creature immediately prior to leaving combat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by_creatures: Vec<ObjectIncarnationRef>,
+    /// CR 400.7: Incarnation of the object when this combat status was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
 }
 
 /// CR 508.1a: Snapshot of a creature's public characteristics when it was
@@ -22700,6 +22709,13 @@ declare_game_state! {
     /// CR 400.7: Zone-change snapshots this turn, enabling data-driven condition queries.
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
     pub zone_changes_this_turn: im::Vector<ZoneChangeRecord>,
+    /// CR 704.3 + CR 603.10a: Pre-captured combat relationships for objects departing
+    /// simultaneously (e.g. SBA lethal damage batches or simultaneous destroy effects).
+    /// Prevents sequential zone delivery from clearing combat links of earlier-delivered
+    /// combatants before later-delivered combatants snapshot their departure state.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub simultaneous_combat_snapshots: HashMap<ObjectId, ZoneChangeCombatStatus>,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -25474,6 +25490,11 @@ pub struct PendingReplacement {
     /// before the replacement is applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub may_cost_remaining: Option<AbilityCost>,
+    /// CR 704.3 + CR 603.10a: All original members of a simultaneous batch
+    /// whose combat snapshots were captured prior to delivery, preserved across
+    /// replacement pauses so every original member is retired upon terminal completion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub simultaneous_combat_snapshots: Vec<ObjectId>,
     /// The event the logical zone-change owner parked on, when it differs from
     /// `proposed`. An answered pre-entry choice (CR 614.12a) writes into
     /// `proposed`, and a CR 616.1f re-park replaces it, but the owner's paused
@@ -29457,6 +29478,7 @@ impl GameState {
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
+            simultaneous_combat_snapshots: HashMap::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -32488,6 +32510,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players_who_sacrificed_artifact_this_turn: _,
         sacrificed_permanents_this_turn: _,
         zone_changes_this_turn: _,
+        simultaneous_combat_snapshots: _,
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
@@ -32849,6 +32872,7 @@ impl PartialEq for GameState {
                 == other.players_who_sacrificed_artifact_this_turn
             && self.sacrificed_permanents_this_turn == other.sacrificed_permanents_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
+            && self.simultaneous_combat_snapshots == other.simultaneous_combat_snapshots
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn

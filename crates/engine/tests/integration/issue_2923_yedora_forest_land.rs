@@ -116,3 +116,51 @@ fn yedora_returns_dying_creature_as_face_down_forest_land() {
         "face-down Forest land must produce only {{G}}, got {options:?}"
     );
 }
+
+/// CR 400.7 + CR 400.7e: If the dying creature card leaves the graveyard before
+/// Yedora's trigger resolves, Yedora can no longer find it and cannot return it.
+#[test]
+fn yedora_creature_moved_from_graveyard_before_resolution_fizzles() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario
+        .add_creature(P0, "Yedora, Grave Gardener", 4, 4)
+        .from_oracle_text(YEDORA_ORACLE);
+
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+
+    // Bear dies
+    runner
+        .act(GameAction::Debug(DebugAction::Sacrifice {
+            object_id: bear,
+        }))
+        .expect("sacrificing the bear should succeed");
+
+    // Yedora trigger is on stack. Before resolution, exile bear from graveyard.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), bear, Zone::Exile, &mut events);
+
+    runner.advance_until_stack_empty();
+
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+    ) {
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accepting Yedora's return must succeed");
+        runner.advance_until_stack_empty();
+    }
+
+    // Bear card must remain in exile and NOT return to the battlefield
+    let obj = &runner.state().objects[&bear];
+    assert_eq!(
+        obj.zone,
+        Zone::Exile,
+        "bear must remain in exile and not return to the battlefield as a land"
+    );
+}

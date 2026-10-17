@@ -4340,6 +4340,10 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_definition_ref,
         delayed_origin: _,
         force_block_attacker: _,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
+        triggering_role: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
         legacy_selected_target_incarnations: _,
@@ -4589,6 +4593,10 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_definition_ref: _,
         delayed_origin: _,
         force_block_attacker: _,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
+        triggering_role: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
         legacy_selected_target_incarnations: _,
@@ -4818,6 +4826,10 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         trigger_definition_ref: _,
         delayed_origin: _,
         force_block_attacker: _,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
+        triggering_role: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
         legacy_selected_target_incarnations: _,
@@ -5156,6 +5168,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_definition_ref: _,
         delayed_origin: _,
         force_block_attacker: a_force_block_attacker,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
+        triggering_role: _,
         target_incarnations: a_target_incarnations,
         controller: a_controller,
         original_controller: _,
@@ -5242,6 +5258,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_definition_ref: _,
         delayed_origin: _,
         force_block_attacker: b_force_block_attacker,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
+        triggering_role: _,
         target_incarnations: b_target_incarnations,
         controller: b_controller,
         original_controller: _,

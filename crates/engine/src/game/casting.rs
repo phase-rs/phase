@@ -27834,6 +27834,16 @@ fn activate_with_cost_carrier(
     // activation`) do not apply. `resolve` cannot fail for the SelfRef grant, but
     // the Result is mapped to `EngineError` rather than unwrapped.
     if is_plot_special_action(&ability_def) {
+        // CR 400.7j: Plot is a special action whose cost moved the card to a
+        // public zone (exile, or redirected destination). Update the resolved
+        // ability's source incarnation to the card's post-move incarnation so
+        // the SelfRef grant finds the moved card.
+        resolved.set_source_incarnation_recursive(
+            state
+                .objects
+                .get(&resolved.source_id)
+                .map(|o| o.incarnation),
+        );
         super::effects::grant_permission::resolve(state, &resolved, events).map_err(|e| {
             EngineError::ActionNotAllowed(format!("plot special action failed: {e}"))
         })?;
@@ -28020,6 +28030,16 @@ pub(crate) fn record_activation_announcement(
     ability_index: usize,
     ability: &mut ResolvedAbility,
 ) {
+    // CR 113.7a + CR 602.2a: Capture the source's incarnation at the moment of
+    // activation announcement, before any costs (such as sacrifice) move the source
+    // to another zone and increment its incarnation.
+    if ability.source_incarnation.is_none() {
+        let source_incarnation = state
+            .objects
+            .get(&source_id)
+            .map(|source| source.incarnation);
+        ability.set_source_incarnation_recursive(source_incarnation);
+    }
     ability.activation_record =
         capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
     let provenance = state

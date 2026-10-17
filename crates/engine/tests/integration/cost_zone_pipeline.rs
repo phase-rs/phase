@@ -990,6 +990,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        simultaneous_combat_snapshots: Vec::new(),
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -3626,7 +3627,6 @@ fn synthesized_plot_redirect_resumes_as_special_action() {
     let second = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("redirect plotted self-exile");
-
     assert_eq!(runner.state().objects[&plotted].zone, Zone::Graveyard);
     assert!(runner.state().objects[&plotted]
         .casting_permissions
@@ -4937,6 +4937,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        simultaneous_combat_snapshots: Vec::new(),
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,

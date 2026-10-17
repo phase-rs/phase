@@ -23028,7 +23028,7 @@ fn try_parse_target_subject_multi_target_damage_chain(
         is_optional: application.is_optional,
     };
     let clause = try_parse_multi_target_damage_chain_inner(predicate, &mut tentative_ctx)?;
-    let wrapped = wrap_target_subject_damage(clause, &subject)?;
+    let wrapped = wrap_target_subject_damage(clause, &subject, Some(&tentative_ctx))?;
     *ctx = tentative_ctx;
     Some(wrapped)
 }
@@ -27364,7 +27364,7 @@ fn lower_subject_predicate_ast_body(
             // authority for the source and inherited self-damage bindings.
             if subject.target.is_some() {
                 if let Some(clause) = try_parse_multi_target_damage_chain(&text, ctx) {
-                    if let Some(wrapped) = wrap_target_subject_damage(clause, &subject) {
+                    if let Some(wrapped) = wrap_target_subject_damage(clause, &subject, Some(ctx)) {
                         return wrapped;
                     }
                 }
@@ -27910,17 +27910,9 @@ fn lower_subject_predicate_ast_body(
                     };
                 }
             }
-            // CR 509.3c + CR 120.1: under a bare "becomes blocked" condition
-            // "it" names the blocked attacker (`ParentTarget`, pinned by
-            // `trigger_object_pronoun_ref_for_condition`). `DamageSource` has no
-            // value naming that attacker, so "it deals N damage" would be dealt
-            // by the ability's source. Fail it closed instead.
-            if subject_is_unbindable_damage_source(&subject, &clause.effect, ctx) {
-                return unbindable_damage_source_clause(original_clause);
-            }
             // CR 608.2c: Inject the subject's target into targeted effects that were
             // parsed via the imperative path (connive, phase out, force block, suspect).
-            if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject) {
+            if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject, Some(ctx)) {
                 return wrapped;
             }
             // CR 608.2c + CR 109.4 + CR 701.16a + CR 701.53a: Investigate and
@@ -28898,32 +28890,6 @@ fn rebind_each_target_damage_amount(effect: &mut Effect, power_scope: ObjectScop
     }
 }
 
-/// CR 509.3c + CR 120.1: true when the damage clause's subject is the bare
-/// "becomes blocked" condition's attacker ("it"), which no `DamageSource` value
-/// can name. Typed: the trigger condition's antecedent is the blocked attacker
-/// and the subject resolved to the matching `ParentTarget` pin.
-fn subject_is_unbindable_damage_source(
-    subject: &SubjectPhraseAst,
-    effect: &Effect,
-    ctx: &ParseContext,
-) -> bool {
-    matches!(effect, Effect::DealDamage { .. } | Effect::DamageAll { .. })
-        && ctx.condition_object_antecedent
-            == Some(crate::parser::oracle_ir::context::ConditionObjectAntecedent::BlockedAttacker)
-        && matches!(ctx.object_pronoun_ref, Some(TargetFilter::ParentTarget))
-        && matches!(
-            subject.target.as_ref().or(subject.affected.as_ref()),
-            Some(TargetFilter::ParentTarget)
-        )
-}
-
-fn unbindable_damage_source_clause(original_clause: &str) -> ParsedEffectClause {
-    parsed_clause(Effect::unimplemented(
-        "blocked_attacker_damage_source",
-        original_clause,
-    ))
-}
-
 fn bind_damage_clause_source(
     effect: &mut Effect,
     damage_source_ref: DamageSource,
@@ -29183,12 +29149,20 @@ fn head_carries_player_subject(head: &str, ctx: &ParseContext) -> bool {
 fn wrap_target_subject_damage(
     mut clause: ParsedEffectClause,
     subject: &SubjectPhraseAst,
+    ctx: Option<&ParseContext>,
 ) -> Option<ParsedEffectClause> {
-    let subject_target = subject.target.as_ref()?;
-    if matches!(subject_target, TargetFilter::TriggeringSource) {
-        // CR 603.6 + CR 120.1: "that creature deals damage equal to its
-        // power" in a zone-change trigger binds both the damage source and
-        // anaphoric power reference to the moved object.
+    let subject_filter = subject.target.as_ref().or(subject.affected.as_ref());
+    let is_triggering_antecedent = matches!(subject_filter, Some(TargetFilter::TriggeringSource))
+        || (matches!(subject_filter, Some(TargetFilter::ParentTarget))
+            && ctx.is_some_and(|c| {
+                c.condition_object_antecedent.is_some()
+                    || (c.in_trigger
+                        && matches!(c.object_pronoun_ref, Some(TargetFilter::TriggeringSource)))
+            }));
+    if is_triggering_antecedent {
+        // CR 603.6 + CR 120.1 + CR 509.3c: "that creature deals damage equal to its
+        // power" or "it deals N damage" under a trigger binds both the damage source and
+        // anaphoric power reference to the triggering object / host (CR 113.7a, CR 608.2h).
         if bind_damage_clause_source(
             &mut clause.effect,
             DamageSource::TriggeringSource,
@@ -29198,6 +29172,8 @@ fn wrap_target_subject_damage(
         }
         return None;
     }
+
+    let subject_target = subject.target.as_ref()?;
 
     // CR 120.1 + CR 601.2c: "up to N / any number of target creatures you
     // control each deal damage equal to their power..." — the parser already

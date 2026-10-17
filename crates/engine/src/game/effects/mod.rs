@@ -5251,6 +5251,10 @@ fn instruction_outlives_declined_gate(
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
+        triggering_host: _,
+        triggering_object: _,
+        triggering_counterpart: _,
+        triggering_role: _,
         target_incarnations: _,
         target_pins: _,
         legacy_selected_target_incarnations: _,
@@ -13940,6 +13944,19 @@ fn perform_player_scope_sacrifices(
     let completed = record_sacrifice_batch_events(&mut completion, events);
     emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
 
+    // CR 101.4 + CR 603.10a: Capture combat snapshots for all announced sacrifices
+    // before any move begins, so sequential deliveries do not prune combat roles
+    // of earlier-delivered objects.
+    if !completion.spans_replacement_pause && completion.announced.len() > 1 {
+        for &card in &completion.announced {
+            let status = crate::game::zones::capture_combat_status(state, card);
+            state
+                .simultaneous_combat_snapshots
+                .entry(card)
+                .or_insert(status);
+        }
+    }
+
     // CR 101.4: after every player has made the required APNAP choice, the
     // chosen permanents are moved as one simultaneous instruction.
     // CR 701.21a: to sacrifice a permanent, its controller moves it from the
@@ -13975,6 +13992,7 @@ fn perform_player_scope_sacrifices(
                     // terminal completion reunites this span with that event,
                     // stamps every actual departure together, and only then
                     // allows trigger collection to observe the batch.
+                    let announced_snapshots = completion.announced.clone();
                     completion
                         .deferred_events
                         .extend(events.drain(events_before_sacrifice..));
@@ -13986,6 +14004,9 @@ fn perform_player_scope_sacrifices(
                             selections,
                             completion,
                         });
+                    if let Some(pending) = state.pending_replacement.as_mut() {
+                        pending.simultaneous_combat_snapshots = announced_snapshots;
+                    }
                     state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(
                         choice_player,
                         state,
@@ -14022,6 +14043,9 @@ fn perform_player_scope_sacrifices(
         &completion.departed_zone_change_indices,
         &departed,
     );
+    for &card in &completion.announced {
+        state.simultaneous_combat_snapshots.remove(&card);
+    }
     state.last_effect_count = Some(
         i32::try_from(completion.sacrificed.len())
             .expect("a game cannot announce more sacrifices than i32 can represent"),

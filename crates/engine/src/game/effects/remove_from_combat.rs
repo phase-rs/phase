@@ -130,6 +130,11 @@ pub fn remove_object_from_combat(
 
     let changed = crate::game::combat::prune_object_from_combat(state, oid);
 
+    // CR 701.19a + CR 506.4: An object removed from combat is no longer in combat;
+    // purge any simultaneous combat snapshot so subsequent zone changes do not read
+    // stale combat membership.
+    state.simultaneous_combat_snapshots.remove(&oid);
+
     // CR 506.4 + CR 613.1f: a creature removed from combat stops being an
     // attacking, blocking, blocked and/or unblocked creature, so a Layer 6
     // grant keyed on `FilterProp::Attacking` / `Blocking` / `BlockingSource` /

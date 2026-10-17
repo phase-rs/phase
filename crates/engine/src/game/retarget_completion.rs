@@ -252,7 +252,9 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
         },
         FilterProp::CombatRelation { subject, .. } => match subject {
             CombatRelationSubject::ParentTarget => RetargetDeps::AllPositions,
-            CombatRelationSubject::Source => RetargetDeps::Independent,
+            CombatRelationSubject::Source
+            | CombatRelationSubject::TriggeringObject
+            | CombatRelationSubject::AttachedTo => RetargetDeps::Independent,
         },
         FilterProp::Attacking { defender } => defender
             .as_ref()

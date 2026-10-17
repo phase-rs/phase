@@ -958,7 +958,7 @@ fn perform_creature_deaths(
     any_performed: &mut bool,
     to_die: &[CreatureDeathSba],
 ) {
-    // CR 704.3 + CR 614.6: zero-toughness and lethal-damage SBAs are
+    // CR 704.3 + CR 603.10a: zero-toughness and lethal-damage SBAs are
     // simultaneous. Consult every graveyard move (and, for lethal damage, its
     // destruction) while the complete co-dying set is still present, then
     // deliver the approved moves. A static die-exile replacement on a creature
@@ -971,6 +971,22 @@ fn perform_creature_deaths(
     // restore both state and emitted events before falling back to the safe
     // sequential path below. There, every consumed replacement is delivered
     // before the later prompt is parked; no approved move can be dropped.
+    //
+    // CR 704.3 + CR 603.10a: Snapshot immediate combat relationships and original
+    // incarnations for all participating objects before the first zone delivery begins.
+    // This prevents earlier deliveries in the batch from pruning combat links before
+    // later deliveries record their departure combat status.
+    if to_die.len() > 1 {
+        for death in to_die {
+            let id = death.object_id();
+            let status = zones::capture_combat_status(state, id);
+            state
+                .simultaneous_combat_snapshots
+                .entry(id)
+                .or_insert(status);
+        }
+    }
+
     let co_dying_replacement_source = to_die.iter().any(|death| {
         state
             .objects
@@ -1078,6 +1094,11 @@ fn perform_creature_deaths(
                     });
                 }
                 performed_ids.push(object_id);
+            }
+            for death in to_die {
+                state
+                    .simultaneous_combat_snapshots
+                    .remove(&death.object_id());
             }
             zones::mark_simultaneous_departures(
                 events,
@@ -1200,6 +1221,10 @@ fn perform_creature_deaths(
                         }
                         ReplacementResult::Prevented => {}
                         ReplacementResult::NeedsChoice(player) => {
+                            if let Some(pending) = state.pending_replacement.as_mut() {
+                                pending.simultaneous_combat_snapshots =
+                                    to_die.iter().map(|d| d.object_id()).collect();
+                            }
                             state.waiting_for =
                                 replacement::replacement_choice_waiting_for(player, state);
                             return;
@@ -1219,10 +1244,19 @@ fn perform_creature_deaths(
                 *any_performed = true;
             }
             ReplacementResult::NeedsChoice(player) => {
+                if let Some(pending) = state.pending_replacement.as_mut() {
+                    pending.simultaneous_combat_snapshots =
+                        to_die.iter().map(|d| d.object_id()).collect();
+                }
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 return;
             }
         }
+    }
+    for death in to_die {
+        state
+            .simultaneous_combat_snapshots
+            .remove(&death.object_id());
     }
     // CR 603.10a + CR 704.3: creatures that leave in this SBA check die
     // simultaneously as a single event — record the group so
@@ -4633,6 +4667,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
 
@@ -4810,6 +4845,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
 

@@ -602,6 +602,10 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         trigger_definition_ref: _, // exact trigger occurrence, no choice
         delayed_origin: _, // delayed-trigger identity, no choice
         force_block_attacker: _, // exact force-block referent, no choice
+        triggering_host: _, // exact triggering host, no choice
+        triggering_object: _, // exact triggering object, no choice
+        triggering_counterpart: _, // exact counterpart combatant, no choice
+        triggering_role: _, // semantic role, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
         target_pins: _, // CR 400.7 selected-target pins, no choice
         legacy_selected_target_incarnations: _,

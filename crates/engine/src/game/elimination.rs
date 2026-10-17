@@ -2006,6 +2006,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         }
     }
@@ -3515,6 +3516,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
@@ -3659,6 +3661,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -3715,6 +3718,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -3763,6 +3767,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -3841,6 +3846,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {

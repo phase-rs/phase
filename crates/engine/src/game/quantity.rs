@@ -7735,6 +7735,11 @@ fn object_lookback_event(
 /// CR 603.2 + CR 603.7 + CR 608.2h: whether an object look-back read has a triggering-event source.
 /// See [`object_lookback_event`].
 fn event_source_referent_present(state: &GameState, ability: Option<&ResolvedAbility>) -> bool {
+    if let Some(ab) = ability {
+        if ab.triggering_object.is_some() || ab.triggering_host.is_some() {
+            return true;
+        }
+    }
     object_lookback_event(state, ability)
         .and_then(|event| crate::game::targeting::extract_source_from_event(&event))
         .is_some()
@@ -8394,6 +8399,21 @@ where
             .get(&id)
             .and_then(|history| history.get(&expected).and_then(lki_extract))
             .or_else(|| {
+                // CR 113.7a + CR 608.2h: Departed named object uses exact LKI from zone_changes_this_turn.
+                state.zone_changes_this_turn.iter().rev().find_map(|r| {
+                    if r.object_id == id
+                        && r.from_zone == Some(crate::types::zones::Zone::Battlefield)
+                        && r.trigger_source_context()
+                            .is_some_and(|ctx| ctx.identity.reference.incarnation == expected)
+                    {
+                        r.trigger_source_context()
+                            .and_then(|ctx| lki_extract(&ctx.lki))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| {
                 // Saves written before incarnation-versioned LKI have only
                 // the legacy cache. Once any versioned history exists for
                 // this ObjectId, fail closed instead of reading a different
@@ -8404,7 +8424,20 @@ where
                     state.lki_cache.get(&id).and_then(lki_extract)
                 }
             }),
-        None => state.lki_cache.get(&id).and_then(lki_extract),
+        None => state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find_map(|r| {
+                if r.object_id == id && r.from_zone == Some(crate::types::zones::Zone::Battlefield)
+                {
+                    r.trigger_source_context()
+                        .and_then(|ctx| lki_extract(&ctx.lki))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| state.lki_cache.get(&id).and_then(lki_extract)),
     })
     .or_else(|| {
         if expected_incarnation.is_none() {
@@ -8450,6 +8483,14 @@ fn trigger_event_source_identity(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
 ) -> Option<(ObjectId, Option<u64>)> {
+    if let Some(ab) = ability {
+        if let Some(trig_obj) = ab.triggering_object {
+            return Some((trig_obj.object_id, trig_obj.incarnation));
+        }
+        if let Some(host_ref) = ab.triggering_host {
+            return Some((host_ref.object_id, Some(host_ref.incarnation)));
+        }
+    }
     let event = object_lookback_event(state, ability)?;
     let object_id = crate::game::targeting::extract_source_from_event(&event)?;
     let expected_incarnation = match &event {

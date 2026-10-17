@@ -32,6 +32,7 @@ pub fn resolve(
     // end-of-combat handling in `turns.rs`); attacking/blocking status is
     // derived from `state.combat`.
     state.combat = None;
+    state.simultaneous_combat_snapshots.clear();
 
     // CR 724.1d: Skip straight to the cleanup step (skipping any intervening
     // phases/steps, including the end step — CR 724.1e).

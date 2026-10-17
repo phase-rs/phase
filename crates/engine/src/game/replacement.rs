@@ -11231,6 +11231,7 @@ fn park_entry_controller_choice(
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        simultaneous_combat_snapshots: Vec::new(),
         delivery_boundary: None,
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
@@ -11405,6 +11406,7 @@ fn park_as_enters_named_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        simultaneous_combat_snapshots: Vec::new(),
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -11970,6 +11972,7 @@ fn pipeline_loop(
                     // paid yet. Set only when re-parking after a paused accept.
                     may_cost_paid: false,
                     may_cost_remaining: None,
+                    simultaneous_combat_snapshots: Vec::new(),
                     delivery_boundary: None,
                 });
                 return replay_pending_replacement(state, affected, events);
@@ -12033,6 +12036,7 @@ fn pipeline_loop(
                 // CR 614.12a: distinct-replacement choices carry no MayCost.
                 may_cost_paid: false,
                 may_cost_remaining: None,
+                simultaneous_combat_snapshots: Vec::new(),
                 delivery_boundary: None,
             });
             return replay_pending_replacement(state, affected, events);
@@ -12305,6 +12309,7 @@ fn continue_replacement_impl(
         let reparked_library_placement = pending.library_placement.clone();
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
+        let reparked_simultaneous_combat_snapshots = pending.simultaneous_combat_snapshots.clone();
         let reparked_delivery_boundary = pending.delivery_boundary.clone();
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
@@ -12437,6 +12442,7 @@ fn continue_replacement_impl(
                     lifelink_bonus: 0,
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
+                    simultaneous_combat_snapshots: reparked_simultaneous_combat_snapshots,
                     delivery_boundary: reparked_delivery_boundary,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
@@ -12764,7 +12770,19 @@ pub fn continue_replacement(
         stage_transformed_entry_projection(state, proposed)
             .or_else(|| stranded_transformed_entry_projection(state, proposed))
     });
+    let parked_simultaneous_combat_snapshots = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.simultaneous_combat_snapshots.clone())
+        .unwrap_or_default();
     let result = continue_replacement_impl(state, chosen_index, events);
+    if !parked_simultaneous_combat_snapshots.is_empty() {
+        if let Some(next_pending) = state.pending_replacement.as_mut() {
+            if next_pending.simultaneous_combat_snapshots.is_empty() {
+                next_pending.simultaneous_combat_snapshots = parked_simultaneous_combat_snapshots;
+            }
+        }
+    }
     // A remaining prompt belongs to a nested decision, not the chosen ordering.
     state.replacement_auto_choice_tail = None;
     clear_replacement_index_pipeline(state);
@@ -15766,6 +15784,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
 
@@ -15830,6 +15849,7 @@ mod tests {
                 lifelink_bonus: 0,
                 may_cost_paid: false,
                 may_cost_remaining: None,
+                simultaneous_combat_snapshots: Vec::new(),
                 delivery_boundary: None,
             });
 
@@ -15915,6 +15935,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
 
@@ -20733,6 +20754,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
             delivery_boundary: None,
         });
 

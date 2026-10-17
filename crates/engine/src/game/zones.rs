@@ -2340,13 +2340,27 @@ pub(crate) fn capture_combat_status(
     state: &GameState,
     object_id: ObjectId,
 ) -> ZoneChangeCombatStatus {
+    // CR 511.3 + CR 506.4: If combat does not exist, no object is attacking or blocking.
     let Some(combat) = &state.combat else {
         return ZoneChangeCombatStatus::default();
     };
+
+    // CR 704.3 + CR 603.10a: If a pre-delivery simultaneous snapshot was captured,
+    // use it so sequential deliveries within the same simultaneous batch do not
+    // see earlier-delivered objects pruned from combat.
+    if let Some(snapshot) = state.simultaneous_combat_snapshots.get(&object_id) {
+        if snapshot.incarnation.is_none()
+            || state.objects.get(&object_id).map(|o| o.incarnation) == snapshot.incarnation
+        {
+            return snapshot.clone();
+        }
+    }
     let attacker = combat
         .attackers
         .iter()
         .find(|attacker| attacker.object_id == object_id);
+
+    let incarnation = state.objects.get(&object_id).map(|o| o.incarnation);
 
     ZoneChangeCombatStatus {
         attacking: attacker.is_some(),
@@ -2358,6 +2372,29 @@ pub(crate) fn capture_combat_status(
         attacking_alone: crate::game::combat::attacking_alone(state, object_id),
         blocking_alone: crate::game::combat::blocking_alone(state, object_id),
         defending_player: attacker.map(|attacker| attacker.defending_player),
+        // CR 509.1g + CR 400.7 + CR 603.10a: Snapshot the exact attackers this creature was
+        // blocking immediately prior to leaving combat, with their exact incarnations.
+        blocking_creatures: combat
+            .blocker_to_attacker
+            .get(&object_id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // CR 509.1h + CR 400.7 + CR 603.10a: Snapshot the exact blockers assigned to this
+        // creature immediately prior to leaving combat, with their exact incarnations.
+        blocked_by_creatures: combat
+            .blocker_assignments
+            .get(&object_id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        incarnation,
     }
 }
 

@@ -277,12 +277,18 @@ impl ObjectIdentityBinding {
 /// `is_none_or` fallback the sibling `entered_incarnation` consumers in
 /// `game/filter.rs` and `game/triggers.rs` already use for legacy and synthesized
 /// records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TriggeringObjectRef {
     pub object_id: ObjectId,
     /// CR 400.7: the incarnation the triggering event proves for `object_id`, or
     /// `None` when the event record stamps none.
     pub incarnation: Option<u64>,
+    /// CR 400.7e / CR 608.2c: Expected zone for a public-zone successor or combatant.
+    /// When `Some(zone)`, the referent is valid only in that zone (e.g. `Zone::Battlefield`
+    /// for combatants, or `to_zone` for a public-zone move).
+    /// When `None`, zone is not restricted (or information read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_zone: Option<Zone>,
 }
 
 impl TriggeringObjectRef {
@@ -295,7 +301,34 @@ impl TriggeringObjectRef {
         Self {
             object_id,
             incarnation: entered_incarnation,
+            expected_zone: None,
         }
+    }
+
+    /// CR 400.7e: Bind with an explicit expected zone for public-zone successor matching.
+    pub fn from_zone_change_with_expected_zone(
+        object_id: ObjectId,
+        incarnation: Option<u64>,
+        expected_zone: Option<Zone>,
+    ) -> Self {
+        Self {
+            object_id,
+            incarnation,
+            expected_zone,
+        }
+    }
+
+    /// CR 400.7 / CR 400.7e: True when this triggering object is currently live and valid in
+    /// `state`. If `expected_zone` is specified, the object must be in that zone. If
+    /// `incarnation` is specified, the object must have that exact incarnation.
+    pub fn is_current(self, state: &crate::types::game_state::GameState) -> bool {
+        state.objects.get(&self.object_id).is_some_and(|obj| {
+            let zone_valid = match self.expected_zone {
+                Some(expected) => obj.zone == expected,
+                None => true,
+            };
+            zone_valid && self.incarnation.is_none_or(|inc| obj.incarnation == inc)
+        })
     }
 
     /// CR 400.7: true when `object` IS this triggering object — same storage id

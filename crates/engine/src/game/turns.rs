@@ -415,6 +415,9 @@ fn complete_end_combat_teardown(state: &mut GameState) {
     state.combat = None;
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
+    // CR 511.3: All creatures leave combat at the end of the combat phase;
+    // purge any remaining simultaneous combat snapshots.
+    state.simultaneous_combat_snapshots.clear();
     super::layers::prune_end_of_combat_effects(state);
     super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
     expire_live_replacement_definitions(state, |r| {

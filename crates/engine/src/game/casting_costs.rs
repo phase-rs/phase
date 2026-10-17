@@ -7044,6 +7044,16 @@ pub(super) fn push_activated_ability_to_stack(
     // self-exile is still an activation cost, so it must be paid above before
     // resolving the grant; a Moved replacement can pause that cost move.
     if super::casting::effect_is_plot_grant(&resolved.effect) {
+        // CR 400.7j: Plot is a special action whose cost moved the card to a
+        // public zone (exile, or redirected destination). Update the resolved
+        // ability's source incarnation to the card's post-move incarnation so
+        // the SelfRef grant finds the moved card.
+        resolved.set_source_incarnation_recursive(
+            state
+                .objects
+                .get(&resolved.source_id)
+                .map(|o| o.incarnation),
+        );
         super::effects::grant_permission::resolve(state, &resolved, events).map_err(|error| {
             EngineError::ActionNotAllowed(format!("plot special action failed: {error}"))
         })?;

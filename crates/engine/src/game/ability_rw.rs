@@ -4251,6 +4251,10 @@ fn walk_ability(
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         delayed_origin: _,     // delayed-trigger identity, no read/write effect
         force_block_attacker: _, // exact force-block referent, no read/write effect
+        triggering_host: _,    // exact triggered-host authority, no read/write effect
+        triggering_object: _,  // exact triggering-object referent, no read/write effect
+        triggering_counterpart: _, // exact counterpart combatant, no read/write effect
+        triggering_role: _,    // semantic role, no read/write effect
         target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
         target_pins: _,        // CR 400.7 selected-target pins, no read/write effect
         legacy_selected_target_incarnations: _,

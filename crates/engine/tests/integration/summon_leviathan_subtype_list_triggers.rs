@@ -21,7 +21,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, TargetFilter,
+    AbilityDefinition, AbilityKind, DamageSource, DelayedTriggerCondition, Effect, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -549,13 +549,11 @@ fn has_unimplemented(def: &AbilityDefinition, gap: &str) -> bool {
 }
 
 /// CR 509.3c + CR 120.1: under a bare "becomes blocked" condition, "it deals N
-/// damage" names the blocked attacker as the damage source. No `DamageSource`
-/// value can name it, so the clause fails closed instead of being dealt by the
-/// Equipment. Reach guard: the trigger is a `BecomesBlocked` trigger whose
-/// "it" pin is live (a target-position "it" in the same shape binds
-/// `ParentTarget`, asserted by `bare_becomes_blocked_it_binds_the_attacker_not_the_blocker`).
+/// damage" names the blocked attacker as the damage source via `DamageSource::TriggeringSource`.
+/// Reach guard: the trigger is a `BecomesBlocked` trigger whose "it" pin is live
+/// (a target-position "it" in the same shape binds `ParentTarget`).
 #[test]
-fn bare_becomes_blocked_it_as_damage_source_fails_closed() {
+fn bare_becomes_blocked_it_binds_triggering_source_as_damage_source() {
     let parsed = engine::parser::oracle::parse_oracle_text(
         "Equipped creature gets +1/+1.\nWhenever equipped creature becomes blocked, it deals 1 damage to defending player.\nEquip {1}",
         "Tormentor's Helm",
@@ -569,10 +567,10 @@ fn bare_becomes_blocked_it_as_damage_source_fails_closed() {
         .find(|t| t.mode == TriggerMode::BecomesBlocked)
         .expect("BecomesBlocked trigger");
     let execute = trigger.execute.as_deref().expect("execute");
-    assert!(
-        has_unimplemented(execute, "blocked_attacker_damage_source"),
-        "{execute:?}"
-    );
+    let Effect::DealDamage { damage_source, .. } = &*execute.effect else {
+        panic!("expected DealDamage, got {:?}", execute.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
 }
 
 /// CR 701.23a: a search zone list with a leg outside the zone vocabulary is
@@ -621,11 +619,11 @@ fn printed_trigger_json(oracle: &str, name: &str, types: &[&str], subtypes: &[&s
     serde_json::to_string(&parsed.triggers).expect("serialize")
 }
 
-/// D7 rows: "it" as a damage source under a bare "becomes blocked" fails
-/// closed — in a conditional sub-clause (Ib Halfheart) and in "have it deal"
-/// (Laccolith Rig). Reach guard: each parses a `BecomesBlocked` trigger.
+/// D7 rows: "it" as a damage source under a bare "becomes blocked" binds
+/// `DamageSource::TriggeringSource` — in a conditional sub-clause (Ib Halfheart)
+/// and in "have it deal" (Laccolith Rig). Reach guard: each parses a `BecomesBlocked` trigger.
 #[test]
-fn blocked_attacker_damage_source_fails_closed_in_subclause_and_have_it_deal() {
+fn blocked_attacker_damage_source_binds_triggering_source_in_subclause_and_have_it_deal() {
     for (name, oracle, types, subtypes) in [
         (
             "Ib Halfheart, Goblin Tactician",
@@ -643,23 +641,23 @@ fn blocked_attacker_damage_source_fails_closed_in_subclause_and_have_it_deal() {
         let json = printed_trigger_json(oracle, name, types, subtypes);
         assert!(json.contains("\"BecomesBlocked\""), "{name}: {json}");
         assert!(
-            json.contains("\"blocked_attacker_damage_source\""),
+            json.contains("\"damage_source\":\"TriggeringSource\""),
             "{name}: {json}"
         );
     }
 }
 
 /// D7, delayed-synthetic row (labelled synthetic: no printed card has this
-/// shape): the same predicate fails a delayed body closed.
+/// shape): the same predicate binds `DamageSource::TriggeringSource` on a delayed body.
 #[test]
-fn synthetic_delayed_blocked_attacker_damage_source_fails_closed() {
+fn synthetic_delayed_blocked_attacker_damage_source_binds_triggering_source() {
     let body = delayed_body(
         "Until end of turn, whenever a creature becomes blocked, it deals 1 damage to defending player.",
     );
-    assert!(
-        has_unimplemented(&body, "blocked_attacker_damage_source"),
-        "{body:?}"
-    );
+    let Effect::DealDamage { damage_source, .. } = &*body.effect else {
+        panic!("expected DealDamage, got {:?}", body.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
 }
 
 /// D7 controls under the same bare "becomes blocked" condition: a self

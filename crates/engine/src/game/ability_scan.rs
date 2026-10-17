@@ -267,6 +267,10 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
         delayed_origin: _,         // delayed-trigger identity, no dynamic read
         force_block_attacker: _,   // exact force-block referent, no dynamic read
+        triggering_host: _,        // exact triggered-host authority, no dynamic read
+        triggering_object: _,      // exact triggering-object referent, no dynamic read
+        triggering_counterpart: _, // exact counterpart combatant, no dynamic read
+        triggering_role: _,        // semantic role, no dynamic read
         target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
         target_pins: _,            // CR 400.7 selected-target pins, no dynamic read
         legacy_selected_target_incarnations: _,
