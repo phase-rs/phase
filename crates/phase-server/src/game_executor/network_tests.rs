@@ -218,6 +218,201 @@ fn enable_ai(session: &mut GameSession, players: impl IntoIterator<Item = Player
 }
 
 #[test]
+fn queued_reconnect_before_departure_keeps_contest_presence_causal() {
+    run_async_test(|| async {
+        use engine::types::contest::{
+            ContestConfig, ContestKind, ContestPhase, ContestState, ContestantConnection,
+        };
+        use engine::types::game_state::WaitingFor;
+
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let mut old = table.connect(PlayerId(0)).await;
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, ()) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
+                    let config = ContestConfig {
+                        countdown_ms: 0,
+                        inactivity_timeout_ms: 60_000,
+                        reconnect_grace_ms: 100,
+                        settle_window_ms: 0,
+                        max_active_ms: 60_000,
+                    };
+                    session.contest.policy.config = config;
+                    session.state.phase = engine::types::phase::Phase::PreCombatMain;
+                    session.state.active_player = PlayerId(0);
+                    let source_id = *session.state.objects.keys().next().unwrap();
+                    session.state.waiting_for = WaitingFor::PhysicalContest {
+                        contest: Box::new(ContestState::new(
+                            91,
+                            ContestKind::Staring,
+                            PlayerId(0),
+                            PlayerId(1),
+                            config,
+                        )),
+                        source_id,
+                    };
+                    session.tick_contest_at(std::time::Instant::now());
+                    session.drain_contest_outbox();
+                    // Keep the autonomous driver from consuming either edge
+                    // until the replacement has completed its real bootstrap.
+                    assert!(session.claim_contest_driver());
+                })
+                .await;
+            drop(lease);
+
+            let work = table.app.context.socket_hooks.arm_parser_work();
+            let mut replacement = connect_and_hello(table.url.clone()).await;
+            work.wait_completed(1).await;
+            let lobby = table.app.lobby.lock().await;
+            send_test_message(&mut replacement, &ClientMessage::SubscribeLobby, false).await;
+            send_test_message(
+                &mut replacement,
+                &ClientMessage::Reconnect {
+                    game_code: table.key.game_code.clone(),
+                    player_token: table.tokens[0].clone(),
+                    full_key: table.key.clone(),
+                },
+                false,
+            )
+            .await;
+            // Decoder completion, not Pong, proves that both ordinary commands
+            // have been retained in FIFO order behind the held lobby dispatch.
+            work.wait_completed(3).await;
+            // Keep the host's millisecond receipt/death stamps distinct without
+            // relying on a race between worker scheduling and socket cleanup.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            old.close(None).await.unwrap();
+            drop(old);
+            loop {
+                let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let away = !lease.connected[0];
+                drop(lease);
+                let recorded = table
+                    .app
+                    .sessions
+                    .lock()
+                    .await
+                    .reconnect
+                    .is_disconnected(&table.key.game_code, PlayerId(0));
+                let unbound = table
+                    .app
+                    .connections
+                    .lock()
+                    .await
+                    .get(&table.key.game_code)
+                    .is_none_or(|players| !players.contains_key(&PlayerId(0)));
+                if away && recorded && unbound {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            drop(lobby);
+            loop {
+                match receive_wire_message(&mut replacement).await {
+                    ServerMessage::GameStarted { your_player, .. } => {
+                        assert_eq!(your_player, PlayerId(0));
+                        break;
+                    }
+                    ServerMessage::Error { message, .. } => panic!("replacement: {message}"),
+                    _ => {}
+                }
+            }
+
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, before_tick) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
+                    assert!(session.connected[0]);
+                    session.release_contest_driver();
+                    session.state_revision
+                })
+                .await;
+            drop(lease);
+            crate::ensure_contest_driver(
+                &table.app.context.game_executor,
+                &table.app.sessions,
+                &table.app.connections,
+                &table.app.draft_sessions,
+                &table.app.game_db,
+                &table.app.game_spectators,
+                &table.app.lobby,
+                &table.app.lobby_subscribers,
+                &table.key.game_code,
+            )
+            .await;
+            let published_revision = loop {
+                let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                if lease.state_revision > before_tick {
+                    let WaitingFor::PhysicalContest { contest, .. } = &lease.state.waiting_for
+                    else {
+                        panic!("the accepted replacement must not forfeit");
+                    };
+                    assert!(lease.connected[0]);
+                    assert_eq!(
+                        contest.contestants[0].connection,
+                        ContestantConnection::Connected
+                    );
+                    assert_eq!(contest.paused_since_ms, None);
+                    break lease.state_revision;
+                }
+                drop(lease);
+                tokio::task::yield_now().await;
+            };
+            loop {
+                if let ServerMessage::StateUpdate {
+                    state_revision,
+                    state,
+                    ..
+                } = receive_wire_message(&mut replacement).await
+                {
+                    if state_revision >= published_revision {
+                        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+                            panic!("the live socket must receive the resumed contest");
+                        };
+                        assert_eq!(
+                            contest.contestants[0].connection,
+                            ContestantConnection::Connected
+                        );
+                        assert_eq!(contest.paused_since_ms, None);
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let WaitingFor::PhysicalContest { contest, .. } = &lease.state.waiting_for else {
+                panic!("no stale grace may forfeit the replacement later");
+            };
+            assert_eq!(contest.phase, ContestPhase::Active);
+            assert_eq!(
+                contest.contestants[0].connection,
+                ContestantConnection::Connected
+            );
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("queued receipt before old-route cleanup must remain a live contest seat");
+    });
+}
+
+#[test]
 fn fresh_reconnect_never_replays_ai_history_older_than_its_bootstrap() {
     run_async_test(|| async {
         let table = NativeTable::new().await;

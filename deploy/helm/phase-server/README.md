@@ -233,16 +233,23 @@ observation, rather than being unconditionally backdated to detection.
 Accepted mutations still finish independently.
 
 Clicks and ticks apply queued contest presence edges only through their host
-observation time, in timestamp order; later edges stay queued for a later
-observation. Presence before the earliest queued return is absent; before a
-queued departure it is present. Duplicate live-presence reports queue no edge.
+observation cutoff; later edges stay queued for a later observation. Each seat
+keeps a contest-local causal presence clock: a later-admitted transition is
+stamped no earlier than that seat's preceding queued or applied transition.
+Thus a reconnect received before the old route's departure cannot sort before
+the departure it reverses. Cross-seat observations remain timestamp-ordered,
+and replacing a contest resets its causal clocks. Presence before the earliest
+queued return is absent; before a queued departure it is present. Duplicate
+live-presence reports queue no edge.
+
 Publication drains flush only through the engine's already-observed contest
 clock, not wall time. They cannot advance time past an earlier pending click.
 The autonomous tick still applies disconnects and grace forfeits without
-further client traffic. An accepted Full reconnect
-stamps its connected edge with the same transport receipt time used by registry
-admission, so executor wait alone cannot turn a timely return into a contest
-forfeit. This does not resolve the separate registry expiry-finalization race.
+further client traffic. Full reconnect admission keeps the original transport
+receipt for registry grace; only the contest edge's ordering stamp is clamped
+to causal history. Executor wait alone cannot turn a timely return into a
+contest forfeit. This does not resolve the separate registry
+expiry-finalization race.
 
 `ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
 game-command completion. Action/Interaction messages may carry a top-level

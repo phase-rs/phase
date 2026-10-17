@@ -147,6 +147,9 @@ pub struct ContestRuntime {
     last_progress: Option<[(PlayerId, u32); 2]>,
     last_progress_ms: u64,
     connection_edges: Vec<ConnectionEdge>,
+    /// (Contest identity, last causal presence stamp) per seat. Retain after
+    /// queue drains; replacing a contest resets that seat's clock, not its peers'.
+    connection_stamps: HashMap<PlayerId, (u64, u64)>,
 }
 
 /// Lightweight live view of a running contest: each contestant's counted clicks.
@@ -295,6 +298,7 @@ impl GameSession {
         let WaitingFor::PhysicalContest { contest, .. } = &self.state.waiting_for else {
             return;
         };
+        let contest_id = contest.id;
         let away: Vec<PlayerId> = contest
             .players()
             .into_iter()
@@ -307,7 +311,7 @@ impl GameSession {
                     .connection_edges
                     .iter()
                     .find(|edge| {
-                        edge.contest == contest.id && edge.player == *player && edge.at_ms > now
+                        edge.contest == contest_id && edge.player == *player && edge.at_ms > now
                     })
                     .map_or_else(
                         || {
@@ -324,6 +328,7 @@ impl GameSession {
         for player in away {
             let mut events = Vec::new();
             let step = set_contest_connection(&mut self.state, player, false, now, &mut events);
+            self.record_applied_presence(contest_id, player, step);
             self.publish_contest_step(step, events);
         }
     }
@@ -344,6 +349,40 @@ impl GameSession {
         }
     }
 
+    /// Keep each seat's admitted transitions causal even when a reconnect's
+    /// transport receipt predates the departure it reverses. Registry grace
+    /// continues using the unmodified receipt; only contest ordering is clamped.
+    fn causal_presence_ms(&mut self, contest: u64, player: PlayerId, observed_ms: u64) -> u64 {
+        let (stamp_contest, stamp_ms) = self
+            .contest
+            .connection_stamps
+            .entry(player)
+            .or_insert((contest, observed_ms));
+        if *stamp_contest != contest {
+            *stamp_contest = contest;
+            *stamp_ms = observed_ms;
+        } else {
+            *stamp_ms = (*stamp_ms).max(observed_ms);
+        }
+        *stamp_ms
+    }
+
+    /// The engine may clamp an applied edge to its already-observed clock.
+    /// Retain that effective per-seat fence, but do not advance it for repeats.
+    fn record_applied_presence(&mut self, contest_id: u64, player: PlayerId, step: ContestStep) {
+        if step != ContestStep::Updated {
+            return;
+        }
+        let WaitingFor::PhysicalContest { contest, .. } = &self.state.waiting_for else {
+            return;
+        };
+        if contest.id != contest_id {
+            return;
+        }
+        let applied_ms = contest.clock_ms;
+        self.causal_presence_ms(contest_id, player, applied_ms);
+    }
+
     /// Presence bookkeeping may run outside compute workers. Retain each edge
     /// and its contest identity until the next admitted contest operation.
     pub(crate) fn queue_contest_connection_at(
@@ -355,14 +394,17 @@ impl GameSession {
         let WaitingFor::PhysicalContest { contest, .. } = &self.state.waiting_for else {
             return;
         };
+        let contest_id = contest.id;
+        let observed_ms = self.contest.clock.at(observed_at);
+        let at_ms = self.causal_presence_ms(contest_id, player, observed_ms);
         let edge = ConnectionEdge {
-            contest: contest.id,
+            contest: contest_id,
             player,
             presence,
-            at_ms: self.contest.clock.at(observed_at),
+            at_ms,
         };
-        // Keep the queue ordered once, rather than sorting at every click/tick.
-        // Insert after equal timestamps to preserve their enqueue order.
+        // Cross-seat observations remain timestamp-ordered. Equal stamps keep
+        // enqueue order, including the departure before its clamped return.
         let index = self
             .contest
             .connection_edges
@@ -395,6 +437,7 @@ impl GameSession {
                 edge.at_ms,
                 &mut events,
             );
+            self.record_applied_presence(edge.contest, edge.player, step);
             self.publish_contest_step(step, events);
         }
         self.contest.connection_edges = edges;
@@ -405,11 +448,13 @@ impl GameSession {
     pub fn note_contest_connection(&mut self, player: PlayerId, connected: bool) {
         let now = self.contest.clock.now_ms();
         self.flush_contest_connections_until(now);
-        if !self.contest_active() {
+        let WaitingFor::PhysicalContest { contest, .. } = &self.state.waiting_for else {
             return;
-        }
+        };
+        let contest_id = contest.id;
         let mut events = Vec::new();
         let step = set_contest_connection(&mut self.state, player, connected, now, &mut events);
+        self.record_applied_presence(contest_id, player, step);
         self.publish_contest_step(step, events);
     }
 
@@ -1205,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_presence_is_applied_in_observation_order() {
+    fn cross_seat_presence_is_applied_in_observation_order() {
         use engine::types::contest::ContestantConnection;
         use std::time::Duration;
 
@@ -1215,27 +1260,159 @@ mod tests {
         session.contest.clock.epoch = epoch;
         session.tick_contest_at(epoch + Duration::from_millis(100));
         session.tick_contest_at(epoch + Duration::from_millis(101));
-        // Receipt stamps can differ from the order their workers acquire a lease.
-        session.queue_contest_connection_at(
-            PlayerId(1),
-            ContestPresence::Connected,
-            epoch + Duration::from_millis(250),
-        );
-        session.queue_contest_connection_at(
-            PlayerId(1),
-            ContestPresence::Disconnected,
-            epoch + Duration::from_millis(200),
-        );
+        session.mark_disconnected_at(PlayerId(0), epoch + Duration::from_millis(250));
+        session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(200));
         session.flush_contest_connections();
         let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
-            panic!("the timely return keeps the contest running");
+            panic!("both seats are still within grace");
         };
+        assert_eq!(contest.paused_since_ms, Some(200));
+        assert_eq!(
+            contest.contestants[0].connection,
+            ContestantConnection::Disconnected { since_ms: 250 },
+        );
+        assert_eq!(
+            contest.contestants[1].connection,
+            ContestantConnection::Disconnected { since_ms: 200 },
+        );
+    }
+
+    #[test]
+    fn an_earlier_received_return_cannot_reverse_its_departure() {
+        use engine::types::contest::ContestantConnection;
+        use std::time::Duration;
+
+        let policy = ContestPolicy {
+            config: ContestConfig {
+                inactivity_timeout_ms: 60_000,
+                ..fast_policy().config
+            },
+            ..fast_policy()
+        };
+        let mut mgr = session_with_contest(policy);
+        let session = only_session(&mut mgr);
+        let epoch = Instant::now() - Duration::from_secs(10);
+        session.contest.clock.epoch = epoch;
+        session.tick_contest_at(epoch + Duration::from_millis(100));
+        session.tick_contest_at(epoch + Duration::from_millis(101));
+        session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(200));
+        session.mark_connected_at(PlayerId(1), epoch + Duration::from_millis(100));
+        session.tick_contest_at(epoch + Duration::from_millis(200));
+        session.drain_contest_outbox();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("the accepted replacement remains in the contest");
+        };
+        assert!(session.connected[1]);
         assert_eq!(
             contest.contestants[1].connection,
             ContestantConnection::Connected
         );
         assert_eq!(contest.paused_since_ms, None);
-        assert!(session.contest.connection_edges.is_empty());
+        session.tick_contest_at(epoch + Duration::from_millis(5_201));
+        assert_eq!(
+            phase(session),
+            ContestPhase::Active,
+            "no stale grace forfeit"
+        );
+    }
+
+    #[test]
+    fn an_applied_departure_fences_an_earlier_received_return() {
+        use engine::types::contest::ContestantConnection;
+        use std::time::Duration;
+
+        for last_observation in [101_u64, 300] {
+            let mut mgr = session_with_contest(fast_policy());
+            let session = only_session(&mut mgr);
+            let epoch = Instant::now() - Duration::from_secs(10);
+            session.contest.clock.epoch = epoch;
+            session.tick_contest_at(epoch + Duration::from_millis(100));
+            session.tick_contest_at(epoch + Duration::from_millis(last_observation));
+            session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(200));
+            session.flush_contest_connections();
+            let applied_at = last_observation.max(200);
+            session.mark_connected_at(PlayerId(1), epoch + Duration::from_millis(100));
+            session.tick_contest_at(epoch + Duration::from_millis(applied_at - 50));
+            let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+                panic!("the earlier observation cannot publish the return");
+            };
+            assert_eq!(
+                contest.contestants[1].connection,
+                ContestantConnection::Disconnected {
+                    since_ms: applied_at
+                },
+            );
+            assert_eq!(contest.paused_since_ms, Some(applied_at));
+            session.tick_contest_at(epoch + Duration::from_millis(applied_at));
+            let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+                panic!("the causal observation applies the accepted return");
+            };
+            assert_eq!(
+                contest.contestants[1].connection,
+                ContestantConnection::Connected
+            );
+            assert_eq!(contest.paused_since_ms, None);
+        }
+    }
+
+    #[test]
+    fn an_ordinary_return_keeps_its_observed_pause_duration() {
+        use std::time::Duration;
+
+        let policy = ContestPolicy {
+            config: ContestConfig {
+                inactivity_timeout_ms: 60_000,
+                ..fast_policy().config
+            },
+            ..fast_policy()
+        };
+        let mut mgr = session_with_contest(policy);
+        let session = only_session(&mut mgr);
+        let epoch = Instant::now() - Duration::from_secs(10);
+        session.contest.clock.epoch = epoch;
+        session.tick_contest_at(epoch + Duration::from_millis(100));
+        session.tick_contest_at(epoch + Duration::from_millis(101));
+        session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(200));
+        session.mark_connected_at(PlayerId(1), epoch + Duration::from_millis(1_000));
+        session.tick_contest_at(epoch + Duration::from_millis(1_000));
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("the ordinary on-time return resumes the contest");
+        };
+        assert_eq!(contest.paused_since_ms, None);
+        assert_eq!(contest.go_at_ms, Some(901));
+        assert_eq!(contest.contestants[0].last_activity_ms, 901);
+        assert_eq!(contest.contestants[1].last_activity_ms, 901);
+    }
+
+    #[test]
+    fn a_replacement_contest_does_not_inherit_a_seats_causal_clock() {
+        use std::time::Duration;
+
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let epoch = Instant::now() - Duration::from_secs(10);
+        session.contest.clock.epoch = epoch;
+        session.mark_disconnected_at(PlayerId(1), epoch + Duration::from_millis(5_000));
+        session.state.waiting_for = WaitingFor::PhysicalContest {
+            contest: Box::new(ContestState::new(
+                2,
+                ContestKind::Staring,
+                PlayerId(0),
+                PlayerId(1),
+                fast_policy().config,
+            )),
+            source_id: engine::types::identifiers::ObjectId(1),
+        };
+        session.tick_contest_at(epoch + Duration::from_millis(100));
+        session.mark_connected_at(PlayerId(1), epoch + Duration::from_millis(200));
+        session.tick_contest_at(epoch + Duration::from_millis(200));
+        session.tick_contest_at(epoch + Duration::from_millis(201));
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("an old lifetime must not postpone this contest's return");
+        };
+        assert_eq!(contest.id, 2);
+        assert_eq!(contest.phase, ContestPhase::Active);
+        assert_eq!(contest.paused_since_ms, None);
     }
 
     #[test]
