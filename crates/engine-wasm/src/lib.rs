@@ -1071,6 +1071,22 @@ pub fn is_card_commander_eligible(name: &str) -> bool {
     })
 }
 
+/// CR 702.139a: Whether the named card has the Companion keyword ability.
+#[wasm_bindgen(js_name = isCardCompanion)]
+pub fn is_card_companion(name: &str) -> bool {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return false;
+        };
+        db.get_face_by_name(name).is_some_and(|face| {
+            face.keywords
+                .iter()
+                .any(|k| matches!(k, engine::types::keywords::Keyword::Companion(_)))
+        })
+    })
+}
+
 /// CR 100.2a / CR 903.5b: The named card's per-card deck-construction copy-limit
 /// override, or `null` when the default four-of / singleton limit applies.
 /// Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or

@@ -112,8 +112,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 30", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(30);
+    it("is version 31", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(31);
     });
   });
 
