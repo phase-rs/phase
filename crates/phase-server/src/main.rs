@@ -919,6 +919,8 @@ impl BrokerEnv for SysEnv {
 struct RateLimiter {
     count: u32,
     window_start: Instant,
+    #[cfg(test)]
+    frozen_at: Option<Instant>,
 }
 
 impl RateLimiter {
@@ -926,11 +928,16 @@ impl RateLimiter {
         Self {
             count: 0,
             window_start: Instant::now(),
+            #[cfg(test)]
+            frozen_at: None,
         }
     }
 
     /// Returns `true` if the message is allowed, `false` if rate-limited.
     fn check(&mut self) -> bool {
+        #[cfg(test)]
+        let now = self.frozen_at.unwrap_or_else(Instant::now);
+        #[cfg(not(test))]
         let now = Instant::now();
         if now.duration_since(self.window_start).as_secs() >= RATE_LIMIT_WINDOW_SECS {
             self.count = 0;
@@ -938,6 +945,12 @@ impl RateLimiter {
         }
         self.count += 1;
         self.count <= RATE_LIMIT_MESSAGES
+    }
+
+    #[cfg(test)]
+    fn freeze(&mut self, at: Instant) {
+        self.window_start = at;
+        self.frozen_at = Some(at);
     }
 }
 

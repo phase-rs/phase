@@ -1385,6 +1385,196 @@ mod transport_fixup_tests {
         result.expect("mode rejection did not complete its operation");
     }
 
+    type ParserSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    fn parser_test_frame(json: &str, format: Option<WireFormat>) -> WsMessage {
+        if format.is_some() {
+            let mut raw = Vec::with_capacity(json.len() + 1);
+            raw.push(wire::FORMAT_RAW);
+            raw.extend_from_slice(json.as_bytes());
+            WsMessage::Binary(raw.into())
+        } else {
+            WsMessage::Text(json.to_string().into())
+        }
+    }
+
+    async fn parser_test_socket(url: String, format: Option<WireFormat>) -> ParserSocket {
+        use crate::issue_4548_full_create_tests::{send_test_message, test_client_hello};
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        assert!(matches!(
+            recv_server_message(&mut socket).await,
+            ServerMessage::ServerHello { .. }
+        ));
+        send_test_message(
+            &mut socket,
+            &test_client_hello(format.into_iter().collect()),
+            false,
+        )
+        .await;
+        socket
+    }
+
+    async fn exhaust_parser_work_quota(socket: &mut ParserSocket, format: Option<WireFormat>) {
+        let ping = serde_json::json!({
+            "type": "Ping", "data": { "timestamp": 7712 },
+            "padding": "x".repeat(60 * 1024),
+        })
+        .to_string();
+        // ClientHello spent the first slot. Pace the rest by a real decoder
+        // reply, retaining at most one frame: ingress capacity cannot mask work.
+        for _ in 1..crate::RATE_LIMIT_MESSAGES {
+            socket.send(parser_test_frame(&ping, format)).await.unwrap();
+            loop {
+                if matches!(
+                    recv_server_message(socket).await,
+                    ServerMessage::Pong { timestamp: 7712 },
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn expect_parser_quota_close(
+        socket: &mut ParserSocket,
+        work: &crate::socket_test_hooks::ParserWork,
+        expected: (usize, usize),
+    ) {
+        loop {
+            let next = socket.next().await;
+            assert_eq!(
+                work.counts(),
+                expected,
+                "an excess frame entered full JSON parsing or metadata recovery",
+            );
+            match next {
+                Some(Ok(WsMessage::Close(Some(close)))) => {
+                    assert_eq!(u16::from(close.code), 1013);
+                    break;
+                }
+                Some(Ok(_)) => {}
+                other => panic!("raw work exhaustion must close explicitly: {other:?}"),
+            }
+        }
+    }
+
+    async fn assert_excess_large_frame_is_unparsed(format: Option<WireFormat>, excess: String) {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let work = app.context.socket_hooks.arm_parser_work();
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut socket = parser_test_socket(url, format).await;
+            exhaust_parser_work_quota(&mut socket, format).await;
+            let expected = (crate::RATE_LIMIT_MESSAGES as usize, 0);
+            assert_eq!(
+                work.counts(),
+                expected,
+                "reach guard: the quota was consumed by full parses"
+            );
+            socket
+                .send(parser_test_frame(&excess, format))
+                .await
+                .unwrap();
+            expect_parser_quota_close(&mut socket, &work, expected).await;
+            assert_eq!(
+                app.context
+                    .metrics
+                    .ws_disconnect_count(Cause::RawDecodeQuota),
+                1,
+            );
+        })
+        .await;
+        server.abort();
+        result.expect("an excess large frame was parsed or failed to close its raw-work route");
+    }
+
+    #[tokio::test]
+    async fn excess_padded_text_is_refused_before_full_json_parse() {
+        assert_excess_large_frame_is_unparsed(
+            None,
+            serde_json::json!({
+                "type": "Ping", "data": { "timestamp": 7713 },
+                "padding": "x".repeat(60 * 1024),
+            })
+            .to_string(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn excess_malformed_text_skips_deserialization_and_metadata_recovery() {
+        assert_excess_large_frame_is_unparsed(None, format!("{{{}", " ".repeat(60 * 1024))).await;
+    }
+
+    #[tokio::test]
+    async fn excess_raw_envelopes_are_refused_before_full_json_parse() {
+        assert_excess_large_frame_is_unparsed(
+            Some(WireFormat::GzipEnvelopeV1),
+            serde_json::json!({
+                "type": "Ping", "data": { "timestamp": 7713 },
+                "padding": "x".repeat(60 * 1024),
+            })
+            .to_string(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn compact_refusal_inspection_is_bounded_before_metadata_recovery() {
+        let (url, server, _directory, app) = spawn_full_mode_server().await;
+        let work = app.context.socket_hooks.arm_parser_work();
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut socket = parser_test_socket(url, None).await;
+            exhaust_parser_work_quota(&mut socket, None).await;
+            let malformed = serde_json::json!({
+                "type": "Action", "command_id": 901,
+                "data": { "action": { "type": "not-an-engine-action" } },
+            })
+            .to_string();
+            // Every rejected payload is fully received, so neither the eight
+            // unflushed-refusal permits nor retained-ingress capacity can mask
+            // an unbounded inspection path.
+            for _ in 0..crate::RATE_LIMIT_MESSAGES {
+                socket
+                    .send(WsMessage::Text(malformed.clone().into()))
+                    .await
+                    .unwrap();
+                loop {
+                    if matches!(
+                        recv_server_message(&mut socket).await,
+                        ServerMessage::ActionFailed { .. }
+                    ) {
+                        break;
+                    }
+                }
+            }
+            let expected = (
+                2 * crate::RATE_LIMIT_MESSAGES as usize,
+                crate::RATE_LIMIT_MESSAGES as usize,
+            );
+            assert_eq!(
+                work.counts(),
+                expected,
+                "reach guard: malformed correlated refusals inspected"
+            );
+            socket
+                .send(WsMessage::Text(malformed.into()))
+                .await
+                .unwrap();
+            expect_parser_quota_close(&mut socket, &work, expected).await;
+            assert_eq!(
+                app.context
+                    .metrics
+                    .ws_disconnect_count(Cause::RawDecodeQuota),
+                1,
+            );
+        })
+        .await;
+        server.abort();
+        result.expect("compact quota recovery bought unbounded parse work");
+    }
+
     #[tokio::test]
     async fn oversized_text_pings_fall_through_to_the_decoder_rate_limit() {
         let (url, server, _directory, _app) = spawn_full_mode_server().await;

@@ -180,13 +180,16 @@ at two per second. Recognized Pings and malformed probes spend this allowance;
 valid non-Ping commands preserve it, so fast play cannot exhaust the heartbeat
 reserve. Replies remain coalesced. Larger frames and excess heartbeats fall
 through to normal ingress admission and the decoder's 30-message/s quota,
-including JSON Pings. Other binary frames, including malformed and
-compressed envelopes, consume the raw decode quota before decompression.
-Exceeding that quota closes with 1013 and records the distinct
-`raw_decode_quota` disconnect cause. Normal client JSON Pings are smaller than
-the 256-byte compression threshold and use the plain/raw form.
-Decoded Action/Interaction quota failures instead receive an owned
-`ActionFailed`. Up to eight such refusals may remain unflushed per connection;
+including JSON Pings. Every full JSON parse and malformed-command metadata
+recovery is admitted before inspecting the payload. Binary frames, including
+malformed and compressed envelopes, consume that quota before decompression.
+After text quota is exhausted, frames of at most 1 KiB may spend a separate
+30-inspection/s allowance solely to recover a correlated Action/Interaction
+quota refusal; they cannot dispatch an application command or answer a Pong.
+Larger text, exhausted inspection allowance, and exhausted binary quota close
+with 1013 and record `raw_decode_quota`. Normal client JSON Pings are smaller
+than the 256-byte compression threshold and use the plain/raw form.
+Up to eight correlated quota refusals may remain unflushed per connection;
 that admission is released only after socket flush, so a draining client may
 receive later refusals without a lifetime strike limit. Exhausting it closes
 with 1013 and records `quota_refusal_overflow` rather than retaining an

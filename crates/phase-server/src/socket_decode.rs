@@ -26,9 +26,14 @@ enum DecoderWake {
 }
 
 enum RateCharge {
-    Required,
     Applied,
+    RefusalInspection,
 }
+
+// Quota refusals may inspect a compact Action/Interaction envelope, never an
+// arbitrary command-sized payload. A separate rate window bounds that work;
+// the mailbox's independent flush-held refusal admission bounds retained replies.
+const MAX_REFUSAL_INSPECTION_BYTES: usize = 1024;
 
 pub(crate) async fn run(
     mut frames: mpsc::Receiver<Received<Message>>,
@@ -41,6 +46,14 @@ pub(crate) async fn run(
 ) {
     let mut hello = Some(hello);
     let mut limiter = IngressRateLimiter::new();
+    let mut refusal_inspection = crate::RateLimiter::new();
+    #[cfg(test)]
+    let parser_work = socket.bootstrap_hooks().take_parser_work();
+    #[cfg(test)]
+    if let Some(work) = &parser_work {
+        limiter.inner.freeze(work.quota_at());
+        refusal_inspection.freeze(work.quota_at());
+    }
     let mut refresh: Option<HostRefresh> = None;
     loop {
         let wake = tokio::select! {
@@ -63,17 +76,22 @@ pub(crate) async fn run(
             DecoderWake::Frame(Some(frame)) => frame,
             DecoderWake::Frame(None) => break,
         };
-        // Only the reader's small, rate-admitted heartbeat allowance bypasses
-        // this task. All fallthrough Pings spend ordinary decoder quota.
-        // Binary frames spend it before decompression or warning work.
-        let charge = if matches!(&frame, Message::Binary(_)) {
-            if !limiter.allow() {
-                socket.raw_decode_quota();
-                break;
-            }
+        // Admit every full parse (and malformed-command metadata recovery)
+        // before touching JSON. Binary quota is spent before envelope decode.
+        // Only small text frames may use the separate, bounded refusal route;
+        // exhausting it closes rather than buying unrestricted recovery parses.
+        if !matches!(&frame, Message::Text(_) | Message::Binary(_)) {
+            continue;
+        }
+        let charge = if limiter.allow() {
             RateCharge::Applied
+        } else if matches!(&frame, Message::Text(text) if text.len() <= MAX_REFUSAL_INSPECTION_BYTES)
+            && refusal_inspection.check()
+        {
+            RateCharge::RefusalInspection
         } else {
-            RateCharge::Required
+            socket.raw_decode_quota();
+            break;
         };
         let text = match frame {
             Message::Text(text) => text,
@@ -98,12 +116,19 @@ pub(crate) async fn run(
             socket.ingress_overflow();
             break;
         }
+        #[cfg(test)]
+        if let Some(work) = &parser_work {
+            work.deserialization();
+        }
         let envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text) {
             Ok(message) => message,
             Err(error) => {
+                #[cfg(test)]
+                if let Some(work) = &parser_work {
+                    work.metadata_recovery();
+                }
                 let command_id = crate::socket_mailbox::ClientEnvelope::malformed_command_id(&text);
-                let allowed = !matches!(charge, RateCharge::Required) || limiter.allow();
-                if !allowed {
+                if matches!(charge, RateCharge::RefusalInspection) {
                     if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
                         break;
                     }
@@ -124,7 +149,7 @@ pub(crate) async fn run(
         };
         let command_id = envelope.command_id();
         let message = &envelope.message;
-        if matches!(charge, RateCharge::Required) && !limiter.allow() {
+        if matches!(charge, RateCharge::RefusalInspection) {
             if command_id.is_some() && socket.enqueue_quota_refusal(command_id).is_err() {
                 break;
             }

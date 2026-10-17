@@ -515,6 +515,48 @@ mod tests {
         }
     }
 
+    /// Scrapers depend on family names, types, labels and values, not HELP
+    /// prose or the order in which independent metric families are rendered.
+    #[test]
+    fn render_preserves_scraper_types_labels_and_values() {
+        let mut fixture = snapshot();
+        fixture.ws_disconnects[DisconnectCause::RawDecodeQuota.index()] = 9;
+        let body = render(&fixture);
+        for expected in [
+            "# TYPE phase_connections gauge",
+            "phase_connections 7",
+            "# TYPE phase_connections_capacity gauge",
+            "phase_connections_capacity 200",
+            "# TYPE phase_games_active gauge",
+            "phase_games_active 4",
+            "# TYPE phase_games_with_connected_humans gauge",
+            "phase_games_with_connected_humans 2",
+            "# TYPE phase_games_capacity gauge",
+            "phase_games_capacity 100",
+            "# TYPE phase_drafts_active gauge",
+            "phase_drafts_active 1",
+            "# TYPE phase_drafts_with_connected_humans gauge",
+            "phase_drafts_with_connected_humans 1",
+            "# TYPE phase_replica_ordinal gauge",
+            "phase_replica_ordinal 3",
+            "# TYPE phase_ws_disconnects_total counter",
+            "phase_ws_disconnects_total{cause=\"raw_decode_quota\"} 9",
+            "phase_ws_disconnects_total{cause=\"peer_close\"} 0",
+            "# TYPE phase_admission_rejects_total counter",
+            "phase_admission_rejects_total{reason=\"connection_limit\"} 5",
+            "# TYPE phase_jev_relay_requests_total counter",
+            "phase_jev_relay_requests_total{status=\"upstream_2xx\"} 11",
+            "# TYPE phase_build_info gauge",
+            "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1",
+        ] {
+            assert_eq!(
+                body.lines().filter(|line| *line == expected).count(),
+                1,
+                "missing or duplicated scraper contract: {expected}\n{body}",
+            );
+        }
+    }
+
     /// `None` must drop the family entirely. Emitting `phase_replica_ordinal 0`
     /// for an un-ordinalled process would be indistinguishable from ordinal 0,
     /// and the scale-in floor is computed from exactly that number.

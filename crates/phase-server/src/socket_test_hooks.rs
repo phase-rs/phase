@@ -18,6 +18,49 @@ pub(crate) struct Hooks {
     cutover: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     terminal_prepare: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
+}
+
+/// One connection's real parser calls, with a frozen quota window so wire tests
+/// distinguish admission from parser work without relying on machine speed.
+pub(crate) struct ParserWork {
+    quota_at: std::time::Instant,
+    deserializations: std::sync::atomic::AtomicUsize,
+    metadata_recoveries: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for ParserWork {
+    fn default() -> Self {
+        Self {
+            quota_at: std::time::Instant::now(),
+            deserializations: Default::default(),
+            metadata_recoveries: Default::default(),
+        }
+    }
+}
+
+impl ParserWork {
+    pub(crate) fn quota_at(&self) -> std::time::Instant {
+        self.quota_at
+    }
+
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering;
+        (
+            self.deserializations.load(Ordering::SeqCst),
+            self.metadata_recoveries.load(Ordering::SeqCst),
+        )
+    }
+
+    pub(crate) fn deserialization(&self) {
+        self.deserializations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn metadata_recovery(&self) {
+        self.metadata_recoveries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -27,6 +70,16 @@ pub(crate) struct BootstrapGate {
 }
 
 impl Hooks {
+    pub(crate) fn arm_parser_work(&self) -> Arc<ParserWork> {
+        let work = Arc::new(ParserWork::default());
+        *self.parser_work.lock() = Some(work.clone());
+        work
+    }
+
+    pub(crate) fn take_parser_work(&self) -> Option<Arc<ParserWork>> {
+        self.parser_work.lock().take()
+    }
+
     pub(crate) fn arm_bootstrap(&self) -> Arc<BootstrapGate> {
         let gate = Arc::new(BootstrapGate::default());
         *self.bootstrap.lock() = Some(gate.clone());
