@@ -39,6 +39,9 @@ During your turn, as long as Kaito has one or more loyalty counters on him, he's
 0: Surveil 2. Then draw a card for each opponent who lost life this turn.
 −2: Tap target creature. Put two stun counters on it."#;
 
+// Verbatim MTGJSON Oracle text for Futurist Operative.
+const FUTURIST_ORACLE: &str = "As long as this creature is tapped, it's a Human Citizen with base power and toughness 1/1 and can't be blocked.\n{2}{U}: Untap this creature.";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -397,6 +400,83 @@ fn kaito_emblem_creation() {
 // ---------------------------------------------------------------------------
 // Test: Planeswalker-to-creature animation
 // ---------------------------------------------------------------------------
+
+// CR 205.1a + CR 613.1d: setting only subtypes preserves existing card types.
+#[test]
+fn futurist_subtype_animation_retains_artifact_and_uses_own_tapped_condition() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tapped_id = scenario
+        .add_creature_from_oracle(P0, "Futurist Operative", 3, 4, FUTURIST_ORACLE)
+        .with_subtypes(vec!["Human", "Ninja"])
+        .as_artifact_creature()
+        .id();
+    let untapped_id = scenario
+        .add_creature_from_oracle(P0, "Futurist Operative", 3, 4, FUTURIST_ORACLE)
+        .with_subtypes(vec!["Human", "Ninja"])
+        .as_artifact_creature()
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tapped_id)
+        .unwrap()
+        .tapped = true;
+    runner.state_mut().layers_dirty.mark_full();
+    for id in [tapped_id, untapped_id] {
+        assert_eq!(
+            runner.state().objects[&id].base_card_types.core_types,
+            vec![CoreType::Creature, CoreType::Artifact]
+        );
+    }
+    runner
+        .act(GameAction::PassPriority)
+        .expect("evaluate the parsed subtype-only animation");
+    let state = runner.state();
+    let tapped = &state.objects[&tapped_id];
+    // CR 613.4b: the active base-P/T change proves the layer path was reached.
+    assert_eq!((tapped.power, tapped.toughness), (Some(1), Some(1)));
+    assert_eq!(
+        tapped.card_types.core_types,
+        vec![CoreType::Creature, CoreType::Artifact]
+    );
+    assert!(tapped.card_types.subtypes.contains(&"Human".to_string()));
+    assert!(tapped.card_types.subtypes.contains(&"Citizen".to_string()));
+    // CR 611.3a: the other source's tapped state cannot activate this source.
+    let untapped = &state.objects[&untapped_id];
+    assert_eq!((untapped.power, untapped.toughness), (Some(3), Some(4)));
+    assert_eq!(
+        untapped.card_types.core_types,
+        vec![CoreType::Creature, CoreType::Artifact]
+    );
+    assert_eq!(untapped.card_types.subtypes, vec!["Human", "Ninja"]);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tapped_id)
+        .unwrap()
+        .tapped = false;
+    runner.state_mut().layers_dirty.mark_full();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("re-evaluate after the source becomes untapped");
+    let state = runner.state();
+    for id in [tapped_id, untapped_id] {
+        let object = &state.objects[&id];
+        assert_eq!((object.power, object.toughness), (Some(3), Some(4)));
+        assert_eq!(
+            object.card_types.core_types,
+            vec![CoreType::Creature, CoreType::Artifact]
+        );
+        assert_eq!(object.card_types.subtypes, vec!["Human", "Ninja"]);
+    }
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
 
 #[test]
 fn kaito_animation_during_your_turn_with_loyalty() {

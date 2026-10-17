@@ -1925,8 +1925,9 @@ pub(crate) fn parse_pronoun_becomes_type_static(
 
 /// CR 205.1a / CR 205.1b: Decide whether a self type-change is a REPLACEMENT or
 /// an additive grant. A set of `AddType` modifications is replaced by a single
-/// `SetCardTypes` unless the text explicitly retains prior types or makes an
-/// artifact creature. P/T, subtype, and keyword changes do not imply retention.
+/// `SetCardTypes` when the descriptor explicitly names a core type, unless the
+/// text retains prior types or makes an artifact creature. Creature inferred
+/// from a subtype/P/T descriptor is not an instruction to replace card types.
 /// Replacement precedes subtype additions so the new subtypes survive removal
 /// of subtypes incompatible with the prior card types.
 pub(super) fn maybe_replace_card_types(
@@ -1947,6 +1948,23 @@ pub(super) fn maybe_replace_card_types(
         .collect();
     if core_types.is_empty()
         || (core_types.contains(&CoreType::Artifact) && core_types.contains(&CoreType::Creature))
+    {
+        return modifications;
+    }
+    let descriptor = super::oracle_effect::animation::split_animation_conjunct_clause(body_lower)
+        .map_or(body_lower, |(descriptor, _)| descriptor);
+    let descriptor = nom_primitives::scan_split_at_phrase(descriptor, |input| {
+        alt((tag("with "), tag("where "))).parse(input)
+    })
+    .map_or(descriptor, |(descriptor, _)| descriptor);
+    if nom_primitives::scan_at_word_boundaries(descriptor, |input| {
+        terminated(
+            nom_primitives::parse_core_type,
+            alt((space1, eof, tag("."), tag(","))),
+        )
+        .parse(input)
+    })
+    .is_none()
     {
         return modifications;
     }

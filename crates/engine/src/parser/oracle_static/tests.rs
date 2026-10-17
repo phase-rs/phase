@@ -20923,6 +20923,48 @@ fn arixmethes_bare_is_a_land_replaces_card_types() {
     );
 }
 
+// SHAPE: CR 205.1a + CR 613.1d + CR 613.4b: Futurist sets subtypes and base
+// P/T without setting a card type, even though its subject says "this creature".
+#[test]
+fn futurist_operative_subtype_animation_preserves_card_types_shape() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as this creature is tapped, it's a Human Citizen with base power and toughness 1/1 and can't be blocked.\n{2}{U}: Untap this creature.",
+        "Futurist Operative",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Ninja".to_string()],
+    );
+    let animation = parsed
+        .statics
+        .iter()
+        .find(|definition| {
+            definition
+                .modifications
+                .contains(&ContinuousModification::SetPower { value: 1 })
+        })
+        .expect("Futurist must parse its base-P/T animation");
+    assert_eq!(animation.affected, Some(TargetFilter::SelfRef));
+    for modification in [
+        ContinuousModification::SetPower { value: 1 },
+        ContinuousModification::SetToughness { value: 1 },
+        ContinuousModification::AddSubtype {
+            subtype: "Human".to_string(),
+        },
+        ContinuousModification::AddSubtype {
+            subtype: "Citizen".to_string(),
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+    ] {
+        assert!(animation.modifications.contains(&modification));
+    }
+    assert!(!animation
+        .modifications
+        .iter()
+        .any(|modification| matches!(modification, ContinuousModification::SetCardTypes { .. })));
+}
+
 // SHAPE: CR 205.1a / CR 205.1b: mixed animation modifications do not imply
 // retention; explicit retention and artifact-creature wording do.
 #[test]
@@ -20956,6 +20998,49 @@ fn self_animation_card_type_replacement_preserves_other_modifications() {
         .cloned()
         .collect();
     assert_eq!(&replaced[1..], non_types);
+    for explicit in [
+        "legendary blue and red ninja creature with hexproof",
+        "3/4 ninja creature.",
+        "3/4 ninja creature, with hexproof",
+    ] {
+        assert_eq!(
+            super::type_change::maybe_replace_card_types(mixed.clone(), explicit),
+            replaced
+        );
+    }
+    // CR 205.1a: inferred Creature does not make a subtype-only predicate
+    // replace card types. Core words in granted abilities are outside it.
+    for (first, second) in [("Human", "Citizen"), ("Elf", "Scout")] {
+        let inferred = vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::AddSubtype {
+                subtype: first.to_string(),
+            },
+            ContinuousModification::AddSubtype {
+                subtype: second.to_string(),
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ];
+        let descriptor = format!("{} {}", first.to_lowercase(), second.to_lowercase());
+        for body in [
+            descriptor.clone(),
+            format!("1/1 {descriptor}"),
+            format!("{descriptor} with base power and toughness 1/1"),
+            format!("{descriptor} with \"Whenever this creature attacks, draw a card.\""),
+            format!("{descriptor} and has \"Whenever this creature attacks, draw a card.\""),
+            format!("{descriptor} where X is the number of creature cards in your graveyard"),
+            format!("{descriptor} creaturely"),
+        ] {
+            assert_eq!(
+                super::type_change::maybe_replace_card_types(inferred.clone(), &body),
+                inferred,
+                "subtype-only descriptor must preserve its modifications: {body}"
+            );
+        }
+    }
     for retention in [
         "in addition to its other types",
         "that's still a planeswalker",
