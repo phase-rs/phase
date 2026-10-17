@@ -4834,6 +4834,8 @@ mod arena_tests {
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder, InjectedColorChoice};
     use crate::parser::oracle_nom::context::ParseContext;
+    #[cfg(feature = "cli")]
+    use crate::types::ability::OpponentMayScope;
     use crate::types::ability::{DelayedTriggerCondition, ReplacementDefinition};
     use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
@@ -4874,9 +4876,16 @@ mod arena_tests {
     #[test]
     fn binding_diagnostics_report_actual_candidates_and_ordered_results() {
         let mut env = AssemblyEnv::default();
-        let mut defs = vec![shuffle_def().optional()];
+        // OptionalHead membership follows optional_for, not the optional flag.
+        let mut defs = vec![AbilityDefinition {
+            optional_for: Some(OpponentMayScope::AnyOpponent),
+            ..shuffle_def().optional()
+        }];
         env.observe(&defs, Some(ClauseId(0)), NodeRole::Primary);
-        defs.push(shuffle_def().optional().sub_ability(shuffle_def()));
+        defs.push(AbilityDefinition {
+            optional_for: Some(OpponentMayScope::AnyOpponent),
+            ..shuffle_def().optional().sub_ability(shuffle_def())
+        });
         env.observe(&defs, Some(ClauseId(1)), NodeRole::Primary);
         defs.push(shuffle_def());
         env.observe(&defs, Some(ClauseId(2)), NodeRole::Primary);
