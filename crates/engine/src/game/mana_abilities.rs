@@ -734,7 +734,7 @@ fn produce_mana_from_ability(
     // cost-paid object snapshot so quantity resolution sees it. Reused for
     // both production-count and sub-chain resolution paths so the same
     // snapshot is visible end-to-end.
-    let resolved_for_quantity = resolved_mana_ability_for_current_state(
+    let mut resolved_for_quantity = resolved_mana_ability_for_current_state(
         state,
         source_id,
         player,
@@ -742,6 +742,27 @@ fn produce_mana_from_ability(
         chosen_x,
         cost_paid_object,
     );
+    // CR 605.3b + CR 602.2b + CR 608.2h: a mana ability resolves immediately, so
+    // its cost-removed counter count binds here instead of at a stack placement.
+    // The count is the preceding "this way" amount for the head production and
+    // the sub-chain. A mana ability can resolve inside another resolution's
+    // payment, so the outer `last_effect_amount` is restored afterwards.
+    // Only a mana ability whose own cost removes counters drains the latch: a
+    // non-mana activation of this source paused for its mana payment may hold
+    // its own count there, and a mana ability activated in that window (CR 601.2g
+    // + CR 605.3a) must neither read it nor strip it from that activation.
+    let pays_counter_cost = mana_sources::cost_has_component(&ability_def.cost, |cost| {
+        matches!(cost, AbilityCost::RemoveCounter { .. })
+    });
+    let cost_removed = pays_counter_cost
+        .then(|| super::costs::take_cost_removed_counters(state, source_id))
+        .flatten();
+    resolved_for_quantity.context.cost_removed_counter_amount = cost_removed;
+    let outer_last_effect_amount = cost_removed.map(|n| {
+        state
+            .last_effect_amount
+            .replace(super::arithmetic::u32_to_i32_saturating(n))
+    });
 
     // CR 106.12: a permanent is "tapped for mana" when the activated mana
     // ability's cost includes the `{T}` symbol.
@@ -888,6 +909,9 @@ fn produce_mana_from_ability(
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
     resolve_mana_ability_sub_chain(state, &resolved_for_quantity, events);
+    if let Some(outer) = outer_last_effect_amount {
+        state.last_effect_amount = outer;
+    }
 }
 
 fn resolved_mana_ability_for_current_state(
@@ -4109,6 +4133,20 @@ fn resolve_mana_ability_sub_chain(
     let Some(sub) = ability.sub_ability.as_deref() else {
         return;
     };
+    // CR 605.3b + CR 608.2c: the sub-chain resolves as its own depth-0 chain,
+    // whose prelude resets `last_effect_amount`; carry the head's cost-removed
+    // counter count onto the sub root so that prelude reseeds it ("then add an
+    // additional {B} for each charge counter removed this way").
+    let carried;
+    let sub = match ability.context.cost_removed_counter_amount {
+        Some(removed) => {
+            let mut owned = sub.clone();
+            owned.context.cost_removed_counter_amount = Some(removed);
+            carried = owned;
+            &carried
+        }
+        None => sub,
+    };
     // Errors during the sub-chain are non-fatal — mana has already been
     // added to the pool and the cost has been paid. The damage/life clause
     // of a painland cannot legitimately fail in a well-formed game state.
@@ -4469,7 +4507,11 @@ where
                 }
                 count => count,
             };
-            remove_counters_for_mana_cost(state, source_id, counter_type, count, events);
+            let removed =
+                remove_counters_for_mana_cost(state, source_id, counter_type, count, events);
+            // CR 605.3b + CR 602.2b + CR 601.2h: the mana ability's production
+            // reads the count actually removed (`produce_mana_from_ability`).
+            super::costs::record_cost_removed_counters(state, source_id, removed);
         }
         Some(other) => {
             return Err(EngineError::InvalidAction(format!(
@@ -5198,13 +5240,15 @@ fn removable_counter_count_for_mana_cost(
     }
 }
 
+/// CR 118.3 + CR 122.1: pay a mana ability's remove-counter cost leaf and
+/// return the number of counters actually removed.
 fn remove_counters_for_mana_cost(
     state: &mut GameState,
     source_id: ObjectId,
     counter_type: &CounterMatch,
     mut count: u32,
     events: &mut Vec<GameEvent>,
-) {
+) -> u32 {
     match counter_type {
         CounterMatch::OfType(counter_type) => {
             super::effects::counters::remove_counter_with_replacement(
@@ -5213,7 +5257,7 @@ fn remove_counters_for_mana_cost(
                 counter_type.clone(),
                 count,
                 events,
-            );
+            )
         }
         CounterMatch::Any => {
             let counters: Vec<(CounterType, u32)> = state
@@ -5226,22 +5270,26 @@ fn remove_counters_for_mana_cost(
                         .collect()
                 })
                 .unwrap_or_default();
+            let mut removed = 0u32;
             for (counter_type, available) in counters {
                 if count == 0 {
                     break;
                 }
                 let to_remove = available.min(count);
                 if to_remove > 0 {
-                    super::effects::counters::remove_counter_with_replacement(
-                        state,
-                        source_id,
-                        counter_type,
-                        to_remove,
-                        events,
+                    removed = removed.saturating_add(
+                        super::effects::counters::remove_counter_with_replacement(
+                            state,
+                            source_id,
+                            counter_type,
+                            to_remove,
+                            events,
+                        ),
                     );
                     count -= to_remove;
                 }
             }
+            removed
         }
     }
 }

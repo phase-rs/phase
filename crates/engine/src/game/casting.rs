@@ -27847,6 +27847,12 @@ fn activate_with_cost_carrier(
     // reversed (never recorded from post-payment facts).
     let mut resolved = resolved;
     let record = take_activation_record(&mut resolved, player)?;
+    // CR 602.2b + CR 601.2h + CR 608.2h: bind this activation's cost-removed
+    // counter count to its own resolving ability. (The third placement, the
+    // loyalty tail `planeswalker::complete_loyalty_activation`, pays only
+    // `AbilityCost::Loyalty`, which never records.)
+    resolved.context.cost_removed_counter_amount =
+        super::costs::take_cost_removed_counters(state, source_id);
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     let announced_targets = declared_targets_in_chain(&resolved);

@@ -701,6 +701,35 @@ pub(crate) fn pay_ability_cost_for_resolution(
     Ok(outcome)
 }
 
+/// CR 602.2b + CR 601.2h + CR 118.3: the single writer of an activation's
+/// cost-removed counter count. Every payer of a counter leaf of an activated
+/// ability's cost reports the number it actually removed; composite costs and
+/// several payers of one activation add up. A paid leaf that removed nothing
+/// still records `Some(0)`, distinct from "no counter cost".
+pub(crate) fn record_cost_removed_counters(
+    state: &mut GameState,
+    activating_source: ObjectId,
+    removed: u32,
+) {
+    if let Some(obj) = state.objects.get_mut(&activating_source) {
+        let total = obj.cost_removed_counters_to_activate.get_or_insert(0);
+        *total = total.saturating_add(removed);
+    }
+}
+
+/// CR 602.2b + CR 608.2h: drain the activation's cost-removed counter count
+/// so it binds to exactly one activation (its stack entry or its mana
+/// production); the latch is empty again before any later activation.
+pub(crate) fn take_cost_removed_counters(
+    state: &mut GameState,
+    activating_source: ObjectId,
+) -> Option<u32> {
+    state
+        .objects
+        .get_mut(&activating_source)
+        .and_then(|obj| obj.cost_removed_counters_to_activate.take())
+}
+
 /// Pays a replacement's MayCost. Its dedicated root owns the outer
 /// replacement state required by [`PendingCostMoveResume::ReplacementMayCost`].
 pub(crate) fn pay_ability_cost_for_replacement_may_cost(
@@ -1747,6 +1776,14 @@ fn pay_ability_cost_inner(
                 }
                 _ => source_id,
             };
+            // CR 602.2b + CR 601.2h + CR 118.3: the activation's effect reads the
+            // count actually removed; a resolution-time PayCost has no activation
+            // to bind.
+            let record_removed = |state: &mut GameState, removed: u32| {
+                if matches!(scope, PaymentScope::Activation { .. }) {
+                    record_cost_removed_counters(state, source_id, removed);
+                }
+            };
             if *count == REMOVE_COUNTER_COST_ALL
                 && matches!(counter_type, crate::types::counter::CounterMatch::Any)
             {
@@ -1764,40 +1801,48 @@ fn pay_ability_cost_inner(
                 // sort by CounterType so the removal (and any per-type triggers
                 // it emits) happen in a deterministic, process-independent order.
                 counters.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut removed = 0u32;
                 for (counter_type, count) in counters {
-                    super::effects::counters::remove_counter_with_replacement(
-                        state,
-                        payer,
-                        counter_type,
-                        count,
-                        events,
+                    removed = removed.saturating_add(
+                        super::effects::counters::remove_counter_with_replacement(
+                            state,
+                            payer,
+                            counter_type,
+                            count,
+                            events,
+                        ),
                     );
                 }
+                record_removed(state, removed);
                 return Ok(PaymentOutcome::Paid);
             }
             // CR 601.2h: Resolve `CounterMatch::Any` to the concrete counter
             // type currently present on the source before the replacement
             // pipeline sees it — `remove_counter_with_replacement` operates on
             // a single concrete kind. `OfType(t)` passes through unchanged.
-            if let Some(resolved) = super::effects::counters::resolve_counter_match_for_removal(
+            let removed = match super::effects::counters::resolve_counter_match_for_removal(
                 state,
                 payer,
                 counter_type,
             ) {
-                let count = if *count == REMOVE_COUNTER_COST_ALL {
-                    state
-                        .objects
-                        .get(&payer)
-                        .and_then(|obj| obj.counters.get(&resolved))
-                        .copied()
-                        .unwrap_or(0)
-                } else {
-                    *count
-                };
-                super::effects::counters::remove_counter_with_replacement(
-                    state, payer, resolved, count, events,
-                );
-            }
+                Some(resolved) => {
+                    let count = if *count == REMOVE_COUNTER_COST_ALL {
+                        state
+                            .objects
+                            .get(&payer)
+                            .and_then(|obj| obj.counters.get(&resolved))
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        *count
+                    };
+                    super::effects::counters::remove_counter_with_replacement(
+                        state, payer, resolved, count, events,
+                    )
+                }
+                None => 0,
+            };
+            record_removed(state, removed);
         }
         // Targeted remove-counter costs are paid by the interactive
         // WaitingFor::RemoveCounterForCost path before automatic cost

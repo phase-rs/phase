@@ -210,6 +210,7 @@ mod cosmic_intervention_graveyard_redirect;
 mod cost_paid_objects_historical_restore;
 mod cost_paid_provenance;
 mod cost_reduction_order_election;
+mod cost_removed_counter_amount;
 mod cost_x_carrier_runtime;
 mod cost_zone_pipeline;
 mod council_of_four_nth_per_turn;

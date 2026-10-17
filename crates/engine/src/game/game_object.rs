@@ -1681,6 +1681,21 @@ pub struct GameObject {
     /// `push_ability_entry` call for the same source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mana_spent_to_activate: Vec<ManaType>,
+
+    /// CR 602.2b + CR 601.2h + CR 118.3: Counters actually removed from any
+    /// object while paying the cost of an activated ability of THIS object,
+    /// accumulated by `costs::record_cost_removed_counters` from every payer
+    /// of a counter leaf. A bridge exactly like `mana_spent_to_activate`:
+    /// `costs::take_cost_removed_counters` drains it synchronously at both
+    /// stack placements (`push_ability_entry` and the direct push in
+    /// `casting::activate_with_cost_carrier`) into that activation's own
+    /// `SpellContext::cost_removed_counter_amount`, and at the production of a
+    /// mana ability whose own cost removes counters (`produce_mana_from_ability`,
+    /// CR 605.3b; any other mana ability of this object leaves it to the
+    /// activation whose payment it is helping). `None` = no counter cost was
+    /// paid since the last drain; `Some(0)` = a counter cost removed none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_removed_counters_to_activate: Option<u32>,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1880,6 +1895,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // synchronously by `push_ability_entry` into the resolving
         // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
         mana_spent_to_activate: _,
+        // Same activation-cost-payment latch class: drained synchronously at
+        // stack placement / mana production by `take_cost_removed_counters`.
+        cost_removed_counters_to_activate: _,
     } = o;
 }
 
@@ -3134,6 +3152,7 @@ impl GameObject {
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
             mana_spent_to_activate: Vec::new(),
+            cost_removed_counters_to_activate: None,
         }
     }
 

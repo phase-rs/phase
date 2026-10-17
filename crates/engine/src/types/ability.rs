@@ -30286,6 +30286,18 @@ pub struct SpellContext {
     /// stays with a paused payment's continuation until that cost completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pay_cost_paid_life_amount: Option<u32>,
+    /// CR 602.2b + CR 601.2h + CR 608.2h: counters actually removed while paying
+    /// THIS activated ability's cost (summed over its counter leaves), bound when the
+    /// activation is placed on the stack or produces mana (CR 605.3b). Taken off the
+    /// root at the chain's depth-0 entry and seeded into `last_effect_amount`, so
+    /// "… removed this way" / "that much" read it. `None` = no counter cost;
+    /// `Some(0)` = a counter cost that removed none. CR 707.10: a copy of the
+    /// ability copies all decisions made for it and can't pay the cost again, so a
+    /// copy keeps the original's count (the official copier rulings: "If the activated
+    /// ability's cost contains a choice, such as … a number of counters to remove,
+    /// the copy uses that same information").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_removed_counter_amount: Option<u32>,
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.

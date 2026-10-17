@@ -1455,17 +1455,22 @@ pub(crate) fn counter_removal_blocked(
 ///
 /// The count is clamped to the number of counters actually present, so callers
 /// can pass the raw damage/cost amount without pre-clamping.
+///
+/// CR 122.1 + CR 118.3: returns the number of counters actually removed — 0
+/// when a prohibition blocks the removal, a replacement prevents it, or a
+/// replacement needs a choice first (the removal is then deferred to the
+/// replacement pipeline and is not part of this call's count).
 pub fn remove_counter_with_replacement(
     state: &mut GameState,
     object_id: ObjectId,
     counter_type: CounterType,
     count: u32,
     events: &mut Vec<GameEvent>,
-) {
+) -> u32 {
     // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
     // this counter type from this object, bail out immediately.
     if counter_removal_blocked(state, object_id, &counter_type) {
-        return;
+        return 0;
     }
 
     let proposed = ProposedEvent::RemoveCounter {
@@ -1484,13 +1489,16 @@ pub fn remove_counter_with_replacement(
                 ..
             } = event
             {
-                apply_counter_removal(state, object_id, counter_type, count, events);
+                apply_counter_removal(state, object_id, counter_type, count, events)
+            } else {
+                0
             }
         }
-        ReplacementResult::Prevented => {}
+        ReplacementResult::Prevented => 0,
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
+            0
         }
     }
 }

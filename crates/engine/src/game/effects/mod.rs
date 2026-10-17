@@ -14933,9 +14933,17 @@ pub fn resolve_ability_chain(
     // before it begins a new resolution; nested producers replace the context
     // after this node's effect completes.
     let root_context_owned;
-    let ability = if depth == 0 && ability.context.forwarded_result_context.is_some() {
+    let mut cost_removed_seed = None;
+    let ability = if depth == 0
+        && (ability.context.forwarded_result_context.is_some()
+            || ability.context.cost_removed_counter_amount.is_some())
+    {
         let mut owned = ability.clone();
         owned.context.forwarded_result_context = None;
+        // CR 602.2b + CR 601.2h + CR 608.2h: the cost-removed count is a
+        // root-only input; take it off the root so no hand-off or handler-local
+        // context clone carries it into a continuation that could reseed.
+        cost_removed_seed = owned.context.cost_removed_counter_amount.take();
         root_context_owned = owned;
         &root_context_owned
     } else {
@@ -14950,6 +14958,12 @@ pub fn resolve_ability_chain(
     // across unrelated ability resolutions.
     if depth == 0 {
         reset_top_level_resolution_state(state);
+        // CR 602.2b + CR 601.2h + CR 608.2h: counters removed to pay this
+        // activation's cost are the preceding "this way" amount its instructions
+        // read; a later producer re-stamps per CR 608.2c.
+        if let Some(n) = cost_removed_seed {
+            state.last_effect_amount = Some(crate::game::arithmetic::u32_to_i32_saturating(n));
+        }
     }
 
     // CR 700.2 ("each of those options is a mode") + CR 608.2c (instructions in

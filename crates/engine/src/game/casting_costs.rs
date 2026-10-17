@@ -4725,6 +4725,7 @@ pub(crate) fn handle_remove_counter_for_cost(
     }
 
     let mut remaining = count;
+    let mut removed = 0u32;
     for &object_id in chosen {
         if remaining == 0 {
             break;
@@ -4744,13 +4745,14 @@ pub(crate) fn handle_remove_counter_for_cost(
             .unwrap_or(0);
         let to_remove = removable.min(remaining);
         if to_remove > 0 {
-            super::effects::counters::remove_counter_with_replacement(
-                state,
-                object_id,
-                concrete_counter,
-                to_remove,
-                events,
-            );
+            removed =
+                removed.saturating_add(super::effects::counters::remove_counter_with_replacement(
+                    state,
+                    object_id,
+                    concrete_counter,
+                    to_remove,
+                    events,
+                ));
             remaining -= to_remove;
         }
     }
@@ -4758,6 +4760,11 @@ pub(crate) fn handle_remove_counter_for_cost(
         return Err(EngineError::ActionNotAllowed(
             "No removable counter".to_string(),
         ));
+    }
+    // CR 602.2b + CR 601.2h + CR 118.3: an activation's effect reads the count
+    // actually removed; a spell's additional counter cost has no activation.
+    if pending.activation_ability_index.is_some() {
+        super::costs::record_cost_removed_counters(state, pending.object_id, removed);
     }
 
     if let Some(obj) = paid_object.and_then(|id| state.objects.get(&id).map(|obj| (id, obj))) {
@@ -4916,6 +4923,7 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
     super::effects::counters::validate_counter_selection(&available_by_type, &per_type)
         .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
 
+    let mut removed = 0u32;
     for choice in distribution {
         let removable = state
             .objects
@@ -4928,13 +4936,19 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
                 "Counter distribution exceeds removable counters".to_string(),
             ));
         }
-        super::effects::counters::remove_counter_with_replacement(
-            state,
-            choice.object_id,
-            choice.counter_type.clone(),
-            choice.count,
-            events,
-        );
+        removed =
+            removed.saturating_add(super::effects::counters::remove_counter_with_replacement(
+                state,
+                choice.object_id,
+                choice.counter_type.clone(),
+                choice.count,
+                events,
+            ));
+    }
+    // CR 602.2b + CR 601.2h + CR 118.3: an activation's effect reads the count
+    // actually removed; a spell's additional counter cost has no activation.
+    if pending.activation_ability_index.is_some() {
+        super::costs::record_cost_removed_counters(state, pending.object_id, removed);
     }
 
     if let Some(choice) = distribution.first() {
@@ -7195,6 +7209,11 @@ pub(super) fn push_ability_entry(
             resolved.set_noted_mana_payment_recursive(payment);
         }
     }
+
+    // CR 602.2b + CR 601.2h + CR 608.2h: bind this activation's cost-removed
+    // counter count to its own resolving ability.
+    resolved.context.cost_removed_counter_amount =
+        super::costs::take_cost_removed_counters(state, source_id);
 
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);
