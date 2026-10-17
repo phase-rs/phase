@@ -1401,10 +1401,13 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         return Some((kw, ""));
     }
 
-    // CR 702.124: Partner variant keywords — must come BEFORE generic "partner" match.
-    // MTGJSON sends Character Select, Friends Forever, and generic Partner all as keyword "Partner".
-    // Oracle text em-dash suffix disambiguates them.
-    if let Ok((_, result)) = alt((
+    // CR 702.124i: "Partner—[text]" (Character select, Friends forever).
+    // CR 702.124k: "Choose a Background". CR 702.124m: "Doctor's companion".
+    // MTGJSON sends Character Select, Friends Forever, and generic Partner all as keyword
+    // "Partner"; the Oracle em-dash suffix disambiguates them. Must come BEFORE generic
+    // "partner". The REAL nom remainder is returned so strict callers
+    // (`parse_router_keyword_fragment`) see trailing prose and decline.
+    if let Ok((rest, result)) = alt((
         value(
             Some(Keyword::Partner(PartnerType::CharacterSelect)),
             tag::<_, _, OracleError<'_>>("partner\u{2014}character select"),
@@ -1421,14 +1424,14 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
             Some(Keyword::Partner(PartnerType::DoctorsCompanion)),
             alt((tag("doctor\u{2019}s companion"), tag("doctor's companion"))),
         ),
-        // CR 702.124c: "Partner with [Name]" — handled at the build_oracle_face level
+        // CR 702.124j: "Partner with [Name]" — handled at the build_oracle_face level
         // via MTGJSON keyword detection. Skip here to avoid producing a duplicate with
         // incorrect casing from the lowered oracle text.
         value(None, tag("partner with ")),
     ))
     .parse(text)
     {
-        return result.map(|kw| (kw, ""));
+        return result.map(|kw| (kw, rest));
     }
 
     // CR 702.24: Cumulative upkeep granted via a quoted ability ("[enchanted
@@ -5163,6 +5166,212 @@ mod tests {
         // Also test with straight apostrophe
         let kw = parse_granted_keyword_fragment("doctor's companion").unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::DoctorsCompanion));
+
+        // The permissive (embedded-grant) surface discards the remainder by contract:
+        // the trailing clause belongs to the enclosing sentence.
+        assert_eq!(
+            parse_granted_keyword_fragment("choose a background xyzzy"),
+            Some(Keyword::Partner(PartnerType::ChooseABackground))
+        );
+    }
+
+    /// The five lowercase Partner-family spellings `parse_keyword_line_core` claims
+    /// (both apostrophes of "Doctor's companion"), with the keyword each yields.
+    fn partner_family_spellings() -> [(&'static str, Keyword); 5] {
+        use crate::types::keywords::PartnerType;
+
+        [
+            (
+                "partner\u{2014}character select",
+                Keyword::Partner(PartnerType::CharacterSelect),
+            ),
+            (
+                "partner\u{2014}friends forever",
+                Keyword::Partner(PartnerType::FriendsForever),
+            ),
+            (
+                "choose a background",
+                Keyword::Partner(PartnerType::ChooseABackground),
+            ),
+            (
+                "doctor's companion",
+                Keyword::Partner(PartnerType::DoctorsCompanion),
+            ),
+            (
+                "doctor\u{2019}s companion",
+                Keyword::Partner(PartnerType::DoctorsCompanion),
+            ),
+        ]
+    }
+
+    // CR 702.124i / CR 702.124k / CR 702.124m: the shared core must report the REAL
+    // nom remainder for the Partner family, never a fabricated full consumption.
+    #[test]
+    fn parse_keyword_line_core_partner_family_returns_real_remainder() {
+        for (spelling, keyword) in partner_family_spellings() {
+            // Positive guard: the bare declaration is claimed with nothing left over.
+            assert_eq!(
+                parse_keyword_line_core(spelling),
+                Some((keyword.clone(), "")),
+                "{spelling}"
+            );
+            for tail in [" xyzzy", "x", " (reminder.)"] {
+                let line = format!("{spelling}{tail}");
+                assert_eq!(
+                    parse_keyword_line_core(&line),
+                    Some((keyword.clone(), tail)),
+                    "{line}"
+                );
+            }
+        }
+
+        // CR 702.124j: "Partner with [name]" is typed from MTGJSON; the core declines.
+        assert_eq!(
+            parse_keyword_line_core("partner with alphinaud leveilleur"),
+            None
+        );
+        assert_eq!(parse_keyword_line_core("partner with "), None);
+    }
+
+    #[test]
+    fn parse_router_keyword_fragment_partner_family_declines_trailing_prose() {
+        for (spelling, keyword) in partner_family_spellings() {
+            // Reach guards: the strict fragment reaches the arm and tolerates a
+            // terminal period.
+            assert_eq!(
+                parse_router_keyword_fragment(spelling),
+                Some(keyword.clone()),
+                "{spelling}"
+            );
+            assert_eq!(
+                parse_router_keyword_fragment(&format!("{spelling}.")),
+                Some(keyword.clone()),
+                "{spelling}."
+            );
+            // Semantic prose and a word-boundary violation are both declined.
+            assert_eq!(
+                parse_router_keyword_fragment(&format!("{spelling} xyzzy")),
+                None,
+                "{spelling} xyzzy"
+            );
+            assert_eq!(
+                parse_router_keyword_fragment(&format!("{spelling}x")),
+                None,
+                "{spelling}x"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_router_keyword_list_partner_family_reminder_and_prose() {
+        use crate::types::keywords::PartnerType;
+
+        fn names(list: &[&str]) -> Vec<String> {
+            list.iter().map(|name| (*name).to_string()).collect()
+        }
+
+        // Choose a Background: MTGJSON is the typed authority, so a complete
+        // declaration emits nothing.
+        let background = names(&["choose a background"]);
+        for line in [
+            "Choose a Background (You can have a Background as a second commander.)",
+            "Choose a Background",
+        ] {
+            assert_eq!(
+                parse_router_keyword_list(line, &background),
+                Some(Vec::new()),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            parse_router_keyword_list("Choose a Background xyzzy", &background),
+            None
+        );
+
+        // Doctor's companion.
+        let companion = names(&["doctor's companion"]);
+        assert_eq!(
+            parse_router_keyword_list(
+                "Doctor's companion (You can have two commanders if the other is the Doctor.)",
+                &companion
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_router_keyword_list("Doctor's companion xyzzy", &companion),
+            None
+        );
+
+        // MTGJSON names both em-dash variants as plain "Partner", so the Oracle
+        // suffix is the only source of the typed variant.
+        let partner = names(&["partner"]);
+        for (declaration, variant) in [
+            (
+                "Partner\u{2014}Character select",
+                PartnerType::CharacterSelect,
+            ),
+            (
+                "Partner\u{2014}Character select (You can have two commanders if both have this ability.)",
+                PartnerType::CharacterSelect,
+            ),
+            (
+                "Partner\u{2014}Friends forever (You can have two commanders if both have this ability.)",
+                PartnerType::FriendsForever,
+            ),
+        ] {
+            assert_eq!(
+                parse_router_keyword_list(declaration, &partner),
+                Some(vec![Keyword::Partner(variant)]),
+                "{declaration}"
+            );
+        }
+        for hostile in [
+            "Partner\u{2014}Character select xyzzy",
+            "Partner\u{2014}Friends forever xyzzy",
+        ] {
+            assert_eq!(
+                parse_router_keyword_list(hostile, &partner),
+                None,
+                "{hostile}"
+            );
+        }
+    }
+
+    // Contract pin only: this line never reaches the core, because step 2b
+    // (`is_partner_declaration_line`) claims it first.
+    #[test]
+    fn parse_router_keyword_line_partner_declaration_reminder() {
+        let routed = parse_router_keyword_line(
+            "Partner\u{2014}Character select (You can have two commanders if both have this ability.)",
+        )
+        .expect("a complete Partner declaration is routed");
+        assert_eq!(routed.keyword, None);
+        assert_eq!(
+            routed.tail.permitted_remainder,
+            PermittedKeywordRemainder::ReminderText
+        );
+    }
+
+    // CR 702.124m: "that has / with <keyword>" requires the keyword text to be fully
+    // consumed; the Partner-family arm used to fabricate that.
+    #[test]
+    fn parse_post_spell_modifier_with_doctors_companion_requires_full_consumption() {
+        use crate::parser::oracle_trigger::parse_post_spell_modifier;
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::PartnerType;
+
+        assert_eq!(
+            parse_post_spell_modifier("with doctor's companion"),
+            Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::WithKeyword {
+                    value: Keyword::Partner(PartnerType::DoctorsCompanion),
+                }]
+            )))
+        );
+        assert_eq!(
+            parse_post_spell_modifier("with doctor's companion xyzzy"),
+            None
+        );
     }
 
     // --- CR 702.11f: hexproof from X and from Y expansion ---
