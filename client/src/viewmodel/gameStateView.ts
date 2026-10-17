@@ -453,6 +453,12 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
   if (data.resume.type === "Resolution") {
     return undefined;
   }
+  if (data.resume.type === "TurnFaceUp") {
+    return (data.resume.source?.object_id ?? data.resume.object_id) as ObjectId;
+  }
+  if (data.resume.type === "SpellCost") {
+    return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
+  }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
 

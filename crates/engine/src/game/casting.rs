@@ -25415,13 +25415,19 @@ pub(crate) fn activated_ability_granting_object(
 /// eligible fodder under a "players can't sacrifice" effect. `pub` so `phase-ai`'s
 /// cast-time cost gates share it with the payment path in `cost_payability.rs` and
 /// `casting_costs.rs`.
-pub fn find_eligible_sacrifice_targets(
+/// CR 601.2h / CR 602.2b / CR 702.37e: The single authority for sacrifice-cost
+/// eligibility, parameterized by payment scope. Cast and activation scopes enforce
+/// static "players can't sacrifice permanents to cast spells or activate abilities"
+/// prohibitions (Yasharn, Angel of Jubilation); turn-face-up special actions do not.
+pub(crate) fn find_eligible_sacrifice_targets_for_scope(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     granting_object: Option<ObjectIncarnationRef>,
     filter: &TargetFilter,
+    scope: Option<&super::costs::PaymentScope>,
 ) -> Vec<ObjectId> {
+    let skip_cant_sacrifice = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
     state
         .battlefield
         .iter()
@@ -25433,7 +25439,14 @@ pub fn find_eligible_sacrifice_targets(
             if obj.controller != player {
                 return false;
             }
-            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
+            // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
+            // for any cost regardless of payment scope (e.g. Assault Suit).
+            if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
+                return false;
+            }
+            if !skip_cant_sacrifice
+                && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
+            {
                 return false;
             }
             // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.
@@ -25448,6 +25461,23 @@ pub fn find_eligible_sacrifice_targets(
             )
         })
         .collect()
+}
+
+pub fn find_eligible_sacrifice_targets(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    find_eligible_sacrifice_targets_for_scope(
+        state,
+        player,
+        source_id,
+        granting_object,
+        filter,
+        None,
+    )
 }
 
 /// CR 118.3 + CR 601.2h: Activation-time affordability pre-gate. Delegates to

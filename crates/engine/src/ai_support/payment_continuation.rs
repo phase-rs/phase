@@ -713,7 +713,8 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         // input — so like its counter-addition sibling it affiliates with no
         // payment-continuation root.
         | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
-        | PendingCostMoveResume::LoyaltyActivation { .. } => {
+        | PendingCostMoveResume::LoyaltyActivation { .. }
+        | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {
             PaymentContinuationState::NotAffiliated
         }
     }
@@ -769,7 +770,9 @@ fn classify_deferred_life_root(
             | ManaAbilityResume::UnlessPayment { .. }
             | ManaAbilityResume::EffectPayCost { .. } => PaymentContinuationState::NotAffiliated,
         },
-        DeferredLifeCostResume::PayAmount { .. } => PaymentContinuationState::NotAffiliated,
+        DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::TurnFaceUp { .. } => {
+            PaymentContinuationState::NotAffiliated
+        }
     }
 }
 
@@ -977,6 +980,7 @@ fn pending_cost_move_contains_root(
         // CR 701.9b: holds no pending cast, so it can contain no root.
         | Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
+        | Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
         | None => false,
     }
 }

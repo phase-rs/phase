@@ -118,7 +118,8 @@ fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
             | PendingCostMoveResume::ActivationMillPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(..),
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => {}
     }

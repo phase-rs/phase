@@ -8398,6 +8398,28 @@ pub(crate) fn park_observer_triggers_if_paused(
     }
 }
 
+/// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
+/// before reaching priority.
+pub(crate) fn park_delayed_observer_triggers_if_paused(
+    state: &mut GameState,
+    events: &[GameEvent],
+    slice_start: usize,
+) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let unclaimed = unclaimed_trigger_events_from(
+        events,
+        slice_start,
+        TriggerCollectionRequester::Delayed,
+        &state.consumed_before_priority_trigger_events,
+    );
+    collect_unclaimed_delayed_triggers_into_deferred(state, events, &unclaimed);
+}
+
 /// CR 603.2 + CR 603.3b: For choice handlers that return `ActionResult` directly
 /// and bypass `run_post_action_pipeline`. When the action settles to Priority,
 /// collect this action's observer triggers and drain the deferred queue; when

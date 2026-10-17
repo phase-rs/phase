@@ -1424,9 +1424,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal this card from your hand" — reveal self cost
+    // "Reveal this card from your hand" / "Reveal this card in your hand" — reveal self cost
     if nom_on_lower(text, &lower, |i| {
-        value((), tag("reveal this card from your hand")).parse(i)
+        value(
+            (),
+            alt((
+                tag("reveal this card from your hand"),
+                tag("reveal this card in your hand"),
+            )),
+        )
+        .parse(i)
     })
     .is_some()
     {
@@ -1436,22 +1443,34 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal a [Type] card from your hand" — reveal from hand with type filter.
+    // CR 701.20a: "Reveal <filter> from/in your hand" — reveal from hand with type filter.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
-            let filter_raw = before.trim();
-            let filter_raw = strip_article(filter_raw, filter_raw);
-            let filter_raw = filter_raw
-                .strip_suffix(" card")
-                .or_else(|| filter_raw.strip_suffix(" cards"))
-                .unwrap_or(filter_raw)
-                .trim();
-            let (filter, _) = parse_target(&format!("target {filter_raw}"));
-            return AbilityCost::Reveal {
-                count: 1,
-                filter: Some(filter),
-            };
+        type E<'a> = super::oracle_nom::error::OracleError<'a>;
+        let res: Result<(&str, &str), _> = alt((
+            take_until::<_, _, E<'_>>(" from your hand"),
+            take_until(" in your hand"),
+        ))
+        .parse(&rest_lower);
+        if let Ok((rem, before)) = res {
+            let tail_matched = alt((tag::<_, _, E<'_>>(" from your hand"), tag(" in your hand")))
+                .parse(rem)
+                .is_ok();
+            if tail_matched {
+                let filter_raw = before.trim();
+                let (count, filter_text) = if let Some((n, rem)) = parse_number(filter_raw) {
+                    (n, rem.trim())
+                } else {
+                    (1, strip_article(filter_raw, filter_raw).trim())
+                };
+                let (filter, remainder) = parse_type_phrase_folding(filter_text);
+                if remainder.trim().is_empty() {
+                    return AbilityCost::Reveal {
+                        count,
+                        filter: Some(filter),
+                    };
+                }
+            }
         }
     }
 
@@ -2206,23 +2225,32 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     None
 }
 
-/// Parse "return a land you control to its owner's hand" style bounce costs.
+/// CR 118.1: Parse "return a land you control to its owner's hand" /
+/// "return two Islands you control to their owner's hand" style bounce costs.
 fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
-    // Must end with "to its owner's hand" or "to your hand"
-    if !scan_contains(rest_lower, "to its owner's hand")
-        && !scan_contains(rest_lower, "to your hand")
-    {
-        return None;
-    }
-    // Strip the destination
-    let filter_text = split_once_on(rest_lower, " to its owner's hand")
-        .map(|(_, (before, _))| before)
-        .or_else(|_| split_once_on(rest_lower, " to your hand").map(|(_, (before, _))| before))
-        .ok()?;
-    // Strip article using nom
-    let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
-        .map(|((), rest)| rest)
-        .unwrap_or(filter_text);
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let filter_text = alt((
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to their owners' hands"),
+            pair(tag(" to their owners' hands"), opt(tag("."))),
+        )),
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to their owner's hand"),
+            pair(tag(" to their owner's hand"), opt(tag("."))),
+        )),
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to its owner's hand"),
+            pair(tag(" to its owner's hand"), opt(tag("."))),
+        )),
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to your hand"),
+            pair(tag(" to your hand"), opt(tag("."))),
+        )),
+    ))
+    .parse(rest_lower.trim())
+    .ok()
+    .map(|(_, before)| before.trim())?;
+
     // CR 201.5 / CR 201.5a: "~" / "this X" is the host self-reference; the
     // granter placeholder is a granted body's by-name reference to its granting
     // object. Preserve the explicit filter so the runtime does not treat an
@@ -2253,12 +2281,23 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
             });
         }
     }
-    let target_text = format!("target {filter_text}");
+
+    let (count, subject_text) = if let Some((n, rem)) = parse_number(filter_text) {
+        (n, rem.trim_start())
+    } else {
+        // Strip article using nom
+        let rem = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
+            .map(|((), rest)| rest.trim_start())
+            .unwrap_or(filter_text);
+        (1, rem)
+    };
+
+    let target_text = format!("target {subject_text}");
     let (filter, rem) = parse_target(&target_text);
     let filter = if rem.trim().is_empty() {
         filter
     } else {
-        let (filter, _) = parse_type_phrase_folding(filter_text);
+        let (filter, _) = parse_type_phrase_folding(subject_text);
         filter
     };
     let filter = match filter {
@@ -2281,7 +2320,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         filter => filter,
     };
     Some(AbilityCost::ReturnToHand {
-        count: 1,
+        count,
         filter: Some(filter),
         from_zone: None,
     })
@@ -4637,6 +4676,21 @@ mod tests {
             AbilityCost::Reveal {
                 count: 1,
                 filter: None
+            }
+        );
+    }
+
+    #[test]
+    fn cost_reveal_black_card_from_hand() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a black card in your hand"),
+            AbilityCost::Reveal {
+                count: 1,
+                filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Black
+                    }
+                ])))
             }
         );
     }

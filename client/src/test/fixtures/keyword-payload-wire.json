@@ -280,11 +280,14 @@
     },
     {
       "Morph": {
-        "generic": 2,
-        "shards": [
-          "Red"
-        ],
-        "type": "Cost"
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
       }
     },
     {
@@ -1019,6 +1022,18 @@
           "WhiteBlue"
         ],
         "type": "Cost"
+      }
+    },
+    {
+      "Morph": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
       }
     },
     {

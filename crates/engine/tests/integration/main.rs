@@ -1967,6 +1967,7 @@ mod exchange_control_of_a_spell;
 mod exchange_control_up_to_one_target;
 mod exploit_ceased_exploiter_lki;
 mod extra_turn_quantity;
+mod fathom_seer_morph;
 mod fathom_trawl_revealed_population;
 mod foreign_subject_split_guard;
 mod generated_target_slot_ownership;

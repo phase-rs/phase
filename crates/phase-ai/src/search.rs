@@ -2423,7 +2423,7 @@ pub fn fallback_action(
             ..
         } => issued_selection(contract),
         WaitingFor::PayCost {
-            resume: CostResume::Resolution,
+            resume: CostResume::Resolution | CostResume::TurnFaceUp { .. },
             ..
         } => issued(|action| matches!(action, GameAction::SelectCards { .. })),
 

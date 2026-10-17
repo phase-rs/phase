@@ -1270,7 +1270,7 @@ fn payable_morph_exact_cast_binds_face_down_three_and_completes() {
     let morph = scenario
         .add_creature_to_hand(P0, "Offer-Probe Morph", 4, 4)
         .with_mana_cost(ManaCost::NoCost)
-        .with_keyword(Keyword::Morph(ManaCost::generic(5)))
+        .with_keyword(Keyword::morph(ManaCost::generic(5)))
         .id();
     scenario.with_mana_pool(
         P0,

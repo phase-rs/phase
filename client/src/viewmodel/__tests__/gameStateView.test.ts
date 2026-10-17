@@ -342,6 +342,105 @@ describe("getBoardChoiceView", () => {
     });
   });
 
+  it("extracts sourceId for PayCost with CostResume::TurnFaceUp wire payload", () => {
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [4, 5],
+          count: 2,
+          min_count: 0,
+          resume: {
+            type: "TurnFaceUp",
+            object_id: 88,
+            cost_source: "Morph",
+          },
+        },
+      },
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "return",
+      sourceId: 88,
+    });
+  });
+
+  it("extracts sourceId for PayCost with CostResume::TurnFaceUp containing source ObjectIncarnationRef", () => {
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [4, 5],
+          count: 2,
+          min_count: 0,
+          resume: {
+            type: "TurnFaceUp",
+            source: { object_id: 88, incarnation: 1 },
+            cost_source: "Morph",
+          },
+        },
+      },
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "return",
+      sourceId: 88,
+    });
+  });
+
+  it("extracts sourceId for PayCost with CostResume::SpellCost wire payload", () => {
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [4, 5],
+          count: 1,
+          min_count: 1,
+          resume: {
+            type: "SpellCost",
+            Spell: {
+              object_id: 77,
+              card_id: 770,
+              ability: { targets: [] },
+              cost: { type: "NoCost" },
+            },
+            cost: {},
+            source: "Other",
+          },
+        },
+      },
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "return",
+      sourceId: 77,
+    });
+  });
+
   it("maps battlefield untap effects to board card selection", () => {
     const choice = getBoardChoiceView({
       type: "EffectZoneChoice",
