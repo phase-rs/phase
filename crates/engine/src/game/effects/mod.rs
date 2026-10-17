@@ -4799,7 +4799,7 @@ fn resolve_optional_effect_decision_step(
             return Ok(progress);
         }
         AutoMayChoice::Decline => {
-            let decline_branch = optional_decline_branch(&ability);
+            let decline_branch = optional_decline_branch(state, &ability);
             // CR 608.2c: Declining the optional return skips its action, but
             // an independent following instruction can still read its named
             // result. Settle that result as empty before the surviving branch
@@ -4874,9 +4874,10 @@ fn resolve_optional_effect_decision_step(
 /// the decline is recorded, with its sub-chain replaced by exactly the
 /// surviving instructions in printed order
 /// ([`declined_gate_reduced_to_surviving_instructions`]).
-pub(crate) fn optional_decline_branch(
-    ability: &ResolvedAbility,
-) -> Option<Cow<'_, ResolvedAbility>> {
+pub(crate) fn optional_decline_branch<'a>(
+    _state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> Option<Cow<'a, ResolvedAbility>> {
     if let Some(branch) = ability.else_ability.as_deref() {
         return Some(Cow::Borrowed(branch));
     }
@@ -21790,6 +21791,99 @@ mod tests {
         ChooseOneOfKind, LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
         SearchSelectionConstraint, SpentColor,
     };
+
+    #[test]
+    fn optional_decline_selector_preserves_none_borrowed_and_owned_branches() {
+        let state = GameState::new_two_player(42);
+        let life = |value| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    player: TargetFilter::Controller,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let performed = AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        };
+        let parent = life(0);
+        assert!(optional_decline_branch(&state, &parent).is_none());
+
+        let explicit = parent.clone().sub_ability(life(9)).else_ability(life(7));
+        let before = serde_json::to_value(&explicit).unwrap();
+        let Some(Cow::Borrowed(branch)) = optional_decline_branch(&state, &explicit) else {
+            panic!("explicit else must stay borrowed");
+        };
+        assert_eq!(
+            serde_json::to_value(branch).unwrap(),
+            serde_json::to_value(life(7)).unwrap()
+        );
+        assert_eq!(serde_json::to_value(&explicit).unwrap(), before);
+
+        let mut sibling = life(3).sub_ability(life(4));
+        sibling.sub_link = SubAbilityLink::SequentialSibling;
+        let sequential = parent.clone().sub_ability(sibling.clone());
+        let Some(Cow::Borrowed(branch)) = optional_decline_branch(&state, &sequential) else {
+            panic!("unconditional next instruction must stay borrowed");
+        };
+        assert_eq!(
+            serde_json::to_value(branch).unwrap(),
+            serde_json::to_value(&sibling).unwrap()
+        );
+
+        let mut step = life(6).sub_ability(sibling.clone());
+        step.sub_link = SubAbilityLink::ContinuationStep;
+        let skipped = parent.clone().sub_ability(step.clone());
+        let Some(Cow::Borrowed(branch)) = optional_decline_branch(&state, &skipped) else {
+            panic!("the continuation step is skipped before the independent sibling");
+        };
+        assert_eq!(
+            serde_json::to_value(branch).unwrap(),
+            serde_json::to_value(&sibling).unwrap()
+        );
+        step.sub_ability = None;
+        assert!(optional_decline_branch(&state, &parent.clone().sub_ability(step)).is_none());
+
+        let decline = life(11).condition(AbilityCondition::Not {
+            condition: Box::new(performed.clone()),
+        });
+        let accept = life(2)
+            .condition(performed.clone())
+            .sub_ability(life(5).sub_ability(decline.clone()));
+        let nested = parent.clone().sub_ability(accept);
+        let Some(Cow::Borrowed(branch)) = optional_decline_branch(&state, &nested) else {
+            panic!("nested printed decline clause must stay borrowed");
+        };
+        assert_eq!(
+            serde_json::to_value(branch).unwrap(),
+            serde_json::to_value(&decline).unwrap()
+        );
+
+        let double: Effect = serde_json::from_str(
+            r#"{"type":"DoublePT","mode":"Power","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},"factor":2}"#,
+        ).unwrap();
+        let gate =
+            ResolvedAbility::new(double, vec![], ObjectId(100), PlayerId(0)).condition(performed);
+        assert!(
+            optional_decline_branch(&state, &parent.clone().sub_ability(gate.clone())).is_none()
+        );
+        let mut independent = life(2);
+        independent.sub_link = SubAbilityLink::SequentialSibling;
+        let with_tail = gate.sub_ability(independent);
+        let owned_parent = parent.sub_ability(with_tail.clone());
+        let before = serde_json::to_value(&owned_parent).unwrap();
+        let Some(Cow::Owned(branch)) = optional_decline_branch(&state, &owned_parent) else {
+            panic!("a reduced performed gate must remain owned");
+        };
+        assert_eq!(
+            serde_json::to_value(&branch).unwrap(),
+            serde_json::to_value(with_tail).unwrap()
+        );
+        assert_eq!(serde_json::to_value(&owned_parent).unwrap(), before);
+    }
 
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
     /// exact cards that reveal looked at, on the continuation itself — so an
