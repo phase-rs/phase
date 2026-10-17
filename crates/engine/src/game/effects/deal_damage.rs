@@ -1,8 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::player_counter;
-use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
+use crate::game::effects::{
+    append_to_pending_continuation, mark_pending_continuation_parent,
+    push_each_source_tail_continuation, push_ownerless_tail_continuation,
+};
 use crate::game::filter;
 use crate::game::keywords;
 use crate::game::quantity::{
@@ -18,7 +21,10 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{
+    CombatPreventionTally, DamageRecord, EachSourceBatchFrame, GameState, PreventedDamageEntry,
+    WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::KeywordKind;
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -1250,14 +1256,20 @@ fn cast_tail_with_parent_targets(
 /// completed Phase B (replacements applied) and are stashed as
 /// `ApplyPostReplacementDamage` nodes (skip re-replacement). `raw_remaining`
 /// sources have not yet entered Phase B and are stashed as `DealDamage` nodes
-/// (full pipeline). Both segments share a single `sub_ability` tail so
-/// downstream effects fire exactly once after the combined batch completes.
+/// (full pipeline). The parent's `sub_ability` parks as its OWN ownerless
+/// frame below the stamped remainder (R2-F1 split tails) so downstream
+/// effects fire exactly once, after the batch's own boundary publishes.
+/// Returns whether a tail was parked. A `false` return (fully-prevented
+/// prefix nodes need no stash, no raw tail, no downstream) tells the pause
+/// site to stamp the pending prompt itself: no continuation will ever drain
+/// for this batch, so the replacement-answer hook is its boundary.
 fn stash_each_source_combined_continuation(
     state: &mut GameState,
     ability: &ResolvedAbility,
     already_replaced: &[(DamageContext, ProposedEvent)],
     raw_remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
-) {
+    owner: u64,
+) -> bool {
     let controller = ability.controller;
 
     // Build the head node: prioritise already-replaced (ApplyPostReplacementDamage)
@@ -1286,19 +1298,29 @@ fn stash_each_source_combined_continuation(
         match head_opt.as_mut() {
             None => {
                 // Nothing to stash — forward sub_ability so downstream fires.
-                append_to_pending_continuation(
+                return push_each_source_tail_continuation(
+                    state,
+                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
+                    owner,
+                );
+            }
+            Some(_) => {
+                // CR 615.13 + CR 616.1e (R2-F1): split tails — the downstream
+                // parks as its OWN ownerless frame BELOW the stamped
+                // remainder, so the remainder's boundary publishes before
+                // downstream drains instead of merging into one application.
+                push_ownerless_tail_continuation(
                     state,
                     Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
                 );
-                return;
             }
-            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(sub, ability)),
         }
     }
 
     if let Some(head) = head_opt {
-        append_to_pending_continuation(state, Some(Box::new(head)));
+        return push_each_source_tail_continuation(state, Some(Box::new(head)), owner);
     }
+    false
 }
 
 /// CR 120.1 + CR 616.1e: Stash a remaining-source damage continuation where each
@@ -2765,10 +2787,250 @@ pub fn resolve_each_deals_equal_to_power(
 /// are computed across the whole batch; a replacement pause mid-batch resumes the
 /// remaining sources with PER-SOURCE identity preserved
 /// (`stash_remaining_each_source_damage`).
+/// CR 615.13: drain the shared simultaneous-batch prevention tally accumulated
+/// during a noncombat Phase B, emitting one aggregate `DamagePrevented` per
+/// (shield, recipient) and firing each `All` rider once — the same authority
+/// the combat batch uses (`fire_batch_prevention_riders`). No-op when the
+/// tally is absent or empty. Takes (deactivates) the tally; callers restore
+/// the surrounding value.
+fn flush_noncombat_prevention_tally(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if let Some(tally) = state.combat_prevention_tally.take() {
+        if !tally.is_empty() {
+            let entries = crate::game::combat_damage::sorted_prevention_entries(tally);
+            // Fire-all: the unpaused path keeps its standing shape (a pausing
+            // rider's prompt propagates via `state.waiting_for`, as before).
+            let _ = crate::game::combat_damage::fire_batch_prevention_riders(
+                state, &entries, events, false,
+            );
+        }
+    }
+}
+
+/// CR 615.13: canonical entry encoding of a live prevention tally for pause
+/// records — saves cannot key JSON maps on pairs, and entries are exactly
+/// what the aggregate drain consumes. Sorted, so records compare canonically.
+pub(crate) fn tally_entries_for_record(tally: &CombatPreventionTally) -> Vec<PreventedDamageEntry> {
+    crate::game::combat_damage::sorted_prevention_entries(tally.clone())
+}
+
+/// CR 615.13: fold parked entries back into a live tally, summing duplicate
+/// pairs. A resumed batch re-accumulates onto its parked prefix through this.
+pub(crate) fn tally_map_from_record_entries(
+    entries: &[PreventedDamageEntry],
+) -> CombatPreventionTally {
+    let mut map = HashMap::new();
+    for entry in entries {
+        *map.entry((entry.key, entry.recipient.clone())).or_insert(0) += entry.amount;
+    }
+    map
+}
+
+/// CR 615.13 + CR 616.1e (Matt M1): the topmost parked frame owned by `owner`
+/// — the running tail's own record. The stack holds at most a few frames, so
+/// the linear scan costs nothing; topmost-first keeps a batch's own re-pause
+/// frames shadowing its older ones exactly like the legacy top did.
+pub(crate) fn top_owned_each_source_frame(
+    state: &GameState,
+    owner: u64,
+) -> Option<&EachSourceBatchFrame> {
+    state
+        .pending_each_source_batches
+        .iter()
+        .rev()
+        .find(|frame| frame.owner == owner)
+}
+
+/// CR 615.13 + CR 616.1e (Matt M1): mutable twin of
+/// `top_owned_each_source_frame`, for the applier write-through.
+pub(crate) fn top_owned_each_source_frame_mut(
+    state: &mut GameState,
+    owner: u64,
+) -> Option<&mut EachSourceBatchFrame> {
+    state
+        .pending_each_source_batches
+        .iter_mut()
+        .rev()
+        .find(|frame| frame.owner == owner)
+}
+
+/// CR 615.13 + CR 616.1e: publish every suspended prevention batch, innermost
+/// first, once the resumed drain completes. Called from
+/// `drain_pending_continuation` when a chain drains with batch frames present,
+/// no further choice pending, and no continuation still queued: each frame's
+/// tally is one CR 615.13 application (its shield/recipient groups), and each
+/// pop restores the surrounding transient that frame suspended, so nesting
+/// unwinds exactly. Empty frames (a scope whose tally already published
+/// inline) restore without publishing.
+///
+/// CR 615.5 (Matt C1): a frame's riders dispatch SCOPELESS — the completed
+/// batch's transient is deactivated first (the popped record is authoritative
+/// for publishing), and the remaining outer frames are suspended aside for
+/// the dispatch, exactly like combat Phase-D dispatch. Rider-created
+/// prevention therefore owns a fresh scope (per-event emission, or a fresh
+/// top-level batch scope of its own) instead of being absorbed into the dead
+/// batch and discarded on restore, or written through into an outer frame.
+/// Rider-created frames are restored above the outers, so the cascade still
+/// unwinds innermost-first.
+///
+/// CR 616.1e + CR 117.2e (Matt C2): returns the FRESH rider-created choice
+/// when a rider pauses mid-drainage, with parent frames left parked (the
+/// unpublished remainder re-parks below any rider frames, so the rider
+/// subtree drains first on resume). Returns `None` when every frame unwound.
+/// Callers propagate the fresh choice instead of any cached Priority.
+///
+/// CR 615.13 + CR 616.1e (Matt M1): each frame carries its owning batch's id.
+/// The drain hook publishes a completed batch's frames through
+/// `flush_owned_each_source_batches` at that batch's boundary — before outer
+/// instructions resume — while frames of any other owner stay parked for
+/// their own boundary. This quiescent all-flush remains for ownerless chains
+/// and the answer/boundary backstops.
+pub(crate) fn flush_pending_each_source_batches(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    while !state.pending_each_source_batches.is_empty() {
+        if let Some(waiting_for) = flush_top_each_source_frame(state, events) {
+            return Some(waiting_for);
+        }
+    }
+    None
+}
+
+/// CR 615.13 + CR 616.1e (Matt M1): publish the topmost contiguous run of
+/// frames owned by `owner` — the batch whose tail just drained — innermost
+/// first, stopping at the first frame of any other owner (those stay parked
+/// for their own boundary). Same per-frame semantics as the quiescent
+/// all-flush above, including the fresh-choice stop.
+pub(crate) fn flush_owned_each_source_batches(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    owner: u64,
+) -> Option<WaitingFor> {
+    while state
+        .pending_each_source_batches
+        .last()
+        .is_some_and(|frame| frame.owner == owner)
+    {
+        if let Some(waiting_for) = flush_top_each_source_frame(state, events) {
+            return Some(waiting_for);
+        }
+    }
+    None
+}
+
+/// Pop the top parked frame and dispatch it. Returns the fresh rider-created
+/// choice when the frame's drainage pauses (the remainder re-parks; the
+/// caller stops unwinding), or `None` when the frame unwound. Single
+/// per-frame authority shared by the all-flush and the owner-scoped flush.
+fn flush_top_each_source_frame(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    use crate::game::combat_damage::BatchRiderDrainOutcome;
+    let frame = state.pending_each_source_batches.pop()?;
+    // Matt C1: deactivate the completed batch's transient BEFORE its
+    // riders dispatch — a live transient here would absorb rider-created
+    // prevention into the already-popped batch.
+    state.combat_prevention_tally = None;
+    if frame.tally.is_empty() {
+        state.combat_prevention_tally = frame
+            .restore_tally
+            .map(|entries| tally_map_from_record_entries(&entries));
+        return None;
+    }
+    // Matt C1: suspend the surrounding scope for the dispatch, so a
+    // rider cannot hydrate from or write through into an outer frame.
+    let suspended = std::mem::take(&mut state.pending_each_source_batches);
+    let map = tally_map_from_record_entries(&frame.tally);
+    let entries = crate::game::combat_damage::sorted_prevention_entries(map);
+    let outcome =
+        crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events, true);
+    let rider_frames = std::mem::take(&mut state.pending_each_source_batches);
+    match outcome {
+        BatchRiderDrainOutcome::Completed => {
+            state.pending_each_source_batches = suspended;
+            state.pending_each_source_batches.extend(rider_frames);
+            state.combat_prevention_tally = frame
+                .restore_tally
+                .map(|entries| tally_map_from_record_entries(&entries));
+            None
+        }
+        BatchRiderDrainOutcome::Paused {
+            waiting_for,
+            published_entries,
+        } => {
+            // Matt C2: stop unwinding parent frames. The unpublished
+            // remainder re-parks with the same surrounding restore, BELOW
+            // the rider frames (the rider subtree owns the live prompt
+            // and drains first); the surrounding value survives only in
+            // the records until their frames unwind. An empty remainder
+            // still re-parks when it carries a surrounding restore —
+            // otherwise the outer scope would be dropped silently.
+            debug_assert!(published_entries <= entries.len());
+            let mut remainder = entries;
+            remainder.drain(..published_entries.min(remainder.len()));
+            state.pending_each_source_batches = suspended;
+            if !remainder.is_empty() || frame.restore_tally.is_some() {
+                state
+                    .pending_each_source_batches
+                    .push(EachSourceBatchFrame {
+                        tally: remainder,
+                        restore_tally: frame.restore_tally,
+                        owner: frame.owner,
+                    });
+            }
+            state.pending_each_source_batches.extend(rider_frames);
+            state.combat_prevention_tally = None;
+            let waiting_for = *waiting_for;
+            state.waiting_for = waiting_for.clone();
+            Some(waiting_for)
+        }
+    }
+}
+
 pub fn resolve_each_source_deals_damage(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // CR 615.13: a batch nested inside a suspended batch pushes a scope frame
+    // so its accumulations attribute to itself (never to the outer frame via
+    // write-through). Top-level batches push nothing — the common path stays
+    // allocation-free.
+    //
+    // CR 615.13 + CR 616.1e (Matt M1): every batch mints an owning id for the
+    // frames it parks and the tail it stashes, so a nested batch never shares
+    // attribution with its outer. The counter starts at 1; `0` stays the
+    // legacy-unowned sentinel.
+    let batch_id = state.next_each_source_batch_id.max(1);
+    state.next_each_source_batch_id = batch_id.saturating_add(1).max(1);
+    let entry_len = state.pending_each_source_batches.len();
+    let pushed_scope = !state.pending_each_source_batches.is_empty();
+    if pushed_scope {
+        state
+            .pending_each_source_batches
+            .push(EachSourceBatchFrame {
+                tally: Vec::new(),
+                restore_tally: None,
+                owner: batch_id,
+            });
+    }
+    let result = resolve_each_source_deals_damage_inner(state, ability, events, batch_id);
+    // A pause in this invocation (or deeper) pushed above our scope: the
+    // frames stay for the completion cascade. Otherwise this batch completed
+    // synchronously — pop and discard our scope (its tally already published
+    // by the inline flush, or is empty).
+    if pushed_scope && state.pending_each_source_batches.len() == entry_len + 1 {
+        state.pending_each_source_batches.pop();
+    }
+    result
+}
+
+fn resolve_each_source_deals_damage_inner(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    batch_id: u64,
 ) -> Result<(), EffectError> {
     let (sources, amount, recipient) = match &ability.effect {
         Effect::EachSourceDealsDamage {
@@ -2922,6 +3184,19 @@ pub fn resolve_each_source_deals_damage(
     let mut replaced: Vec<(DamageContext, ProposedEvent)> = Vec::new();
     let mut phase_b_paused_at: Option<usize> = None;
     let mut phase_b_waiting_for_player: Option<crate::types::player::PlayerId> = None;
+    // CR 615.13: activate the shared simultaneous-batch prevention tally so
+    // multi-source damage to one recipient aggregates into ONE prevention
+    // application (one aggregate event + one rider firing), exactly like the
+    // combat batch. Save/restore the surrounding value: a nested batch (e.g. a
+    // rider that deals damage) aggregates separately.
+    let restore_tally = state.combat_prevention_tally.take();
+    // CR 615.13: a nested batch suspends the outer scope — the surrounding
+    // transient rides in our scope frame (top of stack at this point, pushed
+    // by the wrapper) so the completion cascade restores it.
+    if let Some(top) = state.pending_each_source_batches.last_mut() {
+        top.restore_tally = restore_tally.as_ref().map(tally_entries_for_record);
+    }
+    state.combat_prevention_tally = Some(HashMap::new());
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
         let Some(proposed) = pre_replacement_damage_gate(state, ctx, target, *dmg, false, events)
         else {
@@ -2956,6 +3231,29 @@ pub fn resolve_each_source_deals_damage(
     }
 
     if let (Some(pause_at), Some(player)) = (phase_b_paused_at, phase_b_waiting_for_player) {
+        // CR 615.13 + CR 616.1e: a replacement choice pauses Phase B mid-batch.
+        // Park the completed prefix in a pause-owned record — the transient
+        // tally cannot span the player-visible pause — INSTEAD of publishing
+        // it: the resumed drain republishes the WHOLE batch (prefix, resumed
+        // entry, and stashed tail) as one CR 615.13 application. The
+        // surrounding tally rides in the record too (restored when the batch
+        // completes). Clear our scope copy (if nested) so the completion
+        // cascade publishes the prefix once, from this record.
+        let prefix_tally = state
+            .combat_prevention_tally
+            .take()
+            .map(|tally| tally_entries_for_record(&tally))
+            .unwrap_or_default();
+        if let Some(top) = state.pending_each_source_batches.last_mut() {
+            top.tally.clear();
+        }
+        state
+            .pending_each_source_batches
+            .push(EachSourceBatchFrame {
+                tally: prefix_tally,
+                restore_tally: restore_tally.as_ref().map(tally_entries_for_record),
+                owner: batch_id,
+            });
         state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
         // Source `pause_at` is mid-Phase-B (replacement choice in flight via
         // `waiting_for`); `handle_replacement_choice` will call
@@ -2967,10 +3265,40 @@ pub fn resolve_each_source_deals_damage(
         let raw_remaining = entries[pause_at + 1..]
             .iter()
             .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
-        stash_each_source_combined_continuation(state, ability, &replaced, raw_remaining);
+        let parked_tail = stash_each_source_combined_continuation(
+            state,
+            ability,
+            &replaced,
+            raw_remaining,
+            batch_id,
+        );
+        // CR 615.13 + CR 616.1e (Matt M1): an empty tail parks no continuation
+        // and no drain will ever run for this batch — stamp the pending
+        // prompt itself so the replacement-answer hook publishes this batch's
+        // boundary on the fresh outcome (before any outer tail resumes). A
+        // queued tail owns its boundary through its stamped continuation.
+        if !parked_tail {
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                pending.each_source_batch_owner = Some(batch_id);
+            }
+        }
         mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
         return Ok(());
     }
+
+    // CR 615.13: Phase B completed without pause — flush the whole batch as
+    // one application per (shield, recipient) BEFORE Phase C applies marks, so
+    // aggregate riders fire and `last_effect_count` carries the batch total
+    // while no further replacement can overwrite it. (Phase C pauses stash
+    // post-replacement survivors that bypass the pipeline, so flushing here
+    // is unaffected by them.) The inline flush consumed the batch tally —
+    // clear our scope copy (if nested) so the completion cascade never
+    // republishes it; our normal exit then pops and discards the spent scope.
+    flush_noncombat_prevention_tally(state, events);
+    if let Some(top) = state.pending_each_source_batches.last_mut() {
+        top.tally.clear();
+    }
+    state.combat_prevention_tally = restore_tally;
 
     // Phase C — apply all already-replaced damage events. If any source's
     // Phase C needs a choice (e.g. life-gain or lifelink replacement per CR

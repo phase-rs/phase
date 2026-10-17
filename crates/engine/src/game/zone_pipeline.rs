@@ -1839,6 +1839,7 @@ mod paused_search_audience_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
 
         // The owner parks on the unanswered event.

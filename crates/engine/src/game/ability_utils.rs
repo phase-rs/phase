@@ -7134,7 +7134,9 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost
-        | ContinuousModification::SubstituteTextWord { .. } => None,
+        | ContinuousModification::SubstituteTextWord { .. }
+        // CR 613.1b: designation-anchored control carries no quantity.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => None,
     }
 }
 

@@ -1170,6 +1170,73 @@ mod tests {
         );
     }
 
+    /// CR 109.4 (Matt R2-F4): the corpus-wide export gate refuses a typed
+    /// Continuous static gated on a `PlayerAttackedPlayer` with a
+    /// resolution-scoped `ChosenPlayer` endpoint — bare or nested under
+    /// `Not` — because the layer pipeline has no resolving ability to
+    /// answer it. The same gate with bindable endpoints ships clean.
+    /// Pre-fix the chosen-player shape passes the export.
+    #[test]
+    fn export_integrity_refuses_chosen_player_attack_gate() {
+        use crate::types::ability::{ControllerRef, StaticCondition, StaticDefinition};
+
+        let gate = |attacker: ControllerRef| StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker,
+                defender: ControllerRef::You,
+            }),
+        };
+        let face_with = |name: &str, condition: StaticCondition| {
+            let mut face = test_face(name);
+            let mut def = StaticDefinition::continuous();
+            def.condition = Some(condition);
+            face.static_abilities = vec![def];
+            face
+        };
+
+        // REJECT: bare and nested-Not ChosenPlayer gates fail the export no
+        // matter which parser route built them.
+        for (key, name, condition) in [
+            (
+                "chosen probe",
+                "Chosen Probe",
+                StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: 0 },
+                    defender: ControllerRef::You,
+                },
+            ),
+            (
+                "nested chosen probe",
+                "Nested Chosen Probe",
+                gate(ControllerRef::ChosenPlayer { index: 0 }),
+            ),
+        ] {
+            let mut faces = HashMap::new();
+            faces.insert(key.to_string(), face_with(name, condition));
+            let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap())
+                .expect("parses");
+            let errors = db.export_integrity_errors();
+            assert!(
+                errors.iter().any(|e| e.contains(name)),
+                "a ChosenPlayer attack gate must fail the export, got {errors:?}"
+            );
+        }
+
+        // ACCEPT: the same gate with bindable endpoints ships clean.
+        let mut ok_faces = HashMap::new();
+        ok_faces.insert(
+            "bound probe".to_string(),
+            face_with("Bound Probe", gate(ControllerRef::TargetPlayer)),
+        );
+        let ok_db = CardDatabase::from_json_str(&serde_json::to_string(&ok_faces).unwrap())
+            .expect("parses");
+        assert!(
+            ok_db.export_integrity_errors().is_empty(),
+            "a bindable attack gate must pass the export: {:?}",
+            ok_db.export_integrity_errors()
+        );
+    }
+
     #[test]
     fn from_json_str_parses_legacy_face_map_without_legalities() {
         let mut map = HashMap::new();

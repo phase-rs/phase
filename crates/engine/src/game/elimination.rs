@@ -819,10 +819,21 @@ fn end_control_effects_for_leaving_players(
     // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
     // steal of a survivor's object reverts rather than being over-exiled.
     state.transient_continuous_effects.retain(|e| {
+        // CR 800.4a + CR 725.5: a LEAVER-controlled designation-anchored TCE
+        // ends with its controller too — even when the current holder is a
+        // survivor, the EFFECT's controller left the game. Survivor-controlled
+        // designation TCEs survive (re-derived live by the layer pass).
         !(leaving_set.contains(&e.controller)
-            && e.modifications
+            && (e
+                .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::ChangeController)))
+                .any(|m| matches!(m, ContinuousModification::ChangeController))
+                || e.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::ChangeControllerToDesignation { .. }
+                    )
+                })))
     });
 
     // CR 613.1b: recompute layers so control reverts to base_controller/owner for
@@ -1444,6 +1455,15 @@ fn do_eliminate(
                 player_id: new_monarch,
             });
         }
+        // CR 611.3a + CR 725.4 + CR 725.5: succession (or vacancy, when nobody
+        // is left) can flip live monarch-reading statics — escalate iff any
+        // such static is live. Covers both the `None` and the succession
+        // branches above; the outer `if` already gates on the leaver having
+        // been the monarch.
+        super::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            super::layers::LayerInvalidationDimension::Monarch,
+        );
     }
 
     // CR 726.4: If the player who has the initiative leaves the game,
@@ -2007,6 +2027,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         }
     }
 
@@ -3516,6 +3537,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -3660,6 +3682,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -3716,6 +3739,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -3764,6 +3788,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -3842,6 +3867,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),

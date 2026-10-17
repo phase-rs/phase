@@ -127,6 +127,13 @@ pub fn apply_debug_action(
                     events.extend(delayed);
                     super::sba::check_state_based_actions(state, events); // CR 704
                 }
+                // CR 109.5: a bar on the victim refuses the debug action rather
+                // than reporting a sacrifice that never moved.
+                super::sacrifice::SacrificeOutcome::Prohibited => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent".to_string(),
+                    ));
+                }
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);

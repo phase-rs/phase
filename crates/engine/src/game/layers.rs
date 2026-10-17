@@ -1761,6 +1761,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::None => false,
     }
 }
@@ -1910,6 +1911,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => CharacteristicKinds::EMPTY,
     }
@@ -2049,6 +2051,7 @@ fn entered_object_perturbs_static_condition(
         // battlefield-population-dependent and unperturbed by a battlefield
         // entry — `false` exactly like `SourceIsTapped`.
         | StaticCondition::SourceIsFaceUp
+            | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -2093,7 +2096,11 @@ fn source_condition_gate_passes(
 /// anchored entry point is guarded exactly like `evaluate_condition` and
 /// `evaluate_condition_with_recipient`. The And/Or/Not recursions deliberately
 /// bypass it by calling `evaluate_condition_inner` — preserving the pre-existing
-/// recursion shape, which never re-entered the gate.
+/// recursion shape, which never re-entered the gate. The chosen-player gate
+/// below rides the same single entry for the same reason: every public entry
+/// (`evaluate_condition`, `evaluate_condition_with_recipient`, and this one)
+/// funnels through here, so one check covers the generic conditional-static
+/// path with no per-caller wiring.
 pub(crate) fn evaluate_condition_with_context(
     state: &GameState,
     condition: &StaticCondition,
@@ -2101,7 +2108,9 @@ pub(crate) fn evaluate_condition_with_context(
     source_id: ObjectId,
     context: ConditionContext,
 ) -> bool {
-    if static_condition_has_unanswerable_designation_anchor(state, condition, context) {
+    if static_condition_has_unanswerable_designation_anchor(state, condition, context)
+        || condition.has_unanswerable_chosen_player()
+    {
         return false;
     }
     evaluate_condition_inner(state, condition, controller, source_id, context)
@@ -2287,6 +2296,36 @@ fn evaluate_condition_inner(
         } => state.players.iter().any(|p| {
             p.id != controller && state.player_attacked_player_last_turn(p.id, controller)
         }),
+        // CR 508.6: retrospective this-turn player-pair attack test.
+        // Endpoints resolve through the shared `controller_ref_player`
+        // authority (`You` reads the layer controller; choice- and
+        // target-relative endpoints need ability context that layer
+        // evaluation lacks and fail closed). Unreachable from the current
+        // static grammar -- the sole producer lowers via
+        // `static_condition_to_ability_condition` -- so this arm is a
+        // totality witness over the same uncollapsed ledger the
+        // resolution-time reader uses (Faramir ruling 2023-06-16).
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            let attacker_id = crate::game::filter::controller_ref_player(
+                state,
+                source_id,
+                Some(controller),
+                None,
+                attacker,
+            );
+            let defender_id = crate::game::filter::controller_ref_player(
+                state,
+                source_id,
+                Some(controller),
+                None,
+                defender,
+            );
+            attacker_id
+                .zip(defender_id)
+                .is_some_and(|(attacker_id, defender_id)| {
+                    state.has_attacked_player_directly_this_turn(attacker_id, defender_id)
+                })
+        }
         // CR 508.6 + CR 508.1b + CR 506.3: the SAME CR 508.6 question, asked
         // about ONE player — the player this creature is attacking. "This
         // creature can attack PLAYERS WHO attacked you during their last turn."
@@ -4089,12 +4128,39 @@ pub(crate) fn any_active_static_reads_top_of_library(state: &GameState) -> bool 
     found
 }
 
-/// CR 401.5 + CR 611.3a: Force a full layer recompute after a library-top-changing
-/// event (shuffle, mill, put-on-top, draw), but only when a `TopOfLibraryMatches`
-/// static is actually live. Single authority called by every top-changing library
-/// move and shuffle helper so a stale layer cache can't survive the change.
-pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameState) {
-    if any_active_static_reads_top_of_library(state) {
+/// CR 611.3a: the layer-invalidation dimension a guarded mutation site is
+/// escalating for. Third-dimension parameterization (monarch joins
+/// top-of-library and life — the recorded trigger below, now fulfilled): one
+/// guarded entry point (`mark_layers_full_if_dimension_read_live`), one
+/// granularity (Full), per-dimension live-reader predicates. A FOURTH
+/// dimension extends this enum — never a fourth bespoke guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerInvalidationDimension {
+    /// CR 401.5: library-top readers (`TopOfLibraryMatches` statics).
+    TopOfLibrary,
+    /// CR 119: life-family readers.
+    LifeTotal,
+    /// CR 725.5: monarch-designation readers (designation-anchored
+    /// modifications + `IsMonarch` / `NoMonarch` gates).
+    Monarch,
+}
+
+/// CR 611.3a: single authority for guarded layer escalation. Forces a FULL
+/// battlefield re-evaluation after a dimension-changing event, but only when
+/// a static actually reading that dimension is live — simulated changes on
+/// cold paths stay cheap. Called by every guarded mutation site with its
+/// dimension so a stale layer cache can't survive a change that flips a
+/// derived board.
+pub(crate) fn mark_layers_full_if_dimension_read_live(
+    state: &mut GameState,
+    dimension: LayerInvalidationDimension,
+) {
+    let live = match dimension {
+        LayerInvalidationDimension::TopOfLibrary => any_active_static_reads_top_of_library(state),
+        LayerInvalidationDimension::LifeTotal => any_active_static_reads_life_total(state),
+        LayerInvalidationDimension::Monarch => any_active_static_reads_monarch(state),
+    };
+    if live {
         mark_layers_full(state);
     }
 }
@@ -4134,11 +4200,11 @@ pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameSta
 // Correctness doctrine (`StaticSourceIndex`): over-include, never
 // under-include; output byte-identical.
 //
-// SIBLING-CLUSTER TRIGGER (recorded follow-up): this is the SECOND
-// `mark_layers_full_if_*_static_live` guard after the library-top guard above.
-// At the THIRD such dimension, parameterize all three into a dimension enum and
-// migrate the library-top guard in the same change, rather than adding a fourth
-// bespoke classifier family.
+// SIBLING-CLUSTER TRIGGER (recorded follow-up — FULFILLED phase 5b): the
+// monarch third dimension parameterized all three guards into
+// `LayerInvalidationDimension` + `mark_layers_full_if_dimension_read_live`
+// above, migrating every library-top and life call site in the same change.
+// A fourth dimension extends that enum — never a fourth bespoke guard.
 // ===========================================================================
 
 /// CR 119: Does a `QuantityExpr` read the life family? Expression-level walk,
@@ -4662,6 +4728,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
@@ -4740,14 +4807,154 @@ fn any_active_static_reads_life_total(state: &GameState) -> bool {
     found
 }
 
-/// CR 611.3a + CR 119: Force a full layer recompute after a life-changing event,
-/// but only when a life-reading continuous static is actually live. Single
-/// authority called by the four guarded life-mutation sites in `effects/life.rs`
-/// so a stale layer cache can't survive a life change that flips a derived board.
-pub(crate) fn mark_layers_full_if_life_reading_static_live(state: &mut GameState) {
-    if any_active_static_reads_life_total(state) {
-        mark_layers_full(state);
+/// CR 611.3a + CR 613.1 + CR 725.5: Does a static condition read the monarch
+/// designation? Structural mirror of `static_condition_reads_life` with
+/// exactly two leaves flipped: `IsMonarch { .. }` (Dawnglade class — a monarch
+/// change flips the gate) and `NoMonarch` (vacancy flips on crowning and on
+/// elimination-succession). Every other leaf is monarch-free, enumerated
+/// explicitly (no wildcard) so a future condition variant breaks the build
+/// here instead of silently under-including a live reader.
+fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
+    match condition {
+        // CR 725.1: monarch identity and vacancy — the only condition leaves a
+        // monarch change can flip.
+        StaticCondition::IsMonarch { .. } | StaticCondition::NoMonarch => true,
+        // Recursive combinators (mirror of the life walk).
+        StaticCondition::Not { condition } => static_condition_reads_monarch(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_reads_monarch)
+        }
+        // Filter-bearing conditions: no monarch-scoped filter variant exists
+        // (Azure Fleet Admiral's "creatures the monarch controls" qualifier is
+        // dropped at parse — a pre-existing misparse, not a layer dependency),
+        // so these surfaces read no monarch. If a monarch-scoped filter is
+        // ever added, it MUST route here.
+        StaticCondition::IsPresent { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. } => false,
+        // Payload-free conditions — none read the monarch family. Enumerated
+        // explicitly (no wildcard); mirrors the life walk's leaf list.
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsInitiative
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        // Merge seam (upstream/main #9686): reads the player's held boon
+        // list, never the monarch designation.
+        | StaticCondition::HasBoon { .. }
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => false,
     }
+}
+
+/// CR 611.3a + CR 613.1 + CR 725.5: Does a CONTINUOUS static definition depend
+/// on the monarch designation through its enabling condition or a
+/// designation-anchored modification? Two surfaces (mirrors
+/// `static_definition_reads_life_total` minus the affected-filter surface:
+/// no monarch-scoped filter variant exists, so there is nothing to route —
+/// see `static_condition_reads_monarch`; adding one later MUST extend this
+/// walk or the guard under-includes).
+fn static_definition_reads_monarch(def: &StaticDefinition) -> bool {
+    def.mode == StaticMode::Continuous
+        && (def
+            .condition
+            .as_ref()
+            .is_some_and(static_condition_reads_monarch)
+            || def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::ChangeControllerToDesignation { .. }
+                )
+            }))
+}
+
+/// CR 611.3a: Is any functioning continuous static dependent on the monarch
+/// designation? Scans live static sources (including currently-false gates —
+/// a crowning may be exactly what flips one). Mirrors
+/// `any_active_static_reads_life_total`. NOT indexed into `StaticSourceIndex`
+/// bits by design: an off-zone generator arm is unindexed, so an indexed
+/// guard could under-include (unsound).
+fn any_active_static_reads_monarch(state: &GameState) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
+        }
+        if obj
+            .static_definitions
+            .iter_all()
+            .any(static_definition_reads_monarch)
+        {
+            found = true;
+        }
+    });
+    if found {
+        return true;
+    }
+    // CR 611.3a + CR 725.5 (Matt M3): live TRANSIENT modifications and their
+    // gates are readers too — a transient `ChangeControllerToDesignation` or
+    // monarch-gated buff can be the sole reader, and after its initial
+    // evaluation a crowning would otherwise leave layers Clean with the
+    // previous derived control/characteristics cached. Walked straight off
+    // the store, including currently-OFF gates (a crowning may be exactly
+    // what flips one — same rationale as the characteristic-reads transient
+    // walk, which also refuses to project through `active_effects`).
+    state.transient_continuous_effects.iter().any(|tce| {
+        transient_gate_conditions(tce).any(static_condition_reads_monarch)
+            || tce.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::ChangeControllerToDesignation { .. }
+                )
+            })
+    })
 }
 
 /// CR 400.7 + CR 611.3a: Query zone-sensitive static dependencies on both sides
@@ -5593,6 +5800,11 @@ fn modification_characteristic_writes_at(
         // between controller-keyed populations, which is the read this gate
         // protects.
         ContinuousModification::ChangeController => CharacteristicKinds::CONTROLLER,
+        // CR 613.1b + CR 725.5: designation-anchored control moves the object
+        // between the same populations — same gate.
+        ContinuousModification::ChangeControllerToDesignation { .. } => {
+            CharacteristicKinds::CONTROLLER
+        }
 
         // ---- CR 613.1g + CR 613.4a-d (layer 7): power/toughness. ----
         ContinuousModification::AddPower { .. }
@@ -7032,6 +7244,7 @@ fn gather_ring_emblem_continuous_effects(
             mode: StaticMode::Continuous,
             characteristic_defining: false,
             granter: None,
+            bound_actor: None,
         });
     }
 }
@@ -7388,6 +7601,7 @@ fn active_continuous_effects_from_static_definitions(
                 mode: def.mode.clone(),
                 characteristic_defining: def.characteristic_defining,
                 granter: def.granting_object,
+                bound_actor: None,
             };
             // CR 113.3d + CR 604.1 + CR 611.2c: A `GrantStaticAbility` modification
             // installs the inner static onto every recipient in the host's live
@@ -7546,6 +7760,7 @@ fn expand_granted_static_effects(
                 mode: inner.mode.clone(),
                 characteristic_defining: inner.characteristic_defining,
                 granter: inner.granting_object,
+                bound_actor: None,
             });
         }
     }
@@ -8141,6 +8356,7 @@ fn expand_granted_activated_abilities(
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
                     granter: None,
+                    bound_actor: None,
                 });
                 next_mod_index += 1;
             }
@@ -8246,6 +8462,7 @@ fn expand_granted_triggered_abilities(
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
                     granter: None,
+                    bound_actor: None,
                 });
                 next_mod_index += 1;
             }
@@ -8408,6 +8625,7 @@ fn gather_transient_continuous_effects_with(
                 mode: StaticMode::Continuous,
                 characteristic_defining: false,
                 granter: tce.granting_object,
+                bound_actor: tce.bound_actor,
             };
             // CR 113.3d + CR 604.1 + CR 611.2c: Mirror the printed-static gather
             // path — a transient `GrantStaticAbility` must expand its inner
@@ -11021,6 +11239,19 @@ fn apply_continuous_effect_filtered(
     let modification = stamped_modification
         .as_ref()
         .unwrap_or(&effect.modification);
+    // CR 613.1b + CR 725.5: pre-read the monarch for designation-anchored
+    // control — a `Copy` scalar read before the per-recipient loop (same
+    // pattern as `all_creature_types` above), so the apply arm below never
+    // borrows `state` under the `obj` mutable borrow. Conditional like the
+    // other pre-reads: only designation-anchored effects pay for it.
+    let designation_monarch = if matches!(
+        effect.modification,
+        ContinuousModification::ChangeControllerToDesignation { .. }
+    ) {
+        state.monarch
+    } else {
+        None
+    };
 
     for &id in affected_ids {
         // CR 613.4c: When the dynamic modification's QuantityExpr depends on
@@ -11564,6 +11795,15 @@ fn apply_continuous_effect_filtered(
                 if static_mode_needs_source_controller_anchor(&resolved_mode) {
                     def = def.source_controller(effect.controller);
                 }
+                // CR 109.5 + CR 701.21a: an installer-bound transient stamps
+                // its bound actor as the graft's anchor, so the sacrifice
+                // query can exempt exactly this actor-bound graft for other
+                // actors while object-wide grafts (anchor `None`) keep
+                // barring everyone. No-op for every existing producer: only
+                // installer-bound TCEs carry `Some`.
+                if let Some(bound) = effect.bound_actor {
+                    def = def.source_controller(bound);
+                }
                 // CR 611.2c: stamp the directing object so combat / future
                 // attribution consumers can name the object that grafted this
                 // static (the ForceAttack / Encore / mass-coerce source for a
@@ -11604,6 +11844,21 @@ fn apply_continuous_effect_filtered(
             // authority) rather than re-deriving from the source object.
             ContinuousModification::ChangeController => {
                 obj.controller = effect.controller;
+            }
+            // CR 613.1b (Layer 2) + CR 725.5: designation-anchored control.
+            // The holder is the LIVE designation pre-read above — deliberately
+            // NOT `effect.controller` (the holder changes without the source
+            // changing, so a queued snapshot would go stale). CR 725.5: a
+            // vacant designation is a no-op, never a default. Exhaustive over
+            // `Designation`: a future leaf breaks the build here by design.
+            ContinuousModification::ChangeControllerToDesignation { designation } => {
+                match designation {
+                    Designation::Monarch => {
+                        if let Some(monarch) = designation_monarch {
+                            obj.controller = monarch;
+                        }
+                    }
+                }
             }
             // CR 305.7: Setting a land's subtype removes all old land subtypes
             // (CR 205.3i) and all abilities generated from its rules text. Non-land
@@ -11885,6 +12140,8 @@ pub(crate) fn apply_type_or_color_modification(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // CR 613.1b: designation-anchored control is layer 2, not type/color.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
@@ -21304,6 +21561,7 @@ mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
+                bound_actor: None,
             });
         let mut effects = vec![];
         gather_transient_continuous_effects(&state, &mut effects);
@@ -21340,6 +21598,7 @@ mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
+                bound_actor: None,
             });
         let mut effects = vec![];
         gather_transient_continuous_effects(&state, &mut effects);
@@ -21388,6 +21647,7 @@ mod tests {
                     granting_object: None,
                     duration_event_source: None,
                     source_name: String::new(),
+                    bound_actor: None,
                 });
         }
 
@@ -24909,6 +25169,7 @@ mod tests {
             condition: None,
             mode: StaticMode::Continuous,
             characteristic_defining: false,
+            bound_actor: None,
         }
     }
 
@@ -25416,6 +25677,418 @@ mod tests {
         assert!(
             state.objects[&bear_b].summoning_sick,
             "exchanged permanent B: new controller, sick (CR 302.6)"
+        );
+    }
+
+    // -- CR 613.1b + CR 725.5 designation-anchored control (Phase 5b S1) --
+    //
+    // Helper: add a Layer 2 ChangeControllerToDesignation effect targeting
+    // `target_id`. The queued effect's controller is caller-chosen so tests
+    // can separate it from the designation holder: the apply arm must read
+    // the LIVE designation, never `effect.controller`.
+    fn add_designation_controller_effect(
+        state: &mut GameState,
+        source_id: ObjectId,
+        target_id: ObjectId,
+        effect_controller: PlayerId,
+        designation: Designation,
+    ) -> Option<u64> {
+        state.add_transient_continuous_effect(
+            source_id,
+            effect_controller,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::ChangeControllerToDesignation { designation }],
+            None,
+        )
+    }
+
+    /// CR 613.1b + CR 725.3: the enchanted creature's controller is the live
+    /// monarch. The queued effect's controller (P0) differs from the holder
+    /// (P1) — a snapshot-at-install arm would leave control at P0.
+    #[test]
+    fn designation_control_reads_live_monarch() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+
+        let _eid = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "Layer 2 must apply the live monarch, not the effect controller"
+        );
+    }
+
+    /// CR 725.5: with no monarch the designation-anchored effect does
+    /// nothing — control stays at base even though the queued effect's
+    /// controller (P1) differs. A defaulting arm would hand control to P1.
+    #[test]
+    fn designation_control_vacant_leaves_base_controller() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = None;
+
+        let _eid = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(1),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(0),
+            "vacant designation must not move control (CR 725.5)"
+        );
+    }
+
+    /// CR 725.5 liveness: the effect applies once a monarch is crowned
+    /// WITHOUT reinstalling the Aura — P1 crowned → P1; crown passes
+    /// (vacant) → base P0; P1 crowned again → P1.
+    #[test]
+    fn designation_control_tracks_later_crowning() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+
+        let _eid = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, PlayerId(1));
+
+        state.monarch = None;
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(0),
+            "vacancy reverts to base on re-evaluation"
+        );
+
+        state.monarch = Some(PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "later crowning re-applies with no reinstall"
+        );
+    }
+
+    // -- CR 611.3a + CR 725.5 monarch invalidation guard (Phase 5b S3) --
+    //
+    // Helper: attach a CONTINUOUS static `def` to a fresh 1/1 creature (mirrors
+    // `make_life_static_source`).
+    fn make_monarch_static_source(
+        state: &mut GameState,
+        name: &str,
+        player: PlayerId,
+        def: StaticDefinition,
+    ) -> ObjectId {
+        let id = make_creature(state, name, 1, 1, player);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        id
+    }
+
+    /// Shared reach-guard: run ONLY the monarch guard from a Clean baseline
+    /// and assert it forces a full escalation (mirrors
+    /// `assert_full_escalation_on_guard` for the life dimension).
+    fn assert_full_escalation_on_monarch_guard(state: &mut GameState) {
+        evaluate_layers(state);
+        state.layers_dirty = LayersDirty::Clean;
+        mark_layers_full_if_dimension_read_live(state, LayerInvalidationDimension::Monarch);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a live monarch-reading continuous static must force full escalation"
+        );
+    }
+
+    /// Fealty-shaped static (designation-anchored control) escalates on a
+    /// monarch change. Reverting the member arm stops escalation.
+    #[test]
+    fn monarch_member_static_escalates_on_crowning() {
+        let mut state = setup();
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(vec![
+                ContinuousModification::ChangeControllerToDesignation {
+                    designation: Designation::Monarch,
+                },
+            ]);
+        make_monarch_static_source(&mut state, "Fealty-ish", P1, def);
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// Dawnglade-shaped static (`IsMonarch` gate) escalates on a monarch
+    /// change — the pre-existing surface the guard also covers. Reverting the
+    /// `IsMonarch` arm stops escalation.
+    #[test]
+    fn ismonarch_gated_static_escalates_on_crowning() {
+        let mut state = setup();
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .condition(StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            })
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        make_monarch_static_source(&mut state, "Dawnglade-ish", P0, def);
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// No monarch reader live → the guard stays Clean (negative control so
+    /// the positives above are not passing vacuously; row 6 granularity pin:
+    /// cold paths pay nothing).
+    #[test]
+    fn monarch_guard_stays_clean_without_reader() {
+        let mut state = setup();
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        make_monarch_static_source(&mut state, "Plain anthem", P0, def);
+        evaluate_layers(&mut state);
+        state.layers_dirty = LayersDirty::Clean;
+        mark_layers_full_if_dimension_read_live(&mut state, LayerInvalidationDimension::Monarch);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Clean),
+            "no live monarch reader → no escalation"
+        );
+    }
+
+    /// Classifier matrix: member / IsMonarch / NoMonarch / Not(IsMonarch)
+    /// read; plain anthem / IsInitiative / unrelated condition do not.
+    /// Revert-failing per arm.
+    #[test]
+    fn monarch_reader_classifier_matrix() {
+        use StaticCondition as C;
+        let member = StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::ChangeControllerToDesignation {
+                designation: Designation::Monarch,
+            },
+        ]);
+        assert!(static_definition_reads_monarch(&member));
+        for condition in [
+            C::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+            C::NoMonarch,
+            C::Not {
+                condition: Box::new(C::IsMonarch {
+                    player: PlayerScope::Target,
+                }),
+            },
+        ] {
+            let def = StaticDefinition::continuous().condition(condition);
+            assert!(
+                static_definition_reads_monarch(&def),
+                "monarch condition surface must read"
+            );
+        }
+        let plain = StaticDefinition::continuous()
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        assert!(!static_definition_reads_monarch(&plain));
+        let initiative = StaticDefinition::continuous().condition(C::IsInitiative);
+        assert!(
+            !static_definition_reads_monarch(&initiative),
+            "initiative is a different designation (CR 726)"
+        );
+        let turn_gate = StaticDefinition::continuous().condition(C::DuringYourTurn);
+        assert!(!static_definition_reads_monarch(&turn_gate));
+    }
+
+    /// CR 611.3a + CR 725.5 (Matt M3): a live TRANSIENT
+    /// designation-anchored effect is a monarch reader — the guard must
+    /// escalate even though no static definition reads the monarch.
+    /// Pre-fix this stays Clean: the predicate scans statics only.
+    #[test]
+    fn transient_designation_effect_escalates_on_crowning() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, P0);
+        let _eid =
+            add_designation_controller_effect(&mut state, bear, bear, P0, Designation::Monarch);
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// CR 611.3a + CR 725.5 (Matt M3): a transient whose monarch gate is
+    /// currently OFF still counts — a crowning may be exactly what flips it
+    /// (mirrors the characteristic-reads transient walk, which includes OFF
+    /// gates for the same reason).
+    #[test]
+    fn transient_ismonarch_gate_escalates_on_crowning() {
+        let mut state = setup();
+        state.monarch = None;
+        let bear = make_creature(&mut state, "Bear", 2, 2, P0);
+        let _eid = state.add_transient_continuous_effect(
+            bear,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![ContinuousModification::AddPower { value: 2 }],
+            Some(StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }),
+        );
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// Production crowning through the real `BecomeMonarch` resolve path (no
+    /// manual dirty marking, no hand-set designation).
+    fn crown_through_production_resolve(state: &mut GameState, source: ObjectId, player: PlayerId) {
+        use crate::types::events::GameEvent;
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            player,
+        );
+        let mut events = Vec::new();
+        crate::game::effects::become_monarch::resolve(
+            state,
+            &ability,
+            &TargetFilter::Controller,
+            &mut events,
+        )
+        .expect("production crowning must resolve");
+        assert!(
+            matches!(
+                events.last(),
+                Some(GameEvent::MonarchChanged { player_id }) if *player_id == player
+            ),
+            "crowning must publish MonarchChanged for the new monarch"
+        );
+    }
+
+    /// CR 725.5 (Matt M3): production crowning invalidates transient monarch
+    /// readers with NO manual dirty marking. Vacancy/later-crowning control:
+    /// vacant → crown P1 (designation control + gated buff flip) → crown P0
+    /// back (both revert). Pre-fix the first crowning leaves layers Clean and
+    /// the derived control/characteristics go stale.
+    #[test]
+    fn production_crowning_invalidates_transient_monarch_readers() {
+        let mut state = setup();
+        state.monarch = None;
+        let bear = make_creature(&mut state, "Bear", 2, 2, P0);
+        // Sole readers: ungated designation control (P0-installed) + an OFF
+        // IsMonarch-gated +2/+0 buff held by P1.
+        let _d =
+            add_designation_controller_effect(&mut state, bear, bear, P0, Designation::Monarch);
+        let _g = state.add_transient_continuous_effect(
+            bear,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![ContinuousModification::AddPower { value: 2 }],
+            Some(StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }),
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, P0);
+        assert_eq!(state.objects[&bear].power, Some(2));
+        state.layers_dirty = LayersDirty::Clean;
+
+        // Crown P1: control follows the designation, P1's gate flips ON.
+        crown_through_production_resolve(&mut state, bear, P1);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "crowning P1 must invalidate with transient monarch readers live"
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, P1);
+        assert_eq!(state.objects[&bear].power, Some(4));
+        state.layers_dirty = LayersDirty::Clean;
+
+        // Crown passes back to P0: control follows, P1's gate flips OFF.
+        crown_through_production_resolve(&mut state, bear, P0);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "crowning P0 must invalidate with transient monarch readers live"
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, P0);
+        assert_eq!(state.objects[&bear].power, Some(2));
+    }
+
+    /// CR 613.1b row 3: layer-2 join with timestamp ordering — the LATER
+    /// control effect wins EACH way (timestamps resolve at install, CR
+    /// 613.7b, so install order is timestamp order; no new ordering code).
+    #[test]
+    fn control_order_follows_later_effect_both_directions() {
+        // Leg A: designation first, source-control second → source wins.
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+        let _d = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "designation alone applies the monarch"
+        );
+        let _c =
+            add_change_controller_effect(&mut state, bear, bear, PlayerId(0), Duration::Permanent);
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(0),
+            "later source-control effect must win over earlier designation"
+        );
+
+        // Leg B: source-control first, designation second → designation wins.
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+        let _c =
+            add_change_controller_effect(&mut state, bear, bear, PlayerId(0), Duration::Permanent);
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, PlayerId(0));
+        let _d = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "later designation effect must win over earlier source-control"
         );
     }
 
@@ -28734,7 +29407,7 @@ mod tests {
     // ── U3: life-gated layer escalation (CR 611.3a + CR 119) ──────────────
     //
     // Every fixture below is REVERT-FAILING: reverting the classifier arm it
-    // exercises to `=> false` makes `mark_layers_full_if_life_reading_static_live`
+    // exercises to `=> false` makes the dimension guard (`LifeTotal`)
     // a no-op, so the escalation assertion (and, where present, the differential
     // derived-board / `layers_full_eval == 1` reach-guard) fails.
 
@@ -29064,7 +29737,7 @@ mod tests {
             .life = start_life + 5;
         state.layers_dirty = LayersDirty::Clean;
         crate::game::perf_counters::reset();
-        mark_layers_full_if_life_reading_static_live(&mut state);
+        mark_layers_full_if_dimension_read_live(&mut state, LayerInvalidationDimension::LifeTotal);
         assert!(
             matches!(state.layers_dirty, LayersDirty::Full),
             "a live LifeTotal CDA must force full escalation on a life change"
@@ -29382,7 +30055,7 @@ mod tests {
         state.players.iter_mut().find(|p| p.id == P0).unwrap().life = start_life - 3;
         state.layers_dirty = LayersDirty::Clean;
         crate::game::perf_counters::reset();
-        mark_layers_full_if_life_reading_static_live(&mut state);
+        mark_layers_full_if_dimension_read_live(&mut state, LayerInvalidationDimension::LifeTotal);
         assert!(
             matches!(state.layers_dirty, LayersDirty::Clean),
             "no life-reading static ⇒ no escalation"
@@ -29952,7 +30625,7 @@ mod tests {
     fn assert_full_escalation_on_guard(state: &mut GameState) {
         evaluate_layers(state);
         state.layers_dirty = LayersDirty::Clean;
-        mark_layers_full_if_life_reading_static_live(state);
+        mark_layers_full_if_dimension_read_live(state, LayerInvalidationDimension::LifeTotal);
         assert!(
             matches!(state.layers_dirty, LayersDirty::Full),
             "a live life-reading continuous static must force full escalation"

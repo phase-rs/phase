@@ -2065,7 +2065,10 @@ pub(super) fn handle_resolution_choice(
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
             // static must be re-evaluated — self-gated so it's a no-op otherwise.
-            crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+            crate::game::layers::mark_layers_full_if_dimension_read_live(
+                state,
+                crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+            );
             // CR 603.2 + CR 603.3b: the resumed continuation can perform further
             // observable game actions (e.g. a SECOND "scry N" in the same
             // resolution — "whenever you scry" fires once per scry event) and
@@ -4477,7 +4480,10 @@ pub(super) fn handle_resolution_choice(
                 // CR 401.5 + CR 611.3a: Dig kept cards on top by editing the
                 // library directly, so a `TopOfLibraryMatches` static must be
                 // re-evaluated (self-gated on liveness).
-                crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+                crate::game::layers::mark_layers_full_if_dimension_read_live(
+                    state,
+                    crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+                );
                 if let Some(zone) = move_unkept_to {
                     // CR 614.6 + CR 603.10a: route the unkept pile through the
                     // zone-change pipeline so a per-card `Moved` graveyard→exile
@@ -6215,6 +6221,20 @@ pub(super) fn handle_resolution_choice(
                         "Selected card is no longer in {:?}",
                         zone
                     )));
+                }
+                // CR 608.2d: a resolving player can't choose an illegal
+                // option. The pool excluded barred permanents when the
+                // prompt was issued, but a bar granted in the window — or a
+                // stale client submission — must reject here, before the
+                // performer, not evade via its mid-resolution skip.
+                if matches!(effect_kind, EffectKind::Sacrifice)
+                    && crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *card_id,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(
+                        "Selected permanent can't be sacrificed by this player".to_string(),
+                    ));
                 }
             }
 

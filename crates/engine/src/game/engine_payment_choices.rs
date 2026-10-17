@@ -2339,6 +2339,18 @@ fn eligible_unless_sacrifice_permanents(
                     obj.controller == player
                         && !obj.is_emblem
                         && crate::game::filter::matches_target_filter(state, **id, filter, &ctx)
+                        // CR 118.3 + CR 702.21a: an object its payer is barred
+                        // from sacrificing (Call for Aid's "you can't sacrifice
+                        // those creatures", a printed bar) is not a legal
+                        // payment candidate. Offering it lets an impossible
+                        // full cost START: the Count/aggregate affordability
+                        // gates below count it, the first sacrifice spends,
+                        // and the payer strands at the Prohibited arm with the
+                        // spent permanent unrecoverable. The actor-aware
+                        // authority — not the actor-blind graft read — decides.
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, **id,
+                        )
                 })
                 .unwrap_or(false)
         })
@@ -2435,9 +2447,26 @@ pub(super) fn resume_ward_sacrifice_payment(
 
     match resume {
         WardSacrificePaymentResume::MultiSacrifice { remaining } => {
+            // CR 118.3: the replacement pause is a live-board window — a bar
+            // granted while parked must fail the resume BEFORE the first
+            // resumed sacrifice spends, not strand mid-batch at Prohibited.
+            if remaining.iter().any(|id| {
+                crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, *id)
+            }) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             for (index, id) in remaining.iter().enumerate() {
                 match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                     crate::game::sacrifice::SacrificeOutcome::Complete => {}
+                    // CR 109.5: a mid-payment bar fails the Ward cost instead
+                    // of recording an unsacrificed permanent as paid.
+                    crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot sacrifice this permanent as a cost".to_string(),
+                        ));
+                    }
                     crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
                         choice_player,
                     ) => {
@@ -2461,9 +2490,17 @@ pub(super) fn resume_ward_sacrifice_payment(
             remaining,
         } => {
             if remaining > 1 {
+                // CR 118.3: same bar-aware re-derivation as the live
+                // re-prompt — the pause window can grant bars too.
                 let eligible = permanents
                     .into_iter()
-                    .filter(|&id| id != sacrificed && state.objects.contains_key(&id))
+                    .filter(|&id| {
+                        id != sacrificed
+                            && state.objects.contains_key(&id)
+                            && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                                state, player, id,
+                            )
+                    })
                     .collect();
                 state.waiting_for = WaitingFor::WardSacrificeChoice {
                     player,
@@ -2699,9 +2736,28 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "Selected permanents' total power must be at least {threshold}"
             )));
         }
+        // CR 118.3: revalidate the LIVE bar on submission — the prompt's
+        // `permanents` snapshot predates this action, and a bar granted in
+        // the window (replacement pause, mana-ability board change) must
+        // reject the submission BEFORE anything is spent, not strand the
+        // payer at the Prohibited arm mid-batch.
+        if chosen.iter().any(|id| {
+            crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, *id)
+        }) {
+            return Err(EngineError::InvalidAction(
+                "A selected permanent can't be sacrificed by this player".to_string(),
+            ));
+        }
         for (index, id) in chosen.iter().enumerate() {
             match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                 crate::game::sacrifice::SacrificeOutcome::Complete => {}
+                // CR 109.5: a mid-payment bar fails the Ward cost instead
+                // of recording an unsacrificed permanent as paid.
+                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent as a cost".to_string(),
+                    ));
+                }
                 crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     return Ok(pause_ward_sacrifice_payment(
                         state,
@@ -2721,6 +2777,13 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "Must select exactly one permanent to sacrifice".to_string(),
             ));
         }
+        // CR 118.3: same live-bar submission revalidation as the aggregate
+        // branch — reject before the sacrifice, never strand after it.
+        if crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, chosen[0]) {
+            return Err(EngineError::InvalidAction(
+                "The selected permanent can't be sacrificed by this player".to_string(),
+            ));
+        }
 
         // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
         // co-departed gap. Each Ward sacrifice is taken in its own action's `events`
@@ -2731,6 +2794,13 @@ pub(super) fn handle_ward_sacrifice_choice(
         // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
         match crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)? {
             crate::game::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 109.5: a mid-payment bar fails the Ward cost instead
+            // of recording an unsacrificed permanent as paid.
+            crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_ward_sacrifice_payment(
                     state,
@@ -2748,9 +2818,17 @@ pub(super) fn handle_ward_sacrifice_choice(
 
         // If more sacrifices remain, re-prompt with updated eligible permanents
         if remaining > 1 {
+            // CR 118.3: re-derive through the same bar-aware authority as
+            // the offer — a bar granted mid-payment must not be re-offered.
             let eligible: Vec<ObjectId> = permanents
                 .into_iter()
-                .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
+                .filter(|&id| {
+                    id != chosen[0]
+                        && state.objects.contains_key(&id)
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, id,
+                        )
+                })
                 .collect();
             state.waiting_for = WaitingFor::WardSacrificeChoice {
                 player,

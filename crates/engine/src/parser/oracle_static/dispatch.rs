@@ -9,6 +9,7 @@ use super::{
     restriction::*, same_is_true::*, type_change::*,
 };
 use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
+use crate::types::ability::Designation;
 use crate::types::statics::ProhibitionScope;
 
 /// CR 201.5: Consume a self-reference subject — `~` (produced by
@@ -1426,6 +1427,38 @@ pub(crate) fn parse_static_line_inner(
                     StaticDefinition::continuous()
                         .affected(TargetFilter::Typed(tf))
                         .modifications(vec![ContinuousModification::ChangeController])
+                        .description(text.to_string()),
+                );
+            }
+        }
+    }
+
+    // --- "The monarch controls enchanted creature" (Fealty to the Realm pattern) ---
+    // CR 303.4e + CR 613.1b + CR 725.5: Aura-based DESIGNATION-anchored
+    // control. Structural twin of the Control Magic arm above — same affected
+    // filter (`parse_type_phrase_folding` + `EnchantedBy`, so any future
+    // "monarch controls enchanted X" printing parses with no new code), but
+    // the controller source is the live monarch
+    // (`ChangeControllerToDesignation`), not the Aura's controller.
+    // Fail-closed: a non-empty remainder (extra clause after the type phrase)
+    // falls through to honest-Unimplemented, never a partial control grant.
+    if let Some(type_word) = nom_tag_lower(
+        tp.lower.trim_end_matches('.'),
+        tp.lower.trim_end_matches('.'),
+        "the monarch controls enchanted ",
+    ) {
+        let (type_filter, remainder) = parse_type_phrase_folding(type_word);
+        if remainder.is_empty() {
+            if let TargetFilter::Typed(mut tf) = type_filter {
+                tf.properties.push(FilterProp::EnchantedBy);
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::Typed(tf))
+                        .modifications(vec![
+                            ContinuousModification::ChangeControllerToDesignation {
+                                designation: Designation::Monarch,
+                            },
+                        ])
                         .description(text.to_string()),
                 );
             }

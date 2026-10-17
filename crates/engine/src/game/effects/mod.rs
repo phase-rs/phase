@@ -1304,6 +1304,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             attachment_remainder: _,
             player_scope_linked_exile,
             player_scope_queue_end,
+            each_source_batch_owner,
         } = cont;
         debug_assert!(
             pending_return_result_producer.is_none(),
@@ -1323,6 +1324,13 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let prior_occurrence = std::mem::replace(
             &mut state.active_return_result_occurrence,
             return_result_occurrence,
+        );
+        // CR 615.13 + CR 616.1e (Matt M1): restore the draining tail's batch
+        // owner for the synchronous window (save/restore, like the occurrence
+        // above — the cascade below re-enters this drain for outer tails).
+        let prior_batch_owner = std::mem::replace(
+            &mut state.resolving_each_source_batch_owner,
+            each_source_batch_owner,
         );
         // CR 608.2: replay the resolving ability's snapshotted trigger
         // context so TargetFilter::TriggeringPlayer (and its siblings)
@@ -1373,6 +1381,35 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     resolve_ability_chain_step(state, &scope.after_scope, events, 1).ok();
             }
         }
+        // CR 615.13 + CR 616.1e: a resumed prevention batch publishes its
+        // aggregate application(s) exactly here — its chain fully drained with
+        // no further choice pending. Earlier (mid-chain) would fragment the
+        // batch. Innermost-first cascade; the stack check alone skips the
+        // common path. Runs before the marker below so aggregate events
+        // precede `EffectResolved`, matching the unpaused order.
+        //
+        // Matt M1: the just-drained chain's OWNING batch publishes at its own
+        // boundary even while an outer continuation remains queued — deferring
+        // it would leave a completed child parked for the outer tail to
+        // hydrate. Frames of any other owner stay parked for their own
+        // boundary. An ownerless chain keeps the legacy quiescent flush.
+        if !state.pending_each_source_batches.is_empty()
+            && !waits_for_resolution_choice(&state.waiting_for)
+        {
+            // Matt C2: a fresh rider-created choice stays parked in
+            // `state.waiting_for` (synced by the flush); the gates below
+            // read it from state, so no local propagation is needed here.
+            if let Some(owner) = each_source_batch_owner {
+                let _fresh_choice =
+                    deal_damage::flush_owned_each_source_batches(state, events, owner);
+            }
+            if state.active_ability_continuation().is_none()
+                && !waits_for_resolution_choice(&state.waiting_for)
+                && !state.pending_each_source_batches.is_empty()
+            {
+                let _fresh_choice = deal_damage::flush_pending_each_source_batches(state, events);
+            }
+        }
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
                 kind,
@@ -1381,6 +1418,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             });
         }
         state.active_return_result_occurrence = prior_occurrence;
+        state.resolving_each_source_batch_owner = prior_batch_owner;
         retire_unreferenced_return_result_frames(state);
         if chain_progress == Some(ResolutionProgress::Queued) {
             // CR 608.2c + CR 117.2e: ready child work must settle in this action.
@@ -2818,6 +2856,58 @@ pub(crate) fn append_to_pending_continuation(
     }
 }
 
+/// CR 615.13 + CR 616.1e (Matt M1): park an `EachSourceDealsDamage` Phase-B
+/// tail as its OWN continuation frame, stamped with the pausing batch's id —
+/// never spliced into an active outer chain.
+///
+/// Splicing (what `append_to_pending_continuation` does when a continuation is
+/// already active) merges two owners' tails into one chain with one boundary:
+/// the nested child's frames then sit last while the outer tail's damage
+/// hydrates them, mixing separate applications and publishing at the wrong
+/// boundary. A dedicated frame drains first (LIFO), publishes the child's
+/// boundary before outer instructions resume, and restores the child's owner
+/// as the ambient drain owner while its tail runs. A `None` tail parks nothing
+/// (single source, no downstream), exactly like the shared helper.
+pub(crate) fn push_each_source_tail_continuation(
+    state: &mut GameState,
+    tail: Option<Box<ResolvedAbility>>,
+    owner: u64,
+) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    let mut pending = PendingContinuation::new(tail, state);
+    // The pausing batch names its tail explicitly: ambient inheritance alone
+    // would stamp a nested batch with an outer drain's owner instead of its
+    // own.
+    pending.each_source_batch_owner = Some(owner);
+    state.park_ability_continuation(pending);
+    true
+}
+
+/// CR 615.13 + CR 616.1e (R2-F1): park an `EachSourceDealsDamage` pause's
+/// downstream `sub_ability` as its OWN ownerless continuation frame, below
+/// the stamped batch-remainder frame. Downstream instructions are genuine
+/// later instructions, not simultaneous batch members: spliced into the
+/// remainder's chain they would hydrate the batch tally and merge into its
+/// application. As a separate frame they drain after the remainder's
+/// boundary publishes (LIFO + the drain cascade), with an ownerless ambient
+/// so their prevention publishes its own application. The `None` stamp is
+/// explicit (never ambient-inherited): inheriting an outer drain's owner
+/// would flush that still-incomplete outer batch from this frame's hook.
+pub(crate) fn push_ownerless_tail_continuation(
+    state: &mut GameState,
+    tail: Option<Box<ResolvedAbility>>,
+) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    let mut pending = PendingContinuation::new(tail, state);
+    pending.each_source_batch_owner = None;
+    state.park_ability_continuation(pending);
+    true
+}
+
 /// CR 608.2c: Stamp an operation result onto only the active, same-source
 /// completion head whose producer-action requirement matches. This is a typed
 /// adjacency check; it never searches past another resolution frame.
@@ -2912,6 +3002,7 @@ fn prepend_to_pending_continuation_with_producer(
             attachment_remainder,
             player_scope_linked_exile,
             player_scope_queue_end,
+            each_source_batch_owner,
         } = existing;
         assert!(
             pending_return_result_producer.is_none() || existing_return_result_producer.is_none(),
@@ -2935,6 +3026,10 @@ fn prepend_to_pending_continuation_with_producer(
                 attachment_remainder,
                 player_scope_linked_exile,
                 player_scope_queue_end,
+                // CR 615.13 + CR 616.1e (Matt M1): the prepended head joins the
+                // existing chain, so the merged frame keeps the existing
+                // batch owner — it is still the same logical tail.
+                each_source_batch_owner,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -5898,6 +5993,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         protection_does_not_remove,
         room_door,
         granting_object,
+        bound_actor,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -5912,6 +6008,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && protection_does_not_remove.is_none()
         && room_door.is_none()
         && granting_object.is_none()
+        && bound_actor.is_none()
 }
 
 /// CR 608.2c: the one object class a static ability granted by a
@@ -6793,6 +6890,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. }
+            // CR 508.6: a live game-state gate, not a decline-alternative
+            // selector — declining the optional effect does not pick an
+            // "attacked you" branch.
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::EffectOutcome {
                 signal:
                     EffectOutcomeSignal::CurrentScopeSucceeded
@@ -13966,6 +14067,12 @@ fn player_scope_sacrifice_step(
                 obj.controller == player
                     && !obj.is_emblem
                     && crate::game::filter::matches_target_filter(state, *id, target, &ctx)
+                    // CR 608.2d: same candidate legality as the ordinary
+                    // sacrifice-effect pool — a permanent its chooser is
+                    // barred from sacrificing is not offered.
+                    && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *id,
+                    )
                     && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
                         state, &scoped, *id, player,
                     )
@@ -14072,6 +14179,12 @@ fn perform_player_scope_sacrifices(
                         &events[events_before_card..],
                     );
                     emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+                }
+                // CR 609.3: a mid-resolution bar means the instruction can't
+                // move this object — skip it so terminal bookkeeping derives
+                // from actual departures, not attempts.
+                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                    completion.announced.retain(|&id| id != card);
                 }
                 crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     let completed = record_sacrifice_batch_events(
@@ -18813,6 +18926,18 @@ fn resolve_chain_body(
         {
             return Ok(progress);
         }
+        // CR 615.13 + CR 616.1e (R2-F1): a paused `EachSourceDealsDamage`
+        // resolver already parked the parent's `sub_ability` — the Phase-B
+        // combined stash parks it as its own ownerless frame below the
+        // stamped remainder, and the Phase-C post-replacement stash appends
+        // it last — so downstream fires exactly once after the batch
+        // completes. The generic prepend below would run it a second time,
+        // ahead of the batch remainder — skip it the same way PayCost does.
+        if continuation_installed_by_this_effect
+            && matches!(ability.effect, Effect::EachSourceDealsDamage { .. })
+        {
+            return Ok(progress);
+        }
         // CR 616.1 + CR 701.44a: An explore doubler ("…then it explores again")
         // paused this explore, and its applier already installed the doubled
         // second explore on `pending_continuation`. This node's own `sub_ability`
@@ -21247,6 +21372,57 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ScopedPlayerMatches { filter } => {
             let candidate = ability.scoped_player.unwrap_or(ability.controller);
             scoped_player_matches_filter(state, ability, candidate, filter)
+        }
+        // CR 508.6 + CR 608.2c: retrospective this-turn player-pair attack
+        // test ("if they didn't attack you that turn" — Faramir, Prince of
+        // Ithilien, wrapped in `Not`). Both endpoints resolve via the widened
+        // `resolve_single_player_scope` (`Target` = first `TargetRef::Player`
+        // in `ability.targets` — the stamped chosen player); the printed
+        // controller anchors `original_controller` fallback exactly like the
+        // quantity path. An unresolvable scope fails closed to `false`
+        // (duration-timing-only `AnyTurn`/`SpecificPlayer` are rejected
+        // before the scope resolver's `unreachable!()`); card-level `Not`
+        // composes above it. Reads the UNCOLLAPSED direct-attack ledger
+        // (Faramir ruling 2023-06-16), never the collapsed `has_attacked`.
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => {
+            if attacker.duration_timing_only() || defender.duration_timing_only() {
+                return false;
+            }
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let ctx = crate::game::quantity::QuantityContext {
+                entering: None,
+                source: ability.source_id,
+                trigger_source: ability.trigger_source.clone(),
+                recipient: None,
+                scoped_player: ability.scoped_player,
+                damage_source: None,
+                // No spell scope at a condition gate; a resolving ability is
+                // in scope, so no stamped granter is carried either.
+                spell: None,
+                event_amount: None,
+                granting_object: None,
+            };
+            let (Some(attacker_id), Some(defender_id)) = (
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    attacker,
+                    controller,
+                    ctx.clone(),
+                    &ability.targets,
+                    Some(ability),
+                ),
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    defender,
+                    controller,
+                    ctx,
+                    &ability.targets,
+                    Some(ability),
+                ),
+            ) else {
+                return false;
+            };
+            state.has_attacked_player_directly_this_turn(attacker_id, defender_id)
         }
     }
 }
@@ -46416,6 +46592,105 @@ mod tests {
             "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
              read the 2 actually removed — not the 7 the relay asked for"
         );
+    }
+    /// CR 508.6 + CR 608.2c: unit matrix for the retrospective this-turn
+    /// player-pair attack predicate (phase 5a, Verification Matrix row 5).
+    /// Endpoints resolve via `resolve_single_player_scope` (`Target` = first
+    /// `TargetRef::Player` — the stamped chosen player); every negative below
+    /// is paired with a positive cell proving the path resolves. Revert-
+    /// discriminating: dropping the ledger read (e.g. collapsing to the
+    /// collapsed `has_attacked` gate) flips cell 1; dropping the fail-closed
+    /// arms flips cells 5-7.
+    #[test]
+    fn player_attacked_player_predicate_matrix() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        fn ability_with_targets(targets: Vec<TargetRef>) -> ResolvedAbility {
+            let effect: Effect = serde_json::from_str(
+                r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+            )
+            .expect("draw effect must parse");
+            ResolvedAbility::new(effect, targets, ObjectId(1), PlayerId(0))
+        }
+        fn seeded(attacker: PlayerId, defender: PlayerId) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state
+                .attacked_players_directly_this_turn
+                .entry(attacker)
+                .or_default()
+                .insert(defender);
+            state
+        }
+        let cond = |attacker: PlayerScope, defender: PlayerScope| {
+            AbilityCondition::PlayerAttackedPlayer { attacker, defender }
+        };
+        let empty = GameState::new_two_player(42);
+        // 1. Chosen (Target=P1) attacked you (Controller=P0): ledger P1->P0.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 2. Same scopes, empty ledger: no attack recorded.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 3. Controller attacked chosen: ledger P0->P1.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Target),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 4. Controller vs controller, empty ledger: nobody attacked themselves.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![]),
+        ));
+        // 5. Target with no stamped player target: unresolvable fails closed.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![]),
+        ));
+        // 6-7. Duration-timing-only scopes never reach the resolver: false
+        // even with a matching ledger entry.
+        assert!(!evaluate_condition(
+            &cond(
+                PlayerScope::SpecificPlayer { id: p1 },
+                PlayerScope::Controller,
+            ),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::AnyTurn, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 8. Ordered pairs: only P0->P1 seeded, query P1->P0 is false.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 9. Card-level Not composes above the leaf in both polarities.
+        let leaf = cond(PlayerScope::Target, PlayerScope::Controller);
+        let not = |inner: AbilityCondition| AbilityCondition::Not {
+            condition: Box::new(inner),
+        };
+        assert!(!evaluate_condition(
+            &not(leaf.clone()),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(evaluate_condition(
+            &not(leaf),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
     }
 }
 

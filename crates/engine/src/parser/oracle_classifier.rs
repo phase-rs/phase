@@ -531,6 +531,10 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "enchanted ",
     "equipped ",
     "you control enchanted ",
+    // CR 613.1b + CR 725.5: Fealty to the Realm — "The monarch controls
+    // enchanted creature." Routes the designation-anchored control static to
+    // `parse_static_line` (sibling of the Control Magic prefix above).
+    "the monarch controls enchanted ",
     "all creatures ",
     "all permanents ",
     "other ",

@@ -13,11 +13,11 @@ use super::oracle_effect::conditions::{source_saddled_filter, split_leading_cond
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
+    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause, parse_where_x_is,
     rebind_event_context_amount_counts_in_ability, target_filter_controller_ref,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
-use super::oracle_ir::ast::parsed_clause;
+use super::oracle_ir::ast::{parsed_clause, ParsedEffectClause};
 use super::oracle_ir::context::{
     ConditionObjectAntecedent, ParseContext, TriggerConditionScope, TriggerZoneChangeProvenance,
 };
@@ -51,7 +51,8 @@ use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use super::oracle_static::{
-    add_property, parse_commander_subject_filter_prefix, typed_filter_for_subtype,
+    add_property, parse_cant_attack_defended_scope_nom, parse_commander_subject_filter_prefix,
+    typed_filter_for_subtype,
 };
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase_folding,
@@ -71,18 +72,20 @@ use crate::types::ability::{
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
     Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
     DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
-    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
-    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    DestinationConstraint, DieResultFilter, Duration, Effect, EffectScope, FilterProp,
+    GameRestriction, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet,
+    ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    ProhibitedActivity, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor, StaticCondition,
+    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
@@ -609,6 +612,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => {}
     }
 }
@@ -1600,6 +1604,19 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 118.12: Detect "unless [player] pays {cost}" in effect text.
     let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final, &cond_lower);
+    // CR 118.12 (unit 3b): third-party-voice may-pay with a decline
+    // restriction ("that opponent may pay {X}, where X is <quantity>. If
+    // they don't, <consequence>"). The "unless" extractor above declines
+    // unless-less text; recognize this sibling shape here so the payment
+    // becomes `unless_pay` and the prebuilt consequence becomes the body.
+    // Disjoint from the reflexive split (controller "you may" voice) by
+    // subject; anything unrecognized falls through to the generic chain.
+    let (unless_pay, decline_consequence) = match unless_pay {
+        Some(modifier) => (Some(modifier), None),
+        None => try_parse_may_pay_decline_consequence(&effect_for_parse)
+            .map(|(modifier, consequence)| (Some(modifier), Some(consequence)))
+            .unwrap_or((None, None)),
+    };
 
     // CR 107.4 + CR 202.1 + CR 603.4: Stage the cast-trigger's colored-mana-symbol
     // qualifier color (Namor) so a "create that many tokens" effect clause can
@@ -1775,6 +1792,20 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     "reflexive optional payment",
                     &effect_for_parse,
                 )),
+                None,
+                effect_ctx.actor.clone(),
+                effect_ctx.in_trigger,
+            )))
+        } else if let Some(consequence) = decline_consequence {
+            // Unit 3b: prebuilt decline consequence (the generic chain
+            // cannot build the "can't attack ... this combat" restriction);
+            // the payment rode into `unless_pay` above. The "may" is the
+            // opponent's payment choice, never controller optionality.
+            optional = false;
+            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                &effect_for_parse,
+                AbilityKind::Spell,
+                consequence,
                 None,
                 effect_ctx.actor.clone(),
                 effect_ctx.in_trigger,
@@ -4562,6 +4593,188 @@ fn hoist_unless_pay_modifier(
     (cleaned, Some(UnlessPayModifier { cost, payer }))
 }
 
+/// CR 118.12 + CR 107.3c + CR 508.1c (unit 3b): third-party-voice optional
+/// payment with a decline restriction and no "unless" — "that opponent may
+/// pay {X}, where X is <quantity>. If they don't, <consequence>" (Champions
+/// of Minas Tirith).
+///
+/// Sibling of `extract_unless_pay_modifier`, which declines unless-less text:
+/// the payment becomes `unless_pay` (payer `TriggeringPlayer`, cost
+/// `ManaDynamic` over the where-X quantity rebound to the payer) and the
+/// decline consequence becomes the parsed body. Runs only when the "unless"
+/// extractor returned `None`; disjoint from the reflexive split (controller
+/// "you may" voice) by subject.
+///
+/// Fail-closed: returns `None` unless the pay clause, the where-X quantity,
+/// the decline prefix, AND a supported restriction consequence all parse,
+/// with full consumption — anything else falls through to the generic chain
+/// (base behavior).
+fn try_parse_may_pay_decline_consequence(
+    effect_text: &str,
+) -> Option<(UnlessPayModifier, ParsedEffectClause)> {
+    let lower = effect_text.to_lowercase();
+    let input = lower.as_str();
+    // Pay-clause subject: anaphoric third-party only ("you" stays reflexive).
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("that opponent "),
+        tag("that player "),
+        tag("they "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = alt((tag::<_, _, OracleError<'_>>("may pay "), tag("pays ")))
+        .parse(input)
+        .ok()?;
+    // Exactly "{X}": a second mana shard is a different (static-scale) cost.
+    let (input, _) = tag::<_, _, OracleError<'_>>("{x}").parse(input).ok()?;
+    if tag::<_, _, OracleError<'_>>("{")
+        .parse(input.trim_start())
+        .is_ok()
+    {
+        return None;
+    }
+    // Where-X clause up to its sentence end; the shared authority parses it.
+    let (input, where_text) = terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
+        .parse(input)
+        .ok()?;
+    let mut quantity = parse_where_x_is(where_text)?;
+    rebind_may_pay_quantity_to_payer(&mut quantity);
+    // Decline prefix.
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("if they don't, "),
+        tag("if that player doesn't, "),
+        tag("if that opponent doesn't, "),
+    ))
+    .parse(input)
+    .ok()?;
+    // Consequence: payer-subject attack restriction this combat.
+    let consequence = parse_may_pay_decline_restriction(input)?;
+    let modifier = UnlessPayModifier {
+        cost: AbilityCost::ManaDynamic { quantity },
+        payer: TargetFilter::TriggeringPlayer,
+    };
+    Some((modifier, consequence))
+}
+
+/// CR 508.1c + CR 109.5 + CR 608.2c (unit 3b): the decline-consequence half
+/// of `try_parse_may_pay_decline_consequence` — "<payer> can't attack <scope>
+/// this combat" as a typed attack restriction.
+///
+/// Mirrors `try_parse_that_player_cant_attack_prohibition`
+/// (oracle_effect/mod.rs) with two decline-context bindings: the restricted
+/// player is the payer (fire-stamped `ScopedPlayer`, resolved at creation —
+/// NOT the parent-target anaphor, since this shape declares no target), and
+/// the combat window stamps the final `EndOfCombat` expiry directly (no
+/// resolution-time anchoring needed, unlike player-anchored next-turn
+/// expiries). The defended scope reuses the shared combinator. Duration is a
+/// required discriminator (a bare "can't attack" stays out).
+fn parse_may_pay_decline_restriction(input: &str) -> Option<ParsedEffectClause> {
+    // Restricted subject: the payer anaphor in any of its printed forms.
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they "),
+        tag("that player "),
+        tag("that opponent "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = preceded(
+        alt((tag::<_, _, OracleError<'_>>("can't"), tag("cannot"))),
+        tag(" attack"),
+    )
+    .parse(input)
+    .ok()?;
+    let (input, defended) = parse_cant_attack_defended_scope_nom(input).ok()?;
+    // A bare "can't attack" with no scope is a blanket prohibition with no
+    // representable defended filter: decline the path (fail closed) rather
+    // than narrowing it to player-only attacks.
+    let defended = defended?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>(" this combat"),
+        tag(" until end of combat"),
+    ))
+    .parse(input)
+    .ok()?;
+    if !input.trim_matches(['.', ' ']).is_empty() {
+        return None;
+    }
+    let mut clause = parsed_clause(Effect::AddRestriction {
+        restriction: GameRestriction::ProhibitActivity {
+            source: ObjectId(0),
+            affected_players: RestrictionPlayerScope::ScopedPlayer,
+            expiry: RestrictionExpiry::EndOfCombat,
+            activity: ProhibitedActivity::Attack {
+                defended,
+                protected_player: None,
+                protected_scope: None,
+            },
+        },
+    });
+    clause.duration = Some(Duration::UntilEndOfCombat);
+    Some(clause)
+}
+
+/// CR 109.5 + CR 608.2c (unit 3b): rebind Target-form player references in a
+/// may-pay-decline cost quantity to the payer. The pay clause declares no
+/// target (anaphoric-only subject grammar), so "their"/"that player"
+/// quantities MUST NOT keep their parsed `Target` form (which resolves to 0
+/// with no player target); they anaphor to the payer — the fire-stamped
+/// scoped player on this trigger. Controller-relative ("you") and
+/// target-free quantities pass through untouched.
+///
+/// The Target→ScopedPlayer rewrite delegates to the exhaustive
+/// `QuantityRef::player_scope_mut` authority (types/ability.rs) rather than
+/// hand-enumerating members: every player-scoped member rebinds, and a future
+/// member is a compile error there instead of a silent X=0 here. The
+/// `TargetZoneCardCount` mapping below mirrors `rewrite_player_scope_refs`
+/// (oracle_effect/mod.rs) for the may-pay context; keep the two in sync (a
+/// shared extraction needs that file and is out of unit-3b scope).
+fn rebind_may_pay_quantity_to_payer(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => match qty {
+            // `scope`/`binding` ride along untouched: this path rebinds the
+            // count's zone reading to the payer, never its announcement slot.
+            QuantityRef::TargetZoneCardCount { zone, .. } => match zone {
+                ZoneRef::Hand => {
+                    *qty = QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                }
+                ZoneRef::Library | ZoneRef::Graveyard | ZoneRef::Exile => {
+                    *qty = QuantityRef::ZoneCardCount {
+                        zone: zone.clone(),
+                        card_types: Vec::new(),
+                        scope: crate::types::ability::CountScope::ScopedPlayer,
+                        filter: None,
+                    }
+                }
+            },
+            other => {
+                if let Some(scope) = other.player_scope_mut() {
+                    if *scope == PlayerScope::Target {
+                        *scope = PlayerScope::ScopedPlayer;
+                    }
+                }
+            }
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => rebind_may_pay_quantity_to_payer(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rebind_may_pay_quantity_to_payer(inner);
+            }
+        }
+        QuantityExpr::UpTo { max } => rebind_may_pay_quantity_to_payer(max),
+        QuantityExpr::Power { exponent, .. } => rebind_may_pay_quantity_to_payer(exponent),
+        QuantityExpr::Difference { left, right } => {
+            rebind_may_pay_quantity_to_payer(left);
+            rebind_may_pay_quantity_to_payer(right);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
 fn condition_introduces_scoped_phase_player(cond_lower: &str) -> bool {
     // CR 102.1: "on each player's turn" binds "that player" to the active
     // player for that turn (Kitt Kanto's beginning-of-combat trigger).
@@ -6580,6 +6793,12 @@ pub(crate) fn static_condition_to_trigger_condition(
         // is unanswerable rather than merely absent, so `None` is the honest
         // lowering and NOT an approximation that silently drops the anchor.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // CR 508.6: retrospective this-turn player-pair attack test -- a
+        // delayed-resolution predicate (Faramir). No intervening-if
+        // (`TriggerCondition`) equivalent (different consumer enum,
+        // different subject -- cf. the O-Kagachi note on the last-turn
+        // arm above), so lowering returns `None`.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.
@@ -16279,6 +16498,68 @@ fn try_parse_event(
     None
 }
 
+/// CR 120.3: which recipient the prevented damage was headed for.
+///
+/// A typed enum rather than a bool pair — the two cases are mutually exclusive
+/// and each maps to a different `TriggerDefinition` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreventionRecipient {
+    /// "damage that would be dealt to you" — the ability's controller.
+    Controller,
+    /// "damage that would be dealt to ~" — the source permanent itself.
+    SelfObject,
+}
+
+/// CR 615.13: the standalone prevention-trigger condition. See the call site in
+/// `try_parse_named_trigger_mode` for the class measurement and the
+/// rider-exclusion rationale.
+///
+/// Composed by axis, not enumerated: one `alt` for the head voice, one `alt` for
+/// the recipient. Four phrasings from three combinators rather than four
+/// `tag("full string")` arms.
+///
+/// The recipient relative clause is REQUIRED, not optional, and this is a
+/// measured correctness constraint rather than a stylistic choice. By the time a
+/// trigger condition reaches `try_parse_named_trigger_mode`, an upstream stage
+/// has already stripped the `" this way"` back-reference from the
+/// prevented-this-way rider family, so New Way Forward's rider arrives here as
+/// the BARE string `"when damage is prevented"` — byte-identical to what an
+/// unscoped standalone trigger would look like. An `eof` terminator cannot tell
+/// them apart, because there is no remainder left to refuse. Accepting the bare
+/// form therefore steals the rider from the replacement path
+/// (`oracle_replacement::extract_prevention_followup`, whose doc comment warns
+/// against exactly this) and breaks New Way Forward's `PostReplacementSourceController`
+/// lowering. Requiring the recipient clause restores the discrimination: the one
+/// printed standalone card (Selfless Squire) arrives as
+/// `"whenever damage that would be dealt to you is prevented"` and is claimed,
+/// while the stripped rider is refused. Zero cards are printed in the bare
+/// unscoped shape, so this costs no coverage.
+fn parse_damage_prevented_trigger(input: &str) -> OracleResult<'_, PreventionRecipient> {
+    let (input, ()) = value(
+        (),
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+    )
+    .parse(input)?;
+    // No damage-kind qualifier is admitted here — see the call-site comment.
+    let (input, ()) = value((), tag("damage")).parse(input)?;
+    // REQUIRED — see the doc comment: the bare form is ambiguous with a stripped
+    // "prevented this way" rider and must not be claimed.
+    let (input, recipient) = preceded(
+        tag(" that would be dealt to "),
+        alt((
+            value(PreventionRecipient::Controller, tag("you")),
+            value(PreventionRecipient::SelfObject, tag("~")),
+        )),
+    )
+    .parse(input)?;
+    let (input, ()) = value((), tag(" is prevented")).parse(input)?;
+    // The trigger CONDITION is already split from the effect upstream, so a
+    // well-formed member consumes to end of input. This remainder check refuses
+    // any rider voice that still carries a trailing qualifier.
+    let (input, _) = eof(input)?;
+    Ok((input, recipient))
+}
+
 fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let mut def = make_base();
 
@@ -16314,6 +16595,50 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::ChaosEnsues;
         def.valid_card = Some(TargetFilter::SelfRef);
         return Some((TriggerMode::ChaosEnsues, def));
+    }
+
+    // CR 615.13 + CR 120.3: standalone damage-prevention trigger — "Whenever
+    // damage that would be dealt to you is prevented, ...".
+    //
+    // SCOPE, stated honestly: this is the STANDALONE family, the complement of
+    // the "prevented THIS WAY" riders. Measured over data/card-data.json at
+    // 0f1a35b4d (parenthesized reminder text stripped BEFORE matching, then each
+    // hit classified per prevention-sentence on whether that sentence contains
+    // "prevented this way"): 16 cards match "is prevented"; 15 are riders, 1 is
+    // standalone (Selfless Squire). Regenerate by scanning card-data.json for
+    // oracle_text matching "is prevented" with reminder text stripped, splitting
+    // each hit on ". ", and classifying a card as a rider iff EVERY sentence
+    // containing "is prevented" also contains "prevented this way".
+    //
+    // The REQUIRED recipient clause is what excludes the riders, and it is a
+    // measured constraint, not a stylistic one. An upstream stage strips
+    // " this way" before a condition reaches this function, so New Way Forward's
+    // rider arrives here as the bare "when damage is prevented" — byte-identical
+    // to an unscoped standalone trigger, with no remainder for `eof` to refuse.
+    // Requiring "that would be dealt to you|~" restores the discrimination. This
+    // is why this arm does NOT violate the guard documented at
+    // `oracle_replacement::extract_prevention_followup`: riders encode their
+    // firing condition in the prevention replacement's own execute hook, and this
+    // arm cannot claim them.
+    //
+    // No damage-kind qualifier is admitted. `GameEvent::DamagePrevented` carries
+    // no `is_combat` flag, so a "combat damage ... is prevented" line cannot have
+    // its qualifier honored; it stays `TriggerMode::Unknown` (honestly red)
+    // rather than being accepted with its semantics dropped. Zero cards are
+    // printed in that shape today.
+    if let Ok((_, recipient)) = parse_damage_prevented_trigger(lower) {
+        def.mode = TriggerMode::DamagePreventedOnce;
+        match recipient {
+            // CR 120.3: "dealt to you" — the ability's controller.
+            PreventionRecipient::Controller => {
+                def.valid_target = Some(TargetFilter::Controller);
+            }
+            // CR 120.3: "dealt to ~" — the source permanent itself.
+            PreventionRecipient::SelfObject => {
+                def.valid_card = Some(TargetFilter::SelfRef);
+            }
+        }
+        return Some((TriggerMode::DamagePreventedOnce, def));
     }
 
     // CR 701.31d: "Whenever you planeswalk away from ~" — fires when this
@@ -22891,20 +23216,25 @@ pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_,
 /// going on the stack; choosing a defending player).
 ///
 /// The possessive table itself lives in [`parse_turn_possessive_prefix`] — one
-/// table, two consumers. Also checks for a trailing "on your turn" suffix.
+/// table, two consumers. Also checks for a trailing "on <turn-spec>" suffix via parse_during_turn_spec.
 fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Prefix-based: try at the start of the text
     if let Ok((_, constraint)) = parse_turn_possessive_prefix(phase_text) {
         return Some(constraint);
     }
-    // Suffix-based: "combat on your turn", "each combat on your turn"
+    // Suffix-based: "combat on your turn", "combat on each opponent's turn, ..."
     let mut remaining = phase_text;
     while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("on your turn")
-            .parse(remaining)
-            .is_ok()
+        if let Ok((_, constraint)) = terminated(
+            preceded(tag::<_, _, OracleError<'_>>("on "), parse_during_turn_spec),
+            alt((
+                value((), eof),
+                value((), peek(tag::<_, _, OracleError<'_>>(","))),
+            )),
+        )
+        .parse(remaining)
         {
-            return Some(TriggerConstraint::OnlyDuringYourTurn);
+            return Some(constraint);
         }
         remaining = remaining
             .find(' ')
@@ -24373,6 +24703,185 @@ mod structural_marker_tests {
             "the chosen player controls",
         ] {
             assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+}
+
+/// CR 615.13 + CR 120.3: the standalone damage-prevention trigger family
+/// (Selfless Squire), and the rider family it must NOT claim.
+#[cfg(test)]
+mod damage_prevented_trigger_tests {
+    use super::{parse_damage_prevented_trigger, parse_trigger_line, PreventionRecipient};
+    use crate::parser::oracle_trigger::parse_trigger_lines;
+    use crate::types::ability::TargetFilter;
+    use crate::types::triggers::TriggerMode;
+
+    /// V1 — Selfless Squire's verbatim second line yields the mode AND the
+    /// recipient scope.
+    ///
+    /// Revert-failing: without the parser arm the mode is `Unknown(...)`. The
+    /// `valid_target` assertion is the second, independent leg — assigning the
+    /// mode while dropping "dealt to you" would pass a mode-only assertion and
+    /// ship a trigger that fires when ANY player's damage is prevented.
+    #[test]
+    fn selfless_squire_prevention_trigger_parses_mode_and_recipient() {
+        let def = parse_trigger_line(
+            "Whenever damage that would be dealt to you is prevented, put that many +1/+1 counters on this creature.",
+            "Selfless Squire",
+        );
+        assert_eq!(def.mode, TriggerMode::DamagePreventedOnce);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Controller),
+            "\"dealt to you\" must scope the trigger to its controller (CR 120.3)"
+        );
+        assert_eq!(def.valid_card, None);
+    }
+
+    /// Sibling phrasings: the "when" voice and the self-object recipient, plus
+    /// the deliberate refusal of the bare unscoped form. One arm, two head voices
+    /// × two recipients — this is the class check.
+    #[test]
+    fn prevention_trigger_covers_the_phrasing_class() {
+        // "When" voice.
+        let when_voice = parse_trigger_line(
+            "When damage that would be dealt to you is prevented, draw a card.",
+            "Test",
+        );
+        assert_eq!(when_voice.mode, TriggerMode::DamagePreventedOnce);
+        assert_eq!(when_voice.valid_target, Some(TargetFilter::Controller));
+
+        // Self-object recipient: `normalize_card_name_refs` rewrites the card's
+        // own name to `~` before trigger parsing.
+        let self_ref = parse_trigger_line(
+            "Whenever damage that would be dealt to ~ is prevented, draw a card.",
+            "Test",
+        );
+        assert_eq!(self_ref.mode, TriggerMode::DamagePreventedOnce);
+        assert_eq!(self_ref.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(self_ref.valid_target, None);
+
+        // The bare unscoped form is deliberately NOT claimed — see
+        // `bare_prevention_condition_is_refused_because_it_is_a_stripped_rider`.
+        // Zero cards are printed in that shape, and it is ambiguous with a
+        // "prevented this way" rider whose back-reference was stripped upstream.
+        let bare = parse_trigger_line("Whenever damage is prevented, draw a card.", "Test");
+        assert_ne!(bare.mode, TriggerMode::DamagePreventedOnce);
+    }
+
+    /// V8 — the 15-card "prevented THIS WAY" rider family must NOT grow a trigger
+    /// node. Those riders encode their firing condition in the prevention
+    /// replacement's own execute hook; a trigger here would double-fire.
+    ///
+    /// Revert-failing: dropping the `eof` terminator from the combinator lets the
+    /// rider's trailing " this way..." through and every one of these gains a
+    /// bogus trigger.
+    #[test]
+    fn prevented_this_way_riders_produce_no_prevention_trigger() {
+        // Two distinct printed rider voices plus a source-qualified one.
+        let riders = [
+            "If damage would be dealt to you this turn, prevent that damage. When damage is prevented this way, Selfless Squire deals that much damage to target creature.",
+            "Prevent the next 3 damage that would be dealt to you this turn. If damage is prevented this way, you gain that much life.",
+            "Prevent all damage that would be dealt to you this turn by a black or red source. If damage is prevented this way, put a +1/+1 counter on target creature.",
+        ];
+        for text in riders {
+            let modes: Vec<_> = parse_trigger_lines(text, "Test")
+                .into_iter()
+                .map(|d| d.mode)
+                .collect();
+            assert!(
+                !modes.contains(&TriggerMode::DamagePreventedOnce),
+                "rider text must not mint a standalone prevention trigger: {text}\ngot {modes:?}"
+            );
+        }
+    }
+
+    /// Combat-qualified prevention is REFUSED by design, not silently accepted.
+    ///
+    /// `GameEvent::DamagePrevented` carries no `is_combat` field, so the qualifier
+    /// cannot be honored. Accepting the text and dropping the qualifier would be
+    /// the "text accepted, semantics dropped" failure. Zero cards are printed in
+    /// this shape; the refusal is a forward correctness guard.
+    #[test]
+    fn combat_qualified_prevention_is_refused_and_stays_unknown() {
+        for text in [
+            "whenever combat damage that would be dealt to you is prevented",
+            "whenever noncombat damage that would be dealt to you is prevented",
+        ] {
+            assert!(
+                parse_damage_prevented_trigger(text).is_err(),
+                "combat-qualified prevention must not be claimed by this arm: {text}"
+            );
+        }
+        // Paired positive reach-guard: the unqualified sibling IS claimed, so the
+        // refusal above is a real discrimination and not a dead combinator.
+        assert_eq!(
+            parse_damage_prevented_trigger(
+                "whenever damage that would be dealt to you is prevented"
+            )
+            .expect("the unqualified form must parse")
+            .1,
+            PreventionRecipient::Controller
+        );
+    }
+
+    /// REGRESSION GUARD for the measured rider-collision this arm nearly shipped.
+    ///
+    /// An upstream stage strips `" this way"` from the prevented-this-way rider
+    /// family before the condition reaches `try_parse_named_trigger_mode`, so New
+    /// Way Forward's rider arrives as the BARE string `"when damage is
+    /// prevented"` — with no remainder, so `eof` cannot refuse it. Claiming the
+    /// bare form stole the rider from the replacement path and broke New Way
+    /// Forward's `PostReplacementSourceController` lowering
+    /// (`oracle_replacement::tests::new_way_forward_rider_folds_into_the_prevention_shield`).
+    ///
+    /// Requiring the recipient clause is the fix. Reverting it to `opt(..)` makes
+    /// the first assertion below fail AND re-breaks the New Way Forward test.
+    #[test]
+    fn bare_prevention_condition_is_refused_because_it_is_a_stripped_rider() {
+        // The exact post-strip string New Way Forward's rider produces.
+        assert!(
+            parse_damage_prevented_trigger("when damage is prevented").is_err(),
+            "the bare form is ambiguous with a stripped rider and must be refused"
+        );
+        assert!(
+            parse_damage_prevented_trigger("whenever damage is prevented").is_err(),
+            "the bare form is ambiguous with a stripped rider and must be refused"
+        );
+
+        // Paired positive reach-guard: the recipient-scoped form IS still claimed,
+        // so the refusals above are a real discrimination, not a dead combinator.
+        assert_eq!(
+            parse_damage_prevented_trigger(
+                "whenever damage that would be dealt to you is prevented"
+            )
+            .expect("the recipient-scoped form must still parse")
+            .1,
+            PreventionRecipient::Controller
+        );
+    }
+
+    /// Hostile negatives at the combinator level: adjacent grammars and every
+    /// rider voice must be refused.
+    #[test]
+    fn prevention_combinator_refuses_adjacent_grammars() {
+        for text in [
+            // Rider voices that still carry a remainder — refused by `eof`.
+            "when damage is prevented this way",
+            "if damage is prevented this way",
+            "whenever damage that would be dealt to you is prevented this way",
+            "when damage from a creature is prevented this way",
+            // Adjacent damage grammars that belong to other modes.
+            "whenever damage is dealt to you",
+            "whenever you're dealt damage",
+            "whenever a creature is prevented",
+            // Wrong recipient token.
+            "whenever damage that would be dealt to target creature is prevented",
+        ] {
+            assert!(
+                parse_damage_prevented_trigger(text).is_err(),
+                "must refuse: {text}"
+            );
         }
     }
 }

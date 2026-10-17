@@ -34334,3 +34334,315 @@ fn ir_facade_demotes_a_refused_granter_name() {
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
 }
+/// CR 608.2c + CR 603.7a + CR 508.6: Faramir, Prince of Ithilien full-Oracle
+/// shape probe (phase 5a, S3a). Verbatim Oracle text (matches card-data.json
+/// oracle_text): Choose{Opponent} head, delayed trigger bound to the chosen
+/// player, draw gated by the retrospective this-turn player-pair test,
+/// Otherwise arm creates the tokens.
+#[test]
+fn faramir_prince_of_ithilien_full_oracle_shape() {
+    use crate::types::ability::{
+        ChoiceType, DelayedTriggerCondition, DelayedTriggerPlayerBinding, Effect,
+    };
+    use crate::types::phase::Phase;
+    let parsed = parse(
+        "At the beginning of your end step, choose an opponent. At the beginning of that player's next end step, you draw a card if they didn't attack you that turn. Otherwise, create three 1/1 white Human Soldier creature tokens.",
+        "Faramir, Prince of Ithilien",
+        &[],
+        &["Creature"],
+        &["Human", "Soldier"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Faramir must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .expect("outer end-step trigger");
+    let execute = trigger.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                ..
+            }
+        ),
+        "head must be Choose-Opponent, got {:?}",
+        execute.effect
+    );
+    let mut cursor = execute.sub_ability.as_deref();
+    let mut delayed = None;
+    while let Some(link) = cursor {
+        if matches!(link.effect.as_ref(), Effect::CreateDelayedTrigger { .. }) {
+            delayed = Some(link);
+            break;
+        }
+        cursor = link.sub_ability.as_deref();
+    }
+    let delayed = delayed.expect("chain must contain CreateDelayedTrigger");
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect: inner,
+        ..
+    } = delayed.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            condition,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                binding: DelayedTriggerPlayerBinding::ChosenPlayer { index: 0 },
+                ..
+            }
+        ),
+        "delayed must target chosen player end step, got {condition:?}"
+    );
+    assert!(
+        matches!(inner.effect.as_ref(), Effect::Draw { .. }),
+        "inner head must be Draw, got {:?}",
+        inner.effect
+    );
+    assert!(
+        inner.condition.is_some(),
+        "draw must carry the retrospective condition, got {:#?}",
+        inner
+    );
+    let else_arm = inner
+        .else_ability
+        .as_deref()
+        .expect("Otherwise arm must exist");
+    assert!(
+        matches!(else_arm.effect.as_ref(), Effect::Token { .. }),
+        "Otherwise arm must create tokens, got {:?}",
+        else_arm.effect
+    );
+}
+
+/// CR 508.6: the they-subject retrospective condition also accepts the
+/// uncontracted "did not" form at full-Oracle scope (closes the 5a-carried
+/// LOW — the contracted "didn't" leg above is verbatim card text; the
+/// corpus carries zero uncontracted production instances, so this pins the
+/// alt-branch against rot rather than a live card).
+#[test]
+fn faramir_they_did_not_uncontracted_parses() {
+    use crate::types::ability::{
+        AbilityCondition, DelayedTriggerPlayerBinding, Effect, PlayerScope,
+    };
+    use crate::types::phase::Phase;
+    let parsed = parse(
+        "At the beginning of your end step, choose an opponent. At the beginning of that player's next end step, you draw a card if they did not attack you that turn. Otherwise, create three 1/1 white Human Soldier creature tokens.",
+        "Faramir, Prince of Ithilien",
+        &[],
+        &["Creature"],
+        &["Human", "Soldier"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "uncontracted variant must parse with zero Unimplemented: {parsed:#?}"
+    );
+    let mut cursor = parsed.triggers.iter().filter_map(|t| t.execute.as_deref());
+    let delayed = cursor
+        .by_ref()
+        .flat_map(|link| {
+            let mut chain = vec![link];
+            let mut next = link.sub_ability.as_deref();
+            while let Some(l) = next {
+                chain.push(l);
+                next = l.sub_ability.as_deref();
+            }
+            chain
+        })
+        .find(|link| matches!(link.effect.as_ref(), Effect::CreateDelayedTrigger { .. }))
+        .expect("chain must contain CreateDelayedTrigger");
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect: inner,
+        ..
+    } = delayed.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            condition,
+            crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                binding: DelayedTriggerPlayerBinding::ChosenPlayer { index: 0 },
+                ..
+            }
+        ),
+        "delayed must target chosen player end step, got {condition:?}"
+    );
+    // Pin the exact retrospective variant — not just `is_some()`, which any
+    // fallback-arm condition would satisfy: the chosen player did not attack
+    // you. The bridge (`player_attack_endpoint_to_scope`) maps the
+    // `ChosenPlayer` attacker to the stamped `Target` player scope and `You`
+    // to `Controller` — the same shape the contracted leg produces.
+    assert!(
+        matches!(
+            &inner.condition,
+            Some(AbilityCondition::Not { condition }) if matches!(
+                condition.as_ref(),
+                AbilityCondition::PlayerAttackedPlayer {
+                    attacker: PlayerScope::Target,
+                    defender: PlayerScope::Controller,
+                }
+            )
+        ),
+        "uncontracted draw must carry Not(PlayerAttackedPlayer{{Target, Controller}}), got {:#?}",
+        inner.condition
+    );
+    assert!(
+        matches!(inner.effect.as_ref(), Effect::Draw { .. }),
+        "inner head must be Draw, got {:?}",
+        inner.effect
+    );
+    let else_arm = inner
+        .else_ability
+        .as_deref()
+        .expect("Otherwise arm must exist");
+    assert!(
+        matches!(else_arm.effect.as_ref(), Effect::Token { .. }),
+        "Otherwise arm must create tokens, got {:?}",
+        else_arm.effect
+    );
+}
+
+/// MED-5 chosen-binding control: a "they didn't attack you that turn" gate
+/// WITHOUT a Choose antecedent must not bind a phantom chosen player — the
+/// dispatcher scope guard fails the pronoun closed, so the whole gated clause
+/// stays `Unimplemented { name: "unparsed_condition" }` (the nom shape is
+/// context-free by design and never mints the binding itself).
+#[test]
+fn they_attack_gate_without_choose_binds_nothing() {
+    use crate::types::ability::{AbilityCondition, Effect};
+    let parsed = parse(
+        "At the beginning of your end step, you draw a card if they didn't attack you that turn.",
+        "Chooseless Probe",
+        &[],
+        &["Creature"],
+        &["Human"],
+    );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "reach guard: the probe text must parse to a trigger"
+    );
+    let mut saw_unparsed_gate = false;
+    for trigger in &parsed.triggers {
+        let mut cursor = trigger.execute.as_deref();
+        while let Some(link) = cursor {
+            // No link anywhere may carry the retrospective pair-attack test:
+            // without a Choose producer there is no player to bind.
+            let mut cond = link.condition.as_ref();
+            while let Some(AbilityCondition::Not { condition }) = cond {
+                cond = Some(condition.as_ref());
+            }
+            assert!(
+                !matches!(cond, Some(AbilityCondition::PlayerAttackedPlayer { .. })),
+                "must not bind a phantom chosen player, got {:#?}",
+                link.condition
+            );
+            // The gate must fail CLOSED (visible Unimplemented), never
+            // silently vanish into an unconditional draw.
+            if matches!(
+                link.effect.as_ref(),
+                Effect::Unimplemented { name, .. } if name == "unparsed_condition"
+            ) {
+                saw_unparsed_gate = true;
+            }
+            assert!(
+                !matches!(link.effect.as_ref(), Effect::Draw { .. }) || link.condition.is_some(),
+                "the gate must not silently drop into an unconditional draw"
+            );
+            cursor = link.sub_ability.as_deref();
+        }
+    }
+    assert!(
+        saw_unparsed_gate,
+        "the unbindable gate must surface as Unimplemented, else the guard asserts nothing"
+    );
+}
+
+/// CR 613.1b + CR 725.5: Fealty to the Realm full-Oracle shape probe (phase
+/// 5b, S2). Verbatim Oracle text (matches card-data.json oracle_text): the
+/// ETB become-monarch trigger, the designation-anchored control static, and
+/// the must-attack / can't-attack-you pair — with zero Unimplemented (P1
+/// flips from failing to supported).
+#[test]
+fn fealty_to_the_realm_full_oracle_shape() {
+    use crate::types::ability::{ContinuousModification, Designation, Effect};
+    use crate::types::statics::StaticMode;
+    let parsed = parse(
+        "Enchant creature\nWhen this Aura enters, you become the monarch.\nThe monarch controls enchanted creature.\nEnchanted creature attacks each combat if able and can't attack you.",
+        "Fealty to the Realm",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Fealty must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    // ETB become-monarch trigger still present.
+    assert!(
+        parsed.triggers.iter().any(|t| matches!(
+            t.execute.as_deref().map(|e| e.effect.as_ref()),
+            Some(Effect::BecomeMonarch { .. })
+        )),
+        "ETB become-monarch trigger must survive: {parsed:#?}"
+    );
+    // The monarch-control static carries the designation member.
+    let control = parsed
+        .statics
+        .iter()
+        .find(|s| {
+            s.mode == StaticMode::Continuous
+                && s.modifications.contains(
+                    &ContinuousModification::ChangeControllerToDesignation {
+                        designation: Designation::Monarch,
+                    },
+                )
+        })
+        .expect("designation-anchored control static");
+    match &control.affected {
+        Some(crate::types::ability::TargetFilter::Typed(tf)) => {
+            assert!(tf
+                .properties
+                .contains(&crate::types::ability::FilterProp::EnchantedBy));
+        }
+        _ => panic!("expected EnchantedBy affected filter"),
+    }
+    // The aura's combat pair must ride the same enchanted-creature population:
+    // a must-attack static and a can't-attack-you static (`CantAttack` with
+    // `attack_defended = Player`, scoped to the source controller), both
+    // affecting the `EnchantedBy` filter. Without the pair the host could sit
+    // out combat or swing at its own controller's enemies freely.
+    let has_enchanted_by = |affected: &Option<crate::types::ability::TargetFilter>| {
+        matches!(
+            affected,
+            Some(crate::types::ability::TargetFilter::Typed(tf))
+                if tf.properties
+                    .contains(&crate::types::ability::FilterProp::EnchantedBy)
+        )
+    };
+    assert!(
+        parsed.statics.iter().any(|def| {
+            matches!(def.mode, crate::types::statics::StaticMode::MustAttack)
+                && has_enchanted_by(&def.affected)
+        }),
+        "must-attack static on the enchanted creature: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|def| {
+            matches!(def.mode, crate::types::statics::StaticMode::CantAttack)
+                && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Player)
+                && has_enchanted_by(&def.affected)
+        }),
+        "can't-attack-you static on the enchanted creature: {parsed:#?}"
+    );
+}

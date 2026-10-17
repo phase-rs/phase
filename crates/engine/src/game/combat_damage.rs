@@ -12,8 +12,8 @@ use crate::types::ability::{ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, DamageSlot, GameState, PendingCombatLifelink,
-    PendingLifelinkGain, WaitingFor,
+    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPreventionTally, DamageSlot, GameState,
+    PendingCombatLifelink, PendingLifelinkGain, PreventedDamageEntry, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -1784,18 +1784,7 @@ pub(crate) fn apply_combat_damage(
     // would let the same batch serialize — and emit its rider events —
     // differently across saves and AI clones. The ids are not `Ord`, so sort on
     // their inner integers, exactly as `blocker_ids` is sorted above.
-    let mut prevention_tally: Vec<(AppliedReplacementKey, i32)> =
-        prevention_tally.into_iter().collect();
-    prevention_tally.sort_by_key(|(key, _)| match key {
-        AppliedReplacementKey::Object { source, index } => (0u8, source.0, *index, 0u8),
-        AppliedReplacementKey::Floating { index } => (1, 0, *index, 0),
-        AppliedReplacementKey::StepEndMana { index } => (2, 0, *index, 0),
-        AppliedReplacementKey::EntryControllerChoice {
-            source,
-            index,
-            controller,
-        } => (3, source.0, *index, controller.0),
-    });
+    let prevention_tally = sorted_prevention_entries(prevention_tally);
 
     drain_combat_lifelink(
         state,
@@ -1885,7 +1874,14 @@ fn drain_combat_lifelink(
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    // Fire-all: combat keeps its standing shape (see the `stop_on_fresh_choice`
+    // contract on `fire_batch_prevention_riders`).
+    let _ = fire_batch_prevention_riders(
+        state,
+        &record.prevention_tally,
+        &mut record.batch_events,
+        false,
+    );
     // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
     // prohibition keys on, and this is the last statement that can move life in it.
     // The batch moves life in three places and only a call here sees all three:
@@ -1903,39 +1899,120 @@ fn drain_combat_lifelink(
     CombatDamageBatch::Complete(record.batch_events)
 }
 
-/// CR 615.5 + CR 615.13: After a simultaneous combat-damage batch, fire each
-/// `Prevention::All` shield's `runtime_execute` rider exactly once against the
-/// aggregate prevented amount.
+/// CR 615.13: convert a `HashMap`-backed prevention tally into the deterministically
+/// ordered entry list the batch drain fires. Shared by the combat batch (which
+/// parks it in `PendingCombatLifelink`) and simultaneous noncombat batches
+/// (`EachSourceDealsDamage`), so both aggregate identically.
+///
+/// `AppliedReplacementKey` is the PRIMARY sort rank, so each shield's entries
+/// are contiguous and `chunk_by` in `fire_batch_prevention_riders` recovers
+/// the whole recipient group as one CR 615.13 prevention application. The
+/// CR 120.3 recipient (derived `Ord`) breaks ties inside a group so a parked
+/// batch still serializes byte-identically across saves and AI clones.
+pub(crate) fn sorted_prevention_entries(
+    prevention_tally: CombatPreventionTally,
+) -> Vec<PreventedDamageEntry> {
+    let mut entries: Vec<PreventedDamageEntry> = prevention_tally
+        .into_iter()
+        .map(|((key, recipient), amount)| PreventedDamageEntry {
+            key,
+            recipient,
+            amount,
+        })
+        .collect();
+    entries.sort_by_key(|entry| {
+        let rank = match entry.key {
+            AppliedReplacementKey::Object { source, index } => (0u8, source.0, index, 0u8),
+            AppliedReplacementKey::Floating { index } => (1, 0, index, 0),
+            AppliedReplacementKey::StepEndMana { index } => (2, 0, index, 0),
+            AppliedReplacementKey::EntryControllerChoice {
+                source,
+                index,
+                controller,
+            } => (3, source.0, index, controller.0),
+        };
+        (rank, entry.recipient.clone())
+    });
+    entries
+}
+
+/// CR 615.13 + CR 616.1e (Matt C2): what one aggregate drainage produced.
+/// Either every group dispatched, or a rider parked a FRESH choice mid-frame:
+/// `published_entries` is the leading entry count fully resolved (events
+/// pushed, riders dispatched-or-skipped), so the caller can re-park the
+/// unpublished remainder and stop unwinding instead of firing later groups
+/// ahead of the pending choice.
+pub(crate) enum BatchRiderDrainOutcome {
+    Completed,
+    Paused {
+        waiting_for: Box<WaitingFor>,
+        published_entries: usize,
+    },
+}
+
+/// CR 615.5 + CR 615.13: After a simultaneous damage batch (combat or
+/// noncombat), fire each `Prevention::All` shield's `runtime_execute` rider
+/// exactly once against the aggregate prevented amount.
 ///
 /// Each `DamagePrevented` event for the batch is emitted here (the per-source
-/// applier suppressed them so the rider sees one un-fragmented amount). The
-/// aggregate prevented amount is stamped into `last_effect_count` immediately
-/// before the single rider call so the rider's `QuantityRef::EventContextAmount`
-/// (e.g. Inkshield's "for each 1 damage prevented this way") resolves against
-/// the whole batch total.
-fn fire_combat_prevention_riders(
+/// applier suppressed them so the rider sees one un-fragmented amount), ONE per
+/// (shield, recipient). CR 615.13 and CR 120.3 pull in different directions and
+/// both are honored: the prevention APPLICATION is the trigger unit and the
+/// CR 615.5 rider unit, so the rider fires once per shield against the batch
+/// total, while the RECIPIENT is a per-event property, so a shield that
+/// prevented damage for a player and a creature in the same batch emits one
+/// event for each carrying that recipient's own amount. The aggregate prevented
+/// amount is stamped into `last_effect_count` immediately before the single
+/// rider call so the rider's `QuantityRef::EventContextAmount` (e.g. Inkshield's
+/// "for each 1 damage prevented this way") resolves against the whole batch
+/// total.
+///
+/// `stop_on_fresh_choice` (Matt C2, parked-frame drainage only): stop after
+/// the first rider that parks a fresh choice and report it, so later groups
+/// do not execute ahead of the pending prompt. The combat and unpaused-inline
+/// callers pass `false` and keep the standing fire-all shape.
+pub(crate) fn fire_batch_prevention_riders(
     state: &mut GameState,
-    prevention_tally: &[(AppliedReplacementKey, i32)],
+    prevention_tally: &[PreventedDamageEntry],
     events: &mut Vec<GameEvent>,
-) {
-    for &(key, total_prevented) in prevention_tally {
-        let rid = key.as_replacement_id();
+    stop_on_fresh_choice: bool,
+) -> BatchRiderDrainOutcome {
+    // CR 615.13 + CR 120.3: the tally arrives sorted with each shield's entries
+    // contiguous, so one chunk IS one prevention application over the CR 510.2
+    // simultaneous batch. The application is the trigger unit and the CR 615.5
+    // rider unit — fired ONCE below, against the group total. The RECIPIENT is
+    // not: CR 120.3 makes "player or permanent" a property of each damage event,
+    // and a shield's `damage_target_filter` is a predicate over recipients, not
+    // the recipient of any one event. So one `DamagePrevented` is emitted per
+    // recipient, carrying the amount prevented FOR THAT RECIPIENT — which is what
+    // a trigger scoped to "damage that would be dealt to you" (Selfless Squire)
+    // must read for its "that many" to be right.
+    // Matt C2: the caller's prompt restored on completion, so any
+    // non-Priority deviation after a dispatch is a fresh rider-created choice
+    // (covers dispatches whose return is dropped on a nested path too).
+    // Snapshotted only in stop mode; the fire-all callers never read it.
+    let pre_drain_waiting = stop_on_fresh_choice.then(|| state.waiting_for.clone());
+    let mut published_entries = 0usize;
+    for group in prevention_tally.chunk_by(|a, b| a.key == b.key) {
+        // Every group counts exactly once — resolved means events pushed (or
+        // standing-behavior skipped), whether or not a rider dispatched.
+        published_entries += group.len();
+        let rid = group[0].key.as_replacement_id();
+        let total_prevented: i32 = group.iter().map(|entry| entry.amount).sum();
         if total_prevented <= 0 {
             continue;
         }
 
         if replacement::is_shield_counter_damage_replacement(rid) {
             replacement::consume_shield_counter(state, rid.source, events);
-            events.push(GameEvent::DamagePrevented {
-                source_id: rid.source,
-                target: TargetRef::Object(rid.source),
-                amount: total_prevented as u32,
-            });
+            push_prevented_events(group, rid.source, events);
             continue;
         }
 
-        // CR 615.3: Pending shields use sentinel ObjectId(0); object-hosted
-        // shields are found in the host's replacement_definitions.
+        // Pending (resolution-created) shields are stored in
+        // `pending_damage_replacements` under the sentinel ObjectId(0) because
+        // they have no host permanent; object-hosted shields are found in the
+        // host's `replacement_definitions`.
         let repl_def = if rid.source == ObjectId(0) {
             state.pending_damage_replacements.get(rid.index)
         } else {
@@ -1948,25 +2025,22 @@ fn fire_combat_prevention_riders(
             continue;
         };
 
-        // CR 615.13: The `DamagePrevented` event for the whole batch — informational
-        // (no trigger consumes it yet). Target derived from the shield's player scope.
-        let prevented_target = match &repl_def.damage_target_filter {
-            Some(crate::types::ability::DamageTargetFilter::Player {
-                player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
-            }) => TargetRef::Player(*player),
-            _ => TargetRef::Object(rid.source),
-        };
-        events.push(GameEvent::DamagePrevented {
-            source_id: rid.source,
-            target: prevented_target,
-            amount: total_prevented as u32,
-        });
+        // CR 615.13: shields whose riders already drained inline per event
+        // during the batch feed the PUBLIC aggregate event only — re-firing
+        // here would run the rider a second time with the batch total. That
+        // is the per-source reflectors (CR 615.5 binds each reflection to its
+        // own damage source, which the aggregate cannot carry) and the
+        // depletion/`AllBut` shields (whose applier arms keep the per-event
+        // stash + inline drain in `replace_combat_damage_batch`).
+        let rider_drained_inline = replacement::shield_rider_reflects_per_event(state, rid)
+            || matches!(
+                repl_def.shield_kind,
+                crate::types::ability::ShieldKind::Prevention {
+                    amount: crate::types::ability::PreventionAmount::Next(_)
+                        | crate::types::ability::PreventionAmount::AllBut(_)
+                }
+            );
 
-        // CR 615.5: Resolve the prevention's additional effect ("for each 1
-        // damage prevented this way, create a token"). Stamp the aggregate
-        // prevented amount so `EventContextAmount` resolves against the batch
-        // total, then run the rider continuation exactly once.
-        //
         // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
         // ("that source's controller" — New Way Forward) resolves
         // `PostReplacementSourceController` against the drain's event source. The
@@ -1977,7 +2051,22 @@ fn fire_combat_prevention_riders(
             .damage_source_filter
             .as_ref()
             .and_then(shield_specific_source);
-        let Some(runtime) = repl_def.runtime_execute.clone() else {
+        let runtime = repl_def.runtime_execute.clone();
+
+        push_prevented_events(group, rid.source, events);
+
+        // CR 615.5: Resolve the prevention's additional effect ("for each 1
+        // damage prevented this way, create a token"). Stamp the aggregate
+        // prevented amount so `EventContextAmount` resolves against the batch
+        // total, then run the rider continuation exactly once — ONCE PER SHIELD,
+        // not once per recipient, because CR 615.13 makes the application the
+        // unit and CR 615.5's "that much damage was prevented" refers to the
+        // whole application. Skipped for inline-drained riders (above): theirs
+        // already fired per event during the batch.
+        if rider_drained_inline {
+            continue;
+        }
+        let Some(runtime) = runtime else {
             continue;
         };
         state.last_effect_count = Some(total_prevented);
@@ -1997,9 +2086,58 @@ fn fire_combat_prevention_riders(
                 drain.event_source = Some(source);
             }
         }
-        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        let dispatch_wait = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state, None, None, None, events,
         );
+        // Matt C2: in stop mode a fresh rider-created choice ends the frame
+        // here — later groups must not execute ahead of the pending prompt.
+        if stop_on_fresh_choice {
+            let fresh_choice = dispatch_wait.or_else(|| {
+                let pre = pre_drain_waiting.as_ref()?;
+                (!matches!(state.waiting_for, WaitingFor::Priority { .. })
+                    && state.waiting_for != *pre)
+                    .then(|| state.waiting_for.clone())
+            });
+            if let Some(waiting_for) = fresh_choice {
+                return BatchRiderDrainOutcome::Paused {
+                    waiting_for: Box::new(waiting_for),
+                    published_entries,
+                };
+            }
+        }
+    }
+    BatchRiderDrainOutcome::Completed
+}
+
+/// CR 120.3 + CR 615.13: one `DamagePrevented` per recipient this shield
+/// prevented damage for in the batch. Shared by the shield-counter branch and the
+/// ordinary prevention branch so the two cannot drift.
+///
+/// `source_id` is the SHIELD's host object (the sentinel `ObjectId(0)` for a
+/// floating shield), a pinned convention rather than a threaded value: CR 615.13
+/// makes one prevention application span "one or more simultaneous damage
+/// events", and under CR 510.2 those events routinely have DIFFERENT sources, so
+/// no single damage source exists for the aggregate to name. Every per-event
+/// emitter puts the damage source there instead; that divergence is deliberate
+/// and unresolved, not an endorsement.
+fn push_prevented_events(
+    group: &[PreventedDamageEntry],
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    for entry in group {
+        // CR 120.8 + CR 615.13: a prevention that prevented nothing for this
+        // recipient is not a prevention event. The group total is already known
+        // positive, so this guard only ever suppresses a zero recipient sharing a
+        // batch with a nonzero one.
+        if entry.amount <= 0 {
+            continue;
+        }
+        events.push(GameEvent::DamagePrevented {
+            source_id,
+            target: entry.recipient.clone(),
+            amount: entry.amount as u32,
+        });
     }
 }
 
@@ -2436,7 +2574,11 @@ mod tests {
             } else {
                 (if trample.is_some() { remaining } else { 0 }, 0)
             };
-            crate::game::engine::apply_as_current(
+            // The answering apply runs the damage batch inline, so its events
+            // (damage, lifelink gains, `DamagePrevented` aggregates, rider
+            // follow-ups) would be dropped with the `ActionResult`. Collect
+            // them so event assertions observe the whole resolution.
+            let result = crate::game::engine::apply_as_current(
                 state,
                 crate::types::actions::GameAction::AssignCombatDamage {
                     mode: CombatDamageAssignmentMode::Normal,
@@ -2446,6 +2588,7 @@ mod tests {
                 },
             )
             .expect("greedy combat damage assignment must be legal");
+            events.extend(result.events);
         }
     }
 
@@ -2655,6 +2798,7 @@ mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
+                bound_actor: None,
             });
 
         crate::game::layers::evaluate_layers(&mut state);
@@ -3352,7 +3496,7 @@ mod tests {
     /// (`eventNormalizer.ts`) closes its window one index before the aggregate.
     ///
     /// REVERT PROBE: move `drain_combat_lifelink` after
-    /// `fire_combat_prevention_riders` and the first two indices invert.
+    /// `fire_batch_prevention_riders` and the first two indices invert.
     #[test]
     fn completed_batch_emits_gain_then_aggregate_then_prevention_rider() {
         let mut state = setup();
@@ -4760,6 +4904,96 @@ mod tests {
         assert_eq!(state.players[1].life, 20, "trample-over damage prevented");
         // CR 615.7: only the 3 player-targeted damage is aggregated.
         assert_eq!(count_inklings(&state), 3, "3 trample damage → 3 Inklings");
+    }
+
+    /// CR 615.13 vs CR 120.3 at the seam — the row that pins the split.
+    ///
+    /// One shield covering BOTH legs of one CR 510.2 simultaneous batch (the
+    /// installed Inkshield's `damage_target_filter` is nulled here, which is the
+    /// shape of every Fog-class / `PreventDamage{Any}` shield — 218 of them in the
+    /// corpus — and of Safe Passage's two-legged filter): a trample attacker puts
+    /// 2 on the blocker and 3 over to the player.
+    ///
+    /// CR 120.3 makes the RECIPIENT per-event, so TWO `DamagePrevented` events are
+    /// emitted, one per recipient, each with its own amount. CR 615.13 makes the
+    /// APPLICATION the trigger/rider unit, so the CR 615.5 rider fires ONCE — five
+    /// Inklings from the batch total, not ten from firing per recipient.
+    ///
+    /// This is the single most likely mis-implementation of the per-recipient
+    /// split, and nothing else in the suite catches it: every other prevention
+    /// fixture is single-recipient, so per-shield and per-recipient firing
+    /// coincide.
+    #[test]
+    fn multi_recipient_shield_emits_per_recipient_but_fires_its_rider_once() {
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+        // Widen the resolution-created shield to cover creatures too. Installed
+        // floating (no host permanent), so it lives under the ObjectId(0) sentinel
+        // in `pending_damage_replacements`.
+        state
+            .pending_damage_replacements
+            .iter_mut()
+            .for_each(|repl| repl.damage_target_filter = None);
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
+
+        // Reach-guards: BOTH legs really were prevented. The 0/2 Wall surviving a
+        // 5/5 trampler is the creature leg's proof; life 20 is the player leg's.
+        assert!(
+            state.battlefield.contains(&blocker),
+            "reach-guard: the widened shield prevented the blocker's lethal 2, so \
+             CR 704.5g never removed it"
+        );
+        assert_eq!(
+            state.objects[&blocker].damage_marked, 0,
+            "reach-guard: the creature leg was prevented, not merely survived"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "reach-guard: the 3 trample-over damage was prevented"
+        );
+
+        // CR 120.3: one event per RECIPIENT, each carrying that recipient's own
+        // amount. Exact list, length included.
+        let mut prevented: Vec<(TargetRef, u32)> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamagePrevented { target, amount, .. } => {
+                    Some((target.clone(), *amount))
+                }
+                _ => None,
+            })
+            .collect();
+        prevented.sort();
+        let mut expected = vec![
+            (TargetRef::Object(blocker), 2),
+            (TargetRef::Player(PlayerId(1)), 3),
+        ];
+        expected.sort();
+        assert_eq!(
+            prevented, expected,
+            "CR 120.3: two recipients in one application → two events, 2 and 3"
+        );
+
+        // CR 615.13 + CR 615.5: ONE rider firing against the batch TOTAL. Ten
+        // Inklings would mean the rider fired once per recipient.
+        assert_eq!(
+            count_inklings(&state),
+            5,
+            "the CR 615.5 rider fires ONCE per prevention application, against the \
+             group total (2 + 3) — not once per recipient"
+        );
     }
 
     /// Step 8: A mixed batch — attacker X hits a creature, attacker Y hits the

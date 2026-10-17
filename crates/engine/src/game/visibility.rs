@@ -1804,6 +1804,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // An id-only incarnation reference, not a payment carrier.
                 granting_object: _,
                 source_name: _,
+                // Merge seam (upstream/main): the actor binding is irrelevant
+                // to hidden-member redaction — only `duration_event_source`
+                // is read below.
+                bound_actor: _,
             } = effect;
             duration_event_source.as_deref().is_some_and(|context| {
                 source_context_names_hidden_member(context, &hidden_zone_change_ids)
@@ -5449,6 +5453,9 @@ mod tests {
                 end_permission: None,
                 granting_object: None,
                 source_name: "Paid Permanent".to_string(),
+                // Merge seam (upstream/main): object-anchored test effect,
+                // never an installer-bound bar.
+                bound_actor: None,
             },
         );
         let departed_object = state.objects[&departed].clone();
@@ -6125,6 +6132,9 @@ mod tests {
                 end_permission: None,
                 granting_object: None,
                 source_name: "Paid Permanent".to_string(),
+                // Merge seam (upstream/main): object-anchored test effect,
+                // never an installer-bound bar.
+                bound_actor: None,
             },
         );
 

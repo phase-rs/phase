@@ -185,7 +185,54 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
+    // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+    // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
+    // tail was empty parks no continuation, so no drain will ever run for it.
+    // Capture the stamp before the inner handler consumes the record; the
+    // hook below publishes exactly this batch's frames on the fresh outcome,
+    // even while an outer continuation remains queued.
+    let parked_batch_owner = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.each_source_batch_owner);
     let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // CR 615.13 + CR 616.1e: a resumed prevention batch whose continuation is
+    // empty (single source, no downstream) completes with no drain at all, so
+    // the drain hook never evaluates — publish here on the fresh outcome. A
+    // still-queued chain defers to the drain hook (active check); a nested
+    // pause defers to its own resume (fresh choice check). Pop-once makes the
+    // overlap with the drain hook idempotent.
+    //
+    // CR 615.13 + CR 616.1e (Matt M1): when the answered prompt carries its
+    // batch's stamp, that batch's frames publish at its own boundary — before
+    // any outer tail resumes. Deferring would leave a completed nested child
+    // parked for the outer tail to hydrate. Prompts without a stamp keep the
+    // legacy quiescent flush (their tail owns its boundary through its
+    // stamped continuation).
+    if !state.pending_each_source_batches.is_empty()
+        && matches!(waiting_for, WaitingFor::Priority { .. })
+    {
+        // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses mid-drainage
+        // parks a FRESH choice — it wins over the cached Priority, and the
+        // lifelink tail below must not run while a prompt is open. The flush
+        // already synced `state.waiting_for`.
+        if let Some(owner) = parked_batch_owner {
+            if let Some(fresh) =
+                super::effects::deal_damage::flush_owned_each_source_batches(state, events, owner)
+            {
+                return Ok(fresh);
+            }
+        }
+        if state.active_ability_continuation().is_none()
+            && !state.pending_each_source_batches.is_empty()
+        {
+            if let Some(fresh) =
+                super::effects::deal_damage::flush_pending_each_source_batches(state, events)
+            {
+                return Ok(fresh);
+            }
+        }
+    }
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
@@ -316,6 +363,32 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+    // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
+    // tail was empty parks no continuation, so no drain will ever run for it.
+    // Captured before `continue_replacement` consumes the record; the Execute
+    // epilogue publishes exactly this batch's frames before any queued work
+    // resumes.
+    let parked_batch_owner = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.each_source_batch_owner);
+    // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): same-event identity for the
+    // stamp restore in the NeedsChoice epilogue below. A mandatory modifier
+    // changes the amount, so the (source, recipient, combat) triple
+    // discriminates the repeated event from a nested child event's choice.
+    let parked_damage_identity: Option<(ObjectId, TargetRef, bool)> = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| match &pending.proposed {
+            ProposedEvent::Damage {
+                source_id,
+                target,
+                is_combat,
+                ..
+            } => Some((*source_id, target.clone(), *is_combat)),
+            _ => None,
+        });
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -1055,6 +1128,33 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+            // `EachSourceDealsDamage` batch's own boundary (its pause stamped
+            // the prompt because no tail was parked). Its event applied above
+            // and its inline riders settled, so its frames are final: publish
+            // exactly this batch here, before any queue below (batch
+            // delivery, sacrifice, discard, continuation) resumes. Deferring
+            // would leave the completed child parked for an outer tail to
+            // hydrate. A fresh rider choice above skips (the batch completes
+            // on its resume); an unstamped prompt is owned by its queued
+            // tail's stamped continuation instead.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(owner) = parked_batch_owner {
+                    // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses
+                    // mid-drainage parks a FRESH choice — it wins over the
+                    // cached Priority, and the queues below must not run
+                    // while a prompt is open. The flush already synced
+                    // `state.waiting_for`.
+                    if let Some(fresh) =
+                        super::effects::deal_damage::flush_owned_each_source_batches(
+                            state, events, owner,
+                        )
+                    {
+                        waiting_for = fresh;
+                    }
+                }
+            }
+
             // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
             // deliver its card and then surface an interactive post-replacement
             // effect. Complete the special action at the delivery boundary,
@@ -1466,6 +1566,36 @@ fn handle_replacement_choice_inner(
                 if let Some(paused) = parked_zone_change_delivery.as_ref() {
                     pending.inherit_delivery_boundary(&paused.expected_event);
                 }
+                // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): a SECOND ordering
+                // choice on the same damage event re-parked a fresh record
+                // with `each_source_batch_owner: None` (pipeline_loop
+                // constructs it unstamped). Reapply the stamp captured before
+                // `continue_replacement` consumed the prior record so the
+                // eventual answer still publishes the empty-tail batch at its
+                // own boundary. Same-event gated: a nested child event's
+                // choice (a rider-created reflect names a different source)
+                // must not inherit the stamp.
+                if pending.each_source_batch_owner.is_none() {
+                    let fresh_damage_identity: Option<(ObjectId, TargetRef, bool)> =
+                        match &pending.proposed {
+                            ProposedEvent::Damage {
+                                source_id,
+                                target,
+                                is_combat,
+                                ..
+                            } => Some((*source_id, target.clone(), *is_combat)),
+                            _ => None,
+                        };
+                    if let (Some(owner), Some(parked), Some(fresh)) = (
+                        parked_batch_owner,
+                        parked_damage_identity.clone(),
+                        fresh_damage_identity,
+                    ) {
+                        if parked == fresh {
+                            pending.each_source_batch_owner = Some(owner);
+                        }
+                    }
+                }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
@@ -1510,6 +1640,26 @@ fn handle_replacement_choice_inner(
                 )
             {
                 return Ok(state.waiting_for.clone());
+            }
+            // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+            // `EachSourceDealsDamage` batch's own boundary (its pause stamped
+            // the prompt because no tail was parked; fully-prevented damage
+            // answers land in this arm, not Execute). Its prevention applied
+            // inside `continue_replacement` and no nested prompt is live, so
+            // its frames are final: publish exactly this batch here, before
+            // any queue below resumes. Deferring would leave the completed
+            // child parked for an outer tail to hydrate. An unstamped prompt
+            // is owned by its queued tail's stamped continuation instead.
+            if let Some(owner) = parked_batch_owner {
+                // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses
+                // mid-drainage parks a FRESH choice — surface it instead of
+                // falling through to the queues below. The flush already
+                // synced `state.waiting_for`.
+                if let Some(fresh) = super::effects::deal_damage::flush_owned_each_source_batches(
+                    state, events, owner,
+                ) {
+                    return Ok(fresh);
+                }
             }
             if let Some(loser) = pending_phase_drain_life_loser {
                 // CR 614.1a: the chosen replacement prevented the loss outright,
@@ -1695,7 +1845,17 @@ fn handle_replacement_choice_inner(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
-            if state.active_ability_continuation().is_some() {
+            //
+            // CR 615.13 + CR 616.1e (R2-F1): a stamped batch tail is LIVE, not
+            // dead — its prevention applied inside `continue_replacement` and
+            // its parked frames plus downstream instructions still must drain
+            // through the Priority resume below. Clearing it here orphans the
+            // batch (a stub publishes, downstream never runs). Only dead
+            // (unstamped) continuations clear.
+            let active_is_live_batch_tail = state
+                .active_ability_continuation()
+                .is_some_and(|pending| pending.each_source_batch_owner.is_some());
+            if !active_is_live_batch_tail && state.active_ability_continuation().is_some() {
                 let _ = state
                     .clear_active_ability_continuation()
                     .expect("replacement cancellation cannot clear a buried continuation");
@@ -3992,6 +4152,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -4669,6 +4830,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);

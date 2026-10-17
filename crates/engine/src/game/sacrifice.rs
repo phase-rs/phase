@@ -21,6 +21,12 @@ pub(crate) enum SacrificeOutcome {
     /// A replacement effect requires player choice before sacrifice can proceed.
     /// Callers must handle this by surfacing the replacement choice to the player.
     NeedsReplacementChoice(PlayerId),
+    /// CR 109.5 + CR 701.21a: this actor is barred from sacrificing the
+    /// object (resolution-created "you can't sacrifice" binds its installer;
+    /// printed "can't be sacrificed" bars all). Nothing was sacrificed, moved,
+    /// or emitted. Cost paths must fail payment; effect paths skip the object
+    /// (CR 609.3: do as much as possible).
+    Prohibited,
 }
 
 /// Signed current power of the selected permanents. Aggregate sacrifice costs
@@ -55,12 +61,12 @@ pub(crate) fn sacrifice_permanent(
         ));
     }
 
-    // CR 701.21: "Can't be sacrificed" prevents this action. The effect/cost
-    // invoking sacrifice resolves as if no permanent was sacrificed — no
-    // graveyard move, no leaves-the-battlefield triggers, no events emitted.
-    if crate::game::static_abilities::object_has_static_other(state, object_id, "CantBeSacrificed")
-    {
-        return Ok(SacrificeOutcome::Complete);
+    // CR 109.5 + CR 701.21: "Can't be sacrificed" prevents this action for the
+    // barred actor — no graveyard move, no leaves-the-battlefield triggers,
+    // no events emitted. Cost callers fail on `Prohibited`; effect callers
+    // skip the object.
+    if crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, object_id) {
+        return Ok(SacrificeOutcome::Prohibited);
     }
 
     let proposed = ProposedEvent::Sacrifice {
@@ -513,8 +519,10 @@ mod tests {
         let mut events = Vec::new();
         let result = sacrifice_permanent(&mut state, victim, PlayerId(0), &mut events);
 
-        assert!(matches!(result, Ok(SacrificeOutcome::Complete)));
-        // Permanent is still on the battlefield — sacrifice was a no-op.
+        // CR 109.5: the bar reports `Prohibited` (not a silent no-op) so
+        // cost paths fail payment instead of resolving as no-sacrifice.
+        assert!(matches!(result, Ok(SacrificeOutcome::Prohibited)));
+        // Permanent is still on the battlefield — nothing moved.
         assert!(state.battlefield.contains(&victim));
         assert!(!state.players[0].graveyard.contains(&victim));
         // No PermanentSacrificed event was emitted.
@@ -522,6 +530,58 @@ mod tests {
             e,
             GameEvent::PermanentSacrificed { object_id, .. } if *object_id == victim
         )));
+    }
+
+    #[test]
+    fn resolution_created_sacrifice_bar_binds_installer_only() {
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::game_state::TransientContinuousEffectBindings;
+
+        // CR 109.5: a resolution-created "you can't sacrifice those
+        // creatures" (Call for Aid) binds "you" to the installing caster —
+        // the installed TCE carries the caster as its `bound_actor`, so only
+        // that player is barred. Installed through the same
+        // `add_transient_continuous_effect_inner` entry the resolution path
+        // (`install_transient`) uses, with the same resolved binding.
+        let mut state = GameState::new_two_player(42);
+        let victim = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stolen Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let installed = state.add_transient_continuous_effect_inner(
+            ObjectId(999),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: victim },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("CantBeSacrificed".to_string()),
+            }],
+            None,
+            None,
+            TransientContinuousEffectBindings::default(),
+            Some(PlayerId(0)),
+        );
+        assert!(
+            installed.is_some(),
+            "the installer grant must actually install"
+        );
+
+        // The installer is barred: nothing moves, nothing is emitted.
+        let mut events = Vec::new();
+        let result = sacrifice_permanent(&mut state, victim, PlayerId(0), &mut events);
+        assert!(matches!(result, Ok(SacrificeOutcome::Prohibited)));
+        assert!(state.battlefield.contains(&victim));
+        assert!(events.is_empty());
+
+        // A later controller is not bound by another player's "you": the
+        // same object sacrifices normally.
+        let mut events = Vec::new();
+        let result = sacrifice_permanent(&mut state, victim, PlayerId(1), &mut events);
+        assert!(matches!(result, Ok(SacrificeOutcome::Complete)));
+        assert!(!state.battlefield.contains(&victim));
     }
 
     #[test]

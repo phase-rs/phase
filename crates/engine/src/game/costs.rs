@@ -1062,12 +1062,22 @@ fn pay_ability_cost_inner(
         // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
         AbilityCost::Sacrifice(cost) => {
             if matches!(cost.target, TargetFilter::SelfRef) {
+                // Player-level bans plus object-level bars (Call for Aid binds
+                // its caster) share one authority; either fails payment.
                 if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
+                    || super::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, source_id,
+                    )
                 {
                     return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));
                 }
                 match super::sacrifice::sacrifice_permanent(state, source_id, player, events)? {
                     super::sacrifice::SacrificeOutcome::Complete => {}
+                    // CR 109.5: a mid-payment bar fails the cost, mirroring the
+                    // pre-check above.
+                    super::sacrifice::SacrificeOutcome::Prohibited => {
+                        return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));
+                    }
                     super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                         pause_cost_payment_for_replacement_choice(state, choice_player);
                         return Ok(PaymentOutcome::Paused {

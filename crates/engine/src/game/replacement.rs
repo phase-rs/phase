@@ -23,11 +23,11 @@ use super::filter::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
-    ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
-    ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
-    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    CombatPreventionTally, DrainStatus, GameState, LiminalEntry, LiminalEntryKind,
+    NamedChoiceSource, NamedChoiceSourceBinding, PendingReplacement, PostReplacementDrain,
+    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -2213,7 +2213,7 @@ fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKi
 /// CR 615.5 + CR 510.2: Oracle-text prevention shields carry riders in
 /// `execute`; resolving spells install `runtime_execute` instead. During a
 /// combat-damage batch, `replace_combat_damage_batch` drains `execute` riders
-/// per prevented event inline, while `fire_combat_prevention_riders` handles
+/// per prevented event inline, while `fire_batch_prevention_riders` handles
 /// only `runtime_execute`.
 fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
@@ -2225,6 +2225,36 @@ fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) 
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
     repl.is_some_and(|r| r.execute.is_some() && r.runtime_execute.is_none())
+}
+
+/// CR 615.5: `Next`/`AllBut` shields stash their rider per event and drain it
+/// inline during the combat-damage batch (`replace_combat_damage_batch`); the
+/// post-batch aggregate drain explicitly skips re-firing them
+/// (`combat_damage.rs`). An ordinary `runtime_execute` rider installed by a
+/// resolving spell (Test of Faith's "for each 1 damage prevented this way"
+/// counters) resolves `EventContextAmount` at that inline drain, so the
+/// per-event prevented amount must be stamped even though the public
+/// `DamagePrevented` event is deferred to the post-batch aggregate.
+/// `execute`-template riders are covered by
+/// `shield_has_per_event_execute_followup`; per-source reflectors by
+/// `shield_rider_reflects_per_event`.
+fn shield_has_inline_runtime_rider(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    repl.is_some_and(|r| {
+        matches!(
+            r.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::Next(_) | PreventionAmount::AllBut(_)
+            }
+        ) && r.runtime_execute.is_some()
+    })
 }
 
 /// CR 615.5 + CR 120.1: True when a prevention `runtime_execute` rider reflects
@@ -2262,9 +2292,13 @@ fn rider_reflects_per_event_damage_source(rider: &ResolvedAbility) -> bool {
 
 /// CR 615.5 + CR 120.1: True when the shield identified by `rid` carries a
 /// per-event-source-reflecting `runtime_execute` rider (Comeuppance). Such a
-/// shield must NOT aggregate into the combat batch tally — it fires per prevented
-/// event so each reflection binds to its own damage source and prevented amount.
-fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> bool {
+/// rider cannot ride the aggregate batch path (which pins a single chosen
+/// source) — it keeps its per-event stash + inline drain so each reflection
+/// binds its own damage source and prevented amount. The shield's PUBLIC
+/// prevented amount still aggregates into the combat batch tally (CR 615.13);
+/// `fire_batch_prevention_riders` emits the aggregate event but does not
+/// re-fire the rider.
+pub(crate) fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
@@ -2275,6 +2309,106 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
     };
     repl.and_then(|r| r.runtime_execute.as_deref())
         .is_some_and(rider_reflects_per_event_damage_source)
+}
+
+/// CR 510.2 + CR 615.13 + CR 120.3: accumulate one prevention application
+/// into the combat-damage batch tally, keyed by (shield, RECIPIENT). The
+/// recipient rides with the aggregate because one shield's filter is a
+/// predicate that can match several recipients in a single CR 510.2 batch —
+/// the post-batch aggregate must name each of them rather than re-derive one
+/// from the filter.
+///
+/// Returns whether the amount was accumulated (tally active and nonzero).
+/// Callers store that in `accumulated_in_batch` so the shared emit block
+/// defers the public `DamagePrevented` to the post-batch aggregate in
+/// `fire_batch_prevention_riders` instead of fragmenting one event per
+/// damage event.
+///
+/// Rider continuations are NOT deferred here: shields whose riders drain
+/// inline per event (per-source reflectors per CR 615.5, depletion/`AllBut`
+/// shields keeping their per-event stash) still stash + drain per event —
+/// Phase D emits their aggregate event but does not re-fire the rider.
+/// CR 615.13 + CR 616.1e: materialize the top parked batch's tally as the
+/// live transient. The single hydration authority, called before replacement
+/// dispatch (`apply_single_replacement`) so every tally-sensitive reader —
+/// the shield-counter applier, the batch rider-stash suppression gate, and
+/// the accumulator below — observes the resumed scope. Save/load may have
+/// dropped the transient, and the record is authoritative (kept current by
+/// the write-through below and re-parked whole on any further pause). Gated
+/// on a suspended batch, so the common path is one emptiness check.
+fn hydrate_parked_batch_prevention_tally(state: &mut GameState) {
+    if state.combat_prevention_tally.is_none() && !state.pending_each_source_batches.is_empty() {
+        // CR 615.13 + CR 616.1e (Matt M1): a draining tail hydrates its OWN
+        // batch's frame — never the stack top, which may be a completed
+        // child's still-parked record. No owned frame (the batch published
+        // inline) hydrates nothing. Outside a batch-tail drain the legacy
+        // top applies: the answered event's own batch parked last.
+        let parked = match state.resolving_each_source_batch_owner {
+            Some(owner) => {
+                crate::game::effects::deal_damage::top_owned_each_source_frame(state, owner)
+                    .map(|frame| frame.tally.clone())
+                    .unwrap_or_default()
+            }
+            None => state
+                .pending_each_source_batches
+                .last()
+                .map(|frame| frame.tally.clone())
+                .unwrap_or_default(),
+        };
+        state.combat_prevention_tally =
+            Some(crate::game::effects::deal_damage::tally_map_from_record_entries(&parked));
+    }
+}
+
+fn accumulate_batch_prevention(
+    state: &mut GameState,
+    applied_key: AppliedReplacementKey,
+    recipient: &TargetRef,
+    prevented_amount: u32,
+) -> bool {
+    if prevented_amount == 0 {
+        return false;
+    }
+    // CR 615.13 + CR 616.1e (Matt C3): a resumed batch rehydrates its parked
+    // tally on first accumulation, through the shared authority above.
+    hydrate_parked_batch_prevention_tally(state);
+    let accumulated = if let Some(tally) = state.combat_prevention_tally.as_mut() {
+        *tally.entry((applied_key, recipient.clone())).or_insert(0) += prevented_amount as i32;
+        true
+    } else {
+        false
+    };
+    if accumulated {
+        // CR 615.13: write the accumulation back so the parked record stays
+        // current across any nested boundary (pause, save/load).
+        //
+        // CR 615.13 + CR 616.1e (Matt M1): a draining tail writes through to
+        // its OWN batch's frame — never the stack top, which may be a
+        // completed child's still-parked record. No owned frame (the batch
+        // published inline) writes nowhere. Outside a batch-tail drain the
+        // legacy top applies: the answered event's own batch parked last.
+        let snapshot = state
+            .combat_prevention_tally
+            .as_ref()
+            .map(crate::game::effects::deal_damage::tally_entries_for_record)
+            .unwrap_or_default();
+        match state.resolving_each_source_batch_owner {
+            Some(owner) => {
+                if let Some(frame) =
+                    crate::game::effects::deal_damage::top_owned_each_source_frame_mut(state, owner)
+                {
+                    frame.tally = snapshot;
+                }
+            }
+            None => {
+                if let Some(top) = state.pending_each_source_batches.last_mut() {
+                    top.tally = snapshot;
+                }
+            }
+        }
+        return true;
+    }
+    false
 }
 
 /// CR 614.9: Read back the captured concrete recipient (an object or a player)
@@ -2748,7 +2882,7 @@ fn damage_done_applier(
             //     THIS event's amount (CR 615.5; mirrors Branch 2's stamp);
             //   * inside a batch, accumulate into the per-replacement tally — the
             //     single `DamagePrevented` and the aggregate `last_effect_count`
-            //     stamp happen post-batch in `fire_combat_prevention_riders`
+            //     stamp happen post-batch in `fire_batch_prevention_riders`
             //     (CR 510.2 + CR 615.13), so nothing is emitted or stamped here;
             //   * exception (mirrors Branch 2): an `execute`-template follow-up
             //     drains per-event inside `replace_combat_damage_batch` and needs
@@ -2763,10 +2897,10 @@ fn damage_done_applier(
                 if prevented > 0 {
                     let mut accumulated_in_batch = false;
                     if !shield_rider_reflects_per_event(state, rid) {
-                        if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                            *tally.entry(applied_key).or_insert(0) += prevented as i32;
-                            accumulated_in_batch = true;
-                        }
+                        // CR 120.3: key by (shield, RECIPIENT) — see
+                        // `accumulate_batch_prevention`.
+                        accumulated_in_batch =
+                            accumulate_batch_prevention(state, applied_key, &target, prevented);
                     }
                     let per_event_execute_followup =
                         accumulated_in_batch && shield_has_per_event_execute_followup(state, rid);
@@ -2853,10 +2987,14 @@ fn damage_done_applier(
     };
 
     let applied_key = AppliedReplacementKey::for_event(&event, rid);
-    // CR 615.5 + CR 120.1: A per-source-reflecting shield (Comeuppance) must NOT
-    // aggregate into the combat batch tally — it fires per prevented event so
-    // each reflection binds its own damage source and prevented amount.
-    let reflects_per_event = shield_rider_reflects_per_event(state, rid);
+    // CR 615.5 + CR 615.13 + CR 120.1: A per-source-reflecting shield
+    // (Comeuppance) aggregates its PUBLIC prevented amount into the combat
+    // batch tally like every other prevention application — one shield
+    // application over simultaneous events is ONE trigger. Only its RIDER
+    // stays per-event: each reflection binds its own damage source and
+    // prevented amount, which a batch aggregate cannot carry. The rider keeps
+    // its per-event stash + inline drain; Phase D emits the aggregate event
+    // but does not re-fire the rider (see `fire_batch_prevention_riders`).
     if let Some(ShieldKind::Prevention { amount }) = shield_kind {
         if let ProposedEvent::Damage {
             source_id,
@@ -2951,11 +3089,17 @@ fn damage_done_applier(
                     // prevented amount into the per-shield aggregate keyed by
                     // `rid`. The single rider firing happens post-batch in
                     // `combat_damage.rs` against the summed total.
-                    if !reflects_per_event {
-                        if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                            *tally.entry(applied_key).or_insert(0) += prevented_amount as i32;
-                            accumulated_in_batch = true;
-                        }
+                    // CR 120.3 + CR 615.13: key the batch aggregate by (shield,
+                    // RECIPIENT). One `Prevention::All` shield whose filter is a
+                    // predicate over recipients (Safe Passage's "you and creatures
+                    // you control", or an unfiltered Fog-class shield with no
+                    // `damage_target_filter` at all) prevents damage for several
+                    // recipients in one CR 510.2 batch; the post-batch aggregate
+                    // must name each of them rather than re-derive one from the
+                    // filter. Reflecting shields accumulate here too — only
+                    // their rider stays per-event (see above + Phase D).
+                    if accumulate_batch_prevention(state, applied_key, &target, prevented_amount) {
+                        accumulated_in_batch = true;
                     }
                 }
                 PreventionAmount::AllBut(keep) => {
@@ -2984,6 +3128,14 @@ fn damage_done_applier(
                             is_combat,
                             applied,
                         });
+                    }
+                    // CR 510.2 + CR 615.13: like `All`, one application over
+                    // simultaneous events is ONE trigger — accumulate the
+                    // public amount per (shield, recipient). The rider (if any)
+                    // keeps its per-event stash + inline drain; Phase D emits
+                    // but does not re-fire.
+                    if accumulate_batch_prevention(state, applied_key, &target, prevented_amount) {
+                        accumulated_in_batch = true;
                     }
                 }
                 PreventionAmount::Next(n) => {
@@ -3015,6 +3167,16 @@ fn damage_done_applier(
                             applied,
                         });
                     }
+                    // CR 510.2 + CR 615.13: CR 615.7's "the number of events
+                    // or sources dealing it doesn't matter" makes one
+                    // application over simultaneous events ONE trigger — the
+                    // shielded player's WHICH-damage choice is unaffected by
+                    // aggregating the public amount per (shield, recipient).
+                    // The rider (if any) keeps its per-event stash + inline
+                    // drain; Phase D emits but does not re-fire.
+                    if accumulate_batch_prevention(state, applied_key, &target, prevented_amount) {
+                        accumulated_in_batch = true;
+                    }
                 }
             }
 
@@ -3025,12 +3187,35 @@ fn damage_done_applier(
             // `combat_damage.rs` — emitting them per-source here would fragment
             // the rider's `EventContextAmount` across attackers.
             //
-            // Exception: `execute`-template shields (Mindskinner, Weeping Angel)
-            // drain per-event inside `replace_combat_damage_batch` and need the
-            // per-event prevented amount stamped here so `EventContextAmount`
-            // resolves when that inline drain runs.
-            let per_event_execute_followup =
-                accumulated_in_batch && shield_has_per_event_execute_followup(state, rid);
+            // Exceptions (stamp only; the public event still aggregates
+            // post-batch): `execute`-template shields (Mindskinner, Weeping
+            // Angel) and ordinary `Next`/`AllBut` `runtime_execute` riders
+            // (Test of Faith) drain per-event inside
+            // `replace_combat_damage_batch` and need the per-event prevented
+            // amount stamped here so `EventContextAmount` resolves when that
+            // inline drain runs.
+            //
+            // CR 615.13: every prevention arm above accumulates into
+            // `combat_prevention_tally` when a batch is active
+            // (`PreventionMinus` except per-source reflectors, which have no
+            // printed carrier), so this per-event emit block is reached inside
+            // a batch only for the `execute`-template exception below — one
+            // `DamagePrevented` per (shield, recipient) is emitted post-batch.
+            // The per-event shape survives ONLY where batching cannot carry
+            // the semantics: a per-source-reflecting RIDER (Comeuppance:
+            // CR 615.5 binds each reflection to its own damage source — "that
+            // much damage to that creature" / "the source's controller").
+            // Those riders keep their per-event stash + inline drain; only the
+            // rider stays per-event, while the public `DamagePrevented`
+            // aggregates (Phase D emits but does not re-fire). The stamp is
+            // load-bearing for them: the inline drain resolves
+            // `EventContextAmount` against `last_effect_count`, and without
+            // the per-event stamp it would read a stale aggregate (or
+            // nothing) and reflect the wrong amount.
+            let per_event_execute_followup = accumulated_in_batch
+                && (shield_has_per_event_execute_followup(state, rid)
+                    || shield_rider_reflects_per_event(state, rid)
+                    || shield_has_inline_runtime_rider(state, rid));
             if prevented_amount > 0 && (!accumulated_in_batch || per_event_execute_followup) {
                 if !accumulated_in_batch {
                     events.push(GameEvent::DamagePrevented {
@@ -3343,10 +3528,17 @@ fn apply_shield_counter_replacement(
             // CR 510.2 + CR 122.1c: one shield counter prevents all simultaneous
             // combat damage dealt to the permanent in the batch. Defer counter
             // removal until the post-batch aggregation fires exactly once.
-            if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                *tally
-                    .entry(AppliedReplacementKey::for_event(&event, rid))
-                    .or_insert(0) += amount as i32;
+            // CR 615.13 + CR 616.1e (Matt C3): route through the shared
+            // accumulation/write-through authority — a resumed batch hydrates
+            // its parked prefix first, so the resumed entry joins the SAME
+            // aggregate application (one counter at drain) instead of burning
+            // a counter immediately plus a second at drain.
+            if accumulate_batch_prevention(
+                state,
+                AppliedReplacementKey::for_event(&event, rid),
+                &target,
+                amount,
+            ) {
                 return Err(ApplyResult::Prevented);
             }
 
@@ -9656,6 +9848,11 @@ fn apply_single_replacement(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
+    // CR 615.13 + CR 616.1e (Matt C3): activate the parked batch scope before
+    // replacement dispatch, so the shield-counter applier and the batch
+    // rider-stash suppression gate below read the resumed tally instead of a
+    // dropped transient. No-op unless a batch is suspended.
+    hydrate_parked_batch_prevention_tally(state);
     // CR 703.4q + CR 614.1a: Path A carve-out for step-end empty-mana events.
     // Step-end mana handlers carry no `ReplacementDefinition` (no execute /
     // decline ability, no event-modifier sub-ability work, no runtime_execute)
@@ -9782,7 +9979,7 @@ fn apply_single_replacement(
                 // resolving spell (e.g. Inkshield) captures a `runtime_execute`
                 // rider at resolution time and fires it once post-batch against the
                 // aggregate prevented amount. Suppress the per-event stash here for
-                // such shields so `fire_combat_prevention_riders` owns the single
+                // such shields so `fire_batch_prevention_riders` owns the single
                 // continuation.
                 //
                 // Static permanent-ability shields (e.g. Weeping Angel's "prevent
@@ -9794,7 +9991,7 @@ fn apply_single_replacement(
                 // CR 615.5 + CR 120.1: A rider that reflects PER SOURCE (Comeuppance:
                 // "if damage from a creature source is prevented this way, deal that
                 // much damage to that creature") cannot ride the aggregate batch path
-                // — `fire_combat_prevention_riders` only pins a single CHOSEN source
+                // — `fire_batch_prevention_riders` only pins a single CHOSEN source
                 // (`shield_specific_source`), so a class-scoped `damage_source_filter`
                 // leaves the drain's `event_source` unset and the per-source
                 // reflection/gate never resolves. Such riders must fire per-event so
@@ -11232,6 +11429,7 @@ fn park_entry_controller_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -11405,6 +11603,7 @@ fn park_as_enters_named_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -11971,6 +12170,7 @@ fn pipeline_loop(
                     may_cost_paid: false,
                     may_cost_remaining: None,
                     delivery_boundary: None,
+                    each_source_batch_owner: None,
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -12034,6 +12234,7 @@ fn pipeline_loop(
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
+                each_source_batch_owner: None,
             });
             return replay_pending_replacement(state, affected, events);
         } else {
@@ -12095,12 +12296,14 @@ pub fn replace_event(
 ///
 /// Each proposed `Damage` event is passed through `replace_event` individually
 /// (the pipeline is inherently per-event), but for the duration of the batch
-/// `state.combat_prevention_tally` is active: the damage-replacement applier's
-/// `Prevention::All` branch routes each prevented amount into a per-shield
-/// aggregate keyed by `ReplacementId` instead of stamping `last_effect_count`
-/// or emitting a per-source `DamagePrevented`. `Prevention::Next(N)` shields
-/// keep the existing per-event sequential path — depletion-style shields are
-/// not aggregated here.
+/// `state.combat_prevention_tally` is active: the damage-replacement applier
+/// routes each prevented amount into a per-shield aggregate keyed by
+/// (`ReplacementId`, recipient) instead of stamping `last_effect_count` or
+/// emitting a per-source `DamagePrevented` — CR 615.13 makes one prevention
+/// application over simultaneous events ONE trigger. Every prevention arm
+/// (`All`, `AllBut`, `Next`, `PreventionMinus`) accumulates; depletion and
+/// per-source-reflecting shields keep their per-event rider stash + inline
+/// drain, and Phase D emits their aggregate event without re-firing the rider.
 ///
 /// `// strict-failure: CR 615.7 multi-source Next(N) prevention requires a
 /// player choice — out of scope (#314 is Prevention::All)`. When two or more
@@ -12112,15 +12315,16 @@ pub fn replace_event(
 /// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
 /// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
 /// `None` means that source's damage was fully prevented or skipped. The
-/// `HashMap` is the per-`Prevention::All`-shield aggregate prevented amount.
+/// `HashMap` is the per-shield-AND-per-recipient aggregate prevented amount:
+/// CR 120.3 makes the recipient a load-bearing property of a
+/// damage event, and one shield's `damage_target_filter` is a predicate that can
+/// match several recipients in the same CR 510.2 batch, so the key carries the
+/// recipient the applier actually prevented damage for.
 pub(crate) fn replace_combat_damage_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     proposed: Vec<ProposedEvent>,
-) -> (
-    Vec<Option<ProposedEvent>>,
-    HashMap<AppliedReplacementKey, i32>,
-) {
+) -> (Vec<Option<ProposedEvent>>, CombatPreventionTally) {
     let registry = replacement_registry();
 
     // CR 510.2: Activate the batch tally so the applier aggregates per shield.
@@ -12306,6 +12510,11 @@ fn continue_replacement_impl(
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
         let reparked_delivery_boundary = pending.delivery_boundary.clone();
+        // CR 615.13 + CR 616.1e (Matt M1): a reconstructing re-park carries
+        // the batch stamp with the record — a stamp dropped here would
+        // strand an empty-tail batch's boundary (practically `None` on this
+        // zone-change path, but the lifecycle must not depend on that).
+        let reparked_batch_owner = pending.each_source_batch_owner;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
@@ -12438,6 +12647,7 @@ fn continue_replacement_impl(
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
                     delivery_boundary: reparked_delivery_boundary,
+                    each_source_batch_owner: reparked_batch_owner,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement: parked_outer,
@@ -15767,6 +15977,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
 
         let WaitingFor::ReplacementChoice {
@@ -15831,6 +16042,7 @@ mod tests {
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
+                each_source_batch_owner: None,
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -15916,6 +16128,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -20071,7 +20284,7 @@ mod tests {
     /// CR 510.2 + CR 615.13: inside a combat-damage batch, `PreventionMinus`
     /// must defer BOTH the `DamagePrevented` emission and the
     /// `last_effect_count` stamp to the post-batch aggregate — it accumulates
-    /// into the per-replacement tally that `fire_combat_prevention_riders`
+    /// into the per-replacement tally that `fire_batch_prevention_riders`
     /// consumes (which emits the single event and stamps the batch total),
     /// mirroring the `Prevention::All` shield batching.
     #[test]
@@ -20105,10 +20318,22 @@ mod tests {
              happens post-batch so the rider sees the un-fragmented total"
         );
         let tally = state.combat_prevention_tally.as_ref().unwrap();
+        // CR 120.3: assert the whole entry, key AND recipient included — the
+        // amount alone compiles unchanged after the key was widened, so an
+        // amount-only assertion would keep passing if the recipient were dropped
+        // or replaced by a shield-derived guess. `damage_event` heads its damage
+        // at `Player(PlayerId(1))`; that is the value that must be threaded.
         assert_eq!(
-            tally.values().copied().collect::<Vec<_>>(),
-            vec![2],
-            "the prevented amount must accumulate into the per-replacement batch tally"
+            tally.iter().collect::<Vec<_>>(),
+            vec![(
+                &(
+                    AppliedReplacementKey::object(rid.source, rid.index),
+                    TargetRef::Player(PlayerId(1)),
+                ),
+                &2,
+            )],
+            "the prevented amount must accumulate into the batch tally keyed by \
+             (shield, recipient), carrying the recipient the damage was headed at"
         );
     }
 
@@ -20734,6 +20959,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);

@@ -2119,6 +2119,88 @@ pub fn object_has_static_other(state: &GameState, object_id: ObjectId, name: &st
     )
 }
 
+/// CR 109.5 + CR 701.21a: actor-aware object sacrifice prohibition — the
+/// single legality authority for "can't be sacrificed" shared by selection
+/// (`find_eligible_sacrifice_targets`), cost guards, and execution
+/// (`sacrifice_permanent`).
+///
+/// A resolution-created "you can't sacrifice those <objects>" (Call for Aid)
+/// binds its "you" to the installing caster (CR 109.5): the installed TCE
+/// carries the resolved caster as its `bound_actor`, and the layer-6 graft
+/// copies it onto the grafted def's `source_controller` anchor — only that
+/// player is barred, and a later controller may sacrifice the same object.
+/// Object characteristics ("~ can't be sacrificed" printed, "this permanent
+/// can't be sacrificed" granted — Stilt-Man) carry no binding and bar every
+/// actor.
+///
+/// Both scans below consult the SAME stored binding — the TCE scan for
+/// pre-derivation timing, the functioning-defs scan per graft — so exactly
+/// the actor-bound graft is exempted for other actors while an independent
+/// object-wide grant on the same object keeps barring them.
+pub(crate) fn object_cant_be_sacrificed_by(
+    state: &GameState,
+    actor: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let mode = StaticMode::Other("CantBeSacrificed".to_string());
+    // Shared resolution-grant bar predicate (pin + gates + mode),
+    // actor-agnostic: the caller pairs it with the stored binding below.
+    let tce_bars = |tce: &crate::types::game_state::TransientContinuousEffect| -> bool {
+        let pins_object = matches!(
+            &tce.affected,
+            TargetFilter::SpecificObject { id: pinned, .. } if *pinned == object_id
+        );
+        if !pins_object {
+            return false;
+        }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect
+        // must hold for it to apply — same authority
+        // (`transient_gate_conditions`) as `transient_grants_other_static_to_context`.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            return false;
+        }
+        tce.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Other(name),
+                } if name == "CantBeSacrificed"
+            )
+        })
+    };
+    // Live-TCE scan: an installer-bound TCE bars only its bound actor; an
+    // unbound (object-wide) TCE bars every actor. CR 701.21a already
+    // restricts every sacrifice to the object's controller, so
+    // installer-scoping here never frees a legal sacrifice — it only frees
+    // players the prohibition never named.
+    for tce in state.transient_continuous_effects.iter() {
+        if tce_bars(tce) && tce.bound_actor.is_none_or(|bound| bound == actor) {
+            return true;
+        }
+    }
+    // Functioning-defs scan: each graft carries its own exact provenance
+    // (`source_controller`, stamped by the layer-6 arm from the backing
+    // TCE), so the exemption applies graft-by-graft — an installer-bound
+    // graft frees other actors while an independent object-wide grant on
+    // the same object keeps barring them. A printed def (present in the
+    // graft-free `base_static_definitions` baseline) always binds. This must
+    // NOT be `object_has_static_other` or `check_static_ability`: both read
+    // the live slot actor-blind, which would re-bar players the binding
+    // just cleared.
+    let context = StaticCheckContext {
+        target_id: Some(object_id),
+        ..Default::default()
+    };
+    crate::game::functioning_abilities::game_functioning_statics(state).any(|(obj, def)| {
+        def.mode == mode
+            && static_ability_match_applies(state, &mode, &context, obj, def)
+            && (obj.base_static_definitions.contains(def)
+                || def.source_controller.is_none_or(|bound| bound == actor))
+    })
+}
+
 /// Check if a static ability named `name` applies to a specific player
 /// (player-scoped query). Used for player-targeted prohibitions like
 /// `CantPlayLand`, `CantShuffle`.

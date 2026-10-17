@@ -7524,8 +7524,64 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
                 tag(" attacked you during their last turn"),
             ),
         ),
+        // CR 508.6: "<subject> didn't/did not attack you that turn" -- the
+        // retrospective this-turn player-pair test, negated (Faramir's "if
+        // that player didn't attack you that turn, ... Otherwise, ..." and
+        // its verbatim "they" consequent). Factored by
+        // subject/polarity/endpoint components; defender is the controller
+        // ("you", CR 109.5).
+        parse_pair_attack_condition,
     ))
     .parse(input)
+}
+
+/// CR 508.6: subject component of the retrospective pair-attack grammar —
+/// "that player" (the V1 anaphor) mapping to the `ChosenPlayer { index: 0 }`
+/// placeholder (the chain rewrite binds the true chosen player and the bridge
+/// maps it to the stamped target). The pronoun "they" is deliberately NOT a
+/// subject here: it binds per-context (the choice in the dispatcher's scope),
+/// and the chain drives scope enrichment across multiple passes — an early
+/// scopeless pass must FAIL here (as before) so the scoped passes re-resolve
+/// through the dispatcher's scope-gated arm, which matches the pronoun itself
+/// and delegates the predicate below. Letting nom match "they" context-free
+/// collapses the passes and drops the condition even for honest Choose
+/// antecedents.
+fn parse_pair_attack_subject(input: &str) -> OracleResult<'_, ControllerRef> {
+    value(ControllerRef::ChosenPlayer { index: 0 }, tag("that player")).parse(input)
+}
+
+/// CR 508.6: polarity + endpoint of the retrospective pair-attack grammar —
+/// "didn't/did not attack you that turn" (negated only; the retrospective
+/// test has no positive surface). The contraction reuses `parse_didnt`
+/// (both apostrophes). `pub(crate)`: the effect dispatcher composes this
+/// shared predicate after its own scope-gated "they " pronoun match, so the
+/// attack shape lives here once instead of as complete sentences there.
+pub(crate) fn parse_pair_attack_predicate(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag(" "),
+            alt((parse_didnt, tag("did not"))),
+            tag(" attack you that turn"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 508.6: the composed retrospective pair-attack condition (negated) —
+/// subject + polarity/endpoint above, defender "you".
+fn parse_pair_attack_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, attacker) = parse_pair_attack_subject(input)?;
+    let (rest, _) = parse_pair_attack_predicate(rest)?;
+    Ok((
+        rest,
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker,
+                defender: ControllerRef::You,
+            }),
+        },
+    ))
 }
 
 /// CR 508.1a: "you attacked with [N | N or more] creatures this turn" (the
@@ -12095,6 +12151,58 @@ mod tests {
         "controlled by that player",
         "the chosen player controls",
     ];
+
+    /// CR 508.6: the factored pair-attack grammar accepts the "that player"
+    /// subject with both "didn't"/"did not" spellings (plus the curly
+    /// apostrophe), consumes fully, and emits the negated player-pair test
+    /// with the V1 anaphor placeholder. The pronoun "they" is declined here
+    /// by design (it binds per-context in the dispatcher, which delegates
+    /// the shared predicate).
+    #[test]
+    fn pair_attack_condition_factored_surfaces() {
+        for text in [
+            "that player didn't attack you that turn",
+            "that player did not attack you that turn",
+            "that player didn\u{2019}t attack you that turn",
+        ] {
+            let (rest, condition) = parse_pair_attack_condition(text).unwrap();
+            assert_eq!(rest, "", "{text:?} must consume fully");
+            assert_eq!(
+                condition,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                        attacker: ControllerRef::ChosenPlayer { index: 0 },
+                        defender: ControllerRef::You,
+                    }),
+                },
+                "{text:?}"
+            );
+        }
+        // The shared predicate (polarity via parse_didnt plus endpoint)
+        // consumes fully on its own, independent of subject.
+        for predicate in [
+            " didn't attack you that turn",
+            " did not attack you that turn",
+            " didn\u{2019}t attack you that turn",
+        ] {
+            let (rest, _) = parse_pair_attack_predicate(predicate).unwrap();
+            assert_eq!(rest, "", "{predicate:?} must consume fully");
+        }
+        // No positive surface; no pronoun subject here; no other endpoint.
+        for declined in [
+            "they didn't attack you that turn",
+            "they did not attack you that turn",
+            "that player attacked you that turn",
+            "you didn't attack you that turn",
+            "that player didn't attack them that turn",
+            "that player didn't attack you last turn",
+        ] {
+            assert!(
+                parse_pair_attack_condition(declined).is_err(),
+                "{declined:?} must not parse"
+            );
+        }
+    }
 
     #[test]
     fn they_control_count_ge_marker() {
@@ -24607,6 +24715,57 @@ mod tests {
                 Ok((_, StaticCondition::AnyPlayerAttackedYouLastTurn { .. }))
             ),
             "the this-turn near-miss must not lower to the last-turn revenge gate"
+        );
+    }
+    /// CR 508.6: "that player didn't/did not attack you that turn" parses
+    /// to the negated retrospective this-turn player-pair test with the V1
+    /// anaphor placeholder (Faramir; the chain rewrite binds the true chosen
+    /// player, the bridge maps it to the stamped target).
+    #[test]
+    fn parse_inner_condition_that_player_didnt_attack_you_this_turn() {
+        for text in [
+            "that player didn't attack you that turn",
+            "that player did not attack you that turn",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                        attacker: ControllerRef::ChosenPlayer { index: 0 },
+                        defender: ControllerRef::You,
+                    }),
+                },
+                "{text}"
+            );
+        }
+
+        // Sibling non-shadow: the last-turn revenge gate in the same
+        // `parse_combat_history_condition` combinator keeps its own variant.
+        let (_, last) =
+            parse_inner_condition("a player attacked you during their last turn").unwrap();
+        assert!(matches!(
+            last,
+            StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        ));
+
+        // Negative: a pronoun subject is NOT the V1 anaphor -- it binds a
+        // different referent with no producer yet, so it must not lower to
+        // the chosen-player placeholder.
+        assert!(
+            !matches!(
+                parse_inner_condition("they didn't attack you that turn"),
+                Ok((_, StaticCondition::Not { condition }))
+                    if matches!(
+                        *condition,
+                        StaticCondition::PlayerAttackedPlayer {
+                            attacker: ControllerRef::ChosenPlayer { .. },
+                            ..
+                        }
+                    )
+            ),
+            "pronoun subject must not take the V1 anaphor"
         );
     }
 

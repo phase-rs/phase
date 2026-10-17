@@ -1646,8 +1646,16 @@ mod tests {
         let total: i32 = tally.values().sum();
         assert_eq!(total, 3);
 
+        // CR 615.13: the aggregate is keyed by (shield, recipient), and this
+        // batch has exactly one of each, so it is a single entry. Pin that
+        // structurally: the tally is a `HashMap`, so were a regression ever to
+        // split this across several entries, the `.next()` below would silently
+        // pick a nondeterministic one instead of failing.
+        assert_eq!(tally.len(), 1, "one shield, one recipient, one entry");
         // CR 615.5: fire the rider once against the aggregate prevented amount.
-        let (rid, &prevented) = tally.iter().next().unwrap();
+        let ((rid, recipient), &prevented) = tally.iter().next().unwrap();
+        // CR 120.3: the aggregate names the recipient it was prevented for.
+        assert_eq!(*recipient, TargetRef::Player(PlayerId(0)));
         let runtime = state.pending_damage_replacements[rid.index()]
             .runtime_execute
             .clone()

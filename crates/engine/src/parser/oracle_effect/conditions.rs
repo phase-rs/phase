@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase,
+    inject_controller_you, parse_cast_using_teamwork_phrase, parse_pair_attack_predicate,
     parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
     DamagedThisWayRecipient,
@@ -4793,7 +4793,9 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
-        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        // Reads the turn-history attack ledger, not the spell's cast snapshot.
+        | AbilityCondition::PlayerAttackedPlayer { .. } => false,
     }
 }
 
@@ -5978,6 +5980,45 @@ fn opponent_poison_at_least_as_quantity_check(count: u32) -> AbilityCondition {
     }
 }
 
+/// CR 508.6 + CR 608.2c: endpoint map for the retrospective player-pair
+/// attack test, shared by the positive and negated bridge arms below. Each
+/// endpoint maps only where meaning is preserved exactly (see the arm doc);
+/// unmapped endpoints fail the whole condition to `None` so coverage stays
+/// honest instead of silently rebinding.
+fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope> {
+    match scope {
+        ControllerRef::You => Some(PlayerScope::Controller),
+        ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
+        ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
+        ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
+        ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
+        // No exact mapping: `Opponent` needs an aggregate the source lacks,
+        // the target/event-relative refs name no single endpoint, and
+        // `DeclaredPlayer`/`TriggeringPlayer`/`EnchantedPlayer`/`ActivePlayer`
+        // have no `PlayerScope` counterpart. Each fails the condition to
+        // `None` (listed explicitly so a new `ControllerRef` breaks the
+        // build here instead of silently rebinding).
+        //
+        // CR 508.6 + CR 608.2c (Matt M2): `SpecificPlayer` is refused here
+        // too, even though the names line up. `PlayerScope::SpecificPlayer`
+        // is duration-timing-only — never produced by the parser, carrying
+        // no value reading — and the condition authority rejects it before
+        // evaluation, so mapping it would bridge a matching ledger entry to
+        // a condition that still yields false (or true under `Not`).
+        ControllerRef::Opponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => None,
+    }
+}
+
 /// Bridge a `StaticCondition` (from the nom condition parser) to an
 /// `AbilityCondition`. Returns `None` for variants that have no
 /// effect-resolution equivalent — the caller falls through to the next strategy.
@@ -6005,6 +6046,35 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(AbilityCondition::WasStartingPlayer {
                 controller: controller.clone(),
             })
+        }
+        // CR 508.6 + CR 608.2c: player-pair attack tests bridge
+        // endpoint-wise. Each endpoint maps only where meaning is
+        // preserved exactly: `You` reads the resolution controller;
+        // declared-target and chosen endpoints read the first
+        // `TargetRef::Player` (the V1 creation-time stamp carries the
+        // chosen player); `SourceChosenPlayer`, `DefendingPlayer`, and
+        // `ScopedPlayer` are scalar-identical on both axes. Aggregates
+        // (`Opponent`), event- and parent-relative anchors,
+        // `ActivePlayer`/`TriggeringPlayer`/`EnchantedPlayer`, and
+        // `SpecificPlayer` (Matt M2: its `PlayerScope` namesake is
+        // duration-timing-only and the condition authority rejects it,
+        // so mapping it would yield false despite a matching ledger)
+        // have no scalar counterpart -- lowering them would silently
+        // rebind (cf. `IsMonarch` below), so the whole condition stays
+        // unrepresented and coverage stays honest.
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            match (
+                player_attack_endpoint_to_scope(attacker),
+                player_attack_endpoint_to_scope(defender),
+            ) {
+                (Some(attacker), Some(defender)) => {
+                    Some(AbilityCondition::PlayerAttackedPlayer {
+                        attacker,
+                        defender,
+                    })
+                }
+                _ => None,
+            }
         }
         // CR 702.185c: "a spell was warped this turn" — 1:1 bridge (same `variant`).
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
@@ -6472,6 +6542,9 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::ConditionInstead { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
+        // CR 508.6: retrospective player-pair test reads resolved targets;
+        // a resolution-flow guard with no continuous-effect form.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => None,
         AbilityCondition::DiscardedCardMatchesFilter { .. } => None,
 
@@ -7673,6 +7746,36 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     static_condition_to_ability_condition(&scalar, ctx)?,
                 ],
             });
+        }
+    }
+
+    // CR 508.6 + CR 608.2c: "they <attack-predicate>" with a
+    // Choose(Player|Opponent) antecedent — "they" is the chosen player
+    // (Faramir's verbatim consequent). The pronoun binds per-context, so the
+    // dispatcher matches it here under the chain's `relative_player_scope`
+    // gate — but the attack SHAPE is not re-matched as complete sentences:
+    // the shared nom predicate (`parse_pair_attack_predicate`, polarity via
+    // `parse_didnt` plus endpoint) parses it, and the contextual index binds
+    // below before the shared bridge maps it to the stamped target.
+    // Full-consumption match only; every other scope falls through to the
+    // generic path unchanged (nom deliberately has no "they" subject, so an
+    // early scopeless pass keeps failing here exactly as before, preserving
+    // the chain's scope-enrichment passes).
+    if let Some(ControllerRef::ChosenPlayer { index }) = ctx.relative_player_scope.as_ref() {
+        let mut they_attacked_you = all_consuming((
+            tag::<_, _, OracleError<'_>>("they"),
+            parse_pair_attack_predicate,
+        ));
+        if they_attacked_you.parse(lower.as_str()).is_ok() {
+            let static_cond = StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: *index },
+                    defender: ControllerRef::You,
+                }),
+            };
+            if let Some(bridged) = static_condition_to_ability_condition(&static_cond, ctx) {
+                return Some(bridged);
+            }
         }
     }
 
@@ -13913,5 +14016,41 @@ mod tests {
             })
             .collect();
         assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 508.6 + CR 608.2c (Matt M2): the `SpecificPlayer` attack endpoint
+    /// is refused by the initial-verb bridge on either side.
+    /// `PlayerScope::SpecificPlayer` is duration-timing-only and the
+    /// condition authority rejects it, so mapping the endpoint would bridge
+    /// a matching ledger entry to a condition that still yields false (or
+    /// true under `Not`). The declared-target positive still bridges to
+    /// `Target`/`Controller`; evaluation cells live in
+    /// `player_attacked_player_predicate_matrix`.
+    #[test]
+    fn initial_verb_bridge_refuses_specific_player_attack_endpoint() {
+        use crate::types::player::PlayerId;
+
+        let p1 = PlayerId(1);
+        for (attacker, defender) in [
+            (ControllerRef::SpecificPlayer { id: p1 }, ControllerRef::You),
+            (ControllerRef::You, ControllerRef::SpecificPlayer { id: p1 }),
+        ] {
+            let sc = StaticCondition::PlayerAttackedPlayer { attacker, defender };
+            assert_eq!(
+                static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+                None
+            );
+        }
+        let sc = StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ChosenPlayer { index: 0 },
+            defender: ControllerRef::You,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+            Some(AbilityCondition::PlayerAttackedPlayer {
+                attacker: PlayerScope::Target,
+                defender: PlayerScope::Controller,
+            })
+        );
     }
 }
