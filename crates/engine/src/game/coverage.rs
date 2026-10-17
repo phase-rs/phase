@@ -15,6 +15,7 @@ use crate::parser::oracle::{
 };
 use crate::parser::oracle_casting::parse_casting_restriction_line;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
+use crate::parser::oracle_effect::imperative::try_parse_em_dash_die_result_line;
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagnostic};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
@@ -8582,14 +8583,19 @@ fn effective_oracle_lines(oracle_text: &str) -> Vec<String> {
             in_modal = false;
         }
 
-        // CR 706.2 (rolling a die) / CR 701.51: an outcome row ("1—9 | Draw a
-        // card.", "20 | …", a level band) is the resolution table of the line
-        // above it, and the parser emits every row as a child of that one
-        // ability. Fold rows into their header exactly as modal bullets fold
-        // into their `choose` header, so a fully parsed roll is not counted as
-        // N+1 lines against 1 root. The `!effective.is_empty()` guard keeps a
-        // row that opens a card (no header to belong to) countable.
-        if !effective.is_empty() && (is_attraction_line(&lower) || is_level_effect_line(&lower)) {
+        // CR 706.3a + CR 706.3b (a roll's results table): an outcome row — a pipe row ("1—9 |
+        // Draw a card.", "20 | …", a level band) or an em-dash row ("1 or 2 — Draw a
+        // card.") — is the resolution table of the line above it, and the parser
+        // emits every row as a child of that one ability. Fold rows into their
+        // header exactly as modal bullets fold into their `choose` header, so a
+        // fully parsed roll is not counted as N+1 lines against 1 root. The
+        // `!effective.is_empty()` guard keeps a row that opens a card (no header to
+        // belong to) countable.
+        if !effective.is_empty()
+            && (is_attraction_line(&lower)
+                || is_level_effect_line(&lower)
+                || is_em_dash_die_result_row_line(stripped))
+        {
             continue;
         }
 
@@ -8770,6 +8776,22 @@ fn is_level_effect_line(lower: &str) -> bool {
             && b.chars().all(|c| c.is_ascii_digit());
     }
     false
+}
+
+/// CR 706.3b: whether `line` is a results-table row written with an em dash
+/// ("1 or 2 — …", "3 — …"). The roll, its table and the instructions that follow
+/// its result are one ability, so such a row is part of the ability its header
+/// produced. The parser is the detector — the row grammar that attaches the row to
+/// its roll — so the fold and the grammar cannot drift apart.
+///
+/// Pipe-form rows stay with `is_attraction_line` and `is_level_effect_line`, and
+/// this predicate is deliberately blind to them: their accounting is not part of
+/// the em-dash extension of the row grammar. Widening the fold to a pipe row that
+/// neither of those recognizes (Druid of the Emerald Grove's "9 or less | …")
+/// would report a card whose parsed rows cannot deliver its printed outcome as
+/// fully accounted for.
+fn is_em_dash_die_result_row_line(line: &str) -> bool {
+    try_parse_em_dash_die_result_line(line).is_some()
 }
 
 /// Strip parenthesized reminder text from a line.
@@ -11712,7 +11734,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // Check if this is an attraction/dungeon/level-up line with parsed abilities.
         // Level-up effect lines (N+ | ...) are structural parts of leveler cards and
         // are always considered covered (the level-up keyword itself governs them).
-        let covered_by_attraction = is_attraction_line(&lower)
+        // An em-dash die-table row (CR 706.3b) is covered by the ability its roll
+        // header produced, as a pipe row is.
+        let covered_by_attraction = (is_attraction_line(&lower)
+            || is_em_dash_die_result_row_line(stripped))
             && (!face.abilities.is_empty()
                 || !face.triggers.is_empty()
                 || is_level_effect_line(&lower));
@@ -17031,6 +17056,212 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             effective_oracle_lines("1\u{2014}9 | Draw a card.").len(),
             1,
             "a row with no preceding header is its own line, not a fold target"
+        );
+    }
+
+    /// Verbatim Comet, Stellar Pup (MTGJSON `text`): a loyalty ability that rolls a
+    /// die, then four result rows written as an em-dash list. The row separators
+    /// are U+2014 and the signs of `[−1]` and `[−2]` are U+2212.
+    const COMET_ORACLE: &str = "[0]: Roll a six-sided die.\n\
+        1 or 2 \u{2014} [+2], then create two 1/1 green Squirrel creature tokens. They gain haste until end of turn.\n\
+        3 \u{2014} [\u{2212}1], then return a card with mana value 2 or less from your graveyard to your hand.\n\
+        4 or 5 \u{2014} Comet deals damage equal to the number of loyalty counters on him to a creature or player, then [\u{2212}2].\n\
+        6 \u{2014} [+1], and you may activate Comet's loyalty ability two more times this turn.";
+
+    /// Verbatim Druid of the Emerald Grove (MTGJSON `text`): the one printed table
+    /// whose pipe-form first row is written "9 or less".
+    const DRUID_ORACLE: &str = "When this creature enters, search your library for up to two basic land cards and reveal them, then roll a d20.\n\
+        9 or less | Put those cards into your hand, then shuffle.\n\
+        10\u{2014}19 | Put one of those cards onto the battlefield tapped and the other into your hand, then shuffle.\n\
+        20+ | Put those cards onto the battlefield tapped, then shuffle.";
+
+    /// The face and the coverage row the export would carry for verbatim `oracle`:
+    /// parsed with the card's MTGJSON types and subtypes, with the whole parse
+    /// copied onto the face.
+    fn exported_coverage(
+        name: &str,
+        oracle: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> (CardFace, CardCoverageResult) {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
+        let parsed = crate::parser::parse_oracle_text(oracle, name, &[], &types, &subtypes);
+        let mut face = make_face();
+        face.name = name.to_string();
+        face.oracle_text = Some(oracle.to_string());
+        face.keywords = parsed.extracted_keywords;
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        face.static_abilities = parsed.statics;
+        face.replacements = parsed.replacements;
+        face.parse_warnings = parsed.parse_warnings;
+        let coverage = coverage_result_for_face(face.clone());
+        (face, coverage)
+    }
+
+    /// A one-ability face whose ability is described by the roll header, the shape
+    /// a loyalty ability that rolls a die has once its rows are attached to it.
+    fn roll_header_face(header: &str) -> CardFace {
+        let mut face = make_face();
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description(header.to_string()),
+        );
+        face
+    }
+
+    /// CR 706.3b: a roll's result rows are part of the roll's ability whichever
+    /// separator closes their marker, so a row written as an em-dash list ("1 or 2
+    /// — …", "3 — …") folds into its header exactly as a pipe row does. Without
+    /// the fold Comet's four rows count as four more printed lines against one
+    /// parse root and the card can never read supported.
+    #[test]
+    fn em_dash_outcome_rows_fold_into_their_header() {
+        assert_eq!(
+            effective_oracle_lines(COMET_ORACLE).len(),
+            1,
+            "five printed lines, but the four em-dash rows belong to the roll above them"
+        );
+
+        // A fully parsed roll is therefore not flagged.
+        const HEADER: &str = "[0]: Roll a six-sided die.";
+        let oracle = format!(
+            "{HEADER}\n1 or 2 \u{2014} Draw a card.\n3 \u{2014} Draw two cards.\n4\u{2014}6 \u{2014} Draw three cards."
+        );
+        let parse_details = build_parse_details_for_face(&roll_header_face(HEADER));
+        let mut missing = Vec::new();
+        check_silent_drops(&Some(oracle), "Test Card", &parse_details, &mut missing);
+        assert!(
+            missing.is_empty(),
+            "em-dash rows are covered by the ability their header produced: {missing:?}"
+        );
+
+        // The two recognizers compose: a pipe row and an em-dash row fold into
+        // one header.
+        let mixed = format!("{HEADER}\n1\u{2014}9 | Draw a card.\n10 \u{2014} Draw two cards.");
+        assert_eq!(effective_oracle_lines(&mixed).len(), 1);
+
+        // A row that opens a card has no header to belong to: it is a printed line
+        // of its own, whichever separator closes its marker.
+        assert_eq!(
+            effective_oracle_lines("1 \u{2014} Draw a card.").len(),
+            1,
+            "a leading em-dash row is not a fold target"
+        );
+
+        // The predicate reads rows, not any line that contains an em dash: a loyalty
+        // ability with a flavor word is not a row.
+        assert!(is_em_dash_die_result_row_line(
+            "1 or 2 \u{2014} Draw a card."
+        ));
+        assert!(!is_em_dash_die_result_row_line(
+            "[\u{2212}2]: Heist! \u{2014} Exile the top two cards of target opponent's library."
+        ));
+    }
+
+    /// The semantic audit reads the same printed lines: an em-dash row folded into
+    /// its header is covered, not a `SilentDrop` finding, while a long line nothing
+    /// parsed still is (the audit is live).
+    #[test]
+    fn em_dash_rows_are_covered_for_the_audit() {
+        const HEADER: &str = "[0]: Roll a six-sided die.";
+        let face = roll_header_face(HEADER);
+        let silent_drops = |oracle: &str| {
+            audit_card_lines(oracle, &face)
+                .into_iter()
+                .filter(|finding| matches!(finding, SemanticFinding::SilentDrop { .. }))
+                .collect::<Vec<_>>()
+        };
+
+        let unrelated = silent_drops(&format!(
+            "{HEADER}\nThis long line was silently dropped by the parser."
+        ));
+        assert_eq!(unrelated.len(), 1, "the audit is live: {unrelated:?}");
+
+        let rows = silent_drops(&format!(
+            "{HEADER}\n1 or 2 \u{2014} Create two 1/1 green Squirrel creature tokens.\n3 \u{2014} Return a card from your graveyard to your hand."
+        ));
+        assert!(rows.is_empty(), "em-dash rows are covered: {rows:?}");
+    }
+
+    /// Comet's whole parse through the production coverage predicate: every row is
+    /// attached to the roll and every effect is parsed, so the card reads supported
+    /// with no gap and no parse warning. The in-tree reading is the unit-level
+    /// counterpart of the export's coverage row.
+    #[test]
+    fn comet_reads_supported_through_the_production_coverage_predicate() {
+        let (face, coverage) = exported_coverage(
+            "Comet, Stellar Pup",
+            COMET_ORACLE,
+            &["Planeswalker"],
+            &["Comet"],
+        );
+
+        let rows = face
+            .abilities
+            .iter()
+            .find_map(|ability| match &*ability.effect {
+                Effect::RollDie { results, .. } => Some(results.len()),
+                _ => None,
+            });
+        assert_eq!(
+            rows,
+            Some(4),
+            "reach-guard: all four rows attach to the [0] roll: {:#?}",
+            face.abilities
+        );
+        assert!(face.parse_warnings.is_empty(), "{:?}", face.parse_warnings);
+        assert!(coverage.supported, "{:?}", coverage.gap_details);
+        assert_eq!(coverage.gap_count, 0, "{:?}", coverage.gap_details);
+    }
+
+    /// Pipe-form rows keep the accounting they have always had. Druid of the
+    /// Emerald Grove's "9 or less | …" is the one pipe-form row the grammar accepts
+    /// and neither pipe recognizer folds, so the card counts two effective lines
+    /// and reads unsupported. That red verdict is correct for the card (its search
+    /// moves the cards to hand before the roll and its rows scan Exile), but the
+    /// count of two is not claimed to be the right one: this row pins the em-dash
+    /// recognizer's scope and Druid's verdict, nothing more.
+    #[test]
+    fn pipe_rows_keep_their_own_accounting_druid_is_not_folded() {
+        // Positive reach-guard: the predicate does read an em-dash row, and Comet's
+        // five printed lines fold to one.
+        assert!(is_em_dash_die_result_row_line(
+            "4 or 5 \u{2014} Comet deals damage equal to the number of loyalty counters on him to a creature or player, then [\u{2212}2]."
+        ));
+        assert_eq!(effective_oracle_lines(COMET_ORACLE).len(), 1);
+
+        // Druid's pipe rows are not the em-dash predicate's to fold.
+        for pipe_row in [
+            "9 or less | Put those cards into your hand, then shuffle.",
+            "10\u{2014}19 | Put one of those cards onto the battlefield tapped and the other into your hand, then shuffle.",
+            "20+ | Put those cards onto the battlefield tapped, then shuffle.",
+        ] {
+            assert!(!is_em_dash_die_result_row_line(pipe_row), "{pipe_row:?}");
+        }
+        assert_eq!(effective_oracle_lines(DRUID_ORACLE).len(), 2);
+
+        let (_, druid) = exported_coverage(
+            "Druid of the Emerald Grove",
+            DRUID_ORACLE,
+            &["Creature"],
+            &["Dwarf", "Druid"],
+        );
+        assert!(!druid.supported, "{druid:#?}");
+        assert_eq!(
+            druid
+                .gap_details
+                .iter()
+                .map(|gap| gap.handler.as_str())
+                .collect::<Vec<_>>(),
+            ["SilentDrop:1_of_2"]
         );
     }
 

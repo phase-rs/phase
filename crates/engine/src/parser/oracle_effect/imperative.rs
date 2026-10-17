@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
@@ -1228,6 +1230,50 @@ fn parse_extra_loyalty_activation_grant(
             recipient,
         ),
     ))
+}
+
+/// CR 107.7: an effect-side loyalty symbol is an instruction of its own. `[+N]`
+/// puts N loyalty counters on the source permanent and `[−N]` removes N of them
+/// ("[+2], then create two 1/1 green Squirrel creature tokens", Comet, Stellar
+/// Pup's result rows). CR 107.7 writes the symbol in an activated ability's cost;
+/// an effect that writes it in its own text gives it the same meaning on the
+/// card's own authority (its ruling), which is not CR text.
+///
+/// The clause must be the symbol alone (an optional full stop aside): a symbol
+/// inside other text, an unsigned `[1]`, `[0]` and the announced-X forms are not
+/// matched here and stay visibly unparsed. CR 306.5c + CR 122.1e: loyalty is the
+/// number of loyalty counters, so the counters are the source's own. CR 704.5i: a
+/// planeswalker left with 0 loyalty is put into its owner's graveyard, and CR 609.3:
+/// removing more than it has removes what it has, so neither is decided here.
+///
+/// The magnitude is lowered as `Fixed(|delta|)`: for `RemoveCounter` a negative
+/// count is the "remove all" sentinel, and the symbol must never produce it.
+fn parse_loyalty_symbol_effect(lower: &str) -> Option<ImperativeFamilyAst> {
+    let (_, delta) = all_consuming(terminated(
+        nom_primitives::parse_loyalty_symbol_delta,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+    match delta.cmp(&0) {
+        Ordering::Greater => Some(ImperativeFamilyAst::ZoneCounter(
+            ZoneCounterImperativeAst::PutCounter {
+                counter_type: crate::types::counter::CounterType::Loyalty,
+                count: QuantityExpr::Fixed { value: delta },
+                target: TargetFilter::SelfRef,
+            },
+        )),
+        Ordering::Less => Some(ImperativeFamilyAst::ZoneCounter(
+            ZoneCounterImperativeAst::RemoveCounter {
+                counter_type: Some(crate::types::counter::CounterType::Loyalty),
+                count: QuantityExpr::Fixed { value: delta.abs() },
+                target: TargetFilter::SelfRef,
+                exact_selection: None,
+                multi_target: None,
+            },
+        )),
+        Ordering::Equal => None,
+    }
 }
 
 pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
@@ -12555,6 +12601,14 @@ pub(super) fn parse_imperative_family_ast(
         ));
     }
 
+    // CR 107.7: "[+2]" / "[−1]" as an instruction of its own — put or remove loyalty
+    // counters on the source (Comet, Stellar Pup's result rows). An anchored
+    // whole-clause production, like the extra-activation grant above, so a symbol
+    // inside other text never matches and the verb dispatch below is untouched.
+    if let Some(ast) = parse_loyalty_symbol_effect(lower) {
+        return Some(ast);
+    }
+
     // CR 723.1: "You control target player during that player's next turn"
     // (Mindslaver / Word of Command class). "You" is the spell/ability controller
     // in a declarative sentence (not an imperative verb), so this bypasses the
@@ -14598,17 +14652,33 @@ fn try_parse_roll_die_with_modifier(
     Some((sides, Some(modifier)))
 }
 
-/// CR 706.2: Try to parse a d20 result table line like "1—9 | Draw two cards",
-/// "20 | Search your library for a card", or "15+ | Scry X, then draw X cards".
-/// Returns `(min, max, effect_text)`. Open-ended upper bounds ("15+") set
-/// `max = u8::MAX` so any modifier-boosted roll above the printed lower bound
-/// resolves to this branch — see CR 706.2 on modifier-shifted results
-/// (Diviner's Portent, Gale's Redirection, etc.).
+/// CR 706.3b: a results-table row closes its result marker with a pipe
+/// ("1—9 | …") or with an em dash ("1 or 2 — …"). `try_parse_die_result_line`
+/// tries the pipe and then the em dash; `try_parse_em_dash_die_result_line` is the
+/// em-dash instantiation of the same grammar alone.
+const DIE_RESULT_PIPE: &str = "|";
+const DIE_RESULT_EM_DASH: &str = "\u{2014}";
+
+/// CR 706.3a + CR 706.3b: Try to parse a results-table row like "1—9 | Draw two
+/// cards", "20 | Search your library for a card", "15+ | Scry X, then draw X
+/// cards" or "1 or 2 — Create two Treasure tokens". Returns `(min, max,
+/// effect_text)`. Open-ended upper bounds ("15+") set `max = u8::MAX` so any
+/// modifier-boosted roll above the printed lower bound resolves to this branch —
+/// see CR 706.2 on modifier-shifted results (Diviner's Portent, Gale's
+/// Redirection, etc.).
 ///
-/// CR 706.3a also admits a striation stating only its upper endpoint
-/// ("9 or less" — Druid of the Emerald Grove). Its resolvable lower endpoint is
-/// 0, because CR 706.2 selects the row using the POST-modifier result and that
-/// result can be clamped to zero. A printed "0 or less" is still refused.
+/// CR 706.3a lists exactly three possible results: a single number, a range
+/// "N1–N2" and a range "N+". Two further wordings are Oracle's own, beyond that
+/// list: "N or less" states only the UPPER endpoint (Druid of the Emerald Grove's
+/// "9 or less") and "N or M" names two adjacent results (Comet, Stellar Pup's
+/// "1 or 2"). "N or less" resolves as `0..=N`: its lower endpoint is 0, because
+/// CR 706.2 selects the row using the final result after all modifiers and that
+/// result can be clamped to zero. A printed "0 or less" is still refused. "N or
+/// M" resolves as `N..=M` and only when the two are adjacent, so a non-adjacent
+/// list ("1 or 3") declines rather than covering a result the card does not name.
+///
+/// The marker is followed by a pipe or by an em dash. An ASCII hyphen or an en
+/// dash is a range glyph inside the marker (`1-9`, `1–9`), never a separator.
 ///
 /// SYMMETRY WITH `"N+"`. The open-ended UPPER form maps to `u8::MAX` so a
 /// modifier-boosted roll above the printed bound still lands in the branch, and
@@ -14625,15 +14695,34 @@ fn try_parse_roll_die_with_modifier(
 /// recognize a results-table row (`oracle.rs`), so the loop and the row
 /// collector share this one row grammar.
 pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
+    parse_die_result_row(text, DIE_RESULT_PIPE)
+        .or_else(|| parse_die_result_row(text, DIE_RESULT_EM_DASH))
+}
+
+/// The em-dash instantiation of the row grammar behind
+/// [`try_parse_die_result_line`]: a row written "1 or 2 — …", and no pipe row.
+/// `game/coverage.rs` asks the parser this question so the accounting that folds
+/// an em-dash row into its header and the grammar that attaches it cannot drift
+/// apart. It is deliberately blind to pipe rows, whose accounting is not part of
+/// this grammar's em-dash extension.
+pub(crate) fn try_parse_em_dash_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
+    parse_die_result_row(text, DIE_RESULT_EM_DASH)
+}
+
+/// The row grammar both entry points instantiate: `separator` is the glyph that
+/// closes the result marker and nothing else differs between the two.
+fn parse_die_result_row<'a>(text: &'a str, separator: &'static str) -> Option<(u8, u8, &'a str)> {
     // CR 706.3a: a result-table header is one complete numeric range followed
-    // by a pipe and a nonempty instruction. Keep the grammar here rather than
-    // manually slicing a pre-tokenized header: current Oracle data contains
-    // ASCII hyphens as well as en/em dashes, and accepting a prefix (for
-    // example `1-6-9`) would silently misroute a result branch.
+    // by the separator the caller names (a pipe or an em dash) and a nonempty
+    // instruction. Keep the grammar here rather than manually slicing a
+    // pre-tokenized header: current Oracle data contains ASCII hyphens as well as
+    // en/em dashes, and accepting a prefix (for example `1-6-9`) would silently
+    // misroute a result branch.
     let mut parser = all_consuming((
         space0::<_, OracleError<'_>>,
         alt((
-            // CR 706.3a: a printed "N or less" row is a results-table striation
+            // Oracle wording beyond CR 706.3a's list (a single number, `N1–N2`,
+            // `N+`): a printed "N or less" row is a results-table striation
             // stating only its UPPER endpoint (Druid of the Emerald Grove's
             // "9 or less"). Its lower endpoint is 0, NOT 1.
             //
@@ -14649,10 +14738,9 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
             // different things, which is why the check is on `max` here rather
             // than in the shared guard below.
             //
-            // Placed first among the numeric arms for readability only — the
-            // whole grammar is `all_consuming`, so the bare-value arm below
-            // cannot shadow this wording at any position: it would leave
-            // " or less" unconsumed and fail.
+            // Placed before the bare-value arm: `alt` commits to its first
+            // success, so a bare arm ahead of this one would consume `9`, leave
+            // " or less" unconsumed and fail the whole row.
             map(
                 verify(terminated(parse_u8, tag(" or less")), |max: &u8| *max >= 1),
                 |max| (0u8, max),
@@ -14672,12 +14760,28 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
                 verify(terminated(parse_u8, tag("+")), |min: &u8| *min >= 1),
                 |min| (min, u8::MAX),
             ),
+            // Oracle wording beyond CR 706.3a's list: "N or M" names two results
+            // and covers `N..=M` only when they are adjacent, so a printed
+            // "1 or 2" is the range 1–2, while a non-adjacent list ("1 or 3"), a
+            // descending one ("2 or 1") and a zero-based one ("0 or 1") decline
+            // instead of covering a result the card does not name. The printed
+            // first result is required to be >= 1, like every sibling arm.
+            //
+            // Placed before the bare-value arm for the same reason as the
+            // "N or less" arm: `alt` commits to its first success, so a bare arm
+            // ahead of this one would consume `1` and fail the row on " or 2".
+            verify(
+                pair(terminated(parse_u8, tag(" or ")), parse_u8),
+                |(first, second): &(u8, u8)| *first >= 1 && first.checked_add(1) == Some(*second),
+            ),
+            // The bare single value must stay LAST: every arm above it names a
+            // wider marker that begins with a bare number.
             map(verify(parse_u8, |value: &u8| *value >= 1), |value| {
                 (value, value)
             }),
         )),
         space0,
-        tag("|"),
+        tag(separator),
         space0,
         take_till(|character| character == '|'),
         space0,
@@ -28704,7 +28808,7 @@ mod tests {
 /// satisfied by a change that added nothing at all.
 #[cfg(test)]
 mod die_result_row_grammar_tests {
-    use super::try_parse_die_result_line;
+    use super::{try_parse_die_result_line, try_parse_em_dash_die_result_line};
 
     /// POSITIVE REACH-GUARD for every negative below: the new wording form is
     /// actually accepted, and its resolvable lower endpoint is 0.
@@ -28751,10 +28855,11 @@ mod die_result_row_grammar_tests {
         );
     }
 
-    /// HOSTILE, shape 3 — the bare single value. This is the arm the new wording
-    /// form sits above, and `all_consuming` (not ordering) is what keeps them
-    /// apart: applied to `"9 or less | x"` the bare arm leaves `" or less"`
-    /// unconsumed and fails at ANY position in the `alt`.
+    /// HOSTILE, shape 3 — the bare single value. It is the LAST arm of the
+    /// grammar: `alt` commits to its first success, so a bare arm ahead of the
+    /// "N or less" or "N or M" wordings would consume the leading number, leave
+    /// the rest of the marker unconsumed and fail the row. Being last, it cannot
+    /// shadow them, and the bare forms still read as before.
     #[test]
     fn bare_single_value_is_unchanged() {
         assert_eq!(try_parse_die_result_line("20 | x"), Some((20, 20, "x")));
@@ -28793,6 +28898,150 @@ mod die_result_row_grammar_tests {
         assert_eq!(try_parse_die_result_line("9 or les | x"), None);
         assert_eq!(try_parse_die_result_line("9 or lesser | x"), None);
         assert_eq!(try_parse_die_result_line("or less | x"), None);
+    }
+
+    /// CR 706.3a + CR 706.3b: the em dash closes a marker as the pipe does, so each
+    /// shape of marker reads as the range it names. POSITIVE REACH-GUARD for every
+    /// negative in this module that concerns the em dash or the "N or M" wording.
+    #[test]
+    fn em_dash_rows_read_the_ranges_they_name() {
+        for (line, expected) in [
+            ("1 \u{2014} x", (1, 1)),
+            ("3 \u{2014} x", (3, 3)),
+            ("6 \u{2014} x", (6, 6)),
+            ("1 or 2 \u{2014} x", (1, 2)),
+            ("4 or 5 \u{2014} x", (4, 5)),
+            ("19 or 20 \u{2014} x", (19, 20)),
+            ("254 or 255 \u{2014} x", (254, 255)),
+            ("9 or less \u{2014} x", (0, 9)),
+            ("1\u{2014}9 \u{2014} x", (1, 9)),
+            ("15+ \u{2014} x", (15, u8::MAX)),
+            // The same "N or M" wording behind a pipe.
+            ("1 or 2 | x", (1, 2)),
+        ] {
+            assert_eq!(
+                try_parse_die_result_line(line),
+                Some((expected.0, expected.1, "x")),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// "N or M" is a two-result striation: it covers `N..=M` only for adjacent
+    /// results, so a list that would cover a result the card does not name, a
+    /// descending or zero-based pair, and anything longer or bodiless all decline.
+    #[test]
+    fn two_result_lists_decline_unless_they_are_adjacent() {
+        assert_eq!(
+            try_parse_die_result_line("1 or 2 \u{2014} x"),
+            Some((1, 2, "x")),
+            "reach-guard"
+        );
+        for line in [
+            "1 or 3 \u{2014} x",
+            "2 or 1 \u{2014} x",
+            "0 or 1 \u{2014} x",
+            "1 or 1 \u{2014} x",
+            "255 or 256 \u{2014} x",
+            "1 or 2 or 3 \u{2014} x",
+            "1 or 2 \u{2014} ",
+            "1 or 2 \u{2014}",
+            "1 or 2 \u{2014} x | y",
+            "1 or \u{2014} x",
+            "or 2 \u{2014} x",
+        ] {
+            assert_eq!(try_parse_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// An ASCII hyphen and an en dash are range glyphs inside a marker, never
+    /// separators: only the pipe and the em dash close one.
+    #[test]
+    fn a_hyphen_or_an_en_dash_does_not_close_a_marker() {
+        assert_eq!(
+            try_parse_die_result_line("1 \u{2014} x"),
+            Some((1, 1, "x")),
+            "reach-guard: the em dash separates"
+        );
+        for line in [
+            "1 - x",
+            "1 \u{2013} x",
+            "1 or 2 - x",
+            "1 or 2 \u{2013} x",
+            "9 or less - x",
+        ] {
+            assert_eq!(try_parse_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// The em-dash entry point is the em-dash instantiation of the same grammar:
+    /// it reads every em-dash row and none of the pipe rows. The positive reach-guard
+    /// is the first loop.
+    #[test]
+    fn the_em_dash_entry_point_reads_em_dash_rows_and_no_pipe_row() {
+        for line in ["1 or 2 \u{2014} x", "3 \u{2014} x", "9 or less \u{2014} x"] {
+            assert!(
+                try_parse_em_dash_die_result_line(line).is_some(),
+                "reach-guard: {line:?}"
+            );
+        }
+        for line in [
+            "1 or 2 | x",
+            "9 or less | x",
+            "10\u{2014}19 | x",
+            "20+ | x",
+            "20 | x",
+        ] {
+            assert_eq!(try_parse_em_dash_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// Agreement: for every em-dash row both entry points return the same triple,
+    /// and for every pipe row only the general entry point accepts. Every row is
+    /// also a positive reach-guard for the comparison.
+    #[test]
+    fn the_two_entry_points_agree_on_em_dash_rows_and_split_on_pipe_rows() {
+        for line in [
+            "1 or 2 \u{2014} x",
+            "3 \u{2014} x",
+            "6 \u{2014} x",
+            "9 or less \u{2014} x",
+            "1\u{2014}9 \u{2014} x",
+            "15+ \u{2014} x",
+        ] {
+            let general = try_parse_die_result_line(line);
+            assert!(general.is_some(), "reach-guard: {line:?}");
+            assert_eq!(general, try_parse_em_dash_die_result_line(line), "{line:?}");
+        }
+        for line in [
+            "1 or 2 | x",
+            "1\u{2014}9 | x",
+            "15+ | x",
+            "20 | x",
+            "9 or less | x",
+        ] {
+            assert!(
+                try_parse_die_result_line(line).is_some(),
+                "reach-guard: {line:?}"
+            );
+            assert_eq!(try_parse_em_dash_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// A planeswalker's next loyalty ability is not a row: the collector that stops
+    /// at the first non-row line depends on the grammar refusing it.
+    #[test]
+    fn a_loyalty_ability_line_is_not_a_row() {
+        assert!(
+            try_parse_die_result_line("1 \u{2014} Draw a card.").is_some(),
+            "reach-guard"
+        );
+        assert_eq!(
+            try_parse_die_result_line(
+                "[\u{2212}2]: Heist! \u{2014} Exile the top two cards of target opponent's library."
+            ),
+            None
+        );
     }
 }
 
@@ -29077,5 +29326,115 @@ mod extra_loyalty_activation_grant_tests {
         );
         assert!(!def.optional, "{def:#?}");
         assert_eq!(def.duration, Some(Duration::UntilEndOfTurn), "{def:#?}");
+    }
+}
+
+/// CR 107.7: the effect-side loyalty symbol — "[+2]" / "[−1]" as an instruction of
+/// its own that puts or removes loyalty counters on the source (Comet, Stellar
+/// Pup's result rows).
+#[cfg(test)]
+mod loyalty_symbol_effect_tests {
+    use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::counter::CounterType;
+
+    /// The single node a symbol clause lowers to: no sub-ability and no gap.
+    fn one_clause(text: &str) -> AbilityDefinition {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(def.sub_ability.is_none(), "{text:?}: {def:#?}");
+        def
+    }
+
+    fn puts(def: &AbilityDefinition, count: i32) -> bool {
+        matches!(
+            &*def.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Loyalty,
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::SelfRef,
+            } if *value == count
+        )
+    }
+
+    fn removes(def: &AbilityDefinition, count: i32) -> bool {
+        matches!(
+            &*def.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Loyalty),
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::SelfRef,
+            } if *value == count
+        )
+    }
+
+    /// A positive symbol puts that many loyalty counters on the source, through the
+    /// existing counter effect — no new effect — for every printed spelling.
+    #[test]
+    fn a_positive_symbol_puts_loyalty_counters_on_the_source() {
+        for (text, count) in [("[+2]", 2), ("[+1]", 1), ("[+10]", 10), ("[+1].", 1)] {
+            let def = one_clause(text);
+            assert!(puts(&def, count), "{text:?}: {def:#?}");
+        }
+    }
+
+    /// A negative symbol removes that many, in every minus spelling. The count is
+    /// the magnitude: `Fixed(-1)` is the "remove all counters" sentinel of
+    /// `RemoveCounter`, and a symbol that produced it would empty the planeswalker.
+    #[test]
+    fn a_negative_symbol_removes_its_count_and_never_the_remove_all_sentinel() {
+        for (text, count) in [
+            ("[\u{2212}1]", 1),
+            ("[\u{2212}2].", 2),
+            ("[\u{2013}1]", 1),
+            ("[-1]", 1),
+            ("[\u{2212}12]", 12),
+        ] {
+            let def = one_clause(text);
+            assert!(removes(&def, count), "{text:?}: {def:#?}");
+        }
+    }
+
+    /// The symbol is recognized as a WHOLE clause only. The positive reach-guard is
+    /// the first assertion; everything after it is declined by the intercept and
+    /// stays visibly unparsed: `[0]` puts zero counters, the X forms are costs, an
+    /// unsigned count and a number word are not the symbol, and a symbol with text
+    /// around it belongs to another grammar.
+    #[test]
+    fn only_a_signed_nonzero_symbol_alone_is_the_clause() {
+        assert!(parse_loyalty_symbol_effect("[+2]").is_some(), "reach-guard");
+        for declined in [
+            "[0]",
+            "[+0]",
+            "[+x]",
+            "[\u{2212}x]",
+            "[1]",
+            "[+two]",
+            "+2",
+            "[+2] extra",
+            "extra [+2]",
+            "[+2], then draw a card",
+            "put [+2] on it",
+            "",
+        ] {
+            assert!(
+                parse_loyalty_symbol_effect(declined).is_none(),
+                "{declined:?}"
+            );
+        }
+    }
+
+    /// The symbols that appear inside other printed text (a cost modification, a
+    /// drafting ability) are not instructions: the whole-clause intercept leaves
+    /// them alone. Paired with the accepted form above.
+    #[test]
+    fn a_symbol_inside_other_text_is_not_an_instruction() {
+        assert!(parse_loyalty_symbol_effect("[+1]").is_some(), "reach-guard");
+        for text in [
+            "this ability costs an additional [+1] to activate",
+            "draft a [+1] ability.",
+            "loyalty abilities of planeswalkers you control cost an additional [\u{2212}1] to activate",
+        ] {
+            assert!(parse_loyalty_symbol_effect(text).is_none(), "{text:?}");
+        }
     }
 }

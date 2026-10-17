@@ -29,11 +29,13 @@ use crate::types::zones::Zone;
 /// CR 400.7 + CR 113.7a: a `SelfRef` grant binds the battlefield permanent the
 /// ability's `self_ref_binding` names. When the ability carries a captured source
 /// incarnation (an activated ability's stack entry does), a source that left and
-/// re-entered after activation is a new object and is not bound. A frame built
-/// outside a stack entry (a die-result branch) carries no captured incarnation,
-/// so there a source that re-entered after the carrier was put on the stack is
-/// still bound; that gap is shared with every `SelfRef` resolver and is not
-/// specific to this grant.
+/// re-entered after activation is a new object and is not bound. A die-result
+/// branch frame of an activated ability inherits the incarnation that activation
+/// captured (CR 706.3b), so there too a source that re-entered after the ability
+/// was put on the stack is not bound. A frame built outside such a stack entry (a
+/// triggered ability's die rows, a coin-flip, vote or reveal branch) carries no
+/// captured incarnation, so there a source that re-entered is still bound; that
+/// gap is shared with every `SelfRef` resolver and is not specific to this grant.
 ///
 /// CR 514.2: Both bonuses are bound to the current turn; they are cleared in
 /// `start_next_turn` alongside other per-turn history. The per-permanent bonus

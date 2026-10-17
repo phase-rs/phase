@@ -187,6 +187,7 @@ mod combat_target_support;
 mod combo_infinite_pile;
 mod combustible_gearhulk;
 mod come_back_wrong_finality_counter;
+mod comet_stellar_pup;
 mod comeuppance;
 mod commander_draft_deck_legality;
 mod commander_draft_filler;

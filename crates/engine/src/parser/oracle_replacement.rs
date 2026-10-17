@@ -13212,14 +13212,15 @@ const BIDIRECTIONAL_ELLIPSIS_ANCHOR: &str = "dealt to and dealt by ";
 ///
 /// `turns::execute_cleanup` reads `expiry` and only `expiry` — no prune infers a
 /// lifetime from `shield_kind` — so a stated window the parser drops produces a
-/// definition nothing can ever remove. That is not hypothetical: Urza's Science
-/// Fair Project's die-roll result row "Prevent all combat damage it would deal
-/// this turn." lowers to a printed, object-hosted `DamageDone` shield with
-/// neither `valid_card` nor `damage_target_filter`, on an Artifact Creature — a
-/// PERMANENT, so unlike the eight Instant/Sorcery hosts of the same shape it is
-/// not neutralized by `object_replacement_candidate_applies`' `[Battlefield,
-/// Command]` zone gate. Unstamped, it prevents ALL combat damage in the game, to
-/// or from either player, for the rest of the game.
+/// definition nothing can ever remove. That was not hypothetical before die-result
+/// rows written as an em-dash list attached to their roll (CR 706.3b): Urza's
+/// Science Fair Project's result row "Prevent all combat damage it would deal this
+/// turn." used to be dispatched as a stand-alone line and lowered to a printed,
+/// object-hosted `DamageDone` shield with neither `valid_card` nor
+/// `damage_target_filter`, on an Artifact Creature, a PERMANENT. That row is now a
+/// die-table branch and no longer reaches this parser; the clause-final window
+/// recognized here is still exercised by the row text fed directly in
+/// `prevention_expiry_records_only_a_clause_final_stated_window`.
 ///
 /// POSITION IS THE WHOLE POINT. `oracle_effect::lower::strip_trailing_duration`
 /// is the phrase→`Duration` authority and owns the *per-turn-quantity* lookback
@@ -17509,9 +17510,11 @@ mod tests {
     }
 
     /// CR 611.2a + CR 514.2 vs CR 604.2: `expiry` records the window a prevention
-    /// clause states FOR ITSELF, and nothing else. Shape-level companion to the
-    /// runtime pin in
-    /// `tests/integration/printed_damage_prevention_survives_turn.rs::turn_windowed_printed_shield_is_stamped_and_does_not_survive_cleanup`.
+    /// clause states FOR ITSELF, and nothing else. Shape-level pin for the stamp.
+    /// Urza's Science Fair Project's row 2 is fed to the parser directly because, as
+    /// a die-table branch (CR 706.3b), it no longer lowers to a printed shield; the
+    /// CR 514.2 cleanup prune is pinned at runtime by
+    /// `tests/integration/printed_damage_prevention_survives_turn.rs::printed_and_turn_bound_shields_on_one_host_part_ways_at_cleanup`.
     ///
     /// The discriminating half is `TRAILING-POSITION` block: every one of those
     /// four inputs ends in `"this turn"` / `"until end of turn"` at the very END of
