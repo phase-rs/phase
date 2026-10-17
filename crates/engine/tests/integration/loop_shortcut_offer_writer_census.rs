@@ -79,15 +79,15 @@
 // resource, locally, on engine-source edits. It is NOT checked in GitHub CI, and CI
 // enrollment is policy-blocked (`.agents/pr-review-policy.toml` `[hard_stops]` lists
 // `.github/workflows/**`). A green block in a merged commit is not a CI-verified block.
-// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:5b0805a04cf5a47f
+// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:be25a33368402483
 // instrument rustc = rustc 1.97.0-nightly (0febdbab2 2026-04-18)
 // | probe | mutation | expect | verdict | firing assertion (anchor) | provenance |
 // |---|---|---|---|---|---|
 // | P0_control | (none) | pass | pass | (control; no mounts) | — |
-// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (26, 28) / right: (27, 28) / THE TEST HALF HAS BEEN ADJUDICATED EIGHT TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (27, 27) / right: (27, 28) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (28, 28) / right: (27, 28) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (29, 28) / right: (27, 28) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (26, 29) / right: (27, 29) / THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (27, 28) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (28, 29) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (29, 29) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P5_relocation_preserves_the_count | scenario.rs ×1, interaction.rs ×1 | fail | fail | the COUNT can be preserved by a move that relocates a writer / ("engine/src/game/interaction.rs", 6) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P6_second_validate_pins_consumer | scenario.rs ×1 | fail | fail | expected `validate_pins(` to appear in production exactly twice | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P7_coverage_half_unpaired | decision_template.rs ×1 | fail | fail | validating pin VALUES without also running | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
@@ -306,9 +306,12 @@ fn census(needle: &str) -> Vec<Hit> {
 ///   returned, once re-reading its schema for the published count before taking
 ///   the declare path to the response window. Both READS in one `#[cfg(test)]`
 ///   helper, shared by the ceiling row and the accepted-count row.
-/// * 24 ⇒ the pinned value: the reduction's typed-absence rows — three READS in
+/// * 24 ⇒ 28: the reduction's typed-absence rows — three READS in
 ///   `engine/src/game/engine.rs` and one fixture WRITER in
 ///   `engine/src/game/interaction.rs`.
+/// * 28 ⇒ the pinned value: `offer_period` in `phase-ai/src/policies/loop_shortcut.rs`'s
+///   `#[cfg(test)]` module — a READ of an offer `apply()` minted (its period and
+///   declaration), minting none.
 ///
 /// EVERY addition listed above is in a `#[cfg(test)]` scope — mints and reads
 /// both — which is the benign case this row's own failure message names: a test
@@ -369,7 +372,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (27, 28),
+        (27, 29),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The three CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -389,7 +392,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
          certify without declaring or driving — §10 ruling condition (2), i.e. \
          answer-legality-at-certification becomes OWED WORK and the U-series stops. A new READ \
          site is the benign case; adjudicate, do not relax the assert.\n\
-         THE TEST HALF HAS BEEN ADJUDICATED EIGHT TIMES.\n\
+         THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES.\n\
          measured per-file production multiset: {multiset:?}\n\
          production: {production:?}\n\
          test: {in_test:?}"

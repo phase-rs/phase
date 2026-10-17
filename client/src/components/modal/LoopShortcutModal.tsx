@@ -217,9 +217,11 @@ function CountLine({ count }: { count: IterationCount }) {
   );
 }
 
-// CR 704.5a/704.5c etc.: the certificate's determinate win kind, a pure key lookup.
-function WinKindLine({ kind }: { kind: WinKind }) {
+// CR 704.5a/704.5c etc.: the certificate's determinate win kind, a pure key lookup. An outcome the
+// engine decided at one count (`at`) is stated only beside that count.
+function WinKindLine({ kind, at, count }: { kind?: WinKind; at?: number; count: number | null }) {
   const { t } = useTranslation("game");
+  if (kind === undefined || (at !== undefined && at !== count)) return null;
   return <p className="text-sm font-semibold text-white">{t(`comboShortcut.winKind.${kind}`)}</p>;
 }
 
@@ -659,7 +661,7 @@ function DeclareShortcutOffer({
       footer={footer}
     >
       <div className="flex flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5">
-        <WinKindLine kind={certificate.win_kind} />
+        <WinKindLine kind={certificate.win_kind} at={certificate.win_kind_at} count={chosen} />
         <CountLine count={schema.iteration_count} />
         {countSpec && (
           <AmountInput
@@ -942,7 +944,11 @@ function RespondToShortcut({
       footer={footer}
     >
       <div className="flex flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5">
-        <WinKindLine kind={proposal.win_kind} />
+        <WinKindLine
+          kind={proposal.win_kind}
+          at={proposal.win_kind_at}
+          count={proposal.count === "UntilLethal" ? null : proposal.count.Fixed}
+        />
         <CountLine count={proposal.count} />
         <FamilyBadges axes={proposal.unbounded} />
         {declared && <PreviewLines preview={declared} />}

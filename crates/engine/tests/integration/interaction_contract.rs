@@ -3007,7 +3007,8 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
             predicted_winner: Some(P0),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: Vec::new(),
-                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
@@ -3070,7 +3071,8 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -3124,7 +3126,8 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -3212,16 +3215,21 @@ fn preview_offer_with_points(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
-            per_cycle: per_cycle.map(|delta| engine::analysis::resource::PeriodicDelta {
-                frames_per_period: 1,
-                delta,
-                declarable_victims: Vec::new(),
-                victim_slot,
-                seat_life_charge: Vec::new(),
-                cleanup: None,
+            per_cycle: per_cycle.map(|delta| {
+                engine::analysis::resource::PeriodSignature::EveryRepetition(
+                    engine::analysis::resource::PeriodicDelta {
+                        frames_per_period: 1,
+                        delta,
+                        declarable_victims: Vec::new(),
+                        victim_slot,
+                        seat_life_charge: Vec::new(),
+                        cleanup: None,
+                    },
+                )
             }),
         },
         schema: ShortcutDecisionSchema {
@@ -3736,7 +3744,7 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
     //    is a real guard here.
     let basis_struct = extract(&text, "\nstruct ShortcutPreviewBasis<'a> {", "\n}");
     assert!(
-        basis_struct.contains("delta:"),
+        basis_struct.contains("signature:"),
         "reach-guard: the extracted text must be the struct BODY, else this span is not the \
          declaration the ban is written against"
     );
@@ -3929,7 +3937,8 @@ fn respond_window_on(
             predicted_winner: Some(P0),
             count: count.clone(),
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             template: Some(DecisionTemplate {
                 owner: P0,
                 decisions,
@@ -3939,7 +3948,7 @@ fn respond_window_on(
                     DecisionKind::LoopChoice,
                 ),
             }),
-            per_cycle,
+            per_cycle: per_cycle.map(engine::analysis::resource::PeriodSignature::EveryRepetition),
             shortened_by: None,
             published_declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
@@ -6516,7 +6525,8 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -6750,7 +6760,8 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -8078,7 +8089,8 @@ fn stage_sequenced_offer(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -10731,7 +10743,8 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             predicted_winner: Some(P0),
             count: IterationCount::Fixed(3),
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             template: Some(declared),
             per_cycle: None,
             shortened_by: None,

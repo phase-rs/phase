@@ -2165,10 +2165,17 @@ export interface TriggerContextDisplay {
   player?: PlayerId;
 }
 
+/** Typed form of `StackEntryDisplay.kind_label` for ability entries, so the
+ * display layer localizes the label without parsing the English text. */
+export type StackAbilityKindView =
+  | { type: "Activated"; data: { number?: number | null } }
+  | { type: "Triggered" };
+
 export interface StackEntryDisplay {
   source_name: string;
   token_image_ref?: TokenImageRef | null;
   kind_label: string;
+  ability_kind?: StackAbilityKindView;
   ability_description?: string;
   selected_mode_labels?: string[];
   is_pending?: boolean;
@@ -2516,6 +2523,100 @@ export type MulliganDecisionPhase =
   | { type: "Declare" }
   | { type: "BottomCards"; count: number; then: PendingMulliganAction };
 
+/**
+ * One click collected by a local contest host, stamped with the host's own clock
+ * and addressed to the engine-authored identity of the contest it was made in.
+ */
+export interface ContestClickInput {
+  contest: number;
+  player: PlayerId;
+  seq: number;
+  at_ms: number;
+}
+
+/** What one local-host contest tick did. `step` mirrors the engine's `ContestStep`. */
+export interface ContestDriveResult {
+  step: "NotInContest" | "Unchanged" | "Updated" | "Settled";
+  events: GameEvent[];
+  log_entries: GameLogEntry[];
+  /**
+   * The contest still running after this tick (its identity and seats), or null when
+   * none is. A host reads it to decide which inputs it may accept and buffer.
+   */
+  contest: { id: number; players: [PlayerId, PlayerId] } | null;
+  /**
+   * Set by an adapter that owns the commit of this tick's transition (snapshot and
+   * events) through its own state channel, ahead of any follow-up play it runs. The
+   * caller must not commit it again: an adapter that publishes owns the commit, and a
+   * second one would replay the resolution events and log entries. An adapter whose
+   * snapshot read failed keeps the transition and delivers it, once, on a later tick.
+   */
+  published?: boolean;
+}
+
+/** Which printed contest is being adapted. Presentation only. */
+export type ContestKind = "Staring" | "BreathHolding";
+
+export type ContestPhase =
+  | "Pending"
+  | "Preparing"
+  | "Active"
+  | "Resolving"
+  | "Completed"
+  | "Cancelled";
+
+export type ContestLossReason = "Inactivity" | "Forfeit";
+
+export type ContestOutcome =
+  | { Decided: { winner: PlayerId; loser: PlayerId; reason: ContestLossReason } }
+  | "Tie";
+
+export type ContestCancelReason =
+  | "BothDisconnected"
+  | "TimeLimit"
+  | "ParticipantLeftGame"
+  | "HostAborted";
+
+export type ContestResult = { Outcome: ContestOutcome } | { Cancelled: ContestCancelReason };
+
+export type ContestantConnection = "Connected" | { Disconnected: { since_ms: number } };
+
+export interface Contestant {
+  player: PlayerId;
+  /** Valid clicks counted while Active (display only — never decides the winner). */
+  clicks: number;
+  last_activity_ms: number;
+  last_seq?: number | null;
+  connection: ContestantConnection;
+}
+
+export interface ContestConfig {
+  countdown_ms: number;
+  inactivity_timeout_ms: number;
+  reconnect_grace_ms: number;
+  settle_window_ms: number;
+  max_active_ms: number;
+}
+
+/**
+ * Engine-owned contest state. Times are in the host's monotonic millisecond
+ * timebase (`clock_ms` is the host instant this snapshot was produced at), so a
+ * client derives "time until GO" as `go_at_ms - clock_ms` and counts down from the
+ * moment it received the snapshot — it never compares against its own clock.
+ */
+export interface ContestState {
+  /** Engine-authored identity, unique within a game; every input is bound to it. */
+  id: number;
+  kind: ContestKind;
+  phase: ContestPhase;
+  config: ContestConfig;
+  contestants: [Contestant, Contestant];
+  clock_ms: number;
+  go_at_ms?: number | null;
+  paused_since_ms?: number | null;
+  result?: ContestResult | null;
+}
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
@@ -2748,6 +2849,10 @@ export type WaitingFor =
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
+  // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
+  // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
+  // engine's state machine. See `ContestState`.
+  | { type: "PhysicalContest"; data: { contest: ContestState; source_id: ObjectId } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;
       remaining_votes: number;
@@ -3493,6 +3598,10 @@ export type GameEvent =
   // results tables, aggregates, and AI must not read it. `result` is always
   // the natural value (modifiers never touch ignored rolls).
   | { type: "DieRollIgnored"; data: { player_id: PlayerId; sides: number; result: number } }
+  // Eye to Eye / Mouth to Mouth: the contest between `participants` (controller first)
+  // began / reached a terminal result (a decided win, a tie, or a technical cancellation).
+  | { type: "PhysicalContestStarted"; data: { kind: ContestKind; participants: [PlayerId, PlayerId] } }
+  | { type: "PhysicalContestResolved"; data: { kind: ContestKind; participants: [PlayerId, PlayerId]; result: ContestResult } }
   // CR 103.1: the starting-player d20 roll-off as one structured event. `rounds`
   // preserves the round boundaries (round 1 = every seat; each later round = the
   // previous round's tied-max group that rerolled); `winner` is the engine's
@@ -3777,7 +3886,10 @@ export interface BoardDelta {
 /** Mirrors `engine::analysis::loop_check::LoopCertificate`. */
 export interface LoopCertificate {
   unbounded: ResourceAxis[];
-  win_kind: WinKind;
+  /** Absent when the certificate determines no outcome. */
+  win_kind?: WinKind;
+  /** The count whose take `win_kind` is the outcome of; absent for the loop as a whole. */
+  win_kind_at?: number;
   mandatory: boolean;
   residual_board_delta: BoardDelta;
 }
@@ -3883,7 +3995,8 @@ export interface ShortcutProposal {
   predicted_winner: PlayerId | null;
   count: IterationCount;
   unbounded: ResourceAxis[];
-  win_kind: WinKind;
+  win_kind?: WinKind;
+  win_kind_at?: number;
   shortened_by?: PlayerId;
   road: OfferRoad;
 }
@@ -5113,6 +5226,30 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /**
+   * Submit one click in the running Eye to Eye / Mouth to Mouth contest for the
+   * local seat. Fire-and-forget: the host stamps the instant and decides the
+   * winner, so a click carries only the contest's identity and a per-contest
+   * sequence number (duplicate and reorder protection). Returns whether the
+   * transport took the click; `false` means this client hosts the contest itself and
+   * must stamp the click for `driveContest`. Transports that cannot host a contest
+   * omit it.
+   */
+  submitContestClick?(contest: number, seq: number): boolean;
+  /**
+   * Local engines only (single-player WASM, P2P host): there is no server to host
+   * the running contest, so the client drives it. `nowMs` and each click's `at_ms`
+   * are the client's own monotonic clock; `aiPlayers` are the seats the engine
+   * should click for, and `awayPlayers` the seats currently disconnected (the
+   * engine pauses the contest for them and forfeits them past its reconnect grace).
+   * Server transports omit this — the server drives.
+   */
+  driveContest?(
+    nowMs: number,
+    aiPlayers: PlayerId[],
+    clicks: ContestClickInput[],
+    awayPlayers?: PlayerId[],
+  ): Promise<ContestDriveResult>;
   /** Submit an opaque response from the engine's current interaction projection. */
   submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   /**

@@ -18523,6 +18523,9 @@ fn stamp_graveyard_authority(ability: &mut ResolvedAbility, authority: &Graveyar
 /// the ability the cast carries into payment (the modal placeholder, the
 /// resolved or Aura ability, the no-ability placeholder).
 fn stamp_prepared_cast_context(prepared: &PreparedSpellCast, ability: &mut ResolvedAbility) {
+    // CR 601.2a + CR 601.2c: from its announcement, a spell declares only the
+    // targets chosen for it.
+    ability.start_target_record_recursive();
     if let Some(GraveyardAuthorityResolution::Complete(authority)) = &prepared.graveyard_authority {
         stamp_graveyard_authority(ability, authority);
     }
@@ -28020,6 +28023,9 @@ pub(crate) fn record_activation_announcement(
     ability_index: usize,
     ability: &mut ResolvedAbility,
 ) {
+    // CR 602.2b + CR 601.2c: from its announcement, an ability declares only the
+    // targets chosen for it.
+    ability.start_target_record_recursive();
     ability.activation_record =
         capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
     let provenance = state

@@ -318,6 +318,14 @@ describe("WebSocketAdapter", () => {
         data: fullKey ? { full_key: fullKey } : {},
       }),
     },
+    {
+      label: "ContestProgress",
+      acceptedEvent: "contestProgress",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "ContestProgress",
+        data: { contest: 1, clicks: [[0, 3]], ...(fullKey ? { full_key: fullKey } : {}) },
+      }),
+    },
   ];
 
   it.each(

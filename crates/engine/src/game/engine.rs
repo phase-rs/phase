@@ -2740,11 +2740,12 @@ fn build_cert(
     };
     crate::analysis::loop_check::LoopCertificate {
         unbounded: delta.unbounded_axes_for(winner),
-        win_kind: crate::analysis::loop_check::classify_win_kind(
+        win_kind: Some(crate::analysis::loop_check::classify_win_kind(
             winner,
             &win_kind_delta,
             Some(state),
-        ),
+        )),
+        win_kind_at: None,
         // The offer is only reached for an OPTIONAL loop.
         mandatory: false,
         residual_board_delta: crate::analysis::resource::board_delta(prior, state),
@@ -3512,7 +3513,9 @@ fn bounded_offer_tail(
         base.unbounded.push(ResourceAxis::ExtraTurns);
     }
     let certificate = crate::analysis::loop_check::LoopCertificate {
-        per_cycle: Some(periodic),
+        per_cycle: Some(crate::analysis::resource::PeriodSignature::EveryRepetition(
+            periodic,
+        )),
         // CR 732.5: honest, and currently read by nothing in production — a loop nobody can
         // break is still not forced to end, so this records the fact without acting on it.
         mandatory,
@@ -3680,7 +3683,7 @@ fn build_bounded_declaration(
     state: &GameState,
     proposer: PlayerId,
     schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
-    per_cycle: Option<&crate::analysis::resource::PeriodicDelta>,
+    per_cycle: Option<&crate::analysis::resource::PeriodSignature>,
     recorded: Option<&[crate::analysis::decision_template::PinnedDecision]>,
 ) -> Option<crate::analysis::decision_template::DecisionTemplate> {
     use crate::analysis::decision_template::ReplayMode;
@@ -3801,15 +3804,16 @@ fn pin_journalled_declaration(
 /// as a pure classifier so the exhaustive `WinKind` mapping is unit-testable without a
 /// `GameState`.
 fn shortcut_iteration_count(
-    win_kind: crate::analysis::loop_check::WinKind,
+    win_kind: Option<crate::analysis::loop_check::WinKind>,
 ) -> crate::analysis::decision_template::IterationCount {
     use crate::analysis::decision_template::IterationCount;
     use crate::analysis::loop_check::WinKind;
     match win_kind {
-        WinKind::LethalDamage | WinKind::PoisonLoss => IterationCount::UntilLethal,
-        WinKind::Decking | WinKind::ExtraTurns | WinKind::ImmediateWin | WinKind::Advantage => {
-            IterationCount::Fixed(1)
-        }
+        Some(WinKind::LethalDamage | WinKind::PoisonLoss) => IterationCount::UntilLethal,
+        Some(
+            WinKind::Decking | WinKind::ExtraTurns | WinKind::ImmediateWin | WinKind::Advantage,
+        )
+        | None => IterationCount::Fixed(1),
     }
 }
 
@@ -3817,7 +3821,7 @@ fn shortcut_iteration_count(
 /// `pins` is the confirmed period's choice list — never re-derived here. Legal sets come from live
 /// engine queries (`is_convoke_eligible`); the frontend computes nothing. Targets resolve at the
 /// incarnation the replay will meet, since CR 400.7 replaces a recorded object between cycles.
-fn pinned_decisions_to_points(
+pub(crate) fn pinned_decisions_to_points(
     pins: &[crate::analysis::decision_template::PinnedDecision],
     state: &GameState,
     controller: PlayerId,
@@ -4882,6 +4886,10 @@ enum ConsumptionDerivation {
     NoMeasurement,
     /// Signed, with the threshold the reduction measured.
     Measured(ConsumptionBound),
+    /// CR 732.2a: a period the counting replay counted. Its take answers to the reducer and the
+    /// replay's cap, never to the threshold reduction; these are the departures the count saw
+    /// within the accepted count.
+    Replayed(Vec<crate::analysis::resource::PredictedDeparture>),
 }
 
 impl ConsumptionDerivation {
@@ -4892,6 +4900,7 @@ impl ConsumptionDerivation {
             ConsumptionDerivation::Unsigned => None,
             ConsumptionDerivation::NoMeasurement => Some(&[]),
             ConsumptionDerivation::Measured(bound) => Some(&bound.entries),
+            ConsumptionDerivation::Replayed(entries) => Some(entries),
         }
     }
 }
@@ -4901,8 +4910,23 @@ fn shortcut_consumption_bound(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     accepted: u32,
 ) -> ConsumptionDerivation {
-    let Some(per_cycle) = proposal.per_cycle.as_ref() else {
-        return ConsumptionDerivation::Unsigned;
+    if let Some(departures) = proposal.period.replayed_departures() {
+        return ConsumptionDerivation::Replayed(
+            departures
+                .iter()
+                .filter(|entry| entry.repetition <= accepted)
+                .cloned()
+                .collect(),
+        );
+    }
+    let per_cycle = match proposal.per_cycle.as_ref() {
+        None => return ConsumptionDerivation::Unsigned,
+        Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) => per_cycle,
+        // CR 732.2a: one repetition's signature bounds no other; a take of it predicts no
+        // departure, so any departure refuses it whole.
+        Some(crate::analysis::resource::PeriodSignature::OneRepetition(_)) => {
+            return ConsumptionDerivation::Replayed(Vec::new());
+        }
     };
     // CR 732.2a + CR 601.2c: the declaration the drive REPLAYS is the one the cascade is taken
     // under, resolved exactly as `handle_declare_shortcut` resolves it — the proposal's own
@@ -5079,6 +5103,8 @@ fn shortcut_count_is_drivable(
             // measured none — so the budget conjunct above is the only bound either gets.
             ConsumptionDerivation::Unsigned | ConsumptionDerivation::NoMeasurement => true,
             ConsumptionDerivation::Measured(bound) => count <= bound.ceiling,
+            // The cap is the only ceiling known before the period is performed.
+            ConsumptionDerivation::Replayed(_) => count <= super::period_confirm::COUNT_CAP,
         }
 }
 
@@ -5363,7 +5389,10 @@ fn apply_until_lethal_shortcut(
                     proposal.template.as_ref(),
                     i,
                     cap,
-                    proposal.per_cycle.as_ref().map(|pd| pd.frames_per_period),
+                    proposal
+                        .per_cycle
+                        .as_ref()
+                        .map(crate::analysis::resource::PeriodSignature::frames_per_period),
                 ) {
                     CycleOutcome::Recurred { state: s, .. } => running = *s,
                     CycleOutcome::CrossLethal {
@@ -6141,11 +6170,11 @@ enum TakeRoute {
 /// CR 732.2c: the one route decision for an accepted proposal. The mark stands only where it
 /// reaches what the replay would: a zero or shortened count is performed as agreed (CR 732.2b),
 /// a period standing on the stack cannot be performed from the step-end collapse's empty stack,
-/// the mark would refill restricted mana without its restriction (CR 106.6), its mint makes
-/// bare tapped copies under the proposer, without a keyword, delayed trigger, other controller or
-/// certified departure the cover admitted as growth, its batched collapse must not miss what the
-/// board observes, and a signed proposal's departures are seen only as its repetitions cross them
-/// (CR 704.3).
+/// the mark would refill restricted mana without its restriction (CR 106.6), it batches none of
+/// the damage a period marks (CR 120.3e), its mint makes bare tapped copies under the proposer,
+/// without a keyword, delayed trigger, other controller or certified departure the cover admitted
+/// as growth, its batched collapse must not miss what the board observes, and a signed proposal's
+/// departures are seen only as its repetitions cross them (CR 704.3).
 fn take_route(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
@@ -6164,7 +6193,7 @@ fn take_route(
     }
     // Every accept-time derivation below reads this one driven cycle.
     let frames = drive_one_period_frames(state, &proposal.period, proposal.proposer);
-    if adds_restricted_mana(frames.as_ref(), proposal.proposer) {
+    if adds_restricted_mana(frames.as_ref(), proposal.proposer) || marks_damage(frames.as_ref()) {
         return TakeRoute::Replay;
     }
     let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);
@@ -6286,6 +6315,17 @@ fn adds_restricted_mana(frames: Option<&(GameState, GameState)>, controller: Pla
             })
     };
     frames.is_some_and(|(before, after)| restricted(after) > restricted(before))
+}
+
+/// CR 120.3e + CR 120.6: whether one driven cycle leaves more damage marked on a battlefield
+/// permanent, whoever controls it, than it found there.
+fn marks_damage(frames: Option<&(GameState, GameState)>) -> bool {
+    frames.is_some_and(|(before, after)| {
+        after.battlefield.iter().any(|id| {
+            let marked = |state: &GameState| state.objects.get(id).map_or(0, |o| o.damage_marked);
+            marked(after) > marked(before)
+        })
+    })
 }
 
 /// PR-7 Phase 4b: CR 732.2a finite materialization of a confirmed `Fixed(N)` loop
@@ -6464,7 +6504,7 @@ fn materialize_fixed_shortcut(
             template.as_ref(),
             i,
             cycle_beat_cap,
-            per_cycle.map(|pd| pd.frames_per_period),
+            per_cycle.map(crate::analysis::resource::PeriodSignature::frames_per_period),
         ) {
             CycleOutcome::Recurred {
                 state: s,
@@ -6481,7 +6521,14 @@ fn materialize_fixed_shortcut(
                 // victim-INVARIANT rather than exact: CR 601.2c lets one declaration aim an
                 // announced slot at a different seat each iteration, and `conforms` states
                 // both what that licenses and what it still refuses.
-                if let Some(pd) = per_cycle {
+                if let Some(signature) = per_cycle {
+                    let pd = match signature {
+                        crate::analysis::resource::PeriodSignature::EveryRepetition(pd) => pd,
+                        // CR 732.2a: one repetition's signature checks no cycle of a ring drive.
+                        crate::analysis::resource::PeriodSignature::OneRepetition(_) => {
+                            break 'cycles
+                        }
+                    };
                     let pins = template
                         .as_ref()
                         .map_or(&[][..], |t| t.decisions.as_slice());
@@ -6660,6 +6707,8 @@ fn materialize_fixed_shortcut(
                     // dropped whole. Row:
                     // `a_signed_proposal_measuring_nothing_drops_the_cycle_a_departure_ends`.
                     ConsumptionDerivation::NoMeasurement => break 'cycles,
+                    // A counted period carries its period, whose take is never the ring's.
+                    ConsumptionDerivation::Replayed(_) => break 'cycles,
                     ConsumptionDerivation::Measured(bound) => {
                         match departure_verdict(&bound.entries, &committed, &s, i + 1) {
                             // CR 732.2a: a predicted departure is a beat the accepted count
@@ -7027,11 +7076,33 @@ pub(crate) fn certify_object_growth_frames(
     crate::analysis::resource::ObjectGrowthVerdict,
     crate::analysis::resource::CoveredGrowth,
 ) {
-    use crate::analysis::resource::{CoveredGrowth, ObjectGrowthVerdict};
+    use crate::analysis::resource::{CoveredGrowth, ObjectGrowthVerdict, PairCover};
     let [s_n, s_n1, s_n2] = frames;
     // CR 400.7: normalize each frame BEFORE the cover fork so both arms share the normalized
     // frames.
     let (cs_n, cs_n1, cs_n2) = (normalize(s_n), normalize(s_n1), normalize(s_n2));
+    // CR 732.2a: a token the period spent and made again is the same permanent to the board's
+    // recurrence, so each pair is compared without it; a period that mints nothing else is
+    // covered as one that mints nothing.
+    let (first_remade, second_remade) = (remade_tokens(s_n, s_n1), remade_tokens(s_n1, s_n2));
+    if !first_remade.is_empty() || !second_remade.is_empty() {
+        let without = |prior: &GameState, current: &GameState, remade: &[(ObjectId, ObjectId)]| {
+            let (spent, made): (Vec<ObjectId>, Vec<ObjectId>) = remade.iter().copied().unzip();
+            (
+                crate::analysis::resource::frame_without(prior, &spent),
+                crate::analysis::resource::frame_without(current, &made),
+            )
+        };
+        let first = without(&cs_n, &cs_n1, &first_remade);
+        if derived_fodder_class(&first.0, &first.1).is_none() {
+            let second = without(&cs_n1, &cs_n2, &second_remade);
+            let covers = |(prior, current): &(GameState, GameState)| {
+                crate::analysis::resource::resource_recurrence_covers(prior, current, caster)
+            };
+            let (verdict, _) = PairCover::of_pairs(covers(&first), covers(&second));
+            return (verdict, CoveredGrowth::PerformedOnly);
+        }
+    }
     // CR 732.2a board recurrence on BOTH pairs — two disjoint recurrence shapes:
     //  - fodder-growth (one HOMOGENEOUS class of k >= 1 members was reproduced each period,
     //    `derived_fodder_class` is `Some`): cover modulo the inert reproduced fodder class (the
@@ -7058,18 +7129,7 @@ pub(crate) fn certify_object_growth_frames(
                 crate::analysis::resource::resource_recurrence_covers(&cs_n, &cs_n1, caster);
             let second =
                 crate::analysis::resource::resource_recurrence_covers(&cs_n1, &cs_n2, caster);
-            first.zip(second).map_or(
-                (
-                    ObjectGrowthVerdict::ResourceRecurrence(None),
-                    CoveredGrowth::Mintable,
-                ),
-                |((a, a_cover), (b, b_cover))| {
-                    (
-                        ObjectGrowthVerdict::ResourceRecurrence(Some(a_cover.max(b_cover))),
-                        a.max(b),
-                    )
-                },
-            )
+            PairCover::of_pairs(first, second)
         }
     }
 }
@@ -7109,15 +7169,57 @@ pub fn certify_object_growth_frames_for_tests(
 /// direction an extra member matching the class does not make the class heterogeneous, so the
 /// count would silently rise.
 ///
-/// ONE test, TWO readers: the class derivation and the producer's token-axis feed, which must
-/// publish the count the boundary mint will reproduce.
+/// CR 111.1 + CR 111.3: a token the period made in place of one it spent ([`remade_tokens`]) is
+/// not a mint either, since the board holds the same permanents after it as before.
+///
+/// ONE test, THREE readers: the class derivation, the sign check's token-axis feed and
+/// `ResourceVector::period`, which must publish the count the boundary mint will reproduce.
 pub(crate) fn minted_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
+    let remade = remade_tokens(before, after);
+    new_battlefield_ids(before, after)
+        .into_iter()
+        .filter(|id| remade.iter().all(|(_, made)| made != id))
+        .collect()
+}
+
+/// The battlefield objects of `after` that `before` holds in no zone.
+fn new_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
     after
         .battlefield
         .iter()
         .copied()
         .filter(|id| !before.battlefield.contains(id) && !before.objects.contains_key(id))
         .collect()
+}
+
+/// CR 111.7 + CR 111.3: each battlefield object of `before` that has ceased to exist in `after`,
+/// with one object `after` made that has its tapped status, its content and its copiable values.
+fn remade_tokens(before: &GameState, after: &GameState) -> Vec<(ObjectId, ObjectId)> {
+    let spent: Vec<_> = before
+        .battlefield
+        .iter()
+        .filter(|id| !after.objects.contains_key(id))
+        .filter_map(|id| before.objects.get(id))
+        .collect();
+    if spent.is_empty() {
+        return Vec::new();
+    }
+    let values = crate::game::printed_cards::intrinsic_copiable_values;
+    let mut made = new_battlefield_ids(before, after);
+    let mut pairs = Vec::new();
+    for spent in spent {
+        let twin = made.iter().position(|candidate| {
+            after.objects.get(candidate).is_some_and(|candidate| {
+                spent.tapped == candidate.tapped
+                    && crate::analysis::resource::fodder_content_eq(spent, candidate)
+                    && values(spent) == values(candidate)
+            })
+        });
+        if let Some(twin) = twin {
+            pairs.push((spent.id, made.remove(twin)));
+        }
+    }
+    pairs
 }
 
 /// CR 111.3 / CR 707.2: the content class of the reproduced fodder, and the per-cycle count `k` of
@@ -7331,7 +7433,8 @@ fn try_offer_object_growth_shortcut(
         let confirmation = super::period_confirm::confirm(state, span).ok()?;
         Some((span, confirmation))
     })?;
-    // CR 704.5a + CR 732.2a: a loss period is offered at the threshold authority's count.
+    // CR 732.2a: a period is offered at its stated count — the threshold authority's for a loss
+    // period (CR 704.5a), the counting replay's for a spend.
     if let Some((certificate, schema, declaration)) = confirmation.bounded {
         super::play_trace::note_offered(state, span);
         return Some((certificate, schema, confirmation.period, declaration));
@@ -7432,30 +7535,40 @@ pub(crate) fn replay_bounded_offer(
     )
 }
 
-/// The sign check on a period's second frame pair: net progress for the caster, no loss axis for
-/// anyone, and no driving resource consumed; the delta and any certified departure on success.
+/// CR 732.2a: what the sign check answers of a period that makes progress for its proposer.
+pub(crate) enum PeriodSign {
+    /// It may repeat without bound: its delta and any certified departure.
+    Unbounded(
+        Box<(
+            crate::analysis::resource::ResourceVector,
+            Option<crate::analysis::resource::CertifiedInstructedDeparture>,
+        )>,
+    ),
+    /// CR 704.5a: it moves some player toward losing the game, and nothing of its proposer's own
+    /// falls.
+    LossAxis,
+    /// CR 118.3 + CR 119.4: something of its proposer's own falls across it — its life, or a
+    /// resource that drives the period — so it can be performed only while that lasts.
+    Spend,
+}
+
+/// The sign check on a period's last frame pair: progress for the caster, or no axis; then whether
+/// something of the caster's own falls, whether anyone has a loss axis, or neither.
 pub(crate) fn period_sign_check(
     s_n1: &GameState,
     s_n2: &GameState,
     caster: PlayerId,
-) -> Result<
-    (
-        crate::analysis::resource::ResourceVector,
-        Option<crate::analysis::resource::CertifiedInstructedDeparture>,
-    ),
-    OfferRefusal,
-> {
-    // CR 119 / CR 122.1 / CR 704.5g sign-check on the second pair (RAW un-projected frames):
-    // net progress for the caster, no loss axis for anyone, every driving consumable
-    // non-decreasing (energy / poison / player-counters / object-counters) and no
-    // damage_marked increase.
+) -> Result<PeriodSign, OfferRefusal> {
+    // CR 119 / CR 122.1 / CR 704.5g sign-check on the last pair (RAW un-projected frames):
+    // progress for the caster, then its own life and every driving consumable (energy / poison /
+    // player-counters / object-counters / damage marked), then a loss axis for anyone.
     let mut delta = crate::analysis::resource::ResourceVector::delta(
         &crate::analysis::resource::ResourceVector::snapshot(s_n1),
         &crate::analysis::resource::ResourceVector::snapshot(s_n2),
     );
     // CR 111.1: `tokens_created` is an EVENT-fed axis (0 under a snapshot diff),
     // so the period's MINTED count is fed in as the per-cycle tokens-created count — the
-    // unbounded axis — and `net_progress_for` then sees the progress the certificate names.
+    // unbounded axis — and `progress_for` then sees the progress the certificate names.
     // The count is the MINTED one, not the raw `battlefield.len()` delta, because the boundary
     // mint reproduces minted members and an ARRIVAL grows the battlefield without being one:
     // publishing the raw delta would promise a per-cycle count the collapse cannot reproduce.
@@ -7468,7 +7581,7 @@ pub(crate) fn period_sign_check(
     // ADVANTAGE axis, not a loss one — CR 121.4 / CR 104.3c / CR 704.5b lose a player for
     // DRAWING from an empty library, never for milling one. `has_no_loss_axis` is therefore
     // asked about the delta with the certified departure added back, and ONLY it:
-    // `net_progress_for` and `driving_resources_non_decreasing` keep the full delta, and
+    // `progress_for`, `life_falls_for` and `driving_resources_non_decreasing` keep the full delta, and
     // `has_no_loss_axis` itself is not edited — its other call sites are the CR 732.4
     // mandatory-draw arms, where relieving this would turn an unbreakable mandatory mill loop
     // into a draw (CR 104.4b needs the game state to REPEAT, and a shrinking library does not).
@@ -7480,16 +7593,60 @@ pub(crate) fn period_sign_check(
         Some(certified) => delta.without_certified_departure(&certified.per_victim),
         None => delta.clone(),
     };
-    if !delta.net_progress_for(caster) {
+    if !delta.progress_for(caster) {
         return Err(OfferRefusal::NoAxis);
     }
+    if delta.life_falls_for(caster)
+        || !crate::analysis::resource::driving_resources_non_decreasing(s_n1, s_n2, caster)
+    {
+        return Ok(PeriodSign::Spend);
+    }
     if !has_no_loss_axis(&sign_check_delta) {
-        return Err(OfferRefusal::LossAxis);
+        return Ok(PeriodSign::LossAxis);
     }
-    if !crate::analysis::resource::driving_resources_non_decreasing(s_n1, s_n2, caster) {
-        return Err(OfferRefusal::DrivingResourcesDecrease);
-    }
-    Ok((delta, certified_departure))
+    Ok(PeriodSign::Unbounded(Box::new((
+        delta,
+        certified_departure,
+    ))))
+}
+
+/// CR 732.2a: the offer of a period the counting replay counted. `count`, the repetitions the
+/// reducer performed, is its ceiling; `suggested` of them is its suggestion. `frames` are one
+/// cycle's priority frames in order: their signature describes the period and bounds nothing.
+/// `ending` is how a take of `count` ends the game, which no smaller take reaches.
+pub(crate) fn counted_offer(
+    frames: &[GameState],
+    points: Vec<crate::analysis::decision_template::DecisionPoint>,
+    suggested: u32,
+    count: u32,
+    ending: Option<crate::analysis::loop_check::WinKind>,
+) -> super::period_confirm::BoundedOfferParts {
+    let (prior, current) = (&frames[0], &frames[frames.len() - 1]);
+    // CR 732.2a: every field states what the counting replay performed; one period's delta is
+    // published as one repetition's and classifies nothing.
+    let certificate = crate::analysis::loop_check::LoopCertificate {
+        unbounded: Vec::new(),
+        win_kind: ending,
+        win_kind_at: ending.map(|_| count),
+        mandatory: false,
+        residual_board_delta: crate::analysis::resource::board_delta(prior, current),
+        per_cycle: Some(crate::analysis::resource::PeriodSignature::OneRepetition(
+            crate::analysis::resource::PeriodicDelta {
+                frames_per_period: frames.len() as u32 - 1,
+                delta: crate::analysis::resource::ResourceVector::period(prior, current),
+                victim_slot: Vec::new(),
+                declarable_victims: Vec::new(),
+                seat_life_charge: Vec::new(),
+                cleanup: None,
+            },
+        )),
+    };
+    let schema = build_shortcut_schema(
+        points,
+        crate::analysis::decision_template::IterationCount::Fixed(suggested),
+        Some(count),
+    );
+    (certificate, schema, None)
 }
 
 /// PR-7 Phase 4d-ii / P7 v3 (CR 732.2a): "materialize" a confirmed UNBOUNDED object-growth
@@ -7673,7 +7830,11 @@ pub(crate) fn drive_persistent_axis_collapse(
             // Commit the successful prefix; the caller hands priority back.
             *state = snapshot;
             events.truncate(committed_events);
-            let prefix = delivered;
+            // CR 732.2a: a counted period is taken at the count declared or not at all.
+            let prefix = match period.replayed_departures() {
+                Some(_) => 0,
+                None => delivered,
+            };
             delivered = 0;
             for _ in 0..prefix {
                 reseed(state);
@@ -8013,6 +8174,7 @@ fn handle_declare_shortcut(
         count,
         unbounded: offer.certificate.unbounded.clone(),
         win_kind: offer.certificate.win_kind,
+        win_kind_at: offer.certificate.win_kind_at,
         template,
         // CR 732.2a: the drive reads ONE authority for what a conformant cycle looks like —
         // the confirmed certificate's own signature, copied, never re-derived.
@@ -8289,17 +8451,21 @@ fn check_actor_authorization(
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
-    if authorized.is_empty() {
-        return Err(EngineError::WrongPlayer);
-    }
     if let GameAction::Concede { player_id } = action {
         // CR 104.3a: A player may concede at any time in an unfinished game —
         // but only themselves. `GameOver` has no authorized submitter, so it
-        // cannot admit a second concession.
-        if *player_id != actor {
+        // cannot admit a second concession. A host-driven contest
+        // (`WaitingFor::PhysicalContest`) is also actorless, yet its game is
+        // unfinished: a contestant must still be able to leave it.
+        let unfinished_host_driven =
+            matches!(state.waiting_for, WaitingFor::PhysicalContest { .. });
+        if *player_id != actor || (authorized.is_empty() && !unfinished_host_driven) {
             return Err(EngineError::WrongPlayer);
         }
         return Ok(());
+    }
+    if authorized.is_empty() {
+        return Err(EngineError::WrongPlayer);
     }
     if !authorized.contains(&actor) {
         return Err(EngineError::WrongPlayer);
@@ -19903,29 +20069,30 @@ mod shortcut_schema_tests {
     #[test]
     fn iteration_count_maps_every_win_kind() {
         assert_eq!(
-            shortcut_iteration_count(WinKind::LethalDamage),
+            shortcut_iteration_count(Some(WinKind::LethalDamage)),
             IterationCount::UntilLethal
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::PoisonLoss),
+            shortcut_iteration_count(Some(WinKind::PoisonLoss)),
             IterationCount::UntilLethal
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::Decking),
+            shortcut_iteration_count(Some(WinKind::Decking)),
             IterationCount::Fixed(1)
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::ExtraTurns),
+            shortcut_iteration_count(Some(WinKind::ExtraTurns)),
             IterationCount::Fixed(1)
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::ImmediateWin),
+            shortcut_iteration_count(Some(WinKind::ImmediateWin)),
             IterationCount::Fixed(1)
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::Advantage),
+            shortcut_iteration_count(Some(WinKind::Advantage)),
             IterationCount::Fixed(1)
         );
+        assert_eq!(shortcut_iteration_count(None), IterationCount::Fixed(1));
     }
 
     /// The constructor NARROWS a published suggestion to the capacity it derives and never
@@ -20890,7 +21057,8 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
-            win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             template: Some(template),
             per_cycle: None,
             shortened_by: None,
@@ -21026,7 +21194,8 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
-            win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             template: Some(sched),
             per_cycle: None,
             shortened_by: None,
@@ -22672,7 +22841,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            52,
+            53,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -22680,9 +22849,9 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (4, 11, 37),
+            (4, 11, 38),
             "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
-             readers (including the two new optional-subject projection reads), and 37 \
+             readers (including the two new optional-subject projection reads), and 38 \
              `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
@@ -23458,7 +23627,8 @@ mod stage2_injector_tests {
             predicted_winner: None,
             certificate: LoopCertificate {
                 unbounded: vec![],
-                win_kind: WinKind::LethalDamage,
+                win_kind: Some(WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: BoardDelta::default(),
                 per_cycle: None,
@@ -24528,6 +24698,7 @@ mod bounded_offer_conjunct_tests {
             ConsumptionDerivation::Unsigned => "Unsigned",
             ConsumptionDerivation::NoMeasurement => "NoMeasurement",
             ConsumptionDerivation::Measured(_) => "Measured",
+            ConsumptionDerivation::Replayed(_) => "Replayed",
         };
         assert!(
             crate::game::players::is_alive(&state, doomed)
@@ -24691,6 +24862,9 @@ mod bounded_offer_conjunct_tests {
             ConsumptionDerivation::NoMeasurement => panic!(
                 "REACH-GUARD: the helper must MEASURE on this board; its reduction consumed no \
                  living seat"
+            ),
+            ConsumptionDerivation::Replayed(_) => panic!(
+                "REACH-GUARD: the helper must MEASURE; the counting replay counted this period"
             ),
         }
     }
@@ -24987,6 +25161,7 @@ mod bounded_offer_conjunct_tests {
                     let charge = &certificate
                         .per_cycle
                         .as_ref()
+                        .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
                         .expect("a bounded offer publishes its per-period signature")
                         .seat_life_charge;
                     let [(_, published_magnitude)] = charge.as_slice() else {
@@ -25022,6 +25197,7 @@ mod bounded_offer_conjunct_tests {
                 &certificate
                     .per_cycle
                     .as_ref()
+                    .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
                     .expect("a bounded offer publishes its per-period signature")
                     .seat_life_charge,
             );
@@ -25066,6 +25242,7 @@ mod bounded_offer_conjunct_tests {
                 certificate
                     .per_cycle
                     .as_ref()
+                    .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
                     .expect("a bounded offer publishes its per-period signature")
                     .victim_slot
                     .is_empty(),
@@ -25131,6 +25308,7 @@ mod bounded_offer_conjunct_tests {
         let delta = &certificate
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature")
             .delta;
 
@@ -25232,6 +25410,7 @@ mod bounded_offer_conjunct_tests {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature");
         assert!(
             per_cycle.frames_per_period >= 1,
@@ -25990,6 +26169,7 @@ mod bounded_offer_conjunct_tests {
         let per_cycle = proposal
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer carries its per-period signature onto the proposal");
 
         // ── CARDINALITY REACH-GUARDS: every map the derivation walks holds ≥ 2 entries ──
@@ -26134,9 +26314,11 @@ mod bounded_offer_conjunct_tests {
             else {
                 panic!("legs {legs:?} must mint a bounded offer; got {outcome:?}");
             };
-            let per_cycle = certificate
-                .per_cycle
-                .expect("a bounded offer states its period");
+            let Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) =
+                certificate.per_cycle
+            else {
+                panic!("a bounded offer states its period");
+            };
             assert_eq!(
                 meter.certification,
                 Some(PeriodCertification::ResourceSignatureOnly),
@@ -26700,6 +26882,55 @@ mod minted_battlefield_set_tests {
             vec![ObjectId(2), ObjectId(3)],
             "the same arrival counts as MINTED once `before` no longer knows the id"
         );
+    }
+
+    /// CR 111.7 + CR 111.3: a token made in place of one that ceased to exist is not a mint; a
+    /// second one, one of another name, one of another tapped status, and one with other
+    /// copiable values each are.
+    #[test]
+    fn a_token_made_again_is_not_minted() {
+        let mut before = GameState::new_two_player(7);
+        put(&mut before, 1, "Engine", Zone::Battlefield);
+        let spent = put(&mut before, 2, "Treasure", Zone::Battlefield);
+        let mut ceased = before.clone();
+        ceased.objects.remove(&spent);
+        ceased.battlefield.retain(|id| *id != spent);
+        let made = |name: &str| {
+            let mut after = ceased.clone();
+            let id = put(&mut after, 3, name, Zone::Battlefield);
+            (after, id)
+        };
+
+        let (remade, twin) = made("Treasure");
+        assert_eq!(minted_battlefield_ids(&before, &remade), vec![]);
+
+        let mut two = remade.clone();
+        let second = put(&mut two, 4, "Treasure", Zone::Battlefield);
+        assert_eq!(minted_battlefield_ids(&before, &two), vec![second]);
+
+        let (renamed, gold) = made("Gold");
+        assert_eq!(minted_battlefield_ids(&before, &renamed), vec![gold]);
+
+        let mut tapped = remade.clone();
+        tapped
+            .objects
+            .get_mut(&twin)
+            .expect("the made token is live")
+            .tapped = true;
+        assert_eq!(minted_battlefield_ids(&before, &tapped), vec![twin]);
+
+        let mut keyworded = remade.clone();
+        keyworded
+            .objects
+            .get_mut(&twin)
+            .expect("the made token is live")
+            .base_keywords
+            .push(crate::types::keywords::Keyword::Flying);
+        assert_eq!(minted_battlefield_ids(&before, &keyworded), vec![twin]);
+
+        let mut moved = remade.clone();
+        put(&mut moved, spent.0, "Treasure", Zone::Graveyard);
+        assert_eq!(minted_battlefield_ids(&before, &moved), vec![twin]);
     }
 
     /// **`derived_fodder_class` reports `k` over the MINTED members only.**

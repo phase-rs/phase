@@ -567,6 +567,26 @@ fn emit_as_enters_one_shot(
     true
 }
 
+/// CR 614.1c + CR 608.2c: record the line-owned `enters_with_clause` gap for
+/// `line` when the enters-with parser fails it closed with `Clause` (a clause
+/// it owns but cannot carry, or a source enters-with sentence beside other
+/// instructions). A `Gate` decline is left to the routes after this one, as in
+/// the Class fallback. Shared by the trigger-prefixed (Priority 5-pre) and
+/// for-each (Priority 7) replacement routes, which otherwise hand such a line to
+/// a later parser that claims only part of it.
+fn emit_enters_with_clause_gap(
+    emitter: &mut DocEmitter<'_>,
+    item_line: usize,
+    line: &str,
+    card_name: &str,
+) -> bool {
+    if enters_with_fails_closed(line, card_name) != Some(EntersWithGap::Clause) {
+        return false;
+    }
+    emitter.ability_at(item_line, EntersWithGap::Clause.gap_ability(line));
+    true
+}
+
 fn try_parse_opening_hand_reveal_delayed_trigger(
     line: &str,
     lower: &str,
@@ -6591,8 +6611,10 @@ fn parse_normalized_oracle_ir(
         {
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"
-            // (Wildgrowth Archaic and cousin cards — Runadi, Boreal Outrider,
-            // Torgal, Dragon Broodmother, …) is a TRIGGERED ability (CR 603.1),
+            // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing; Torgal
+            // and Boreal Outrider are NOT recognized here; the self-exile form, Dark
+            // Intimations, is recognized only to fail closed below) is a TRIGGERED
+            // ability (CR 603.1),
             // not an object-hosted static replacement — the entering-with-counters
             // effect must survive the source leaving the battlefield after the
             // trigger resolves but before the cast spell does (issue #6492
@@ -6611,7 +6633,10 @@ fn parse_normalized_oracle_ir(
                 // object-hosted replacement — publishing a partial ability AND
                 // giving it the wrong lifetime, since the effect must outlive the
                 // source leaving the battlefield. Fail the line closed instead,
-                // so the unsupported clause is reported honestly.
+                // so the unsupported clause is reported honestly. The self-exile
+                // form ("…, exile this card from your graveyard. That … enters
+                // with …") always lands here, as one unsupported line: neither the
+                // exile nor the rider is published without the other.
                 CastEntersWithOutcome::ShapeUnsupported => {
                     emitter.unsupported_at(item_line, line.clone());
                     i += 1;
@@ -6621,13 +6646,23 @@ fn parse_normalized_oracle_ir(
             }
             // Every other "… enters with …" shape here (kicker-conditional
             // "if ~ was kicked, it enters with …", external "[type] enters
-            // with …", etc.) is a genuine CR 614.1c object-hosted replacement.
+            // with …", etc.) is tried as a CR 614.1c object-hosted replacement
+            // candidate; the gate in `enters_with_counters_outcome` decides
+            // which are claimed.
             if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
                 emitter.emit_at(
                     item_line,
                     OracleNodeIr::Replacement(replacement_ir),
                     OuterRoute::Replacement,
                 );
+                i += 1;
+                continue;
+            }
+            // CR 614.1c + CR 608.2c: a source enters-with sentence beside the
+            // trigger's own instructions ("When you cast this spell, … . This
+            // creature enters with …") is one line-owned gap, not a trigger
+            // whose body silently carries the replacement's sentence.
+            if emit_enters_with_clause_gap(&mut emitter, item_line, &line, card_name) {
                 i += 1;
                 continue;
             }
@@ -7231,6 +7266,13 @@ fn parse_normalized_oracle_ir(
                         OracleNodeIr::Replacement(replacement_ir),
                         OuterRoute::Replacement,
                     );
+                    i += 1;
+                    continue;
+                }
+                // CR 614.1c + CR 608.2c: a for-each enters-with clause the
+                // parser owns but cannot carry stays one line-owned gap instead
+                // of falling to the static parser.
+                if emit_enters_with_clause_gap(&mut emitter, item_line, &line, card_name) {
                     i += 1;
                     continue;
                 }
@@ -9403,6 +9445,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -10479,6 +10522,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade

@@ -841,7 +841,16 @@
     "defendingPlayerTrample": "Defending Player (Trample)",
     "pwControllerTrample": "PW Controller (Trample Over PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stack",
     "collapsePanel": "Collapse stack panel",
     "expandPanel": "Expand stack panel",
@@ -2670,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Staring Contest",
+      "breathHolding": "Breath-Holding Contest"
+    },
+    "versus": "{{first}} vs. {{second}}",
+    "instructions": "Keep clicking, tapping, or pressing Space for as long as you can. The first player to stop for {{seconds}} seconds loses.",
+    "status": {
+      "pending": "Waiting for the contest to begin…",
+      "preparing": "Get ready…",
+      "go": "GO! Keep clicking!",
+      "paused": "Contest paused while a player reconnects…",
+      "spectating": "Watching the contest…",
+      "resolving": "Deciding the result…"
+    },
+    "button": {
+      "wait": "Wait for GO…",
+      "active": "Keep clicking!"
+    },
+    "you": "You",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "You won the contest!",
+      "lost": "You lost the contest.",
+      "winner": "{{name}} won the contest.",
+      "tie": "It's a tie — nothing happens.",
+      "cancelled": "The contest was cancelled — nothing happens."
+    }
   }
 }

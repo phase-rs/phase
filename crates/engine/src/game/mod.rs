@@ -30,6 +30,7 @@ pub mod combat_damage;
 pub mod commander;
 pub mod companion;
 pub(crate) mod conditions;
+pub mod contest;
 pub mod contraptions;
 #[cfg(test)]
 #[path = "contraptions_tests.rs"]

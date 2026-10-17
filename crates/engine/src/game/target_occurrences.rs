@@ -94,8 +94,8 @@ impl OccurrenceIdentity {
 /// the same length; `Some(StoredIndex(s))` for a stored occurrence (`Legal`,
 /// `IllegalRetained` and `PassThrough` all occupy storage, in declared order),
 /// `None` for a `Dropped` one. Whether a stored occurrence is also a published
-/// declared slot is a separate question (`OccurrenceVerdict::is_declared_illegal`
-/// and `chain_node_positions`); this map answers only where it is stored.
+/// declared slot is a separate question; this map answers only where it is
+/// stored.
 pub(crate) fn declared_to_stored(verdicts: &[OccurrenceVerdict]) -> Vec<Option<StoredIndex>> {
     let mut next = 0usize;
     verdicts
@@ -308,6 +308,7 @@ impl ResolvedAbility {
     pub fn set_unpinned_targets(&mut self, targets: Vec<TargetRef>) {
         self.targets = targets;
         self.finish_occurrence_write(vec![None; self.targets.len()]);
+        self.chosen_target_slots.remap(|_| None);
     }
 
     /// SOURCE INHERITANCE: copy `source`'s occurrences (targets and pins,
@@ -316,6 +317,7 @@ impl ResolvedAbility {
     pub fn mirror_targets_from(&mut self, source: &ResolvedAbility) {
         self.targets = source.targets.clone();
         self.finish_occurrence_write(source.aligned_target_pins());
+        self.chosen_target_slots.remap(|_| None);
     }
 
     /// SOURCE PROJECTION: replace every occurrence with the occurrences of
@@ -409,12 +411,15 @@ impl ResolvedAbility {
         self.targets.insert(index, target);
         pins.insert(index, pin);
         self.finish_occurrence_write(pins);
+        self.chosen_target_slots
+            .remap(|slot| Some(if slot < index { slot } else { slot + 1 }));
     }
 
     /// Remove every occurrence.
     pub fn clear_targets(&mut self) {
         self.targets.clear();
         self.finish_occurrence_write(Vec::new());
+        self.chosen_target_slots.remap(|_| None);
     }
 
     /// CR 608.2b: storage projection of resolution validation — keep the
@@ -436,19 +441,26 @@ impl ResolvedAbility {
     /// survivor storage), never a re-derivation by object id.
     pub(crate) fn project_target_occurrences(&mut self, positions: &[usize]) {
         let pins = self.begin_occurrence_write();
-        let (targets, pins): (Vec<_>, Vec<_>) = positions
+        let kept: Vec<usize> = positions
             .iter()
-            .filter_map(|&index| Some((self.targets.get(index)?.clone(), pins[index])))
+            .copied()
+            .filter(|&index| index < self.targets.len())
+            .collect();
+        let (targets, pins): (Vec<_>, Vec<_>) = kept
+            .iter()
+            .map(|&index| (self.targets[index].clone(), pins[index]))
             .unzip();
         self.targets = targets;
         self.finish_occurrence_write(pins);
+        self.chosen_target_slots
+            .remap(|slot| kept.iter().position(|&index| index == slot));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::ability::{ChosenTargetSlots, Effect, ResolvedAbility};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -562,6 +574,49 @@ mod tests {
         assert_eq!(
             validate_target_pin_alignment(&drifted),
             Err(TargetPinAlignmentError::IdentityMismatch)
+        );
+    }
+
+    /// CR 601.2c: `set_unpinned_targets` keeps no recorded slot, and leaves a
+    /// node without a record without one.
+    #[test]
+    fn unpinned_targets_keep_no_recorded_slot() {
+        let mut recorded = node(vec![]);
+        recorded.push_chosen_target(TargetRef::Object(ObjectId(7)));
+        recorded.set_unpinned_targets(vec![
+            TargetRef::Object(ObjectId(8)),
+            TargetRef::Player(PlayerId(1)),
+        ]);
+        assert_eq!(
+            recorded.chosen_target_slots,
+            ChosenTargetSlots::Recorded(Vec::new())
+        );
+        let mut unrecorded = node(vec![TargetRef::Object(ObjectId(7))]);
+        unrecorded.set_unpinned_targets(vec![TargetRef::Object(ObjectId(8))]);
+        assert_eq!(
+            unrecorded.chosen_target_slots,
+            ChosenTargetSlots::Unrecorded
+        );
+    }
+
+    /// CR 601.2c: `mirror_targets_from` keeps no recorded slot of the
+    /// receiver, and leaves a receiver without a record without one.
+    #[test]
+    fn mirrored_targets_keep_no_recorded_slot() {
+        let source = node(vec![TargetRef::Object(ObjectId(8))]);
+        let mut recorded = node(vec![]);
+        recorded.push_chosen_target(TargetRef::Player(PlayerId(1)));
+        recorded.mirror_targets_from(&source);
+        assert_eq!(recorded.targets, source.targets);
+        assert_eq!(
+            recorded.chosen_target_slots,
+            ChosenTargetSlots::Recorded(Vec::new())
+        );
+        let mut unrecorded = node(vec![TargetRef::Player(PlayerId(1))]);
+        unrecorded.mirror_targets_from(&source);
+        assert_eq!(
+            unrecorded.chosen_target_slots,
+            ChosenTargetSlots::Unrecorded
         );
     }
 

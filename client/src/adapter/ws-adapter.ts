@@ -211,6 +211,20 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
+ *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
+ *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v146 peer cannot parse them.
+ *      Wire 129 moves with it.
+ * 146 — ConfirmedPeriod gains counted_by (CR 732.2a: a loop offer counted by
+ *      replaying its period, with the seats that left in each repetition, a
+ *      per_cycle scope stating one repetition, and an optional win_kind with
+ *      the count it is decided at) and performance, carried in
+ *      WaitingFor::LoopShortcut — see PROTOCOL_VERSION's own `/// 146` entry in
+ *      crates/lobby-broker/src/protocol.rs. Wire 128 moves with it.
+ * 145 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ *      on ResolvedAbility.parent_target_missing_reason; a v144 peer cannot
+ *      parse the tag. P2P moves in lockstep (wire 127); lobby messages unchanged.
  * 144 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
  *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
  *       edit retypes power_delta/toughness_delta to required QuantityExpr
@@ -880,7 +894,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 144;
+export const PROTOCOL_VERSION = 147;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -1353,6 +1367,7 @@ export type WsAdapterEvent =
       rewindTargets?: RewindOption[] }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
+  | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
   | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
@@ -2056,6 +2071,20 @@ export class WebSocketAdapter implements EngineAdapter {
 
   sendEmote(emote: string): void {
     this.send({ type: "Emote", data: { emote } });
+  }
+
+  /**
+   * One click in the running Eye to Eye / Mouth to Mouth contest. The server
+   * authenticates the seat and stamps the instant from its own clock, so the
+   * frame carries only the contest's identity and a sequence number. Never queued:
+   * a click that cannot be sent now is stale by the time a reconnect could deliver
+   * it. Always `true` — the server hosts the contest, so the caller never stamps.
+   */
+  submitContestClick(contest: number, seq: number): boolean {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.send({ type: "ContestClick", data: { contest, seq } });
+    }
+    return true;
   }
 
   /**
@@ -2917,6 +2946,13 @@ export class WebSocketAdapter implements EngineAdapter {
           fromPlayer: data.from_player,
           emote: data.emote,
         });
+        break;
+      }
+
+      case "ContestProgress": {
+        const data = msg.data as { contest: number; clicks: [PlayerId, number][]; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        this.emit({ type: "contestProgress", contest: data.contest, clicks: data.clicks });
         break;
       }
 

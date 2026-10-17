@@ -185,6 +185,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/fixtures/kilo_freed_relic_pentad_max_of_one_4p.json.gz", "BUDGET Priority"),
     ("engine/tests/fixtures/lethal_lifegain_loss_4p.json.gz", "OFFER@restore bounded=true threshold=Some(2) unbounded=[Life(PlayerId(0)), Life(PlayerId(1))] road=Ring"),
     ("engine/tests/fixtures/mass_library_order_turn15.json.gz", "BUDGET Priority"),
+    ("engine/tests/fixtures/smaug_devil_bats_4p.json.gz", "BUDGET Priority"),
     ("engine/tests/fixtures/sprout_witherbloom_realistic_lands_4p.json.gz", "BUDGET Priority"),
     ("engine/tests/fixtures/tenacity_exquisite_blood_4p.json.gz", "OFFER@restore bounded=false threshold=None unbounded=[Life(PlayerId(0)), Life(PlayerId(3))] road=Ring"),
     ("engine/tests/fixtures/vanquish_the_horde_manapayment_4p.json.gz", "BUDGET Priority"),

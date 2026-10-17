@@ -133,6 +133,59 @@ pub type ActionResult = (
 /// pairing intact when it fans a snapshot out to multiple viewers.
 pub type RevisionedActionResult = (u64, ActionResult);
 
+/// The atomic decision fields derived from one authoritative state.
+#[derive(Debug, Clone)]
+pub struct DecisionSnapshot {
+    pub legal_actions: Vec<GameAction>,
+    pub auto_pass_recommended: bool,
+    pub spell_costs: HashMap<ObjectId, ManaCost>,
+    pub legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+}
+
+impl DecisionSnapshot {
+    pub fn from_state(state: &GameState) -> Self {
+        let (legal_actions, spell_costs, legal_actions_by_object) =
+            engine_legal_actions_full(state);
+        let auto_pass_recommended = auto_pass_recommended(state, &legal_actions);
+        Self {
+            legal_actions,
+            auto_pass_recommended,
+            spell_costs,
+            legal_actions_by_object,
+        }
+    }
+}
+
+/// An AI transition retains presentation and rewind history even when no
+/// decision is offered. Only the final transition in a batch has a decision.
+#[derive(Debug, Clone)]
+pub struct AiTransition {
+    pub state_revision: u64,
+    pub state: GameState,
+    pub events: Vec<GameEvent>,
+    pub log_entries: Vec<GameLogEntry>,
+    pub decision: Option<DecisionSnapshot>,
+}
+
+impl AiTransition {
+    /// Extract a decision-bearing transition for a single-snapshot recipient.
+    pub fn into_action_result(self) -> Option<RevisionedActionResult> {
+        let decision = self.decision?;
+        Some((
+            self.state_revision,
+            (
+                self.state,
+                self.events,
+                decision.legal_actions,
+                self.log_entries,
+                decision.auto_pass_recommended,
+                decision.spell_costs,
+                decision.legal_actions_by_object,
+            ),
+        ))
+    }
+}
+
 /// Distinguishes an engine-owned, viewer-safe action refusal from an
 /// operational session failure. Only the former is eligible for a structured
 /// `ActionRejected` frame at the WebSocket boundary.
@@ -194,7 +247,7 @@ impl PreviewRefusal {
 /// not discard transitions that were already committed before that failure.
 #[derive(Debug)]
 pub struct AiRunOutcome {
-    pub transitions: Vec<RevisionedActionResult>,
+    pub transitions: Vec<AiTransition>,
     pub failure: Option<AiDriverFailure>,
     /// The durable terminal record, when this invocation observed or created
     /// an AI driver failure. Transports must send the final state frames before
@@ -207,7 +260,7 @@ pub struct AiRunOutcome {
 /// stack-resolution session is necessary: a safety cap is terminal only when
 /// an AI submitter is still eligible in the resulting state.
 struct AiActionBatch {
-    transitions: Vec<RevisionedActionResult>,
+    transitions: Vec<AiTransition>,
     stop: AiActionsStop,
 }
 
@@ -593,6 +646,9 @@ pub struct GameSession {
     /// ([`GameSession::seed_deck_pools_encoding`]), so the first persist after
     /// a restart re-serializes nothing either.
     deck_pools_cache: Option<(Vec<PlayerDeckPool>, Arc<str>)>,
+    /// Runtime state for the online sustained-clicking contests (Eye to Eye,
+    /// Mouth to Mouth). Never persisted; see `crate::contest`.
+    pub contest: crate::contest::ContestRuntime,
 }
 
 impl GameSession {
@@ -1321,9 +1377,9 @@ impl GameSession {
 
     /// Run AI actions and return per-action broadcast data.
     ///
-    /// Each entry is one authoritative transition: raw state snapshot, events,
-    /// legal actions, and log entries. Stack automation remains in that ordinary
-    /// engine transition stream rather than using a separate Resolve All frame.
+    /// Each entry retains its raw state, events, log entries and revision.
+    /// Only the final entry carries a decision snapshot. Stack automation remains
+    /// in that ordinary transition stream rather than a separate Resolve All frame.
     /// The caller is responsible for filtering the state per-player before sending.
     /// Returns an empty vec if the session has no AI seats.
     ///
@@ -1401,12 +1457,14 @@ impl GameSession {
 
         let stop = ai_results.stop;
 
+        let result_count = ai_results.results.len();
         let transitions = ai_results
             .results
             .into_iter()
-            .map(|r| {
-                let (legal, spell_costs, by_object) = engine_legal_actions_full(&r.state);
-                let auto_pass = auto_pass_recommended(&r.state, &legal);
+            .enumerate()
+            .map(|(index, r)| {
+                let decision =
+                    (index + 1 == result_count).then(|| DecisionSnapshot::from_state(&r.state));
                 let revision = self.advance_state_revision();
                 // Per AI result, which is exactly the granularity
                 // `run_ai_actions` reports. This is what makes a turn that
@@ -1423,18 +1481,13 @@ impl GameSession {
                 // `handle_interaction_with_rejection`.
                 self.game_log
                     .write_game_log_entries(&self.game_code, &r.log_entries);
-                (
-                    revision,
-                    (
-                        r.state,
-                        r.events,
-                        legal,
-                        r.log_entries,
-                        auto_pass,
-                        spell_costs,
-                        by_object,
-                    ),
-                )
+                AiTransition {
+                    state_revision: revision,
+                    state: r.state,
+                    events: r.events,
+                    log_entries: r.log_entries,
+                    decision,
+                }
             })
             .collect();
 
@@ -1706,6 +1759,7 @@ impl GameSession {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number,
+            contest: Default::default(),
         })
     }
 
@@ -2224,6 +2278,9 @@ impl GameSession {
     /// caller under the same held session guard.
     pub fn mark_disconnected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = false;
+        // A seat away mid-contest pauses the contest clock and starts its
+        // reconnect grace (`engine::game::contest`).
+        self.note_contest_connection(player, false);
     }
 
     /// Mark a seat connected again, after the registry half
@@ -2231,6 +2288,7 @@ impl GameSession {
     /// allows it.
     pub fn mark_connected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = true;
+        self.note_contest_connection(player, true);
     }
 
     pub fn reserve_seat(&mut self, display_name: String) -> Result<SeatReservation, String> {
@@ -2684,6 +2742,7 @@ impl SessionManager {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number,
+            contest: Default::default(),
         };
         // Seat 0 is installed the way every other seat is, through the
         // per-seat setter, rather than seeded into the struct literal.
@@ -2897,6 +2956,8 @@ impl SessionManager {
         // walk straight into a shared server. Order matters: this reads the
         // `hosting` just stamped.
         session.revoke_unentitled_debug_capability();
+        // A contest's clock epoch did not survive the restart.
+        session.cancel_contest_after_restore();
         let game_code = session.game_code.clone();
         for token in &session.player_tokens {
             if !token.is_empty() {
@@ -4669,6 +4730,92 @@ mod tests {
         );
     }
 
+    /// A contest's identity must survive a takeback of a COMPLETED contest. Undoing the
+    /// cast and replaying it reaches the same state revision, so an identity derived from
+    /// the revision alone would repeat — and a click frame stamped for the discarded
+    /// branch's contest would count in the replayed one. The restore rotates the
+    /// interaction session, and the identity is bound to it.
+    #[test]
+    fn a_contest_replayed_after_a_takeback_has_a_new_identity_and_rejects_the_old_frame() {
+        use engine::game::contest::{cancel_contest, contest_click, start_contest};
+        use engine::types::contest::{
+            ClickDisposition, ClickRejection, ContestCancelReason, ContestConfig,
+        };
+
+        const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        let (mgr, code, _token0, _token1) = setup_two_player_game();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = scenario.build().state().clone();
+        bind_fresh_interaction_session(&mut session.state, &code);
+        session.push_takeback_snapshot(P0);
+
+        let cast_into_contest = |session: &mut GameSession| {
+            let mut runner = GameRunner::from_state(session.state.clone());
+            runner.cast(spell).target_objects(&[victim]).resolve();
+            session.state = runner.state().clone();
+            match &session.state.waiting_for {
+                WaitingFor::PhysicalContest { contest, .. } => contest.id,
+                other => panic!("the cast must park the game on the contest, got {other:?}"),
+            }
+        };
+        let first = cast_into_contest(&mut session);
+        // A running contest refuses a takeback, so the contest completes first (the case
+        // this guards is undoing one that already has).
+        let mut events = Vec::new();
+        cancel_contest(
+            &mut session.state,
+            ContestCancelReason::HostAborted,
+            0,
+            &mut events,
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the contest completed"
+        );
+
+        assert_eq!(
+            session.request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(P1, true),
+            Ok(TakebackOutcome::Approved)
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the takeback undid the cast that started the contest"
+        );
+        let second = cast_into_contest(&mut session);
+
+        assert_ne!(
+            first, second,
+            "a replayed contest must not reuse the old identity"
+        );
+        start_contest(&mut session.state, ContestConfig::default(), 0, &mut events);
+        // Past the countdown the contest is Active, and only the new identity counts.
+        let go = ContestConfig::default().countdown_ms;
+        let (stale, _) = contest_click(&mut session.state, first, P0, 1, go + 10, &mut events);
+        assert_eq!(
+            stale,
+            ClickDisposition::Rejected(ClickRejection::WrongContest),
+            "the frame stamped for the discarded branch's contest must not count"
+        );
+        let (current, _) = contest_click(&mut session.state, second, P0, 1, go + 20, &mut events);
+        assert_eq!(current, ClickDisposition::Counted);
+    }
+
     /// A takeback restores a live shortcut offer through the same rekeying
     /// boundary as persisted sessions. The old offer capability must not be
     /// usable after the approved rollback.
@@ -5871,6 +6018,48 @@ mod tests {
             );
         }
         (mgr, code, token0, ai_seat)
+    }
+
+    #[test]
+    fn run_ai_only_final_transition_offers_a_current_decision() {
+        let (mgr, code, token0, _ai_seat) = single_user_game_vs_ai();
+        for _ in 0..80 {
+            let mut session = mgr.try_session(&code).unwrap();
+            let before_revision = session.state_revision;
+            let outcome = session.run_ai();
+            assert!(outcome.failure.is_none(), "{:?}", outcome.failure);
+            if let Some((last, intermediate)) = outcome.transitions.split_last() {
+                for (index, transition) in outcome.transitions.iter().enumerate() {
+                    assert_eq!(
+                        transition.state_revision,
+                        before_revision + index as u64 + 1
+                    );
+                }
+                assert!(intermediate
+                    .iter()
+                    .all(|transition| transition.decision.is_none()));
+                let decision = last
+                    .decision
+                    .as_ref()
+                    .expect("final state offers its decision");
+                let (legal, costs, by_object) = engine_legal_actions_full(&session.state);
+                assert_eq!(decision.legal_actions, legal);
+                assert_eq!(
+                    decision.auto_pass_recommended,
+                    auto_pass_recommended(&session.state, &legal)
+                );
+                assert_eq!(decision.spell_costs, costs);
+                assert_eq!(decision.legal_actions_by_object, by_object);
+                assert_eq!(last.state.waiting_for, session.state.waiting_for);
+                if !intermediate.is_empty() {
+                    return;
+                }
+            }
+            session
+                .handle_action(&token0, GameAction::PassPriority)
+                .expect("human passes to advance the driven game");
+        }
+        panic!("fixture never produced an intermediate AI transition");
     }
 
     #[test]
@@ -7449,6 +7638,7 @@ mod tests {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number: 1,
+            contest: Default::default(),
         };
 
         let game_started_before = session.game_started;
@@ -8896,20 +9086,17 @@ mod tests {
             "the engine-owned runner must publish the post-collapse state"
         );
         assert!(
-            transitions
-                .transitions
-                .iter()
-                .all(|(_, (broadcast_state, ..))| !matches!(
-                    broadcast_state.waiting_for,
-                    WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
-                )),
+            transitions.transitions.iter().all(|transition| !matches!(
+                transition.state.waiting_for,
+                WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+            )),
             "a published frame parked a player on a Resolve All consent decision"
         );
         assert!(
             transitions
                 .transitions
                 .iter()
-                .any(|(_, (broadcast_state, ..))| broadcast_state.stack.is_empty()),
+                .any(|transition| transition.state.stack.is_empty()),
             "no broadcast frame carried the post-collapse state"
         );
     }

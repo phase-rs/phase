@@ -226,6 +226,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
@@ -12905,7 +12906,8 @@ mod tests {
             predicted_winner: None,
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
@@ -13333,7 +13335,8 @@ mod tests {
                 predicted_winner: None,
                 count: IterationCount::Fixed(3),
                 unbounded: Vec::new(),
-                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 template: Some(declaration.clone()),
                 per_cycle: None,
                 shortened_by: None,

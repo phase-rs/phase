@@ -1617,6 +1617,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ExileFromTopUntil { .. } => {}
         Effect::RevealUntil { .. } => {}
         Effect::Discover { .. } => {}
+        Effect::PhysicalContest { .. } => {}
         Effect::Heist { .. } => {}
         Effect::HeistExile => {}
         Effect::Cascade => {}

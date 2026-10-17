@@ -32,6 +32,15 @@ t("log.counterAdded", { counterType, count, objectId });
 Content localization (translating the card text itself) is a *separate* mechanism
 that sources official MTGJSON data — it does not happen via `t()`.
 
+Ability decisions and the stack may show the full localized printed text as an
+explicit **reference**, alongside the engine's original ability description.
+The sidecar does not identify individual abilities: never split or align its
+paragraphs to infer translations. Printed wording may differ from current Oracle
+or a modified/granted ability. Keep the original description and its canonical
+source name intact (apart from `renderDescription`'s self-reference expansion).
+Stack kind labels such as `Triggered ability` are UI copy, not Oracle text;
+format these known labels through the catalog, preserving any ability number.
+
 ## Structure
 
 ```

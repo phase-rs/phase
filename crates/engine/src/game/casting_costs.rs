@@ -29200,7 +29200,7 @@ its replicate cost was paid.)\nDraw a card.";
                 let (mut state, source, targets, fodder, tapper, cost, mut resolved) =
                     defensive_x_target_fixture(target_count, mixed);
                 match route {
-                    Route::Assigned => resolved.targets.push(TargetRef::Object(targets[0])),
+                    Route::Assigned => resolved.push_chosen_target(TargetRef::Object(targets[0])),
                     Route::Random => {
                         resolved.target_selection_mode =
                             crate::types::ability::TargetSelectionMode::Random;

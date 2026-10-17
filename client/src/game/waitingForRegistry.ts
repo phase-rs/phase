@@ -155,6 +155,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseAnnouncingOpponent",
     "ChooseGiftRecipient",
     "ClashCardPlacement",
+    // Eye to Eye / Mouth to Mouth: real-time clicking contest (ContestOverlay).
+    "PhysicalContest",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).
     "AssistChoosePlayer",

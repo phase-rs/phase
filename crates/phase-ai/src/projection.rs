@@ -1008,6 +1008,9 @@ pub(crate) mod projection_fixtures {
     const BEGIN_COMBAT_GROWTH_ORACLE: &str =
         "At the beginning of combat on your turn, put a +1/+1 counter on this creature.";
 
+    /// Inert permanents added to each board by [`seed_opponent_begin_combat_horizon`].
+    const BYSTANDERS_PER_BOARD: usize = 25;
+
     /// Seed `scenario` so that a state built from it TRAVERSES `project_to`'s
     /// loop to `ProjectionHorizon::OpponentBeginCombat` for
     /// `(ai_player, target_opponent)`. Returns the growing permanent's id, which
@@ -1058,6 +1061,16 @@ pub(crate) mod projection_fixtures {
             )
             .id();
         scenario.add_creature(ai_player, "Projection Bear", 2, 2);
+        // Inert bystanders on both boards. A traversal clones and re-evaluates the whole
+        // game every step, so its cost grows with the permanents on the battlefield;
+        // this keeps the traversal comfortably above the 15 ms interactive cap on a fast
+        // host, which is the margin T7b's wall-clock arm needs to discriminate. They
+        // have no abilities, so they change neither the horizon's reachability nor which
+        // choices the traversal dispatches.
+        for index in 0..BYSTANDERS_PER_BOARD {
+            scenario.add_creature(ai_player, &format!("AI Bystander {index}"), 1, 1);
+            scenario.add_creature(target_opponent, &format!("Opp Bystander {index}"), 1, 1);
+        }
         scenario.with_library_top(
             ai_player,
             &[
@@ -1247,7 +1260,8 @@ mod tests {
             predicted_winner: Some(PlayerId(1)),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
                 per_cycle: None,

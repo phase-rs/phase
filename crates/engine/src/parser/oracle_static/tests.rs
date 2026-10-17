@@ -12011,6 +12011,200 @@ fn static_boast_abilities_activate_as_instant() {
     );
 }
 
+/// CR 606.3: Oath of Teferi line 2 (verbatim) lowers to the shared
+/// `ModifyActivationLimit` mode with the `"loyalty"` keyword convention (the
+/// Eidolon cost-gate spelling), scoped to planeswalkers its controller
+/// controls. Reverting the `dispatch.rs` call site yields `None` here.
+#[test]
+fn static_oath_of_teferi_loyalty_activation_limit() {
+    let def = parse_static_line(
+        "You may activate the loyalty abilities of planeswalkers you control twice each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 2,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+        ))
+    );
+}
+
+/// CR 606.3 + CR 201.5 + CR 201.5c: Urza, Planeswalker's self-scoped sibling — the
+/// production pipeline normalizes "Urza" to `~` before the static line parses,
+/// so the unit shape uses `~` directly and expects `SelfRef`. Runtime scope is
+/// pinned by the `oath_of_teferi` integration seam test, not here.
+#[test]
+fn static_urza_planeswalker_loyalty_activation_limit_is_self_scoped() {
+    let def = parse_static_line(
+        "You may activate the loyalty abilities of ~ twice each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 2,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 606.3: the count axis composes (`twice`/`thrice`/N) — no printed card
+/// carries the thrice/N-time loyalty shape yet, so these are labeled
+/// combinator tests, not card tests.
+#[test]
+fn static_loyalty_activation_limit_count_axis_composes() {
+    let thrice = parse_static_line(
+        "You may activate the loyalty abilities of planeswalkers you control thrice each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        thrice.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 3,
+        }
+    );
+    let n = parse_static_line(
+        "You may activate the loyalty abilities of planeswalkers you control 4 times each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        n.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 4,
+        }
+    );
+}
+
+/// Synthetic numeric grammar controls: representable nonzero limits retain
+/// their exact value; zero and overflowing limits keep honest unsupported output.
+#[test]
+fn static_loyalty_activation_limit_numeric_bounds_are_honest() {
+    for limit in [1u8, 4, 255] {
+        let text = format!(
+            "You may activate the loyalty abilities of planeswalkers you control {limit} times each turn rather than only once."
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            &text,
+            "Numeric Limit",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|definition| matches!(
+                &definition.mode,
+                StaticMode::ModifyActivationLimit { keyword, new_limit }
+                    if keyword == "loyalty" && *new_limit == limit
+            )),
+            "limit {limit} must retain its exact value: {parsed:?}"
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "representable limit {limit} must parse completely: {parsed:?}"
+        );
+    }
+
+    for limit in [0, 256, 257] {
+        let text = format!(
+            "You may activate the loyalty abilities of planeswalkers you control {limit} times each turn rather than only once."
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            &text,
+            "Numeric Limit",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "unfaithful limit {limit} must remain unsupported: {parsed:?}"
+        );
+        assert!(
+            !parsed.statics.iter().any(|definition| matches!(
+                &definition.mode,
+                StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
+            )),
+            "unfaithful limit {limit} must not produce a loyalty cap: {parsed:?}"
+        );
+    }
+}
+
+/// CR 606.3: routing claims exactly its class. Kaito, Dancing Shadow's line is
+/// trigger-led ("Whenever ..."), so the full pipeline must keep it a trigger
+/// and produce NO `ModifyActivationLimit` static — the trigger slot precedes
+/// the static slot and the new routing entry must not steal the line.
+#[test]
+fn static_routing_does_not_steal_trigger_led_loyalty_line() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever one or more creatures you control deal combat damage to a player, you may return one of them to its owner's hand. If you do, you may activate loyalty abilities of Kaito twice this turn rather than only once.",
+        "Kaito, Dancing Shadow",
+        &[],
+        &["Planeswalker".to_string()],
+        &[],
+    );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "the trigger-led line must stay a trigger, got {:?}",
+        parsed.triggers
+    );
+    assert!(
+        !parsed.statics.iter().any(|d| matches!(
+            &d.mode,
+            StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
+        )),
+        "no loyalty activation-limit static may be claimed from a trigger-led line, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 606.3: scope wording selects mechanism. A permanent-led "twice THIS turn"
+/// loyalty sentence is a one-shot SET grant, not a continuous static — the
+/// grammar must fail closed so it keeps today's honest `Unimplemented`, and the
+/// `Unimplemented` assertion below is the reach-guard against a vacuous pass.
+#[test]
+fn static_loyalty_activation_limit_rejects_this_turn_scope() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "You may activate the loyalty abilities of planeswalkers you control twice this turn rather than only once.",
+        "Test Card",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+        "the one-shot scope must stay an honest Unimplemented, got abilities={:?} statics={:?}",
+        parsed.abilities,
+        parsed.statics
+    );
+    assert!(
+        !parsed.statics.iter().any(|d| matches!(
+            &d.mode,
+            StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
+        )),
+        "no permanent static may be claimed from a this-turn scope, got {:?}",
+        parsed.statics
+    );
+}
+
 // CR 400.7: Crew Captain — "This creature has indestructible as long as it
 // entered this turn." For a SelfRef static the bound pronoun "it" co-refers with
 // the source, so `rewrite_self_pronoun_subject` on the SelfRef path normalizes
@@ -13183,8 +13377,8 @@ fn parse_compound_static_kaito_animation() {
         .contains(&ContinuousModification::SetToughness { value: 4 }));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddType {
-            core_type: crate::types::card_type::CoreType::Creature,
+        .contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Creature],
         }));
     assert!(def
         .modifications
@@ -20674,8 +20868,8 @@ fn omo_nonland_creature_counter_subject_is_all_creature_types() {
 // [non-creature type]" with no CR 205.1b retention marker REPLACES the object's
 // card types, so the Kraken stops being a creature while it slumbers. The
 // modification must be a REPLACING `SetCardTypes`, not an additive `AddType`
-// (which left the impossible "Creature Land"). Creature animations, "artifact
-// creature" forms, and "in addition to its other types" stay additive.
+// (which left the impossible "Creature Land"). Explicit retention and "artifact
+// creature" forms stay additive under CR 205.1b.
 #[test]
 fn arixmethes_bare_is_a_land_replaces_card_types() {
     use crate::types::card_type::CoreType;
@@ -20715,13 +20909,162 @@ fn arixmethes_bare_is_a_land_replaces_card_types() {
     );
     // An artifact-creature compound retains its prior types (CR 205.1b).
     let artifact_creature = parse_static_line("~ is an artifact creature.").unwrap();
-    assert!(
+    assert_eq!(
+        artifact_creature.modifications,
+        vec![
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            },
+        ],
+        "'artifact creature' must retain both additive types"
+    );
+}
+
+// SHAPE: CR 205.1a + CR 613.1d + CR 613.4b: Futurist sets subtypes and base
+// P/T without setting a card type, even though its subject says "this creature".
+#[test]
+fn futurist_operative_subtype_animation_preserves_card_types_shape() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as this creature is tapped, it's a Human Citizen with base power and toughness 1/1 and can't be blocked.\n{2}{U}: Untap this creature.",
+        "Futurist Operative",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Ninja".to_string()],
+    );
+    let animation = parsed
+        .statics
+        .iter()
+        .find(|definition| {
+            definition
+                .modifications
+                .contains(&ContinuousModification::SetPower { value: 1 })
+        })
+        .expect("Futurist must parse its base-P/T animation");
+    assert_eq!(animation.affected, Some(TargetFilter::SelfRef));
+    for modification in [
+        ContinuousModification::SetPower { value: 1 },
+        ContinuousModification::SetToughness { value: 1 },
+        ContinuousModification::AddSubtype {
+            subtype: "Human".to_string(),
+        },
+        ContinuousModification::AddSubtype {
+            subtype: "Citizen".to_string(),
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+    ] {
+        assert!(animation.modifications.contains(&modification));
+    }
+    assert!(!animation
+        .modifications
+        .iter()
+        .any(|modification| matches!(modification, ContinuousModification::SetCardTypes { .. })));
+}
+
+// SHAPE: CR 205.1a / CR 205.1b: mixed animation modifications do not imply
+// retention; explicit retention and artifact-creature wording do.
+#[test]
+fn self_animation_card_type_replacement_preserves_other_modifications() {
+    let mixed = vec![
+        ContinuousModification::SetPower { value: 3 },
+        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::AddSubtype {
+            subtype: "Ninja".to_string(),
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof,
+        },
+    ];
+    let replaced = super::type_change::maybe_replace_card_types(
+        mixed.clone(),
+        "3/4 ninja creature with hexproof",
+    );
+    assert_eq!(
+        replaced[0],
+        ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
+        }
+    );
+    let non_types: Vec<_> = mixed
+        .iter()
+        .filter(|modification| !matches!(modification, ContinuousModification::AddType { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(&replaced[1..], non_types);
+    for explicit in [
+        "legendary blue and red ninja creature with hexproof",
+        "3/4 ninja creature.",
+        "3/4 ninja creature, with hexproof",
+    ] {
+        assert_eq!(
+            super::type_change::maybe_replace_card_types(mixed.clone(), explicit),
+            replaced
+        );
+    }
+    // CR 205.1a: inferred Creature does not make a subtype-only predicate
+    // replace card types. Core words in granted abilities are outside it.
+    for (first, second) in [("Human", "Citizen"), ("Elf", "Scout")] {
+        let inferred = vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::AddSubtype {
+                subtype: first.to_string(),
+            },
+            ContinuousModification::AddSubtype {
+                subtype: second.to_string(),
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ];
+        let descriptor = format!("{} {}", first.to_lowercase(), second.to_lowercase());
+        for body in [
+            descriptor.clone(),
+            format!("1/1 {descriptor}"),
+            format!("{descriptor} with base power and toughness 1/1"),
+            format!("{descriptor} with \"Whenever this creature attacks, draw a card.\""),
+            format!("{descriptor} and has \"Whenever this creature attacks, draw a card.\""),
+            format!("{descriptor} where X is the number of creature cards in your graveyard"),
+            format!("{descriptor} creaturely"),
+        ] {
+            assert_eq!(
+                super::type_change::maybe_replace_card_types(inferred.clone(), &body),
+                inferred,
+                "subtype-only descriptor must preserve its modifications: {body}"
+            );
+        }
+    }
+    for retention in [
+        "in addition to its other types",
+        "that's still a planeswalker",
+        "that's still an enchantment",
+    ] {
+        assert_eq!(
+            super::type_change::maybe_replace_card_types(mixed.clone(), retention),
+            mixed
+        );
+    }
+    let mut artifact_creature = mixed.clone();
+    artifact_creature.push(ContinuousModification::AddType {
+        core_type: CoreType::Artifact,
+    });
+    assert_eq!(
+        super::type_change::maybe_replace_card_types(
+            artifact_creature.clone(),
+            "3/4 ninja artifact creature with hexproof"
+        ),
         artifact_creature
-            .modifications
-            .iter()
-            .all(|m| matches!(m, ContinuousModification::AddType { .. })),
-        "'artifact creature' must stay additive: {:?}",
-        artifact_creature.modifications
+    );
+    assert_eq!(
+        super::type_change::maybe_replace_card_types(non_types.clone(), "with hexproof"),
+        non_types
     );
 }
 
@@ -27021,6 +27364,46 @@ fn static_life_total_cant_change_opponent_scope() {
             }))
         ));
     }
+}
+
+/// CR 101.2 + CR 121.3 + CR 119.7: "[Subject] can't draw cards or gain life." emits both
+/// prohibitions, and the life clause binds the same subject as the draw clause
+/// (Mornsong Aria: "Players"; an opponent subject scopes both to opponents).
+#[test]
+fn static_cant_draw_cards_or_gain_life_binds_one_subject() {
+    let defs = parse_static_line_multi("Players can't draw cards or gain life.");
+    let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers
+            },
+            StaticMode::CantGainLife,
+        ]
+    );
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(TypedFilter::default()))
+    );
+
+    let defs = parse_static_line_multi("Each opponent can't draw cards or gain life.");
+    let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantDraw {
+                who: ProhibitionScope::Opponents
+            },
+            StaticMode::CantGainLife,
+        ]
+    );
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
 }
 
 #[test]

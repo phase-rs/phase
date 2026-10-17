@@ -584,6 +584,8 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::KeywordAbilityActivated { .. }
             | GameEvent::CreatureExploited { .. }
             | GameEvent::Clash { .. }
+            | GameEvent::PhysicalContestStarted { .. }
+            | GameEvent::PhysicalContestResolved { .. }
             | GameEvent::VoteCast { .. }
             | GameEvent::VoteResolved { .. }
             | GameEvent::PowerToughnessChanged { .. }

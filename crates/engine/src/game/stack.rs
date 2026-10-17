@@ -4343,6 +4343,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
@@ -4592,6 +4593,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
@@ -4821,6 +4823,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
@@ -5222,6 +5225,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         parent_target_missing_reason: a_parent_target_missing_reason,
         target_pins: _,
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: a_chosen_target_slots,
         activation_cost_reduction: a_activation_cost_reduction,
         activation_record: a_activation_record,
         illegal_target_slots: a_illegal_target_slots,
@@ -5308,6 +5312,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         parent_target_missing_reason: b_parent_target_missing_reason,
         target_pins: _,
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: b_chosen_target_slots,
         activation_cost_reduction: b_activation_cost_reduction,
         activation_record: b_activation_record,
         illegal_target_slots: b_illegal_target_slots,
@@ -5328,6 +5333,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
         && a.aligned_target_pins() == b.aligned_target_pins()
+        && a_chosen_target_slots == b_chosen_target_slots
         // CR 608.2b: the resolution legality stamp participates for the same
         // reason — agreement with the derived `PartialEq`.
         && a_activation_cost_reduction == b_activation_cost_reduction

@@ -195,7 +195,7 @@ fn mana_engine_basalt_power_offers_mana_advantage_shortcut() {
             );
             assert_eq!(
                 certificate.win_kind,
-                WinKind::Advantage,
+                Some(WinKind::Advantage),
                 "a pure mana engine is an Advantage loop (no lethal/poison/decking axis)"
             );
         }

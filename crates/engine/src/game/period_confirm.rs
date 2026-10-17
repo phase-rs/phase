@@ -1,9 +1,13 @@
 //! CR 732.2a: the confirmer. It replays a candidate period the play trace names, twice, from the
 //! priority frame it is asked at, on the proposer's own information set, and certifies the
-//! replay's frames through the recurrence cover and the sign check.
+//! replay's frames through the recurrence cover and the sign check. A period that spends
+//! something of its proposer's own is not shown to repeat; it is counted by replaying it until a
+//! repetition is refused.
 //!
 //! The trace (`play_trace`) records and names; this module decides whether a named span is a
 //! period a shortcut may repeat.
+
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -11,20 +15,21 @@ use crate::analysis::decision_template::{
     ChoicePoint, DecisionSlot, DecisionTemplate, MayChoiceOption, PinnedDecision,
     ShortcutDecisionSchema, TargetPin,
 };
-use crate::analysis::loop_check::LoopCertificate;
+use crate::analysis::loop_check::{classify_win_kind, LoopCertificate, WinKind};
 use crate::analysis::resource::{
-    driving_resources_non_decreasing, frame_without, CertifiedInstructedDeparture, CleanupPair,
-    CoveredGrowth, ObjectGrowthVerdict, RecurrenceCover, ResourceVector,
+    frame_without, CertifiedInstructedDeparture, CleanupPair, CoveredGrowth, ObjectGrowthVerdict,
+    PredictedDeparture, RecurrenceCover, ResourceVector,
 };
 use crate::game::engine::{
     announced_target_pins, apply, certify_object_growth_frames, clear_frame_bookkeeping,
-    object_decision_source, period_sign_check, pinnable_mana_color, proliferate_pins,
-    replay_bounded_offer, SimulationProbeGuard,
+    counted_offer, object_decision_source, period_sign_check, pinnable_mana_color,
+    pinned_decisions_to_points, proliferate_pins, replay_bounded_offer, PeriodSign,
+    SimulationProbeGuard,
 };
 use crate::game::mana_payment::{select_convoke_taps, ConvokeTapOrder};
 use crate::game::play_trace::{
-    self, AnswerOptionality, CostChoices, CostMove, EntryKind, NamedSpan, PeriodReach, PromptClass,
-    TraceEntry,
+    self, AnswerOptionality, CostChoices, CostMove, EntryKind, NamedSpan, PeriodReach, PlayLocus,
+    PromptClass, TraceEntry,
 };
 use crate::types::ability::TargetRef;
 use crate::types::actions::GameAction;
@@ -32,7 +37,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CostResume, GameState, ManaChoiceContext, PayCostKind, StackEntryKind, WaitingFor, YieldTarget,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
 
 /// Why the confirmer did not confirm a span, in the order its stages read.
@@ -57,11 +63,9 @@ pub enum OfferRefusal {
     Cover(ObjectGrowthVerdict),
     /// The period makes no progress for its controller.
     NoAxis,
-    /// CR 704.5a: the period moves some player toward losing the game, and either consumes a
-    /// resource that drives it or the threshold authority refused its replayed frames.
+    /// CR 704.5a: the period moves some player toward losing the game, and the threshold
+    /// authority refused its replayed frames.
     LossAxis,
-    /// The period consumes a resource that drives it.
-    DrivingResourcesDecrease,
 }
 
 /// One recorded play or answer of a period, as the replay makes it.
@@ -94,6 +98,60 @@ pub struct ConfirmedPeriod {
     /// recorded take performs.
     #[serde(default)]
     choices: Vec<PinnedDecision>,
+    /// Which authority counted the period's offer.
+    #[serde(default, skip_serializing_if = "CountedBy::is_threshold")]
+    counted_by: CountedBy,
+    /// How one repetition is performed; `None` when no plays were read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    performance: Option<PeriodPerformance>,
+}
+
+/// CR 605.3a + CR 605.3b: whether a period's repetition is made only of mana abilities, which its
+/// player may activate while paying a cost (CR 601.2g) and which resolve without the stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeriodPerformance {
+    /// Every play is a mana ability and nothing resolves from the stack.
+    ManaAbilitiesOnly,
+    /// A play is a spell or a non-mana ability, or a triggered ability resolves, which waits for
+    /// priority (CR 603.3), so no cost's payment performs it.
+    UsesTheStack,
+}
+
+impl PeriodPerformance {
+    fn of(body: &[TraceEntry]) -> Self {
+        let uses_the_stack = body.iter().any(|entry| match &entry.kind {
+            EntryKind::Play { locus, .. } => match locus {
+                PlayLocus::Mana(..) => false,
+                PlayLocus::Cast(_) | PlayLocus::Activate(..) | PlayLocus::Unread => true,
+            },
+            EntryKind::Resolution { .. } => true,
+            EntryKind::Answer { .. } => false,
+        });
+        if uses_the_stack {
+            Self::UsesTheStack
+        } else {
+            Self::ManaAbilitiesOnly
+        }
+    }
+}
+
+/// CR 732.2a: which authority states the count of a confirmed period's offer; its take answers to
+/// the same one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum CountedBy {
+    /// The threshold authority, by arithmetic over one certified period; a period that repeats
+    /// without bound has no count.
+    #[default]
+    Threshold,
+    /// The counting replay, by performing the period: the seats that left the game in each
+    /// repetition it performed, the one that ended the count included.
+    Replay { departures: Vec<PredictedDeparture> },
+}
+
+impl CountedBy {
+    fn is_threshold(&self) -> bool {
+        *self == CountedBy::Threshold
+    }
 }
 
 // `GameAction` derives no `Eq`, and no value an action carries is floating-point.
@@ -112,14 +170,27 @@ impl ConfirmedPeriod {
         &self.choices
     }
 
+    pub fn performance(&self) -> Option<PeriodPerformance> {
+        self.performance
+    }
+
     /// CR 732.2a: the answers a take of this period performs, which a declaration must agree
     /// with; `None` when no period was confirmed.
     pub fn recorded_answers(&self) -> Option<&[PinnedDecision]> {
         (!self.is_empty()).then_some(self.choices.as_slice())
     }
+
+    /// CR 732.2a: the departures the counting replay saw, for a period it counted; `None` for a
+    /// period it did not count.
+    pub(crate) fn replayed_departures(&self) -> Option<&[PredictedDeparture]> {
+        match &self.counted_by {
+            CountedBy::Threshold => None,
+            CountedBy::Replay { departures } => Some(departures),
+        }
+    }
 }
 
-/// A confirmed period: what it replays, the replay's second frame pair, and the sign check's
+/// A confirmed period: what it replays, the replay's last frame pair, and the sign check's
 /// delta.
 #[derive(Debug, Clone)]
 pub(crate) struct Confirmation {
@@ -130,8 +201,9 @@ pub(crate) struct Confirmation {
     /// The printed identity of each triggered ability the first replayed cycle resolved, in order.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) performed: Vec<String>,
-    /// CR 704.5a + CR 732.2a: a loss period's bounded offer, as the threshold authority measured
-    /// it on the replayed frames; `None` on the unbounded road.
+    /// CR 732.2a: the offer at its stated count — a loss period's as the threshold authority
+    /// measured it on the replayed frames (CR 704.5a), or a spend period's as the counting replay
+    /// performed it; `None` on the unbounded road.
     pub(crate) bounded: Option<BoundedOfferParts>,
 }
 
@@ -165,9 +237,13 @@ fn seat_refusal(body: &[TraceEntry], holder: PlayerId) -> Option<OfferRefusal> {
     }
 }
 
-/// The span's plays and answers, rotated to begin at the trace's current position; priority
-/// passes are left to the replay (CR 117.4).
-fn period_items(entries: &im::Vector<TraceEntry>, span: NamedSpan) -> Vec<PeriodItem> {
+/// The span's plays and answers as `frame` replays them, rotated to begin at the trace's current
+/// position; priority passes are left to the replay (CR 117.4).
+fn period_items(
+    entries: &im::Vector<TraceEntry>,
+    span: NamedSpan,
+    frame: &GameState,
+) -> Vec<PeriodItem> {
     let len = span.end - span.start;
     let rotation = if span.end < entries.len() {
         (entries.len() - span.start) % len
@@ -178,6 +254,29 @@ fn period_items(entries: &im::Vector<TraceEntry>, span: NamedSpan) -> Vec<Period
         .chain(span.start..span.start + rotation)
         .filter_map(|at| {
             let entry = &entries[at];
+            // CR 111.7 + CR 111.1: a play whose token source the period made again is the play
+            // one period later, made from that token, which the period minted before it.
+            if let (
+                EntryKind::Play {
+                    action,
+                    locus: PlayLocus::Mana(spent, _),
+                    ..
+                },
+                Some(source_id),
+            ) = (&entry.kind, play_trace::remade_play_source(frame, span, at))
+            {
+                let minted = frame.next_object_id - entries[entries.len() - len].next_object_id;
+                let remade = |id: ObjectId| if id == *spent { source_id } else { id };
+                return Some(PeriodItem {
+                    seat: entry.seat,
+                    action: renamed(action, remade, frame),
+                    play: Some((entry.depth, entry.prompt)),
+                    mandatory_answer: false,
+                    next_object_id: entry.next_object_id + minted,
+                    minted_since: entry.next_object_id,
+                    cost_move: None,
+                });
+            }
             let minted_since = entries[at.saturating_sub(len)].next_object_id;
             let (action, play, cost_move, mandatory_answer) = match &entry.kind {
                 EntryKind::Play { action, .. } => {
@@ -224,11 +323,32 @@ fn rebound(item: &PeriodItem, replay: &GameState) -> GameAction {
             id
         }
     };
+    renamed(&item.action, map, replay)
+}
+
+/// `action` with each object it names replaced by the one `map` gives for it. CR 400.7: a mana
+/// source selection whose source is replaced names that object as `state` holds it.
+fn renamed(
+    action: &GameAction,
+    map: impl Fn(ObjectId) -> ObjectId,
+    state: &GameState,
+) -> GameAction {
     let target = |t: &TargetRef| match t {
         TargetRef::Object(id) => TargetRef::Object(map(*id)),
         TargetRef::Player(p) => TargetRef::Player(*p),
     };
-    match &item.action {
+    let selected = |selection: &ManaSourceSelection| {
+        let id = map(selection.source.object_id);
+        ManaSourceSelection {
+            source: state
+                .objects
+                .get(&id)
+                .filter(|_| id != selection.source.object_id)
+                .map_or(selection.source, ObjectIncarnationRef::from_object),
+            ..selection.clone()
+        }
+    };
+    match action {
         GameAction::ChooseTarget { target: chosen } => GameAction::ChooseTarget {
             target: chosen.as_ref().map(target),
         },
@@ -244,6 +364,12 @@ fn rebound(item: &PeriodItem, replay: &GameState) -> GameAction {
         } => GameAction::ActivateAbility {
             source_id: map(*source_id),
             ability_index: *ability_index,
+        },
+        GameAction::TapLandForMana { selection } => GameAction::TapLandForMana {
+            selection: selected(selection),
+        },
+        GameAction::ActivateManaSource { selection } => GameAction::ActivateManaSource {
+            selection: selected(selection),
         },
         GameAction::CastSpell {
             object_id,
@@ -732,7 +858,8 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
     if let Some(refusal) = seat_refusal(&body, holder) {
         return Err(refusal);
     }
-    let items = period_items(entries, span);
+    let items = period_items(entries, span, frame);
+    let performance = Some(PeriodPerformance::of(&body));
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
     let _probe = SimulationProbeGuard::enter();
@@ -750,15 +877,20 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         &mut Vec::new(),
     )?;
     let s_n1 = replay.clone();
-    replay_cycle(
+    // CR 732.2a: `replay` is the frame the second cycle reached, or where it was refused.
+    let second = replay_cycle(
         &mut replay,
         &items,
         &end,
         &mut Vec::new(),
         None,
         &mut Vec::new(),
-    )?;
-    let s_n2 = replay;
+    );
+    // A period whose second cycle is refused has one pair of frames, read as any pair is.
+    let (prior, current) = match second {
+        Ok(_) => (&s_n1, &replay),
+        Err(_) => (&s_n, &s_n1),
+    };
     let casts: Vec<ObjectId> = items
         .iter()
         .filter_map(|item| match item.action {
@@ -767,21 +899,39 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         })
         .collect();
     let (verdict, growth) = certify_object_growth_frames(
-        [&s_n, &s_n1, &s_n2],
+        [&s_n, &s_n1, current],
         |state| normalize_cast_frame(state, &casts),
         holder,
     );
-    if !verdict.certifies() {
-        return Err(OfferRefusal::Cover(verdict));
-    }
-    let (delta, departure, bounded) = match period_sign_check(&s_n1, &s_n2, holder) {
-        Ok((delta, departure)) => (delta, departure, None),
+    // CR 732.2a: one count per offer. Something of its proposer's own falling makes the period
+    // the counting replay's; any other period with a loss axis is the threshold authority's.
+    // A spend verdict asks the sign check only for its refusals.
+    let sign = match (&verdict, verdict.certifies()) {
+        (ObjectGrowthVerdict::Spend, _) => {
+            period_sign_check(prior, current, holder).map(|_| PeriodSign::Spend)
+        }
+        (
+            ObjectGrowthVerdict::FodderGrowth(_) | ObjectGrowthVerdict::ResourceRecurrence(_),
+            true,
+        ) => period_sign_check(prior, current, holder),
+        (
+            ObjectGrowthVerdict::FodderGrowth(_) | ObjectGrowthVerdict::ResourceRecurrence(_),
+            false,
+        ) => Err(OfferRefusal::Cover(verdict.clone())),
+    };
+    let (delta, departure, bounded, growth, counted_by) = match (sign, second) {
+        // Only a spend says why a period stopped after one repetition.
+        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis) | Err(_), Err(stopped)) => {
+            return Err(stopped);
+        }
+        (Err(refusal), Ok(_)) => return Err(refusal),
+        (Ok(PeriodSign::Unbounded(unbounded)), Ok(_)) => {
+            let (delta, departure) = *unbounded;
+            (delta, departure, None, growth, CountedBy::Threshold)
+        }
         // CR 704.5a + CR 732.2a: a loss period may be repeated only up to the threshold crossings
-        // the authority measures on its replayed frames, and never while it consumes what drives it.
-        Err(OfferRefusal::LossAxis) => {
-            if !driving_resources_non_decreasing(&s_n1, &s_n2, holder) {
-                return Err(OfferRefusal::LossAxis);
-            }
+        // the authority measures on its replayed frames.
+        (Ok(PeriodSign::LossAxis), Ok(_)) => {
             let mut frames = Vec::new();
             replay_cycle(
                 &mut s_n1.clone(),
@@ -798,9 +948,66 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             .flatten();
             let parts = replay_bounded_offer(frame, holder, &frames, &choices, cleanup)
                 .map_err(|_| OfferRefusal::LossAxis)?;
-            (ResourceVector::period(&s_n1, &s_n2), None, Some(parts))
+            let delta = ResourceVector::period(prior, current);
+            (delta, None, Some(parts), growth, CountedBy::Threshold)
         }
-        Err(refusal) => return Err(refusal),
+        // CR 732.2a + CR 118.3: the count is the repetitions the reducer performs, and the offer
+        // states no other.
+        (Ok(PeriodSign::Spend), second) => {
+            let points = pinned_decisions_to_points(&choices, frame, holder)
+                .ok_or(OfferRefusal::UnanswerablePrompt)?;
+            let mut frames = Vec::new();
+            replay_cycle(
+                &mut prior.clone(),
+                &items,
+                &end,
+                &mut Vec::new(),
+                Some(&mut frames),
+                &mut Vec::new(),
+            )?;
+            let delta = ResourceVector::period(prior, current);
+            let pair = Box::new([prior.clone(), current.clone()]);
+            let mut count = Count::default();
+            count.note(seats(&s_n), &s_n1, true, holder);
+            let mut repeats = count.note(seats(&s_n1), &replay, second.is_ok(), holder);
+            while repeats && count.repetitions < COUNT_CAP {
+                let before = seats(&replay);
+                let completed = replay_cycle(
+                    &mut replay,
+                    &items,
+                    &end,
+                    &mut Vec::new(),
+                    None,
+                    &mut Vec::new(),
+                )
+                .is_ok();
+                repeats = count.note(before, &replay, completed, holder);
+            }
+            let parts = counted_offer(
+                &frames,
+                points,
+                count.survived(holder),
+                count.repetitions,
+                counted_ending(holder, &s_n, &replay),
+            );
+            let departures = count.departures;
+            return Ok(Confirmation {
+                period: ConfirmedPeriod {
+                    items,
+                    growth: CoveredGrowth::PerformedOnly,
+                    reach: span.reach,
+                    choices,
+                    counted_by: CountedBy::Replay { departures },
+                    performance,
+                },
+                frames: pair,
+                delta,
+                departure: None,
+                #[cfg(any(test, feature = "test-support"))]
+                performed,
+                bounded: Some(parts),
+            });
+        }
     };
     Ok(Confirmation {
         period: ConfirmedPeriod {
@@ -808,14 +1015,88 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             growth,
             reach: span.reach,
             choices,
+            counted_by,
+            performance,
         },
-        frames: Box::new([s_n1, s_n2]),
+        frames: Box::new([s_n1, replay]),
         delta,
         departure,
         #[cfg(any(test, feature = "test-support"))]
         performed,
         bounded,
     })
+}
+
+/// CR 732.2a: the most repetitions the counting replay performs for one offer. An offer at the cap
+/// states the cap, which the replay performed; what remains is the next offer's.
+pub(crate) const COUNT_CAP: u32 = 25;
+
+/// The players still in the game (CR 800.4a).
+fn seats(state: &GameState) -> BTreeSet<PlayerId> {
+    state
+        .players
+        .iter()
+        .filter(|player| !player.is_eliminated)
+        .map(|player| player.id)
+        .collect()
+}
+
+/// CR 732.2a: the repetitions the reducer performed, with the seats that left the game in each.
+#[derive(Default)]
+struct Count {
+    repetitions: u32,
+    departures: Vec<PredictedDeparture>,
+}
+
+impl Count {
+    /// Notes one replayed repetition from a frame holding `before` to `after`; whether another
+    /// may follow. CR 104.2a + CR 800.4a: a repetition the game ends in, or `holder` leaves in,
+    /// was performed although it did not come round, and any other refused repetition was not.
+    fn note(
+        &mut self,
+        before: BTreeSet<PlayerId>,
+        after: &GameState,
+        completed: bool,
+        holder: PlayerId,
+    ) -> bool {
+        let ended = after.game_end.is_some() || !crate::game::players::is_alive(after, holder);
+        if !completed && !ended {
+            return false;
+        }
+        self.repetitions += 1;
+        let left = before.difference(&seats(after)).copied().collect();
+        self.departures
+            .extend(PredictedDeparture::new(self.repetitions, left));
+        completed
+    }
+
+    /// The repetitions `holder` is still in the game after: every one, or all but the last when
+    /// `holder` leaves in it.
+    fn survived(&self, holder: PlayerId) -> u32 {
+        let leaves = self.departures.last().is_some_and(|last| {
+            last.repetition == self.repetitions && last.seats.contains(&holder)
+        });
+        self.repetitions - u32::from(leaves)
+    }
+}
+
+/// CR 104.2a + CR 732.2a: how the counted repetitions from `start` to `end` end the game, when
+/// they end it with `holder` the winner.
+fn counted_ending(holder: PlayerId, start: &GameState, end: &GameState) -> Option<WinKind> {
+    let won = end
+        .game_end
+        .as_ref()
+        .is_some_and(|game_end| game_end.winner == Some(holder));
+    won.then(
+        || match classify_win_kind(holder, &ResourceVector::period(start, end), Some(end)) {
+            kind @ (WinKind::LethalDamage
+            | WinKind::PoisonLoss
+            | WinKind::Decking
+            | WinKind::ImmediateWin) => kind,
+            // CR 104.2b / CR 104.3e: no opponent's life, poison or library moved, so an effect won it.
+            WinKind::ExtraTurns | WinKind::Advantage => WinKind::ImmediateWin,
+        },
+    )
 }
 
 /// CR 732.2c: performs one cycle of `period` from `state`, a frame where `holder` has priority,
@@ -852,7 +1133,7 @@ pub fn confirm_for_tests(state: &GameState) -> Vec<(NamedSpan, Result<Vec<String
 pub fn performed_for_tests(state: &GameState) -> Option<Result<Vec<String>, OfferRefusal>> {
     let span = play_trace::play_trace_view(state)?.offered?;
     let holder = state.waiting_for.acting_player()?;
-    let items = period_items(play_trace::span_entries(state, span)?, span);
+    let items = period_items(play_trace::span_entries(state, span)?, span, state);
     let mut frame = state.clone();
     frame.waiting_for = WaitingFor::Priority { player: holder };
     let _probe = SimulationProbeGuard::enter();

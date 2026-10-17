@@ -4097,6 +4097,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
             d.push(("player".into(), format!("{player:?}")));
         }
+        Effect::PhysicalContest { kind, contestant } => {
+            d.push(("contest".into(), format!("{kind:?}")));
+            d.push(("contestant".into(), format!("{contestant:?}")));
+        }
         // Heist (Arena digital-only): look step records the look count.
         Effect::Heist { look_count, .. } => {
             d.push(("look".into(), look_count.to_string()));

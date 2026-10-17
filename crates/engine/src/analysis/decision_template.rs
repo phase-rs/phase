@@ -360,7 +360,8 @@ pub struct ShortcutDecisionSchema {
     /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop.
     pub iteration_count: IterationCount,
     /// CR 732.2a: the repetition bound this offer's producer MEASURED — the CR 704 threshold
-    /// crossing or, for a turn-cycle period, the cleanup hand bound (CR 514.1) — a LEGALITY
+    /// crossing, for a turn-cycle period the cleanup hand bound (CR 514.1), or the repetitions
+    /// the counting replay performed (CR 118.3) — a LEGALITY
     /// CEILING, what SOME legal declaration may specify, never a count every declaration
     /// reaches. `game::engine::bounded_offer_tail` takes the LARGER of two
     /// declaration-relative cascades: the cascade's count under the offer's own published
@@ -1606,7 +1607,7 @@ pub struct AimContext<'a> {
     pub proposer: PlayerId,
     /// The certified period the crossings are measured from. `None` is a typed absence, not a
     /// default: an offer stating no per-period signature measured no crossing to outlive.
-    pub per_cycle: Option<&'a crate::analysis::resource::PeriodicDelta>,
+    pub per_cycle: Option<&'a crate::analysis::resource::PeriodSignature>,
     /// The declaration the offer published, snapshotted at offer construction and expiring with
     /// the window.
     pub published: Option<&'a DecisionTemplate>,
@@ -1666,8 +1667,12 @@ pub fn aims_survive_the_crossings(
     // No certified period, so no crossing to outlive. The same posture
     // `game::engine::ConsumptionDerivation::Unsigned` takes at the drive, stated at its own arm
     // rather than folded into the absence below.
-    let Some(per_cycle) = aim.per_cycle else {
-        return Ok(());
+    let per_cycle = match aim.per_cycle {
+        None => return Ok(()),
+        Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) => per_cycle,
+        // CR 732.2a: a counted take's replay refuses an aim at a departed seat, whole, so no
+        // crossing is predicted here.
+        Some(crate::analysis::resource::PeriodSignature::OneRepetition(_)) => return Ok(()),
     };
     // The reduction consumed no living seat, so it measured no threshold and no aim can outlive
     // one. The two absences answer alike; they are kept apart because their grounds differ.
