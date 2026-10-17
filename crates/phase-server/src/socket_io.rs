@@ -1289,8 +1289,8 @@ mod transport_fixup_tests {
         let result = tokio::time::timeout(Duration::from_secs(3), async {
             let mut socket = connect_and_hello(url).await;
             let held = app.lobby.lock().await;
-            // Exhaust the eight reader probes without exceeding decoder quota.
-            for _ in 0..16 {
+            // Exceed decoder quota without spending the reader's Ping reserve.
+            for _ in 0..40 {
                 socket
                     .send(WsMessage::Text(
                         serde_json::to_string(&ClientMessage::SubscribeLobby)
@@ -1320,7 +1320,7 @@ mod transport_fixup_tests {
         })
         .await;
         server.abort();
-        result.expect("a normal command burst blocked the fallback heartbeat");
+        result.expect("a normal command burst blocked the reserved heartbeat");
     }
 
     #[tokio::test(start_paused = true)]

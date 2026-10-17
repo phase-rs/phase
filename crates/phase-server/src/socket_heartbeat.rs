@@ -35,8 +35,8 @@ pub(crate) const MAX_HEARTBEAT_PROBE_BYTES: usize = 256;
 pub(crate) const FAST_PATH_BURST: u32 = 8;
 const PROBE_REFILL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Bound JSON probe work, including probes which do not recognize a Ping.
-/// Excess frames retain the normal ingress and decoder rate-limit path.
+/// Bound fast-path heartbeats and malformed probes. Valid application commands
+/// preserve the heartbeat reserve and still require ingress/decoder admission.
 pub(crate) struct HeartbeatProbe {
     tokens: u32,
     refilled_at: tokio::time::Instant,
@@ -76,12 +76,21 @@ impl HeartbeatProbe {
                 self.refilled_at + PROBE_REFILL_INTERVAL * refill
             };
         }
-        // Charge attempts before parsing: malformed/unrelated small JSON must
-        // not bypass this CPU bound merely because it produces no Pong.
-        self.tokens = self.tokens.checked_sub(1)?;
-        let probe: PingProbe = serde_json::from_str(json).ok()?;
+        if self.tokens == 0 {
+            return None;
+        }
+        let probe: PingProbe = match serde_json::from_str(json) {
+            Ok(probe) => probe,
+            Err(_) => {
+                self.tokens -= 1;
+                return None;
+            }
+        };
         match probe.kind {
-            MessageKind::Ping => probe.data.timestamp,
+            MessageKind::Ping => {
+                self.tokens -= 1;
+                probe.data.timestamp
+            }
             MessageKind::Other => None,
         }
     }
@@ -185,20 +194,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn unrelated_and_malformed_probes_cannot_preserve_unlimited_parse_credit() {
-        for json in [r#"{"type":"SubscribeLobby"}"#, "{"] {
-            let mut probe = HeartbeatProbe::default();
-            for _ in 0..FAST_PATH_BURST {
-                assert_eq!(probe.timestamp(&Message::text(json), None), None);
-            }
-            assert_eq!(
-                probe.timestamp(
-                    &Message::text(r#"{"type":"Ping","data":{"timestamp":4}}"#),
-                    None,
-                ),
-                None,
-                "{json} escaped the reader probe budget"
-            );
+    async fn malformed_probes_spend_the_heartbeat_allowance() {
+        let mut probe = HeartbeatProbe::default();
+        for _ in 0..FAST_PATH_BURST {
+            assert_eq!(probe.timestamp(&Message::text("{"), None), None);
         }
+        let ping = Message::text(r#"{"type":"Ping","data":{"timestamp":4}}"#);
+        assert_eq!(probe.timestamp(&ping, None), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn valid_non_ping_commands_preserve_the_heartbeat_reserve() {
+        let mut probe = HeartbeatProbe::default();
+        let action = Message::text(
+            serde_json::to_string(&server_core::protocol::ClientMessage::Action {
+                action: engine::types::actions::GameAction::PassPriority,
+            })
+            .unwrap(),
+        );
+        for _ in 0..40 {
+            assert_eq!(probe.timestamp(&action, None), None);
+        }
+        let ping = Message::text(r#"{"type":"Ping","data":{"timestamp":4}}"#);
+        for _ in 0..FAST_PATH_BURST {
+            assert_eq!(probe.timestamp(&ping, None), Some(4));
+        }
+        assert_eq!(probe.timestamp(&ping, None), None);
     }
 }
