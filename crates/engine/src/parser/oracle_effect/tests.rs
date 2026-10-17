@@ -55554,12 +55554,18 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
             panic!("rider must lower to AddPendingEntersModifications for {text:?}");
         };
         // CR 608.2c + CR 601.2a: the quality axis is typed — the anaphoric form
-        // names no quality (unconditional), the quality form carries the
-        // creature predicate.
+        // names no quality (unconditional), the quality form carries the exact
+        // printed creature predicate.
+        let expected_filter = if text == "if you cast it this way, it gains haste" {
+            None
+        } else {
+            Some(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+        };
         assert_eq!(
-            rider.cast_filter.is_none(),
-            text == "if you cast it this way, it gains haste",
-            "the anaphoric form must carry no quality predicate for {text:?}"
+            rider.cast_filter, expected_filter,
+            "the quality axis must carry the exact printed predicate for {text:?}"
         );
         let modifications = &rider.modifications;
         assert_eq!(
@@ -55820,6 +55826,13 @@ fn strago_and_relm_cast_this_way_gains_rider_parses_through_card() {
         rider.condition.is_none(),
         "the rider's \"this way\" back-reference is not a condition"
     );
+    assert_eq!(
+        payload.cast_filter,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Creature)
+        )),
+        "the printed creature quality must survive the full parse_oracle_text path"
+    );
     assert!(
         has_gains_rider_carrier(&parsed),
         "reach guard: the typed carrier is present"
@@ -55871,6 +55884,11 @@ fn if_you_do_gains_rider_requires_cast_grant_parent() {
             keyword: Keyword::Haste
         }),
         "got {modifications:?}"
+    );
+    assert!(
+        payload.cast_filter.is_none(),
+        "the gate form carries no printed spell-quality predicate, got {:?}",
+        payload.cast_filter
     );
     assert!(
         rider

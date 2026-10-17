@@ -5023,7 +5023,11 @@ pub enum CastingPermission {
         /// cast object). Empty for every grant without a type-grant rider.
         /// Parallel to `enters_with_counter` because the counter (CR 122) and
         /// the type grant (CR 613) are categorically distinct rule sections.
-        #[serde(default, skip_serializing_if = "PendingEntersModifications::is_empty")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_enters_with_modifications_compat",
+            skip_serializing_if = "PendingEntersModifications::is_empty"
+        )]
         enters_with_modifications: PendingEntersModifications,
         /// CR 609.4b: Optional payment permission scoped to this specific grant.
         /// `AnyColor` and `AnyTypeOrColor` both relax colored mana requirements;
@@ -5806,7 +5810,11 @@ pub enum ResolutionCastSuccessAction {
         /// permission, which is its only application point (CR 611.2c). Empty
         /// for windows without a rider and for saved states predating the
         /// field.
-        #[serde(default, skip_serializing_if = "PendingEntersModifications::is_empty")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_enters_with_modifications_compat",
+            skip_serializing_if = "PendingEntersModifications::is_empty"
+        )]
         enters_with_modifications: PendingEntersModifications,
         /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch,
         /// threaded from the window that offered the cast so the re-offer's
@@ -6017,6 +6025,78 @@ mod resolution_cast_face_policy_serde_tests {
             serde_json::from_value::<ResolutionCastSuccessAction>(pre_fix_action).unwrap(),
             empty_action,
             "a field-less payload must read as an empty rider"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: retained state written by an intermediate build
+    /// serialized the rider as a bare `ContinuousModification` array (both the
+    /// permission field and the effect payload). The dual-shape deserializer
+    /// must restore a populated legacy array as the unconditional rider while
+    /// the current object shape keeps round-tripping — a same-build or
+    /// omitted-field round trip does not prove this.
+    #[test]
+    fn enters_with_modifications_accepts_the_legacy_array_shape() {
+        use crate::types::ability::{ContinuousModification, PendingEntersModifications};
+        use crate::types::keywords::Keyword;
+
+        let legacy_rider = PendingEntersModifications {
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            cast_filter: None,
+        };
+
+        // Legacy permission: a populated bare array under the field name.
+        let legacy_permission = serde_json::json!({
+            "type": "ExileWithAltCost",
+            "cost": serde_json::to_value(ManaCost::generic(2)).unwrap(),
+            "enters_with_modifications": [
+                { "type": "AddKeyword", "keyword": "Haste" }
+            ]
+        });
+        let permission: CastingPermission = serde_json::from_value(legacy_permission).unwrap();
+        let CastingPermission::ExileWithAltCost {
+            enters_with_modifications,
+            ..
+        } = permission
+        else {
+            panic!("the legacy permission must restore as ExileWithAltCost");
+        };
+        assert_eq!(
+            enters_with_modifications, legacy_rider,
+            "a populated legacy permission array must restore as the unconditional rider"
+        );
+
+        // Legacy effect payload: the array under the former `modifications` key.
+        let legacy_effect: Effect = serde_json::from_value(serde_json::json!({
+            "type": "AddPendingEntersModifications",
+            "modifications": [ { "type": "AddKeyword", "keyword": "Haste" } ]
+        }))
+        .unwrap();
+        let Effect::AddPendingEntersModifications { rider } = legacy_effect else {
+            panic!("the legacy effect must restore as AddPendingEntersModifications");
+        };
+        assert_eq!(
+            rider, legacy_rider,
+            "a populated legacy effect array must restore as the unconditional rider"
+        );
+
+        // The current object shapes still round-trip.
+        let current_effect = Effect::AddPendingEntersModifications {
+            rider: PendingEntersModifications {
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+                cast_filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                )),
+            },
+        };
+        let encoded = serde_json::to_value(&current_effect).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Effect>(encoded).unwrap(),
+            current_effect,
+            "the current effect object must round-trip unchanged"
         );
     }
 
@@ -12850,6 +12930,12 @@ pub enum StaticCondition {
     },
     /// CR 102.1: The active player is the controller of this static ability.
     DuringYourTurn,
+    /// CR 500.8 + CR 506.1 + CR 608.2c: this is the first combat phase of the
+    /// turn — the per-turn phase-occurrence gate ("it's the first combat phase
+    /// of the turn"). The possessive "of your turn" form composes
+    /// `And([DuringYourTurn, FirstCombatPhaseOfTurn])` at the parse layer
+    /// (CR 109.5: "your" = the ability's controller).
+    FirstCombatPhaseOfTurn,
     /// CR 102.3 + CR 805.4a: The active player is an opponent of this static
     /// ability's controller. This is deliberately distinct from
     /// `Not(DuringYourTurn)`: in team games, a teammate may be the active
@@ -13119,6 +13205,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
     }
@@ -13228,6 +13315,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsPaired
             | StaticCondition::SourceInZone { .. }
             | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
     }
@@ -13464,6 +13552,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
     }
@@ -13583,6 +13672,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => visit(self),
         }
     }
@@ -17502,6 +17592,36 @@ impl PendingEntersModifications {
     }
 }
 
+/// Dual-shape deserialization for the gains-rider payload. The field was
+/// first serialized as a bare `Vec<ContinuousModification>` (the legacy array
+/// shape) and now carries the typed [`PendingEntersModifications`] object
+/// (modifications + printed spell-quality predicate). State written by an
+/// intermediate build that still used the array must keep restoring: a
+/// populated legacy array deserializes to the unconditional rider
+/// (`cast_filter: None`, the legacy semantics — no quality was recorded), and
+/// the current object shape is accepted unchanged. Used by the effect variant
+/// (via the `modifications` alias) and by every serialized carrier field.
+pub(crate) fn deserialize_enters_with_modifications_compat<'de, D>(
+    deserializer: D,
+) -> Result<PendingEntersModifications, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RiderCompat {
+        Legacy(Vec<ContinuousModification>),
+        Current(PendingEntersModifications),
+    }
+    Ok(match RiderCompat::deserialize(deserializer)? {
+        RiderCompat::Legacy(modifications) => PendingEntersModifications {
+            modifications,
+            cast_filter: None,
+        },
+        RiderCompat::Current(rider) => rider,
+    })
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -19617,6 +19737,14 @@ pub enum Effect {
     // RUNTIME: consumed only as `CastFromZone` permission metadata; a standalone
     // resolve is a fail-loud no-op (see `resolve_add_pending_enters_modifications`).
     AddPendingEntersModifications {
+        /// Dual-shape: the current object, or the legacy bare array under the
+        /// former `modifications` key (see
+        /// [`deserialize_enters_with_modifications_compat`]).
+        #[serde(
+            default,
+            alias = "modifications",
+            deserialize_with = "deserialize_enters_with_modifications_compat"
+        )]
         rider: PendingEntersModifications,
     },
     /// CR 114.1 + CR 114.4: Create an emblem with the specified abilities in

@@ -510,3 +510,109 @@ fn paid_cast_this_way_gains_haste_and_sacrifice() {
         "the granted end-step sacrifice trigger must resolve the creature to the graveyard"
     );
 }
+
+/// Review control (CR 608.2c, instructions in written order): the
+/// cast-metadata rider must not swallow a later independent instruction. This
+/// text prints "Draw a card." AFTER the gains rider, so the metadata splice has
+/// to keep the draw on both the accepted and the declined cast path.
+const RIDER_THEN_DRAW: &str = "{T}: You may cast target creature card from your graveyard. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Draw a card. Activate only as a sorcery.";
+
+/// P0 has the rider-then-draw source plus one red mana (the graveyard
+/// creature's {1} cost) and a seeded library top for the independent draw.
+fn build_rider_then_draw_runner() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Rider Then Draw Source", 1, 1, RIDER_THEN_DRAW)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let creature = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Bear", false)
+        .as_creature()
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    scenario.add_card_to_library_top(P0, "Drawn Card");
+    (scenario.build(), source, creature)
+}
+
+#[test]
+fn rider_then_independent_draw_resolves_on_accept() {
+    let (mut runner, source, creature) = build_rider_then_draw_runner();
+    give_body(&mut runner, creature);
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let outcome = runner.activate(source, 0).target_object(creature).resolve();
+    let mut events = outcome.events().to_vec();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::CastOffer { .. }),
+        "reach guard: the paid offer must be minted, found {:?}",
+        runner.state().waiting_for
+    );
+    let accepted = runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accepting the paid offer must succeed");
+    events.extend(accepted.events);
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        let paid = runner
+            .act(GameAction::PassPriority)
+            .expect("paying the offered cast must succeed");
+        events.extend(paid.events);
+    }
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Battlefield,
+        "the accepted cast creature must enter the battlefield"
+    );
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    assert!(
+        object_has_effective_keyword_kind(runner.state(), creature, KeywordKind::Haste),
+        "the rider must still apply to the accepted creature cast"
+    );
+    assert!(
+        !standalone_rider_resolution(&events),
+        "the rider must be consumed as metadata, never resolved standalone; events: {events:?}"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "the independent Draw printed after the rider must resolve on the accepted cast"
+    );
+}
+
+#[test]
+fn rider_then_independent_draw_resolves_on_decline() {
+    let (mut runner, source, creature) = build_rider_then_draw_runner();
+    give_body(&mut runner, creature);
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let outcome = runner.activate(source, 0).target_object(creature).resolve();
+    let mut events = outcome.events().to_vec();
+    let declined = runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: CastChoice::Decline,
+        })
+        .expect("declining the paid offer must succeed");
+    events.extend(declined.events);
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Graveyard,
+        "a declined cast leaves the card in the graveyard"
+    );
+    assert!(
+        !standalone_rider_resolution(&events),
+        "the rider must never resolve standalone; events: {events:?}"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "the independent Draw printed after the rider must resolve on the declined cast"
+    );
+}

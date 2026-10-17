@@ -2216,6 +2216,43 @@ pub(crate) fn is_enters_with_modifications_rider_subability(ability: &ResolvedAb
     )
 }
 
+/// CR 608.2c: the node the chain walk should process after consuming a cast
+/// parent's typed metadata riders. `CastFromZone`/`CastCopyOfCard` consume the
+/// "enters with a counter" and "gains modifications" riders as permission
+/// metadata — they are not instructions of their own (their standalone
+/// resolvers are fail-loud no-ops). A rider may itself carry the next written
+/// instruction as a `SequentialSibling` ("… it gains haste. Draw a card."), so
+/// the walk splices the whole metadata run out and continues at the first
+/// non-metadata node: accepted and declined cast paths share this authority,
+/// so neither drops a later independent instruction. `None` when the remaining
+/// chain is entirely consumed metadata.
+///
+/// The chain storage is `Option<Box<ResolvedAbility>>` and the walker binds
+/// `sub` through that exact type (`sub.as_ref().clone()` clones the node), so
+/// this authority speaks the storage type: `&ResolvedAbility` in the signature
+/// would force a binding-type churn across the walker for no behavioral gain.
+#[allow(clippy::borrowed_box)]
+pub(crate) fn cast_metadata_continuation<'a>(
+    parent: &ResolvedAbility,
+    first: &'a Box<ResolvedAbility>,
+) -> Option<&'a Box<ResolvedAbility>> {
+    if !matches!(
+        &parent.effect,
+        Effect::CastFromZone { .. } | Effect::CastCopyOfCard { .. }
+    ) {
+        return Some(first);
+    }
+    let mut cursor = first;
+    loop {
+        if !(is_enters_with_counter_rider_subability(cursor)
+            || is_enters_with_modifications_rider_subability(cursor))
+        {
+            return Some(cursor);
+        }
+        cursor = cursor.sub_ability.as_ref()?;
+    }
+}
+
 /// Extract the counter the cast-this-way creature enters with, if the
 /// `CastFromZone` carries an enters-with-counter rider sub-ability. Returns the
 /// rider's counter type; the count is fixed at one per CR 122.1 (the printed

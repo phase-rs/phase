@@ -5990,6 +5990,9 @@ pub(crate) fn static_condition_to_ability_condition(
 ) -> Option<AbilityCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn),
+        // CR 500.8 + CR 506.1 + CR 608.2c: the shared phase-occurrence gate
+        // bridges 1:1 (the possessive composition arrives as an `And`).
+        StaticCondition::FirstCombatPhaseOfTurn => Some(AbilityCondition::FirstCombatPhaseOfTurn),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -7163,38 +7166,11 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     }
 
     // CR 500.8 + CR 506.1 + CR 109.5 + CR 608.2c: "it's the first combat phase
-    // of your turn" — the possessive axis on the phase-occurrence gate composes
-    // `IsYourTurn` ("your" = the ability's controller, CR 109.5) with
-    // `FirstCombatPhaseOfTurn`, so the phase is added only on the controller's
-    // own turn (the `CurrentPhaseIs` possessive precedent in
-    // `game/effects/mod.rs`). The non-possessive "of the turn" arm is unchanged.
-    // `all_consuming` requires the phase-occurrence phrase to BE the whole
-    // condition: a trailing conjunct ("… and you control a creature") must not
-    // be silently dropped by a partial match — the whole condition then stays
-    // honestly unbound rather than half-bound.
-    if let Ok((_, possessive)) = all_consuming(terminated(
-        alt((
-            value(
-                false,
-                tag::<_, _, OracleError<'_>>("it's the first combat phase of the turn"),
-            ),
-            value(true, tag("it's the first combat phase of your turn")),
-        )),
-        multispace0,
-    ))
-    .parse(lower.as_str())
-    {
-        return Some(if possessive {
-            AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::IsYourTurn,
-                    AbilityCondition::FirstCombatPhaseOfTurn,
-                ],
-            }
-        } else {
-            AbilityCondition::FirstCombatPhaseOfTurn
-        });
-    }
+    // of [the|your] turn" is recognized by the shared `parse_inner_condition`
+    // authority (`parse_first_combat_phase_of_turn`) and lowered through the
+    // generic fallback below, which requires the whole condition to be
+    // consumed. The possessive axis composes `IsYourTurn` there (CR 109.5), so
+    // no effect-local arm is needed.
 
     // CR 500.8 + CR 513.1: "it's the first end step of the turn" — end-step
     // sibling of the combat-phase gate above (Y'shtola Rhul's loop guard).

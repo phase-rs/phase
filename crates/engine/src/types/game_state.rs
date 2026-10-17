@@ -7987,6 +7987,10 @@ pub struct FinalizePrePaymentChecks {
     pub cascade_cast_transformed: bool,
     pub resolution_success_waiting_for: Option<WaitingFor>,
     pub cast_this_way_etb_counter: Option<CounterType>,
+    #[serde(
+        default,
+        deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat"
+    )]
     pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
 }
 
@@ -11108,11 +11112,14 @@ pub enum CastOfferKind {
         /// ("If you cast a [quality] spell this way, it gains …", Strago and
         /// Relm) snapshotted from the converting `CastFromZone` ability. Every
         /// cast of the window receives it through its `ResolutionCastRequest`
-        /// (the elected-permission application point, CR 611.2c), and the
-        /// re-offers carry it through `FreeCastOfferRemaining`. Empty for
-        /// windows without a rider and for saved states predating the field.
+        /// (the elected-permission application point; CR 611.2f: such an effect
+        /// "do[es] not begin immediately" but applies when the player next puts
+        /// the appropriate spell on the stack), and the re-offers carry it
+        /// through `FreeCastOfferRemaining`. Empty for windows without a rider
+        /// and for saved states predating the field.
         #[serde(
             default,
+            deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat",
             skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
         )]
         enters_with_modifications: crate::types::ability::PendingEntersModifications,
@@ -11139,10 +11146,13 @@ pub enum CastOfferKind {
         /// CR 608.2c + CR 611.2a: the cast-permission gains-modifications rider
         /// ("If you cast a [quality] spell this way, it gains …", Strago and
         /// Relm) snapshotted from the offering `CastFromZone` ability; the
-        /// accept threads it into the elected permission (CR 611.2c). Empty
-        /// for every other paid offer and for saved states predating the field.
+        /// accept threads it into the elected permission (CR 611.2f: the
+        /// granted rider applies when the player next puts the appropriate
+        /// spell on the stack). Empty for every other paid offer and for saved
+        /// states predating the field.
         #[serde(
             default,
+            deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat",
             skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
         )]
         enters_with_modifications: crate::types::ability::PendingEntersModifications,
@@ -34608,6 +34618,33 @@ mod tests {
             serde_json::from_value::<CastOfferKind>(pre_fix).unwrap(),
             paid,
             "a field-less pre-fix payload must read as an empty rider with the rest intact"
+        );
+
+        // A retained intermediate-build payload carries the bare array under
+        // the same key; the dual-shape deserializer restores it as the
+        // unconditional rider (no printed quality was recorded then).
+        let mut legacy_array = serde_json::to_value(&ridden_paid).unwrap();
+        legacy_array.as_object_mut().unwrap().insert(
+            "enters_with_modifications".to_string(),
+            serde_json::json!([{ "type": "AddKeyword", "keyword": "Haste" }]),
+        );
+        let legacy_paid: CastOfferKind = serde_json::from_value(legacy_array).unwrap();
+        let CastOfferKind::GraveyardPaidCast {
+            enters_with_modifications,
+            ..
+        } = legacy_paid
+        else {
+            panic!("the legacy paid offer must restore as GraveyardPaidCast");
+        };
+        assert_eq!(
+            enters_with_modifications,
+            crate::types::ability::PendingEntersModifications {
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+                cast_filter: None,
+            },
+            "a populated legacy offer array must restore as the unconditional rider"
         );
     }
 
