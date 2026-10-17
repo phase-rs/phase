@@ -1980,6 +1980,98 @@ fn card_type_set_source_recipient_read(source: &CardTypeSetSource) -> RecipientR
     }
 }
 
+/// CR 608.2h: How a `QuantityRef` reads a specific object through an
+/// [`ObjectScope`]. The single exhaustive authority for the object-scope axis of
+/// `quantity_expr_uses_resolution_only_object_scope`,
+/// `quantity_expr_contains_scope`, and
+/// `quantity_expr_missing_resolution_only_referent`, so a new reference forces
+/// one decision here instead of escaping three wildcard tails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectScopeRead {
+    /// Reads no object through an `ObjectScope`: player, population, record,
+    /// and number references, plus object reads on their own axis.
+    Unscoped,
+    /// CR 608.2h: reads information from the scoped object (power, toughness,
+    /// mana value, colors, name, name stickers, typeline, mana symbols,
+    /// intensity). A resolution-only referent must be determined once, at
+    /// resolution, and an absent one yields no information.
+    ObjectInformation(ObjectScope),
+    /// CR 608.2h + CR 122.1: counts counters on the scoped object. Its resolvers
+    /// own a live-vs-LKI ladder, so it names its scope but is neither
+    /// snapshotted nor pre-gated on referent presence.
+    CounterCount(ObjectScope),
+}
+
+/// Classify every reference explicitly (no wildcard) so a new variant requires a decision.
+fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
+    match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        // CR 608.2h: intensity is information from a specific object, read
+        // through `resolve_object_pt` like power (digital-only; no CR entry of its own).
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount { stickers: NameStickerSet::OnObject { scope }, letters: _ }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => ObjectScopeRead::ObjectInformation(*scope),
+        QuantityRef::CountersOn { scope, .. } => ObjectScopeRead::CounterCount(*scope),
+        // CR 123.1 + CR 123.6e: "that sticker" names a sticker, not an object
+        // ("Stickers are not objects"); no such sticker reads 0.
+        QuantityRef::NameStickerLetterCount { stickers: NameStickerSet::ThatSticker, letters: _ } => ObjectScopeRead::Unscoped,
+        // Object reads on their own axis: an own target slot
+        // (`quantity_ref_target_slot_spec`), `CastManaObjectScope`, the
+        // `resolve_quantity` source, an exile index, leaving-object LKI, a commander.
+        QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::CommanderManaValue { .. }
+        // Player-scoped quantities.
+        | QuantityRef::HandSize { .. } | QuantityRef::LifeTotal { .. } | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
+        | QuantityRef::Speed { .. } | QuantityRef::LifeGainedThisTurn { .. } | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. } | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. } | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. } | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        // Populations, filters, journals, and aggregates.
+        | QuantityRef::ObjectCount { .. } | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. } | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::EnteredThisTurn { .. } | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::FilteredTrackedSetSize { .. } | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::AttackedThisTurn { .. } | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. } | QuantityRef::PropertyAggregate(_)
+        | QuantityRef::DistinctCardTypes { .. } | QuantityRef::SharedCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. } | QuantityRef::DistinctColorsAmong { .. }
+        | QuantityRef::PlayerCount { .. } | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. } | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
+        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource
+        // Numbers, counters on players, and resolution/turn records.
+        | QuantityRef::LifeAboveStarting | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. } | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. } | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount | QuantityRef::UnspentMana { .. }
+        | QuantityRef::EventContextAmount | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn | QuantityRef::TurnsTaken | QuantityRef::NotedNumber
+        | QuantityRef::ChosenNumber | QuantityRef::DescendedThisTurn | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted | QuantityRef::CostXPaid | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::VoteCount { .. } => ObjectScopeRead::Unscoped,
+    }
+}
+
 /// CR 608.2h + CR 608.2k + CR 608.2c: True when the QuantityExpr reads an object
 /// characteristic through a scope whose referent only exists during the resolving
 /// ability's resolution — the triggering/cost/instruction-order object
@@ -2000,8 +2092,8 @@ fn card_type_set_source_recipient_read(source: &CardTypeSetSource) -> RecipientR
 /// an object scope, and is likewise left dynamic.
 ///
 /// Mirrors the structural recursion of `quantity_expr_uses_recipient`; the
-/// `QuantityRef` leaf classifies the object-scoped variants exhaustively so a new
-/// object-scoped reference forces a decision here.
+/// `QuantityRef` leaf is classified exhaustively by `quantity_ref_object_scope_read`,
+/// so a new object-scoped reference forces a decision there.
 pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExpr) -> bool {
     fn scope_is_resolution_only(scope: ObjectScope) -> bool {
         match scope {
@@ -2036,27 +2128,18 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
     }
     match expr {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::Power { scope }
-            | QuantityRef::BasePower { scope }
-            | QuantityRef::Toughness { scope }
-            | QuantityRef::ObjectManaValue { scope }
-            | QuantityRef::ObjectColorCount { scope }
-            | QuantityRef::ObjectNameWordCount { scope }
-            | QuantityRef::NameStickerLetterCount {
-                stickers: NameStickerSet::OnObject { scope },
-                letters: _,
-            }
-            | QuantityRef::ObjectTypelineComponentCount { scope }
-            | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope_is_resolution_only(*scope),
-            // CR 608.2h: `QuantityRef::CountersOn` deliberately stays OUT of the
-            // list above. Its resolvers own their live-vs-LKI ladder, so a
+        QuantityExpr::Ref { qty } => match quantity_ref_object_scope_read(qty) {
+            ObjectScopeRead::ObjectInformation(scope) => scope_is_resolution_only(scope),
+            // CR 608.2h: `QuantityRef::CountersOn` is classified
+            // `ObjectScopeRead::CounterCount`, not `ObjectInformation`.
+            // Its resolvers own their live-vs-LKI ladder, so a
             // departed referent (a destroyed `ChainRootTarget`, an exiled
             // `Source`) still reports a real recorded count; classifying it as a
             // resolution-only object read would let
             // `quantity_expr_missing_resolution_only_referent` gate that read
             // `false` before the ladder ever runs.
-            _ => false,
+            ObjectScopeRead::CounterCount(_) => false,
+            ObjectScopeRead::Unscoped => false,
         },
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -2081,33 +2164,20 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
 /// CR 120.1 + CR 608.2: True when `expr` references `scope` anywhere — including
 /// nested inside any composite wrapper (`Multiply`, `Offset`, `Sum`,
 /// `Difference`, …). Structural recursion over the already-parsed `QuantityExpr`;
-/// the `QuantityRef` leaf classifies per-object scopes exhaustively so a new
-/// object-scoped reference forces a decision here. Used by the parser (does the
+/// the `QuantityRef` leaf is classified exhaustively by
+/// `quantity_ref_object_scope_read`. Used by the parser (does the
 /// "each <filter> deals damage" amount carry the deferred `Anaphoric` pronoun?)
 /// and by the resolver (does the batch amount read the per-source `BatchSource`
 /// scope?).
 pub(crate) fn quantity_expr_contains_scope(expr: &QuantityExpr, scope: ObjectScope) -> bool {
-    fn ref_contains_scope(qty: &QuantityRef, scope: ObjectScope) -> bool {
-        match qty {
-            QuantityRef::Power { scope: s }
-            | QuantityRef::BasePower { scope: s }
-            | QuantityRef::Toughness { scope: s }
-            | QuantityRef::ObjectManaValue { scope: s }
-            | QuantityRef::ObjectColorCount { scope: s }
-            | QuantityRef::ObjectNameWordCount { scope: s }
-            | QuantityRef::NameStickerLetterCount {
-                stickers: NameStickerSet::OnObject { scope: s },
-                letters: _,
-            }
-            | QuantityRef::ObjectTypelineComponentCount { scope: s }
-            | QuantityRef::ManaSymbolsInManaCost { scope: s, .. }
-            | QuantityRef::CountersOn { scope: s, .. } => *s == scope,
-            _ => false,
-        }
-    }
     match expr {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => ref_contains_scope(qty, scope),
+        QuantityExpr::Ref { qty } => match quantity_ref_object_scope_read(qty) {
+            ObjectScopeRead::ObjectInformation(read) | ObjectScopeRead::CounterCount(read) => {
+                read == scope
+            }
+            ObjectScopeRead::Unscoped => false,
+        },
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -2207,9 +2277,9 @@ fn resolution_only_scope_referent_present(
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
         // CR 601.2c: referent presence mirrors the `Target` arm, but against the
         // ability-carried chain-root list rather than this sub-ability's own
-        // targets. Unreachable for `QuantityRef::CountersOn` today (that variant
-        // is not in `quantity_expr_missing_resolution_only_referent`'s leaf
-        // list), but adjudicated rather than wildcarded.
+        // targets. Unreachable for `QuantityRef::CountersOn` today
+        // (`quantity_ref_object_scope_read` classifies it `CounterCount`, which
+        // that gate never checks), but adjudicated rather than wildcarded.
         ObjectScope::ChainRootTarget => ability
             .context
             .chain_root_targets
@@ -2247,22 +2317,11 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
     }
     match expr {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::Power { scope }
-            | QuantityRef::BasePower { scope }
-            | QuantityRef::Toughness { scope }
-            | QuantityRef::ObjectManaValue { scope }
-            | QuantityRef::ObjectColorCount { scope }
-            | QuantityRef::ObjectNameWordCount { scope }
-            | QuantityRef::NameStickerLetterCount {
-                stickers: NameStickerSet::OnObject { scope },
-                letters: _,
-            }
-            | QuantityRef::ObjectTypelineComponentCount { scope }
-            | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
-                leaf_scope_missing(state, *scope, ability)
-            }
-            _ => false,
+        QuantityExpr::Ref { qty } => match quantity_ref_object_scope_read(qty) {
+            ObjectScopeRead::ObjectInformation(scope) => leaf_scope_missing(state, scope, ability),
+            // CR 608.2h: counter reads own their live-vs-LKI ladder and are never
+            // pre-gated (see `quantity_expr_uses_resolution_only_object_scope`).
+            ObjectScopeRead::CounterCount(_) | ObjectScopeRead::Unscoped => false,
         },
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -22755,6 +22814,354 @@ mod tests {
                 right: Box::new(ref_batch()),
             },
             ObjectScope::BatchSource
+        ));
+    }
+
+    /// Every `ObjectScope` variant: one list feeds both the cases and a
+    /// wildcard-free `match`, so a new variant stops this module compiling until
+    /// the list names it and the pinned expectations below are revisited.
+    macro_rules! every_object_scope {
+        ($($scope:ident $({ $field:ident: $value:expr $(,)? })?),+ $(,)?) => {{
+            let _exhaustive = |scope: ObjectScope| match scope {
+                $(ObjectScope::$scope $({ $field: _ })?)|+ => {}
+            };
+            [$((stringify!($scope), ObjectScope::$scope $({ $field: $value })?)),+]
+        }};
+    }
+
+    fn all_object_scopes() -> [(&'static str, ObjectScope); 15] {
+        every_object_scope!(
+            Source,
+            Target,
+            Recipient,
+            EventSource,
+            CostPaidObject,
+            Anaphoric,
+            Demonstrative,
+            AmassedArmy,
+            EventTarget,
+            OtherRevealedCard,
+            OwnedLinkedExileCard,
+            BatchSource,
+            ChainRootTarget,
+            GrantingObject,
+            SpecificObject {
+                object: ObjectIncarnationRef::of(ObjectId(1), 0),
+            },
+        )
+    }
+
+    /// The resolution-only scope set, pinned literally (deliberately not derived
+    /// from `scope_is_resolution_only`, so a drift there fails the pins below).
+    fn expected_resolution_only(scope: ObjectScope) -> bool {
+        matches!(
+            scope,
+            ObjectScope::Target
+                | ObjectScope::EventSource
+                | ObjectScope::EventTarget
+                | ObjectScope::CostPaidObject
+                | ObjectScope::Anaphoric
+                | ObjectScope::Demonstrative
+                | ObjectScope::AmassedArmy
+                | ObjectScope::OtherRevealedCard
+                | ObjectScope::OwnedLinkedExileCard
+                | ObjectScope::BatchSource
+                | ObjectScope::ChainRootTarget
+                | ObjectScope::GrantingObject
+        )
+    }
+
+    /// Constructors for every `QuantityRef` that reads information from an
+    /// object through an `ObjectScope`.
+    fn object_information_refs() -> [(&'static str, fn(ObjectScope) -> QuantityRef); 10] {
+        [
+            ("Power", |scope| QuantityRef::Power { scope }),
+            ("BasePower", |scope| QuantityRef::BasePower { scope }),
+            ("Intensity", |scope| QuantityRef::Intensity { scope }),
+            ("Toughness", |scope| QuantityRef::Toughness { scope }),
+            ("ObjectManaValue", |scope| QuantityRef::ObjectManaValue {
+                scope,
+            }),
+            ("ObjectColorCount", |scope| QuantityRef::ObjectColorCount {
+                scope,
+            }),
+            ("ObjectNameWordCount", |scope| {
+                QuantityRef::ObjectNameWordCount { scope }
+            }),
+            ("NameStickerLetterCount{OnObject}", |scope| {
+                QuantityRef::NameStickerLetterCount {
+                    stickers: NameStickerSet::OnObject { scope },
+                    letters: LetterQuery::UniqueVowels,
+                }
+            }),
+            ("ObjectTypelineComponentCount", |scope| {
+                QuantityRef::ObjectTypelineComponentCount { scope }
+            }),
+            ("ManaSymbolsInManaCost", |scope| {
+                QuantityRef::ManaSymbolsInManaCost { scope, color: None }
+            }),
+        ]
+    }
+
+    fn counters_on_ref(scope: ObjectScope) -> QuantityRef {
+        QuantityRef::CountersOn {
+            scope,
+            counter_type: None,
+        }
+    }
+
+    /// References that read no object through an `ObjectScope`, including the
+    /// object reads on their own axis (`TargetObjectManaValue` resolves via
+    /// `ObjectScope::Target` internally but owns its own target slot).
+    fn unscoped_refs() -> Vec<(&'static str, QuantityRef)> {
+        vec![
+            (
+                "NameStickerLetterCount{ThatSticker}",
+                QuantityRef::NameStickerLetterCount {
+                    stickers: NameStickerSet::ThatSticker,
+                    letters: LetterQuery::UniqueVowels,
+                },
+            ),
+            (
+                "TargetObjectManaValue",
+                QuantityRef::TargetObjectManaValue {
+                    filter: Box::new(TargetFilter::Any),
+                },
+            ),
+            (
+                "ManaSpentToCast",
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: CastManaSpentMetric::Total,
+                },
+            ),
+            ("ExiledCardPower", QuantityRef::ExiledCardPower { index: 0 }),
+            ("SelfManaValue", QuantityRef::SelfManaValue),
+            ("CostXPaid", QuantityRef::CostXPaid),
+            (
+                "ObjectCount",
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Any,
+                },
+            ),
+        ]
+    }
+
+    fn ref_expr(qty: QuantityRef) -> QuantityExpr {
+        QuantityExpr::Ref { qty }
+    }
+
+    /// CR 608.2h: the helper classifies the scope-bearing family, the
+    /// counter-count carve-out, and the unscoped edge cases.
+    #[test]
+    fn object_scope_read_classifies_every_scope_bearing_ref() {
+        for (scope_name, scope) in all_object_scopes() {
+            for (ref_name, ctor) in object_information_refs() {
+                assert_eq!(
+                    quantity_ref_object_scope_read(&ctor(scope)),
+                    ObjectScopeRead::ObjectInformation(scope),
+                    "{ref_name}{{{scope_name}}} reads object information"
+                );
+            }
+            assert_eq!(
+                quantity_ref_object_scope_read(&counters_on_ref(scope)),
+                ObjectScopeRead::CounterCount(scope),
+                "CountersOn{{{scope_name}}} is the counter-count carve-out"
+            );
+        }
+        for (ref_name, qty) in unscoped_refs() {
+            assert_eq!(
+                quantity_ref_object_scope_read(&qty),
+                ObjectScopeRead::Unscoped,
+                "{ref_name} reads no object through an ObjectScope"
+            );
+        }
+    }
+
+    /// CR 608.2h: classifier 1 snapshots exactly the resolution-only scopes for
+    /// every object-information reference (`Intensity` included), never
+    /// `CountersOn`, and never an unscoped reference.
+    #[test]
+    fn resolution_only_object_scope_pins_every_scope_bearing_ref() {
+        for (scope_name, scope) in all_object_scopes() {
+            for (ref_name, ctor) in object_information_refs() {
+                assert_eq!(
+                    quantity_expr_uses_resolution_only_object_scope(&ref_expr(ctor(scope))),
+                    expected_resolution_only(scope),
+                    "{ref_name}{{{scope_name}}}"
+                );
+            }
+            assert!(
+                !quantity_expr_uses_resolution_only_object_scope(&ref_expr(counters_on_ref(scope))),
+                "CountersOn{{{scope_name}}} owns its live-vs-LKI ladder and is never snapshotted"
+            );
+        }
+        for (ref_name, qty) in unscoped_refs() {
+            assert!(
+                !quantity_expr_uses_resolution_only_object_scope(&ref_expr(qty)),
+                "{ref_name} is unscoped"
+            );
+        }
+        // Wrapper recursion reaches the Intensity leaf (paired with the Fixed
+        // control so the wrapper alone is not what answers true).
+        assert!(quantity_expr_uses_resolution_only_object_scope(
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(ref_expr(QuantityRef::Intensity {
+                    scope: ObjectScope::CostPaidObject,
+                })),
+            }
+        ));
+        assert!(!quantity_expr_uses_resolution_only_object_scope(
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Fixed { value: 1 }),
+            }
+        ));
+    }
+
+    /// CR 120.1 + CR 608.2: classifier 2 reports exactly the scope each
+    /// scope-bearing reference names, `CountersOn` and `Intensity` included.
+    #[test]
+    fn contains_scope_pins_every_scope_bearing_ref() {
+        let scopes = all_object_scopes();
+        for (scope_name, scope) in scopes {
+            let scope_bearing = object_information_refs()
+                .into_iter()
+                .map(|(name, ctor)| (name, ctor(scope)))
+                .chain([("CountersOn", counters_on_ref(scope))]);
+            for (ref_name, qty) in scope_bearing {
+                let expr = ref_expr(qty);
+                // Positive reach guard first, then the negatives against it.
+                assert!(
+                    quantity_expr_contains_scope(&expr, scope),
+                    "{ref_name}{{{scope_name}}} names its own scope"
+                );
+                for (other_name, other) in scopes {
+                    if other != scope {
+                        assert!(
+                            !quantity_expr_contains_scope(&expr, other),
+                            "{ref_name}{{{scope_name}}} must not report {other_name}"
+                        );
+                    }
+                }
+            }
+            for (ref_name, qty) in unscoped_refs() {
+                assert!(
+                    !quantity_expr_contains_scope(&ref_expr(qty), scope),
+                    "{ref_name} reports no scope (probed with {scope_name})"
+                );
+            }
+        }
+    }
+
+    fn empty_draw_ability(targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            targets,
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// CR 701.57c + CR 608.2h: classifier 3 gates an absent referent for every
+    /// object-information reference (`Intensity` included) and never gates
+    /// `CountersOn` or an unscoped reference.
+    #[test]
+    fn missing_referent_pins_every_scope_bearing_ref() {
+        let state = GameState::new_two_player(42);
+        let ability = empty_draw_ability(Vec::new());
+        for (scope_name, scope) in all_object_scopes() {
+            for (ref_name, ctor) in object_information_refs() {
+                assert_eq!(
+                    quantity_expr_missing_resolution_only_referent(
+                        &state,
+                        &ref_expr(ctor(scope)),
+                        &ability
+                    ),
+                    expected_resolution_only(scope),
+                    "{ref_name}{{{scope_name}}} over an empty resolution context"
+                );
+            }
+            assert!(
+                !quantity_expr_missing_resolution_only_referent(
+                    &state,
+                    &ref_expr(counters_on_ref(scope)),
+                    &ability
+                ),
+                "CountersOn{{{scope_name}}} is never pre-gated"
+            );
+        }
+        for (ref_name, qty) in unscoped_refs() {
+            assert!(
+                !quantity_expr_missing_resolution_only_referent(&state, &ref_expr(qty), &ability),
+                "{ref_name} is unscoped"
+            );
+        }
+
+        // A bound target makes the Intensity{Target} referent present; the same
+        // expression over no targets is the paired positive.
+        let intensity_target = ref_expr(QuantityRef::Intensity {
+            scope: ObjectScope::Target,
+        });
+        assert!(quantity_expr_missing_resolution_only_referent(
+            &state,
+            &intensity_target,
+            &ability
+        ));
+        let with_target = empty_draw_ability(vec![TargetRef::Object(ObjectId(2))]);
+        assert!(!quantity_expr_missing_resolution_only_referent(
+            &state,
+            &intensity_target,
+            &with_target
+        ));
+    }
+
+    /// CR 701.57c + CR 608.2c: a `QuantityCheck` over an absent `Intensity`
+    /// referent is false rather than comparing the `.unwrap_or(0)` fallback.
+    #[test]
+    fn quantity_check_over_absent_intensity_referent_is_false() {
+        let mut state = GameState::new_two_player(42);
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Intensified".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target).unwrap().intensity = 2;
+
+        let check = |rhs: i32| AbilityCondition::QuantityCheck {
+            lhs: ref_expr(QuantityRef::Intensity {
+                scope: ObjectScope::Target,
+            }),
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: rhs },
+        };
+
+        // Positive reach guard: with the referent bound, the check reads its
+        // live intensity (2 >= 2).
+        let bound = empty_draw_ability(vec![TargetRef::Object(target)]);
+        assert!(crate::game::effects::evaluate_condition(
+            &check(2),
+            &state,
+            &bound
+        ));
+        assert!(!crate::game::effects::evaluate_condition(
+            &check(3),
+            &state,
+            &bound
+        ));
+
+        // Absent referent: 0 >= 0 would be true if the fallback were compared.
+        let absent = empty_draw_ability(Vec::new());
+        assert!(!crate::game::effects::evaluate_condition(
+            &check(0),
+            &state,
+            &absent
         ));
     }
 
