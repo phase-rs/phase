@@ -22317,7 +22317,7 @@ mod tests {
             .sub_ability
             .is_some());
         let generic = declined_search_test_ability(Effect::GenericEffect {
-            target: Some(TargetFilter::ParentTarget),
+            target: None,
             duration: None,
             end_cost: None,
             static_abilities: vec![
@@ -22334,6 +22334,11 @@ mod tests {
         };
         assert_eq!(static_abilities.len(), 1);
         assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+        let mut both_dependent = generic.clone();
+        if let Effect::GenericEffect { target, .. } = &mut both_dependent.effect {
+            *target = Some(TargetFilter::ParentTarget);
+        }
+        assert!(without_declined_search_object_dependencies(&both_dependent).is_none());
         root.else_ability = Some(Box::new(dependent));
         assert!(
             matches!(optional_decline_branch(&root), Some(Cow::Borrowed(_))),

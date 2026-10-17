@@ -234,8 +234,8 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
 #[test]
 fn search_result_guard_does_not_cross_a_mode_boundary() {
     let parsed = parse_card("Choose one —\n• Search your library for an Equipment card and reveal it.\n• If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield.", "Mode boundary fixture", &[], &["Sorcery"]);
-    assert_eq!(parsed.abilities.len(), 1);
-    let modes = &parsed.abilities[0].mode_abilities;
+    assert_eq!(parsed.modal.as_ref().expect("modal spell").mode_count, 2);
+    let modes = &parsed.abilities;
     assert_eq!(modes.len(), 2);
     assert!(chain_effects(&modes[0])
         .iter()

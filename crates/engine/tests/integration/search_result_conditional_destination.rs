@@ -1020,6 +1020,9 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
         let victim = scenario
             .add_land_from_oracle(P1, "Opponent nonbasic", "")
             .id();
+        let unchosen_nonbasic = scenario
+            .add_land_from_oracle(P1, "Unchosen opponent nonbasic", "")
+            .id();
         let first = scenario.add_basic_land(P1, ManaColor::White);
         let found = scenario.add_basic_land(P0, ManaColor::Green);
         let cover = scenario
@@ -1042,10 +1045,22 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
             })
             .unwrap()
             .events;
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::TargetSelection { player: P0, .. }
-        ));
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Demolition Field must offer its printed target choice");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(target_slots.len(), 1);
+        assert_eq!(selection.current_slot, 0);
+        let legal = &target_slots[selection.current_slot].legal_targets;
+        assert_eq!(legal.len(), 2);
+        assert!(legal.contains(&TargetRef::Object(victim)));
+        assert!(legal.contains(&TargetRef::Object(unchosen_nonbasic)));
         events.extend(
             runner
                 .act(GameAction::ChooseTarget {
@@ -1072,6 +1087,11 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
         assert!(events.iter().any(|event| matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == source)), "activation paid its printed tap cost");
         let _ = pass_to_pause(&mut runner, &mut events);
         assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().objects[&unchosen_nonbasic].zone,
+            Zone::Battlefield
+        );
+        assert_eq!(runner.state().objects[&unchosen_nonbasic].controller, P1);
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::OptionalEffectChoice { player: P1, .. }
@@ -1105,6 +1125,11 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
         assert_complete(&runner, &last);
         assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
         assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().objects[&unchosen_nonbasic].zone,
+            Zone::Battlefield
+        );
+        assert_eq!(runner.state().objects[&unchosen_nonbasic].controller, P1);
         assert_eq!(runner.state().objects[&first].zone, Zone::Library);
         assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
         if find {
