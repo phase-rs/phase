@@ -924,6 +924,616 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Issue #9936 (P1-C4): a quoted-text granted loyalty ability carries
+    /// sorcery-speed timing (CR 606.3 timing half), so it refuses off-turn /
+    /// non-main / non-empty-stack and allows on own main phase with an empty
+    /// stack — exactly like a printed loyalty ability. The def is extracted
+    /// from the production quoted-grant path (the exact Phase-3-consumed
+    /// shape), installed via `create_planeswalker` — NOT `make_loyalty_ability`
+    /// (that helper adds `OnlyOnceEachTurn`, which would conflate the fixture).
+    ///
+    /// Leg discipline is load-bearing: refusals run BEFORE the allow on the
+    /// shared walker, so the activation count stays 0 through the refusals and
+    /// each refusal is attributable to `AsSorcery`, not the per-permanent cap
+    /// (`planeswalker.rs:129` precedes the restriction consult at `:155-172`,
+    /// behind the undiscriminating `ActionNotAllowed`). Revert the attach and
+    /// the FIRST refusal leg returns Ok → red.
+    #[test]
+    fn quoted_granted_loyalty_ability_requires_sorcery_speed() {
+        use crate::parser::oracle_static::parse_quoted_ability_modifications;
+        use crate::types::ContinuousModification;
+
+        let parsed = parse_quoted_ability_modifications("\"[0]: Proliferate\"");
+        let quoted_def = match parsed.as_slice() {
+            [ContinuousModification::GrantAbility { definition }] => (**definition).clone(),
+            other => panic!("expected single GrantAbility, got {other:?}"),
+        };
+        assert_eq!(quoted_def.kind, AbilityKind::Activated);
+        assert!(
+            matches!(quoted_def.cost, Some(AbilityCost::Loyalty { amount: 0 })),
+            "fixture def must be [0] loyalty, got {:?}",
+            quoted_def.cost
+        );
+        assert!(
+            matches!(*quoted_def.effect, Effect::Proliferate),
+            "fixture def effect must be Proliferate, got {:?}",
+            quoted_def.effect
+        );
+
+        let mut state = setup();
+        let pw = create_planeswalker(&mut state, PlayerId(0), "Jace", 3, vec![quoted_def.clone()]);
+
+        // REFUSALS FIRST. Count must stay 0 through all three legs so each
+        // refusal is attributable to AsSorcery, not the cap.
+        // Leg 1: not main phase.
+        state.phase = Phase::DeclareAttackers;
+        let mut events = Vec::new();
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_err(), "non-main-phase activation must refuse");
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
+
+        // Leg 2: not active player (opponent's turn).
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_err(), "off-turn activation must refuse");
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
+
+        // Leg 3: stack not empty.
+        state.active_player = PlayerId(0);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(99),
+            source_id: ObjectId(99),
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_err(), "stack-nonempty activation must refuse");
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
+
+        // ALLOW LAST (reach-guard): own main phase, empty stack → Ok, with the
+        // activation count recorded and the ability on the stack.
+        state.stack.clear();
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_ok(), "own-main-empty activation must allow");
+        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
+        assert!(!state.stack.is_empty());
+
+        // Non-walker holder pin (P1-R2 preservation): the same quoted def
+        // direct-installed on a non-walker object refuses via the planeswalker
+        // type check (`:88`) — which precedes the restriction consult
+        // (`:155-172`) — both before and after the attach. Pins
+        // gate-structural stability, not the fix; excluded from the revert-red
+        // claim.
+        let holder = create_object(
+            &mut state,
+            CardId(777),
+            PlayerId(0),
+            "Non-walker holder".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&holder).unwrap().abilities = Arc::new(vec![quoted_def]);
+        state.stack.clear();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), holder, 0, &mut events);
+        assert!(
+            result.is_err(),
+            "non-walker holder must refuse pre- and post-fix"
+        );
+    }
+
+    /// Build the Phase 3 activation board: Bolas(4) with one hand-built printed
+    /// +1 and verbatim-clause statics, plus a donor walker (3) with a +1
+    /// gain-life def and a targeted -3 destroy def, in the `setup()` position
+    /// (P0's precombat main, P0 priority, empty stack), layers evaluated.
+    /// Printed and donor defs carry `AsSorcery` ONLY — never
+    /// `make_loyalty_ability` (that helper adds `OnlyOnceEachTurn`, which would
+    /// conflate cap attribution, per P1-C4). When `timed` is false the DONOR
+    /// defs are built restriction-free (the P3-C4 carriage-drop probe);
+    /// Bolas's own def stays timed.
+    ///
+    /// `create_planeswalker` installs abilities, types, and loyalty on the live
+    /// object only, so the base fields are synced for the layer pass that
+    /// follows. Returns `(state, bolas, donor, own_plus, donor_plus,
+    /// donor_minus)`; the setup assertions make an emission revert fail here
+    /// (red: donated defs absent), not downstream.
+    fn bolas_plus_donor_board(
+        timed: bool,
+    ) -> (
+        GameState,
+        ObjectId,
+        ObjectId,
+        AbilityDefinition,
+        AbilityDefinition,
+        AbilityDefinition,
+    ) {
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle::parse_oracle_text;
+
+        fn time(mut def: AbilityDefinition, timed: bool) -> AbilityDefinition {
+            if timed {
+                def = def.sorcery_speed();
+            }
+            def
+        }
+
+        let mut state = setup();
+        let own_plus = time(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: 1 }),
+            true,
+        );
+        let bolas = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Nicol Bolas, Dragon-God",
+            4,
+            vec![own_plus.clone()],
+        );
+        {
+            let obj = state.objects.get_mut(&bolas).unwrap();
+            obj.base_abilities = Arc::clone(&obj.abilities);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_loyalty = obj.loyalty;
+            let parsed = parse_oracle_text(
+                "Nicol Bolas has all loyalty abilities of all other planeswalkers on the battlefield.",
+                "Nicol Bolas, Dragon-God",
+                &[],
+                &["Legendary".to_string(), "Planeswalker".to_string()],
+                &["Bolas".to_string()],
+            );
+            assert_eq!(
+                parsed.statics.len(),
+                1,
+                "verbatim Bolas grant clause must parse to exactly one static; got {:?}",
+                parsed.statics
+            );
+            obj.static_definitions = parsed.statics.into();
+        }
+
+        let donor_plus = time(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: 1 }),
+            timed,
+        );
+        let donor_minus = time(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: -3 }),
+            timed,
+        );
+        let donor = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Donor Walker",
+            3,
+            vec![donor_plus.clone(), donor_minus.clone()],
+        );
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.base_abilities = Arc::clone(&obj.abilities);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_loyalty = obj.loyalty;
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // Setup assertions: Bolas holds its printed +1 plus both donated defs.
+        for def in [&own_plus, &donor_plus, &donor_minus] {
+            assert!(
+                state.objects[&bolas].abilities.iter().any(|a| a == def),
+                "Bolas must hold def {def:?} post-layers; got {:?}",
+                state.objects[&bolas].abilities
+            );
+        }
+        (state, bolas, donor, own_plus, donor_plus, donor_minus)
+    }
+
+    /// Index of `def` in `id`'s live abilities. Re-resolved after every layer
+    /// pass rather than cached, so controller-change legs cannot go stale.
+    fn ability_index_of(state: &GameState, id: ObjectId, def: &AbilityDefinition) -> usize {
+        state.objects[&id]
+            .abilities
+            .iter()
+            .position(|a| a == def)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected def {def:?} on {id:?}; got {:?}",
+                    state.objects[&id].abilities
+                )
+            })
+    }
+
+    /// CR 606.4 + CR 606.6: the donated +1 activates on the controller's main
+    /// phase with an empty stack — Bolas loyalty 4→5, the donor unchanged, the
+    /// ability on the stack with Bolas as source, and the gain-life effect
+    /// resolves. Reverting the emission arm strands the board setup assertion
+    /// (red: donated ability absent).
+    #[test]
+    fn bolas_donated_plus_one_activates_and_moves_counters_on_bolas() {
+        let (mut state, bolas, donor, _, donor_plus, _) = bolas_plus_donor_board(true);
+        let mut events = Vec::new();
+        let life_before = state.players[0].life;
+
+        let donated_plus_index = ability_index_of(&state, bolas, &donor_plus);
+        let waiting = handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            bolas,
+            donated_plus_index,
+            &mut events,
+        )
+        .expect("donated +1 must activate on own main phase with empty stack");
+        assert!(
+            matches!(waiting, WaitingFor::Priority { .. }),
+            "untargeted activation must return to priority, got {waiting:?}"
+        );
+        assert_eq!(
+            state.objects[&bolas].loyalty,
+            Some(5),
+            "Bolas pays the donated +1 (4→5)"
+        );
+        assert_eq!(
+            state.objects[&donor].loyalty,
+            Some(3),
+            "donor loyalty unchanged by Bolas's activation"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.stack.back().expect("stacked ability").source_id,
+            bolas,
+            "stacked ability source is Bolas"
+        );
+
+        // The donated effect resolves.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(state.stack.is_empty());
+        assert_eq!(
+            state.players[0].life,
+            life_before + 1,
+            "the donated gain-life effect must resolve"
+        );
+
+        // Hostile (fresh board — the cap is spent above): the donated [-3]
+        // destroy with a target announces the target BEFORE Bolas pays
+        // (CR 602.2b + CR 601.2c): parks on TargetSelection with loyalty
+        // untouched and the pending loyalty cost stored; completing the
+        // selection pays on Bolas (4→1, donor unchanged) and stacks the
+        // ability. Two victims so auto-select cannot collapse to Priority.
+        use crate::types::ability::TargetRef;
+        let (mut state, bolas, donor, _, _, donor_minus) = bolas_plus_donor_board(true);
+        for card_id in [99u64, 100] {
+            let c = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(1),
+                "Goblin".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let victim_id = state
+            .objects
+            .iter()
+            .find(|(_, o)| o.name == "Goblin")
+            .map(|(id, _)| *id)
+            .expect("a goblin victim");
+        let donated_minus_index = ability_index_of(&state, bolas, &donor_minus);
+        let waiting = handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            bolas,
+            donated_minus_index,
+            &mut events,
+        )
+        .expect("donated -3 must reach target selection");
+        assert_eq!(
+            state.objects[&bolas].loyalty,
+            Some(4),
+            "loyalty unchanged before target selection"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 0);
+        assert!(
+            matches!(waiting, WaitingFor::TargetSelection { .. }),
+            "expected TargetSelection, got {waiting:?}"
+        );
+        if let WaitingFor::TargetSelection { pending_cast, .. } = &waiting {
+            assert!(
+                matches!(
+                    pending_cast.activation_cost,
+                    Some(AbilityCost::Loyalty { amount: -3 })
+                ),
+                "loyalty cost must be stored for deferred payment, got {:?}",
+                pending_cast.activation_cost
+            );
+            assert_eq!(
+                pending_cast.object_id, bolas,
+                "deferred payment source is Bolas"
+            );
+        }
+        state.waiting_for = waiting;
+        crate::game::casting_targets::handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Object(victim_id)],
+            &mut events,
+        )
+        .expect("target selection must complete");
+        assert_eq!(
+            state.objects[&bolas].loyalty,
+            Some(1),
+            "Bolas pays the donated -3 after targets are announced (4→1)"
+        );
+        assert_eq!(
+            state.objects[&donor].loyalty,
+            Some(3),
+            "donor loyalty unchanged by Bolas's activation"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    /// CR 606.3 (timing half): the donated +1 refuses off-turn / non-main /
+    /// non-empty-stack via its carried `AsSorcery`, and allows on own main
+    /// phase with an empty stack. Leg discipline is load-bearing (P1 F6):
+    /// refusals run BEFORE the allow on the shared board, so the activation
+    /// count stays 0 through the refusals and each refusal is attributable to
+    /// `AsSorcery`, not the per-permanent cap. Reverting the emission arm
+    /// strands the board setup assertion (red: donated ability absent).
+    #[test]
+    fn bolas_donated_ability_requires_sorcery_speed() {
+        let (mut state, bolas, _, _, donor_plus, _) = bolas_plus_donor_board(true);
+        let donated_plus_index = ability_index_of(&state, bolas, &donor_plus);
+
+        // REFUSALS FIRST. Count must stay 0 through all three legs so each
+        // refusal is attributable to AsSorcery, not the cap.
+        // Leg 1: not main phase (combat).
+        let mut events = Vec::new();
+        state.phase = Phase::DeclareAttackers;
+        let result = handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            bolas,
+            donated_plus_index,
+            &mut events,
+        );
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "combat-phase activation must refuse, got {result:?}"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 0);
+
+        // Leg 2: not active player (opponent's turn, no instant permission).
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        let result = handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            bolas,
+            donated_plus_index,
+            &mut events,
+        );
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "off-turn activation must refuse, got {result:?}"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 0);
+
+        // Leg 3: stack not empty.
+        state.active_player = PlayerId(0);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(99),
+            source_id: ObjectId(99),
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let result = handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            bolas,
+            donated_plus_index,
+            &mut events,
+        );
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "stack-nonempty activation must refuse, got {result:?}"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 0);
+
+        // ALLOW LAST (reach-guard): own main phase, empty stack → Ok.
+        state.stack.clear();
+        let result = handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            bolas,
+            donated_plus_index,
+            &mut events,
+        );
+        assert!(result.is_ok(), "own-main-empty activation must allow");
+        assert!(state.objects[&bolas].loyalty_activations_this_turn > 0);
+        assert!(!state.stack.is_empty());
+
+        // Carriage-drop probe (green-when-should-be-red): the SAME board with
+        // the AsSorcery carriage dropped from the donor defs allows off-turn —
+        // proving the refusals above ride on the donated def's carried
+        // restriction, not on some ambient gate.
+        let (mut state, bolas, _, _, donor_plus, _) = bolas_plus_donor_board(false);
+        assert!(
+            donor_plus.activation_restrictions.is_empty(),
+            "probe board must drop the AsSorcery carriage; got {:?}",
+            donor_plus.activation_restrictions
+        );
+        let donated_plus_index = ability_index_of(&state, bolas, &donor_plus);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        let result = handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            bolas,
+            donated_plus_index,
+            &mut events,
+        );
+        assert!(
+            result.is_ok(),
+            "carriage dropped → off-turn activation must allow (green-when-should-be-red), got {result:?}"
+        );
+        assert_eq!(
+            state.objects[&bolas].loyalty,
+            Some(5),
+            "the uncarriaged activation still pays on Bolas (4→5)"
+        );
+    }
+
+    /// CR 606.3 (frequency half): one loyalty activation per permanent per turn
+    /// across printed + donated — in BOTH orders — and the cap is owned by the
+    /// ACTIVATING permanent (`planeswalker.rs:129` reads `pw_id` = Bolas).
+    /// Stack is cleared between same-board attempts so each refusal is
+    /// attributable to the cap, not stack-nonempty AsSorcery. Reverting the
+    /// emission arm strands the board setup assertions (red: donated defs
+    /// absent, order-2 untestable).
+    #[test]
+    fn bolas_donated_and_printed_share_one_per_turn_cap() {
+        // Order 1: own +1 first (allowed), donated second (refused).
+        let (mut state, bolas, _, own_plus, donor_plus, _) = bolas_plus_donor_board(true);
+        let mut events = Vec::new();
+        let own_index = ability_index_of(&state, bolas, &own_plus);
+        let donated_index = ability_index_of(&state, bolas, &donor_plus);
+        handle_activate_loyalty(&mut state, PlayerId(0), bolas, own_index, &mut events)
+            .expect("first activation (own +1) must allow");
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+        state.stack.clear();
+        let result =
+            handle_activate_loyalty(&mut state, PlayerId(0), bolas, donated_index, &mut events);
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "second activation (donated) must refuse on the shared cap, got {result:?}"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+
+        // Order 2 (fresh board): donated first (allowed), own +1 second
+        // (refused).
+        let (mut state, bolas, _, own_plus, donor_plus, _) = bolas_plus_donor_board(true);
+        let own_index = ability_index_of(&state, bolas, &own_plus);
+        let donated_index = ability_index_of(&state, bolas, &donor_plus);
+        handle_activate_loyalty(&mut state, PlayerId(0), bolas, donated_index, &mut events)
+            .expect("first activation (donated) must allow");
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+        state.stack.clear();
+        let result =
+            handle_activate_loyalty(&mut state, PlayerId(0), bolas, own_index, &mut events);
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "second activation (own +1) must refuse on the shared cap, got {result:?}"
+        );
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+
+        // Multi-authority (1): the donor activates its own ability (donor
+        // count 1), then Bolas activates the donated copy → ALLOWED (Bolas
+        // 0→1). First branch: `loyalty_activations_this_turn >= cap` false on
+        // the activating permanent in each case.
+        let (mut state, bolas, donor, _, donor_plus, _) = bolas_plus_donor_board(true);
+        handle_activate_loyalty(&mut state, PlayerId(0), donor, 0, &mut events)
+            .expect("donor must activate its own +1 (index 0)");
+        assert_eq!(state.objects[&donor].loyalty_activations_this_turn, 1);
+        state.stack.clear();
+        let donated_index = ability_index_of(&state, bolas, &donor_plus);
+        handle_activate_loyalty(&mut state, PlayerId(0), bolas, donated_index, &mut events)
+            .expect("Bolas must activate the donated copy after the donor used its own");
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+
+        // Multi-authority (2): Bolas activates the donated copy, then the
+        // donor activates its printed original → ALLOWED.
+        let (mut state, bolas, donor, _, donor_plus, _) = bolas_plus_donor_board(true);
+        let donated_index = ability_index_of(&state, bolas, &donor_plus);
+        handle_activate_loyalty(&mut state, PlayerId(0), bolas, donated_index, &mut events)
+            .expect("Bolas must activate the donated copy first");
+        state.stack.clear();
+        handle_activate_loyalty(&mut state, PlayerId(0), donor, 0, &mut events)
+            .expect("donor must activate its printed original after Bolas used the copy");
+        assert_eq!(state.objects[&donor].loyalty_activations_this_turn, 1);
+
+        // Multi-authority (3): the donor changes controller mid-turn — still
+        // donated (no controller axis) and Bolas's cap unaffected. Both
+        // controller fields move: Layer 2 recomputes `controller` from
+        // `base_controller` on every pass, so moving one alone would revert.
+        let (mut state, bolas, donor, _, donor_plus, _) = bolas_plus_donor_board(true);
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.controller = PlayerId(1);
+            obj.base_controller = Some(PlayerId(1));
+        }
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let donated_index = ability_index_of(&state, bolas, &donor_plus);
+        handle_activate_loyalty(&mut state, PlayerId(0), bolas, donated_index, &mut events)
+            .expect("Bolas must activate the donated copy after the donor changed controller");
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 1);
+
+        // Multi-authority (4): a Chain Veil extra activation raises the shared
+        // cap (reaches the `base_cap` branch) → the second use is ALLOWED —
+        // proving the refusals above are the shared counter, not a per-ability
+        // flag (which the Veil does not touch). A third use is still refused
+        // (proving +1, not +infinity).
+        let (mut state, bolas, _, own_plus, donor_plus, _) = bolas_plus_donor_board(true);
+        // Seed the Chain Veil +1 grant directly (the Chain Veil resolver's own
+        // unit-test precedent writes this same map; cf. Oath of Teferi).
+        state
+            .extra_loyalty_activations_this_turn
+            .insert(PlayerId(0), 1);
+        let own_index = ability_index_of(&state, bolas, &own_plus);
+        let donated_index = ability_index_of(&state, bolas, &donor_plus);
+        handle_activate_loyalty(&mut state, PlayerId(0), bolas, own_index, &mut events)
+            .expect("first activation must allow under the Veil grant");
+        state.stack.clear();
+        handle_activate_loyalty(&mut state, PlayerId(0), bolas, donated_index, &mut events)
+            .expect("second activation must allow under the Veil grant (cap 2)");
+        assert_eq!(state.objects[&bolas].loyalty_activations_this_turn, 2);
+        state.stack.clear();
+        let result =
+            handle_activate_loyalty(&mut state, PlayerId(0), bolas, own_index, &mut events);
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "third activation must refuse (Veil grants +1, not +infinity), got {result:?}"
+        );
+    }
+
     /// CR 606.2: a targeted `[-X]` loyalty ability's printed cost is
     /// `RemoveCounter { X loyalty counters }`, which `is_loyalty_ability_cost`
     /// recognizes. The X-cost path clears `pending.activation_cost` before the

@@ -1,0 +1,30 @@
+name: Sync fork main with upstream
+
+# Keeps this fork's `main` tracking phase-rs/phase `main` so PR branches cut
+# from (or compared against) the fork never go silently stale. Uses the
+# merge-upstream API: each run merges upstream/main into fork main (a merge
+# commit when upstream advanced; a no-op otherwise). Only this workflow file
+# itself differs from upstream, so the merge is always conflict-free — if it
+# ever fails, upstream added a colliding path and the sync needs a human.
+#
+# Fork-local file: intentionally NOT part of any upstream PR. Branches forked
+# for upstream PRs should still merge `upstream/main` directly.
+
+on:
+  schedule:
+    # Every 6 hours, off the hour/half-hour marks most crons pile onto.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Merge upstream main into fork main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream into fork main
+        run: gh api -X POST repos/JacobWoodson/phase/merge-upstream -f branch=main --jq '{merged: .merge_upstream_commit, base: .base_branch}'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

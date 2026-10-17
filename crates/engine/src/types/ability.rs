@@ -34610,6 +34610,27 @@ pub enum ContinuousModification {
     GrantAllTriggeredAbilitiesOf {
         source: TargetFilter,
     },
+    /// CR 613.1f + CR 606.1 + CR 606.2: Grant the affected object **all loyalty
+    /// abilities of** the objects matching `source` (Nicol Bolas, Dragon-God
+    /// "has all loyalty abilities of all other planeswalkers on the
+    /// battlefield"). The loyalty-ability mirror of
+    /// `GrantAllActivatedAbilitiesOf`: the set is dynamic — recomputed each
+    /// layer pass — so it is retained through earlier layers and expanded into
+    /// `GrantAbility` effects when it applies in layer 6. `source` is resolved
+    /// relative to the host static with each recipient's current controller,
+    /// mirroring the activated expander. Distinct sibling rather than a
+    /// parameter of `GrantAllActivatedAbilitiesOf` because the loyalty filter
+    /// is ability-level (CR 606.2: an activated ability with a loyalty symbol
+    /// in its cost is a loyalty ability) while `source` is object-level, and
+    /// planeswalkers can hold non-loyalty activated abilities — the unfiltered
+    /// sibling would over-grant. No `cap`: loyalty frequency is governed by
+    /// the CR 606.3 per-permanent gate, which replaces CR 602.5b rider caps, so
+    /// a cap channel would be dead shape. Loyalty abilities ARE `Activated`
+    /// (`AbilityKind` has no loyalty kind, CR 606.2), so donated defs land in
+    /// CR 602.1 `obj.abilities` via `GrantAbility` like the activated mirror.
+    GrantAllLoyaltyAbilitiesOf {
+        source: TargetFilter,
+    },
     /// CR 604.1: Grant a triggered ability to the affected object.
     /// Unlike GrantAbility (which pushes to obj.abilities), this pushes to
     /// obj.trigger_definitions so the trigger's event/condition metadata is

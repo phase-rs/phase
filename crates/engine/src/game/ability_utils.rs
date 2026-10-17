@@ -7094,6 +7094,7 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::RemoveAllAbilities

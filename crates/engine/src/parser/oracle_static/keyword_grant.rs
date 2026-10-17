@@ -850,24 +850,30 @@ pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<Target
     Some(TargetFilter::Typed(typed))
 }
 
-/// CR 602.1 + CR 603.1: The set of ability categories a "[~ has] all
-/// [activated|triggered|activated and triggered] abilities of [source]" grant
-/// donates. Activated and triggered abilities land in different stores via
-/// different continuous modifications (`GrantAllActivatedAbilitiesOf` →
-/// `obj.abilities`; `GrantAllTriggeredAbilitiesOf` → `obj.trigger_definitions`),
+/// CR 602.1 + CR 603.1 + CR 606.2: The set of ability categories a "[~ has]
+/// all [activated|triggered|loyalty|activated and triggered] abilities of
+/// [source]" grant donates. Activated and triggered abilities land in
+/// different stores via different continuous modifications
+/// (`GrantAllActivatedAbilitiesOf` → `obj.abilities`;
+/// `GrantAllTriggeredAbilitiesOf` → `obj.trigger_definitions`), and loyalty
+/// abilities donate via their own sibling (`GrantAllLoyaltyAbilitiesOf` →
+/// `obj.abilities`, since loyalty abilities ARE activated abilities),
 /// so the parser captures which categories the phrase named.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GrantedAbilityKinds {
     Activated,
     Triggered,
+    Loyalty,
     ActivatedAndTriggered,
 }
 
-/// CR 602.1 + CR 603.1: The grant-phrase category axis. The conjunction form
-/// ("activated and triggered" / "triggered and activated", order-insensitive) is
-/// tried before the single-category leaves so the longer phrase wins. The plural
-/// and the singular-distributive activated form ("each activated ability of",
-/// Locus of Enlightenment) map to the same activated set.
+/// CR 602.1 + CR 603.1 + CR 606.2: The grant-phrase category axis. The
+/// conjunction form ("activated and triggered" / "triggered and activated",
+/// order-insensitive) is tried before the single-category leaves so the longer
+/// phrase wins. The plural and the singular-distributive activated form ("each
+/// activated ability of", Locus of Enlightenment) map to the same activated
+/// set; the loyalty leaf ("all loyalty abilities of", Nicol Bolas,
+/// Dragon-God) maps to the loyalty subset.
 fn parse_granted_ability_kinds(input: &str) -> OracleResult<'_, GrantedAbilityKinds> {
     alt((
         value(
@@ -880,6 +886,10 @@ fn parse_granted_ability_kinds(input: &str) -> OracleResult<'_, GrantedAbilityKi
         value(
             GrantedAbilityKinds::Triggered,
             tag("all triggered abilities of "),
+        ),
+        value(
+            GrantedAbilityKinds::Loyalty,
+            tag("all loyalty abilities of "),
         ),
         value(
             GrantedAbilityKinds::Activated,
@@ -1044,6 +1054,25 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
                 zone: Zone::Battlefield,
             }])),
             tag("all lands on the battlefield"),
+        ),
+        // CR 613.1f: "all other planeswalkers on the battlefield" (Nicol Bolas,
+        // Dragon-God) — zone is explicit in the phrase, encoded so planeswalker
+        // cards in other zones are excluded from the runtime provider scan; the
+        // English "other" is the self-exclusion conjunct (Kraj precedent).
+        value(
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(
+                        vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }],
+                    )),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::SelfRef),
+                    },
+                ],
+            },
+            tag("all other planeswalkers on the battlefield"),
         ),
         // CR 613.1f: "all legendary creatures you control" (Robaran Mercenaries)
         // — battlefield permanents; scope to InZone { Battlefield } so
@@ -1327,6 +1356,15 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             mods.push(ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: source.clone(),
                 cap: None,
+            });
+        }
+        // CR 606.1 + CR 606.2: a loyalty grant donates the loyalty abilities
+        // (activated abilities with a loyalty symbol in the cost) of the source
+        // set. No cap channel — loyalty frequency is governed by the CR 606.3
+        // per-permanent gate, which replaces CR 602.5b rider caps.
+        if matches!(kinds, GrantedAbilityKinds::Loyalty) {
+            mods.push(ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+                source: source.clone(),
             });
         }
         if matches!(

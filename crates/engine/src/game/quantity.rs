@@ -2495,6 +2495,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         // A granted object-hosted replacement carries no `QuantityExpr`
         // magnitude — its `execute` (ChangeZone→Exile) has no dynamic value.

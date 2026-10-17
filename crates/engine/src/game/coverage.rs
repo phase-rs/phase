@@ -5222,6 +5222,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
             format!("grant all triggered abilities of {}", fmt_target(source))
         }
+        ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => {
+            format!("grant all loyalty abilities of {}", fmt_target(source))
+        }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::GrantReplacement { .. } => "grant replacement".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
@@ -15615,10 +15618,14 @@ mod tests {
     #[test]
     fn grant_all_abilities_signature_exposes_source() {
         // Same class as #5492/#5495/#5501/#5507: GrantAllActivatedAbilitiesOf /
-        // GrantAllTriggeredAbilitiesOf rendered only the bare label, swallowing their
-        // `source` filter with `..`, so a parser change to which permanents' abilities
-        // are granted showed as a removal with no compensating addition in the sticky.
-        use crate::types::ability::{ContinuousModification, TargetFilter};
+        // GrantAllTriggeredAbilitiesOf / GrantAllLoyaltyAbilitiesOf rendered only
+        // the bare label, swallowing their `source` filter with `..`, so a parser
+        // change to which permanents' abilities are granted showed as a removal
+        // with no compensating addition in the sticky.
+        use crate::types::ability::{
+            ContinuousModification, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::zones::Zone;
 
         let act = |source: TargetFilter| {
             fmt_modification(&ContinuousModification::GrantAllActivatedAbilitiesOf {
@@ -15629,6 +15636,9 @@ mod tests {
         let trg = |source: TargetFilter| {
             fmt_modification(&ContinuousModification::GrantAllTriggeredAbilitiesOf { source })
         };
+        let loy = |source: TargetFilter| {
+            fmt_modification(&ContinuousModification::GrantAllLoyaltyAbilitiesOf { source })
+        };
 
         // The source filter must appear in each signature ...
         assert!(
@@ -15638,6 +15648,23 @@ mod tests {
         assert!(
             trg(TargetFilter::SelfRef).contains(&fmt_target(&TargetFilter::SelfRef)),
             "triggered-grant signature must expose its source filter",
+        );
+        assert!(
+            loy(TargetFilter::SelfRef).contains(&fmt_target(&TargetFilter::SelfRef)),
+            "loyalty-grant signature must expose its source filter",
+        );
+        // ... so a source-filter swap changes the loyalty signature (reaches
+        // the new fmt arm's `fmt_target(source)`).
+        let battlefield_walkers =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+            ]));
+        assert_ne!(
+            loy(TargetFilter::SelfRef),
+            loy(battlefield_walkers),
+            "different source filters must produce different loyalty-grant signatures",
         );
         // ... so different source filters produce distinct signatures, not one bare label.
         assert_ne!(

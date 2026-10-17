@@ -116,6 +116,7 @@ mod block_trigger_cardinality;
 mod blocked_history_primitive;
 mod blocked_status_filter;
 mod bolas_citadel_regression;
+mod bolas_dragon_god_grants;
 mod bombur_gentle_dreamer_conditional_untap;
 mod boneyard_parley_pile_separation;
 mod boon_reflection_gain_life_drain;

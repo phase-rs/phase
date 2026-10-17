@@ -397,6 +397,7 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
             | ContinuousModification::GrantReplacement { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::RemoveType { .. }

@@ -8,6 +8,7 @@ use super::prelude::*;
 use super::support::*;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
+use crate::types::ability::is_loyalty_ability_cost;
 use crate::types::ability::PlayerFilter;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
@@ -1760,6 +1761,23 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
             parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
         def.cost = Some(cost);
         def.activation_restrictions.extend(constraints.restrictions);
+        // CR 606.3: a quoted granted ability whose cost is a loyalty cost is a loyalty
+        // ability (CR 606.2) and carries sorcery-speed timing — the same attach the
+        // printed-loyalty path performs in `apply_loyalty_restrictions`, at the second
+        // construction site it was missing. Dedup-guarded: an explicit textual rider
+        // ("Activate only as a sorcery") already contributed `AsSorcery` via
+        // `strip_activated_constraints`. The once-per-turn half of CR 606.3 stays with
+        // the per-permanent gate (`can_activate_loyalty_ability`), which keys on the
+        // loyalty cost — deliberately no `OnlyOnceEachTurn` here (per-ability-index
+        // semantics would mis-model the per-permanent rule and break Chain Veil caps).
+        if def.cost.as_ref().is_some_and(is_loyalty_ability_cost)
+            && !def
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery)
+        {
+            def.activation_restrictions
+                .push(ActivationRestriction::AsSorcery);
+        }
         // CR 601.2f: Fold a trailing self-referential "This ability costs {X}
         // less to activate, where X is ~'s power" node into `cost_reduction`
         // (the same AST-level extractor standalone activated abilities use). The

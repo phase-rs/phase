@@ -728,6 +728,7 @@ fn modification_can_add_keyword_kind(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::AddType { .. }

@@ -6422,6 +6422,7 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::GrantStaticAbility { .. }
         | ContinuousModification::AddKeywordWithDerivedCost { .. }
@@ -11254,6 +11255,9 @@ mod tests {
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::Any,
             },
+            ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+                source: TargetFilter::Any,
+            },
             ContinuousModification::RetainPrintedTriggerFromSource {
                 source_trigger_index: 0,
             },
@@ -11276,8 +11280,8 @@ mod tests {
         ];
         assert_eq!(
             survivors.len(),
-            10,
-            "scope guard covers 10 of the arm's 11 members; CopyValues is the \
+            11,
+            "scope guard covers 11 of the arm's 12 members; CopyValues is the \
              documented omission"
         );
         for m in &survivors {
