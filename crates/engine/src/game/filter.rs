@@ -8560,6 +8560,7 @@ fn filter_inner_for_object(
                 granting_object,
             );
             source_ctx.declared_slot_view = declared_slot_view;
+            source_ctx.ability_targets = ability_targets;
             properties.iter().all(|p| match p {
                 FilterProp::Owned { controller } => {
                     zone_axis_admits(state, licensed, obj.owner, |owner| {
@@ -10542,6 +10543,11 @@ struct SourceContext<'a> {
     recipient_id: Option<ObjectId>,
     /// CR 201.5a: mirror of `FilterContext::granting_object`.
     granting_object: Option<ObjectIncarnationRef>,
+    /// R2: mirror of `FilterContext::ability_targets` — the parked target
+    /// authority for suspension-resume reads. Consumers that resolve a
+    /// selected-target reference (`SharesQuality`) consult this when
+    /// `ability` is `None`; every other context leaves it `None`.
+    ability_targets: Option<ParkedTargets<'a>>,
 }
 
 /// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
@@ -10781,6 +10787,7 @@ fn source_context_from_filter<'a>(
         recipient_id,
         triggering_object,
         granting_object,
+        ability_targets: None,
     }
 }
 
@@ -13230,6 +13237,9 @@ fn parent_target_shared_quality_values(
     // `ParentTarget` normally references the first selected object target.
     // In layer evaluation there is no selected target, so recipient-relative
     // quantities bind it to the affected object instead.
+    // R2: suspension-resume reads carry no ability, but the parked frame
+    // kept the node's targets — the first selected object is the same
+    // reference the live path reads, through the same ladder below.
     let target_id = source
         .ability
         .and_then(|ability| {
@@ -13238,7 +13248,15 @@ fn parent_target_shared_quality_values(
                 TargetRef::Player(_) => None,
             })
         })
-        .or(source.recipient_id);
+        .or(source.recipient_id)
+        .or_else(|| {
+            source.ability_targets.and_then(|parked| {
+                parked.local.iter().find_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+            })
+        });
 
     // Resolution ladder: live object → target-id LKI → effect-context snapshot.
     // The first two rungs honor a genuinely chosen target; the snapshot rung is a
@@ -13348,6 +13366,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         ability: None,
         recipient_id: None,
         granting_object: None,
+        ability_targets: None,
     }
 }
 

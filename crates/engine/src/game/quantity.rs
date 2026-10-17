@@ -22615,6 +22615,175 @@ mod tests {
         }
     }
 
+    /// R2 fixture: two live unstamped battlefield permanents published to
+    /// the chain tracked set — a 5-power Creature brute (also the ability's
+    /// selected target) and a 7-power Artifact bauble. A CardType
+    /// `SharesQuality` member filter against the selected target admits
+    /// the brute and excludes the bauble, so a power sum reads 5 with the
+    /// non-sharing control embedded. No keyed pins: the live consumer
+    /// reads the first selected target raw, and the parked twin must match
+    /// it exactly.
+    fn r2_shares_fixture() -> (GameState, ResolvedAbility, TargetFilter) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(550),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(551),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        let bauble = create_object(
+            &mut state,
+            CardId(552),
+            PlayerId(0),
+            "Bauble".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let brute_obj = state.objects.get_mut(&brute).unwrap();
+            brute_obj.power = Some(5);
+            brute_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        }
+        {
+            let bauble_obj = state.objects.get_mut(&bauble).unwrap();
+            bauble_obj.power = Some(7);
+            bauble_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Artifact];
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        crate::game::effects::publish_tracked_set(&mut state, vec![brute, bauble]);
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }]),
+        );
+        (state, ability, filter)
+    }
+
+    /// R2: live member matching through a Typed `SharesQuality` filter
+    /// reads the first selected target — the sharing brute contributes
+    /// its power 5, the non-sharing bauble nothing.
+    #[test]
+    fn live_shares_member_filter_reads_the_selected_target() {
+        let (state, ability, filter) = r2_shares_fixture();
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(filter),
+                    },
+                )
+                .expect("filtered ChainSet is admitted"),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            5,
+            "the sharing member contributes 5, the bauble nothing"
+        );
+    }
+
+    /// R2: a parked Typed `SharesQuality` member filter reads the same
+    /// first selected target after a production capture and resume —
+    /// natural 10 + 5 = 15. Dropping the parked authority at the Typed
+    /// property boundary excludes both members and emits 10.
+    #[test]
+    fn parked_shares_member_filter_reads_the_selected_target() {
+        let (mut state, ability, filter) = r2_shares_fixture();
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.declared_targets.len(),
+            1,
+            "reach guard: the selected target must travel"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: ability.source_id,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets: ability.context.chain_root_targets.clone(),
+            illegal_target_slots: illegal,
+            chain_root_target_pins: vec![],
+            declared_targets: captured.declared_targets,
+            declared_target_pins: captured.declared_pins,
+            declared_ahead: captured.declared_ahead,
+            local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![15],
+            "the sharing member contributes 5 (10 + 5); dropping the parked authority emits 10"
+        );
+    }
+
     /// CR 603.4 + CR 508.1a: Pack Tactics evaluates the particular declaration
     /// event that caused the check, and each declaration record keeps its own
     /// power even when a hostile fixture reuses the same object id.
