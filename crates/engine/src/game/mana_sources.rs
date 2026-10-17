@@ -2345,17 +2345,68 @@ fn mana_capacity(
     payment_context: Option<&PaymentContext<'_>>,
     capacity_use: CapacityUse,
 ) -> u32 {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return 0;
-    };
-    if obj.zone != Zone::Battlefield || obj.controller != controller {
-        return 0;
-    }
+    usable_mana_ability_nets(state, object_id, controller, payment_context, capacity_use)
+        .map(|(_, net_yield)| net_yield)
+        .max()
+        .unwrap_or(0)
+}
 
-    obj.abilities
-        .iter()
-        .enumerate()
-        .filter(|(idx, ability)| {
+/// One way a permanent could pay mana: the net mana a single activation yields
+/// and the typed penalty that activation carries. A permanent with several
+/// methods (a Sliver granted both `{T}: Add one mana` and `Sacrifice this
+/// permanent: Add {B}{B}`) offers one entry per method — the yield and the
+/// penalty belong together, so a caller pricing a payment pairs them rather
+/// than reading a per-object maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeasibleManaMethod {
+    pub net_yield: u32,
+    pub penalty: ManaSourcePenalty,
+}
+
+/// CR 107.3 + CR 601.2f: Every mana method of this permanent the controller
+/// could currently activate toward the {X} ceiling, each with its net yield
+/// (CR 605.3b) and penalty. [`x_ceiling_mana_capacity`] is the maximum net
+/// yield over these; both walk the same usable abilities, and only this view
+/// builds the per-method penalty.
+pub(crate) fn x_ceiling_mana_methods(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> Vec<FeasibleManaMethod> {
+    usable_mana_ability_nets(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        CapacityUse::XCeiling,
+    )
+    .map(|(ability, net_yield)| FeasibleManaMethod {
+        net_yield,
+        penalty: object_mana_ability_penalty(state, object_id, ability),
+    })
+    .collect()
+}
+
+/// The mana abilities of `object_id` the controller could currently activate
+/// toward `payment_context`, each with its net yield. Empty when the object is
+/// not a battlefield permanent under `controller`. The one walk behind both
+/// the capacity and per-method views, so they cannot disagree on which
+/// abilities count.
+fn usable_mana_ability_nets<'a>(
+    state: &'a GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&'a PaymentContext<'a>>,
+    capacity_use: CapacityUse,
+) -> impl Iterator<Item = (&'a AbilityDefinition, u32)> + 'a {
+    state
+        .objects
+        .get(&object_id)
+        .filter(|obj| obj.zone == Zone::Battlefield && obj.controller == controller)
+        .into_iter()
+        .flat_map(|obj| obj.abilities.iter().enumerate())
+        .filter(move |(idx, ability)| {
             is_payment_mana_ability(ability)
                 && mana_ability_usable_for_payment(
                     state,
@@ -2366,11 +2417,10 @@ fn mana_capacity(
                     payment_context,
                 )
         })
-        .filter_map(|(_, ability)| {
+        .filter_map(move |(_, ability)| {
             usable_mana_ability_net(state, object_id, controller, ability, capacity_use)
+                .map(|net_yield| (ability, net_yield))
         })
-        .max()
-        .unwrap_or(0)
 }
 
 /// CR 605.1a: An activated mana ability.
