@@ -2702,15 +2702,21 @@ fn try_parse_lose_control_delayed_trigger(
     ))
 }
 
-/// CR 122.1 + CR 608.2c: "it enters with an additional +1/+1 counter on it" rider
-/// after a zone-change-this-way gate (Winter Soldier, Reborn Avenger). Valid only
-/// under its battlefield-mover producer: reached solely through
-/// `entry_counter_rider_clause`, so its `ParentTarget` always names the object
-/// the preceding `ChangeZone` moved (and is folded into that move).
+/// CR 122.1 + CR 608.2c + CR 614.12: an additional entry-counter rider bound to
+/// its battlefield-mover producer. `entry_counter_rider_clause` reads a gated
+/// rider (Winter Soldier, Reborn Avenger), whose `ParentTarget` is folded into
+/// the move by `lower::fold_enters_this_way_counter_rider`.
+/// `sequence::parse_moved_object_entry_counters_continuation` reads an unconditional
+/// rider after a battlefield mover, using only its counter type and count to
+/// modify how each moved object enters.
 fn try_parse_enters_this_way_additional_counter(lower: &str) -> Option<Effect> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that creature enters with "),
         tag("it enters with "),
+        // CR 608.2c: the distributive plural anaphor after a multi-object mover
+        // ("Each of them enters with …" — Aberrant Return) names every object that
+        // mover put onto the battlefield.
+        tag("each of them enters with "),
     ))
     .parse(lower.trim())
     .ok()?;
@@ -4378,6 +4384,11 @@ fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClaus
 /// 2. a battlefield mover whose rider is gated on an object entering this way
 ///    (Heroic Return, Recommission) — `lower::entry_rider_folds_into`, the
 ///    predicate the fold into `ChangeZone.conditional_enter_with_counters` uses.
+/// 3. (not dispatched here) an UNCONDITIONAL rider directly after a battlefield
+///    `ChangeZone` is read as a followup continuation
+///    (`sequence::parse_moved_object_entry_counters_continuation` →
+///    `TokenEntersWithCounters`), patching the mover's `enter_with_counters`;
+///    this function returns `None` for it (no condition).
 ///
 /// The first arm whose producer holds owns the clause; when its recognizer
 /// declines, the clause falls to the generic path rather than to a later arm

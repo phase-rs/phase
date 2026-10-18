@@ -23875,6 +23875,290 @@ fn return_one_or_two_target_permanents_from_graveyard_is_multi_targeted() {
     assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)));
 }
 
+/// CR 601.2c + CR 115.1a: Aberrant Return's "Put one, two, or three target
+/// creature cards from graveyards onto the battlefield under your control"
+/// announces one to three targets. SHAPE: asserts the `MultiTargetSpec` through
+/// both seams that recover it (the clause fixup and the chain assembly). The
+/// runtime proof is `put_target_count_entry_counters.rs`.
+///
+/// `fixed(1, 3)`, not `exact(1)`: "one, two, or three" opens with "one" but the
+/// exact-count grammar needs "one target", so the bounded recovery must win.
+#[test]
+fn put_one_two_or_three_target_creature_cards_is_bounded_multi_target() {
+    let text = "Put one, two, or three target creature cards from graveyards onto the battlefield under your control.";
+
+    let clause = parse_effect_clause(text, &mut ParseContext::default());
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "reach guard: expected a battlefield ChangeZone, got {:?}",
+        clause.effect
+    );
+    assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "reach guard: expected a battlefield ChangeZone, got {:?}",
+        def.effect
+    );
+    assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+}
+
+/// CR 601.2c + CR 115.1a: "Put two target <permanents> on top of their owners'
+/// libraries" (Rebuking Ceremony, Plow Under) announces exactly two targets.
+/// SHAPE; the runtime proof for Rebuking Ceremony is
+/// `put_target_count_entry_counters.rs`. The destination assertion is only a
+/// reach guard that the clause parsed to a library move (the separate
+/// "libraries" plural routing defect is not asserted here).
+///
+/// Paired control on the same entry points: a resource count on a target
+/// ("Put two +1/+1 counters on target creature") is not an announced target
+/// count and must stay without a `MultiTargetSpec`.
+#[test]
+fn put_two_target_permanents_is_exact_multi_target() {
+    let two = MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 });
+    for text in [
+        "Put two target artifacts on top of their owners' libraries.",
+        "Put two target lands on top of their owners' libraries.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    ..
+                }
+            ),
+            "{text:?}: reach guard: expected a library ChangeZone, got {:?}",
+            def.effect
+        );
+        assert_eq!(def.multi_target, Some(two.clone()), "{text:?}");
+    }
+
+    let counters = "Put two +1/+1 counters on target creature.";
+    let def = parse_effect_chain(counters, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::PutCounter { .. }),
+        "reach guard: the control parses to PutCounter, got {:?}",
+        def.effect
+    );
+    assert_eq!(def.multi_target, None, "{counters:?}");
+    let clause = parse_effect_clause(counters, &mut ParseContext::default());
+    assert!(matches!(clause.effect, Effect::PutCounter { .. }));
+    assert_eq!(clause.multi_target, None, "{counters:?}");
+}
+
+/// The entry counters of a battlefield mover (single or mass), `None` for any
+/// other effect.
+fn battlefield_mover_entry_counters(
+    def: &AbilityDefinition,
+) -> Option<&Vec<(CounterType, QuantityExpr)>> {
+    match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            enter_with_counters,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            destination: Zone::Battlefield,
+            enter_with_counters,
+            ..
+        } => Some(enter_with_counters),
+        _ => None,
+    }
+}
+
+/// Like `chain_definitions`, but also descends into a delayed trigger's effect
+/// (Semester's End returns its creatures from a delayed trigger).
+fn chain_definitions_through_delayed(abilities: &[AbilityDefinition]) -> Vec<&AbilityDefinition> {
+    fn walk<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(def);
+        if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+            walk(effect, out);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(else_branch) = def.else_ability.as_deref() {
+            walk(else_branch, out);
+        }
+    }
+    let mut out = Vec::new();
+    for ability in abilities {
+        walk(ability, &mut out);
+    }
+    out
+}
+
+/// SHAPE: CR 614.12 + CR 122.6 + CR 608.2c. Aberrant Return (verbatim): the
+/// unconditional "Each of them enters with an additional -1/-1 counter on it"
+/// rider is the battlefield mover's own entry counters, with the announced
+/// 1..=3 target count on the same mover. No `Unimplemented` clause and no
+/// dangling post-move `PutCounter { ParentTarget }` remains. The runtime proof
+/// is `put_target_count_entry_counters.rs`.
+#[test]
+fn aberrant_return_rider_folds_into_mover_entry_counters() {
+    let abilities = spell_chain_definitions(
+        "Put one, two, or three target creature cards from graveyards onto the battlefield under your control. Each of them enters with an additional -1/-1 counter on it.",
+    );
+    let defs = chain_definitions(&abilities);
+    let mover = defs
+        .iter()
+        .find(|def| battlefield_mover_entry_counters(def).is_some())
+        .unwrap_or_else(|| panic!("reach guard: a battlefield mover parses, got {abilities:?}"));
+    assert_eq!(
+        battlefield_mover_entry_counters(mover),
+        Some(&vec![(
+            CounterType::Minus1Minus1,
+            QuantityExpr::Fixed { value: 1 }
+        )]),
+        "got {abilities:?}"
+    );
+    assert_eq!(mover.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+    assert!(
+        defs.iter()
+            .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
+        "no clause may stay unimplemented, got {abilities:?}"
+    );
+    assert!(
+        !has_parent_target_put(&defs),
+        "no post-move PutCounter, got {abilities:?}"
+    );
+}
+
+/// SHAPE: CR 614.12 + CR 122.6. The same carrier serves the singular and
+/// counted forms of the unconditional rider after any battlefield return:
+/// "It enters with an additional +1/+1 counter on it" and "It enters with two
+/// additional +1/+1 counters on it" patch the mover's entry counters.
+#[test]
+fn unconditional_singular_entry_rider_after_return_folds() {
+    for (text, count) in [
+        (
+            "Return target creature card from your graveyard to the battlefield. It enters with an additional +1/+1 counter on it.",
+            1,
+        ),
+        (
+            "Return target creature card from your graveyard to the battlefield. It enters with two additional +1/+1 counters on it.",
+            2,
+        ),
+    ] {
+        let abilities = spell_chain_definitions(text);
+        let defs = chain_definitions(&abilities);
+        let mover = defs
+            .iter()
+            .find(|def| battlefield_mover_entry_counters(def).is_some())
+            .unwrap_or_else(|| panic!("{text:?}: reach guard: a battlefield mover parses"));
+        assert_eq!(
+            battlefield_mover_entry_counters(mover),
+            Some(&vec![(
+                CounterType::Plus1Plus1,
+                QuantityExpr::Fixed { value: count }
+            )]),
+            "{text:?}: got {abilities:?}"
+        );
+        assert!(
+            defs.iter()
+                .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
+            "{text:?}: no clause may stay unimplemented, got {abilities:?}"
+        );
+        assert!(
+            !has_parent_target_put(&defs),
+            "{text:?}: no post-move PutCounter, got {abilities:?}"
+        );
+    }
+}
+
+/// CR 614.12 + CR 608.2c: riders that are NOT an unconditional whole-sentence
+/// "enters with additional counters" must not patch the battlefield mover.
+/// Each row pairs the emptiness assertion with a positive reach guard (the
+/// battlefield mover parsed), so an unparsed input cannot pass vacuously.
+///
+/// - What Must Be Done (verbatim): trailing "if it's a creature" gate.
+/// - A leading "If it's an artifact, ..." gate.
+/// - A trailing "for each ..." quantity.
+/// - Semester's End (verbatim): a delayed mass return whose rider is gated per
+///   card type ("... if it's a creature and ... if it's a planeswalker").
+/// - A non-battlefield producer (exile): the rider stays an explicit gap.
+#[test]
+fn entry_rider_hostile_shapes_do_not_patch_the_mover() {
+    let battlefield_rows = [
+        (
+            "what_must_be_done",
+            "Return target historic permanent card from your graveyard to the battlefield. It enters with two additional +1/+1 counters on it if it's a creature.",
+        ),
+        (
+            "leading_gate",
+            "Return target artifact card from your graveyard to the battlefield. If it's an artifact, it enters with an additional +1/+1 counter on it.",
+        ),
+        (
+            "trailing_quantity",
+            "Return target creature card from your graveyard to the battlefield. It enters with an additional +1/+1 counter on it for each creature you control.",
+        ),
+        (
+            "semesters_end",
+            "Exile any number of target creatures and/or planeswalkers you control. At the beginning of the next end step, return each of them to the battlefield under its owner's control. Each of them enters with an additional +1/+1 counter on it if it's a creature and an additional loyalty counter on it if it's a planeswalker.",
+        ),
+    ];
+    for (label, text) in battlefield_rows {
+        let abilities = spell_chain_definitions(text);
+        let defs = chain_definitions_through_delayed(&abilities);
+        let movers: Vec<_> = defs
+            .iter()
+            .filter_map(|def| battlefield_mover_entry_counters(def))
+            .collect();
+        assert!(
+            !movers.is_empty(),
+            "{label}: reach guard: a battlefield mover parses, got {abilities:?}"
+        );
+        assert!(
+            movers.iter().all(|counters| counters.is_empty()),
+            "{label}: a declined rider must not patch the mover, got {abilities:?}"
+        );
+    }
+
+    let exile = spell_chain_definitions(
+        "Exile target creature card from your graveyard. It enters with an additional +1/+1 counter on it.",
+    );
+    let exile_defs = chain_definitions(&exile);
+    let exile_movers: Vec<_> = exile_defs
+        .iter()
+        .filter_map(|def| match def.effect.as_ref() {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                enter_with_counters,
+                ..
+            } => Some(enter_with_counters),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !exile_movers.is_empty(),
+        "exile: reach guard: the exile mover parses, got {exile:?}"
+    );
+    assert!(
+        exile_movers.iter().all(|counters| counters.is_empty()),
+        "exile: the rider must not patch a non-battlefield mover, got {exile:?}"
+    );
+    assert!(
+        has_unimplemented_rider(&exile_defs),
+        "exile: the rider stays an explicit gap, got {exile:?}"
+    );
+    assert!(!has_parent_target_put(&exile_defs));
+}
+
 #[test]
 fn trystans_command_return_mode_parses_with_multi_target() {
     let parsed = parse_oracle_text(

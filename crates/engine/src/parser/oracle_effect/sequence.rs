@@ -6303,8 +6303,15 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            // CR 122.6a: Patch the preceding Token effect to enter with counters.
+            // CR 122.6 + CR 614.12: an entry-counter rider patches the preceding
+            // producer's entry counters — a created token (CR 122.6a), or every object a
+            // battlefield mover puts onto the battlefield.
             if let Effect::Token {
+                enter_with_counters,
+                ..
+            }
+            | Effect::ChangeZone {
+                destination: Zone::Battlefield,
                 enter_with_counters,
                 ..
             } = &mut *previous.effect
@@ -8250,6 +8257,32 @@ fn parse_change_zone_enters_tapped_attacking(
     })
 }
 
+/// CR 614.12 + CR 122.6 + CR 608.2c: an UNCONDITIONAL entry-counter rider after a
+/// battlefield mover — "<it | that creature | each of them> enters with <an
+/// additional | N additional> <+1/+1 | -1/-1> counter(s) on it" (Aberrant Return).
+/// The rider modifies how each object the mover puts onto the battlefield enters
+/// (a replacement effect from another source, CR 614.12), so it lowers onto the
+/// mover's `enter_with_counters`, which the resolver applies to every moved object
+/// at move time. The grammar is the single rider authority
+/// (`try_parse_enters_this_way_additional_counter`): anchored at the subject and
+/// required to consume the whole sentence, so a gated rider ("If a Hero enters
+/// this way, …", "… if it's a creature") or a trailing quantity ("… for each …")
+/// declines here and keeps its existing handling.
+fn parse_moved_object_entry_counters_continuation(lower: &str) -> Option<ContinuationAst> {
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        ..
+    } = super::try_parse_enters_this_way_additional_counter(lower)?
+    else {
+        return None;
+    };
+    Some(ContinuationAst::TokenEntersWithCounters {
+        counter_type,
+        count,
+    })
+}
+
 /// CR 614.12: returns true when `sentence` is a moved-object type-conditional
 /// enters-modifier clause — a leading "if that card is a/an <type>" (or
 /// "it's/it is a/an <type>") gating an "enters tapped and attacking" tail
@@ -9178,6 +9211,14 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         } if matches_put_rest_on_bottom_line(&lower) =>
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
+        }
+        // CR 614.12 + CR 122.6: an unconditional "… enters with … counter(s) on it"
+        // rider after a battlefield mover becomes that mover's own entry counters.
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        } if let Some(continuation) = parse_moved_object_entry_counters_continuation(&lower) => {
+            Some(continuation)
         }
         // CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." (plural,
         // Cyber-Controller) or "It's a/an [types] [subtype] <core-type>." (singular,

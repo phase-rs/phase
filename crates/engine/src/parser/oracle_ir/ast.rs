@@ -582,8 +582,12 @@ pub(crate) enum ContinuationAst {
     /// (Stangg / Shark Shredder). Only ChangeZone honors the gate;
     /// CopyTokenOf / Token always enter unconditionally.
     EntersTappedAttacking { moved_filter: Option<TargetFilter> },
-    /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
-    /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
+    /// CR 122.6 + CR 614.12: an entry-counter rider — "The token enters with X
+    /// +1/+1 counters on it, where X is …", or an unconditional "<it | that creature
+    /// | each of them> enters with N additional <counter> counter(s) on it" after
+    /// a battlefield mover. Absorbs into the preceding `Token`'s or battlefield
+    /// `ChangeZone`'s `enter_with_counters`. (The name predates the `ChangeZone`
+    /// producer.)
     TokenEntersWithCounters {
         counter_type: CounterType,
         count: QuantityExpr,

@@ -2022,6 +2022,7 @@ mod resolution_progress_contract;
 mod search_result_missing_referent;
 
 mod celes_kotis_graveyard_origin_batch;
+mod put_target_count_entry_counters;
 mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
 mod tifa_additional_combat;
