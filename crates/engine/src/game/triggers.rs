@@ -309,10 +309,19 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
                 },
             },
         },
-        WardCost::DiscardCard => AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value: 1 },
-            filter: None,
-            selection: crate::types::ability::CardSelectionMode::Chosen,
+        // CR 702.21a + CR 701.9a + CR 701.9b: the discard axes (count, card-type
+        // filter, chosen vs random) pass through to the unified discard cost; a
+        // ward cost is always paid from the payer's hand.
+        WardCost::Discard {
+            count,
+            filter,
+            selection,
+        } => AbilityCost::Discard {
+            count: QuantityExpr::Fixed {
+                value: i32::try_from(*count).unwrap_or(i32::MAX),
+            },
+            filter: filter.clone(),
+            selection: *selection,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         },
         WardCost::Sacrifice { count, filter } => {
@@ -31618,7 +31627,11 @@ pub mod tests {
         ));
 
         // Discard
-        let discard = WardCost::DiscardCard;
+        let discard = WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+        };
         let result = ward_cost_to_ability_cost(&discard);
         assert!(matches!(
             result,
@@ -31628,6 +31641,25 @@ pub mod tests {
                 selection: CardSelectionMode::Chosen,
                 self_scope: DiscardSelfScope::FromHand,
             }
+        ));
+
+        // CR 701.9b + CR 205.2a: the count, filter and random-selection axes
+        // pass through to the unified discard cost.
+        let typed_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+        let counted_random_filtered = WardCost::Discard {
+            count: 2,
+            filter: Some(typed_filter.clone()),
+            selection: CardSelectionMode::Random,
+        };
+        let result = ward_cost_to_ability_cost(&counted_random_filtered);
+        assert!(matches!(
+            result,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                filter: Some(ref f),
+                selection: CardSelectionMode::Random,
+                self_scope: DiscardSelfScope::FromHand,
+            } if *f == typed_filter
         ));
 
         // Sacrifice

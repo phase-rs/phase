@@ -22841,7 +22841,11 @@ fn gideon_the_oathless_full_oracle_shape() {
     }
     assert!(parsed.extracted_keywords.iter().any(|kw| matches!(
         kw,
-        Keyword::Ward(crate::types::keywords::WardCost::DiscardCard)
+        Keyword::Ward(crate::types::keywords::WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+        })
     )));
 }
 

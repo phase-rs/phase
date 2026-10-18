@@ -6,7 +6,7 @@ use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCost, ControllerRef, Effect, TargetFilter, TargetRef, TypedFilter,
+    AbilityCost, CardSelectionMode, ControllerRef, Effect, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -76,10 +76,14 @@ fn set_turn(runner: &mut GameRunner, player: PlayerId) {
 
 fn assert_full_gideon(runner: &GameRunner, source: ObjectId) {
     let object = &runner.state().objects[&source];
-    assert!(object
-        .keywords
-        .iter()
-        .any(|kw| matches!(kw, Keyword::Ward(WardCost::DiscardCard))));
+    assert!(object.keywords.iter().any(|kw| matches!(
+        kw,
+        Keyword::Ward(WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+        })
+    )));
     for mode in [
         TriggerMode::ChangesZone,
         TriggerMode::LoyaltyAbilityActivated,
