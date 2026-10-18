@@ -2193,6 +2193,65 @@ fn refresh_deferred_cast_cost_paid_object(
     }
 }
 
+/// CR 400.7d: PUBLISH the SPELL object's `cast_cost_paid_object` carrier — the
+/// object a cost moved to cast this spell — for the permanent it becomes.
+///
+/// A permanent spell with no on-resolve Spell ability (a vanilla or ETB-only
+/// creature) skips the ability-gated normalization in `stack::resolve`, so the
+/// pipeline's `CastLinkSnapshot` would otherwise capture `None`. Stamping the
+/// stack object here fulfills the "already-stamped" contract the resolution
+/// epilogue relies on, so the snapshot survives `reset_for_battlefield_entry`
+/// and reaches the permanent's ETB triggers (Adipose Offspring's "where X is
+/// the sacrificed creature's toughness") and its enters-with replacement
+/// (Dralnu's Pet's "where X is the discarded card's mana value").
+///
+/// The single publication seam for every cost-move handler (sacrifice,
+/// unattach, discard). Gated to SPELL CASTS ONLY: activated-ability costs
+/// share these handlers (`activation_ability_index` is set), but their
+/// `object_id` is the source permanent, whose own cast provenance must not be
+/// overwritten. [`refresh_deferred_cast_cost_paid_object`] mirrors this gate.
+fn stamp_spell_cast_cost_paid_object(
+    state: &mut GameState,
+    pending: &PendingCast,
+    snapshot: CostPaidObjectSnapshot,
+) {
+    if pending.activation_ability_index.is_some() {
+        return;
+    }
+    if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
+        spell_obj.cast_cost_paid_object = Some(snapshot);
+    }
+}
+
+/// CR 400.7j + CR 701.9c: the settled cost-paid referent a completed discard
+/// component may publish to the spell's carrier — the singular referent, when
+/// it is one of the cards this component discarded (`chosen`) and the discard
+/// delivered it to a public zone. A replacement that put the card into a
+/// hidden zone without revealing it leaves its characteristics undefined
+/// (CR 701.9c) and CR 400.7j does not license finding it, so the carrier stays
+/// unstamped. A missing object row reads as not public, failing closed.
+///
+/// Call only after `settle_cost_paid_provenance_recursive` has settled this
+/// component's moves, so the snapshot names the post-move incarnation.
+fn settled_public_discard_referent(
+    state: &GameState,
+    pending: &PendingCast,
+    chosen: &[ObjectId],
+) -> Option<CostPaidObjectSnapshot> {
+    pending
+        .ability
+        .cost_paid_object
+        .as_ref()
+        .filter(|snapshot| chosen.contains(&snapshot.object_id))
+        .filter(|snapshot| {
+            state
+                .objects
+                .get(&snapshot.object_id)
+                .is_some_and(|obj| obj.zone.is_public())
+        })
+        .cloned()
+}
+
 /// Complete the discard-for-cost flow: discard selected cards, then continue casting.
 pub(crate) fn handle_discard_for_cost(
     state: &mut GameState,
@@ -2304,6 +2363,13 @@ pub(crate) fn handle_discard_for_cost(
     pending
         .ability
         .settle_cost_paid_provenance_recursive(state, chosen, CostMoveOutcome::Discard);
+    // CR 400.7d: publish the settled discarded card to the spell's carrier so
+    // the permanent it becomes can read it ("where X is the discarded card's
+    // mana value", Dralnu's Pet). The resumed suffix publishes in
+    // `resume_interrupted_cost_payment` after its own settlement.
+    if let Some(snapshot) = settled_public_discard_referent(state, &pending, chosen) {
+        stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
+    }
 
     if pending.activation_ability_index.is_some() {
         pending.mark_activation_cost_committed();
@@ -2579,6 +2645,13 @@ fn park_cost_payment_triggers_if_paused(
     if matches!(waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
+    // CR 602.2a-b + CR 603.3b: an activation's cost events belong to the
+    // action-boundary custodian, which stages them into the activation's
+    // carrier so they join its stack-push batch. Parking them here would split
+    // that batch (publicly) or lose them (a carrier the boundary overwrites).
+    if super::announcement_triggers::activation_announcement_is_live(state, waiting_for) {
+        return;
+    }
 
     // CR 603.2c + CR 603.3b: `finish_pending_cost_or_cast`'s announcement drain
     // can already have collected this span, claiming its occurrences in
@@ -2598,15 +2671,7 @@ fn park_cost_payment_triggers_if_paused(
     if cost_events.is_empty() {
         return;
     }
-    if let Some(mut collection) = state.take_pending_activation_trigger_collection() {
-        // CR 602.2b + CR 603.3b: A target-first activation owns cost-trigger
-        // collection until its stack entry exists, even when a later payment
-        // prompt has parked the PendingCast between cost components.
-        collection.collect(state, &cost_events);
-        state.restore_pending_activation_trigger_collection(collection);
-    } else {
-        crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
-    }
+    crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
     // CR 603.2c: the span is collected; the end-of-action announcement staging
     // must not collect it again.
     super::announcement_triggers::claim_ordinary_collected_span(
@@ -2819,7 +2884,7 @@ fn finish_cost_object_moves(
                     cascade_cast_transformed,
                     resolution_success_waiting_for: resolution_success_waiting_for.map(|wf| *wf),
                     cast_this_way_etb_counter: None,
-                    cast_this_way_enters_mods: Vec::new(),
+                    cast_this_way_enters_mods: Default::default(),
                 }),
                 Some(actual_mana_spent),
                 ReturnedCreatureCostMove::Delivered,
@@ -3097,6 +3162,12 @@ pub(crate) fn resume_interrupted_cost_payment(
             &chosen,
             CostMoveOutcome::Discard,
         );
+        // CR 400.7d: the paused `handle_discard_for_cost` returned before its
+        // own publication, so the settled discarded card reaches the spell's
+        // carrier here, under the same public-delivery rule.
+        if let Some(snapshot) = settled_public_discard_referent(state, &pending, &chosen) {
+            stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
+        }
         let cost_event_end = events.len();
         let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
         park_cost_payment_triggers_if_paused(
@@ -3517,6 +3588,10 @@ fn park_deferred_cost_triggers_if_paused(
     if matches!(waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
+    // CR 602.2a-b + CR 603.3b: see `park_cost_payment_triggers_if_paused`.
+    if super::announcement_triggers::activation_announcement_is_live(state, waiting_for) {
+        return;
+    }
     let Some((start, end)) = cost_event_range else {
         return;
     };
@@ -3741,7 +3816,7 @@ fn pause_sacrifice_for_cost(
     state.waiting_for.clone()
 }
 
-/// CR 603.2 + CR 603.3b: The typed sacrifice root owns every cost event that
+/// CR 603.2c + CR 603.3b: The typed sacrifice root owns every cost event that
 /// crossed a replacement-choice action boundary. Collect the full stamped set
 /// once, and claim the current action occurrences so its normal Priority
 /// pipeline cannot collect the same events again.
@@ -3753,32 +3828,6 @@ pub(crate) fn settle_sacrifice_for_cost_events(
     current_start: usize,
     current_end: usize,
 ) {
-    if let Some(collection) =
-        pending.and_then(|pending| pending.activation_trigger_collection.as_mut())
-    {
-        // Earlier action fragments carry no ordinal in THIS buffer, so the
-        // consumed journal — whose ordinals are absolute within the current
-        // action — must not be applied to them. The queued-context witness is
-        // occurrence-exact independently of any buffer; `turn_zone_change_index`
-        // separates distinct occurrences within a turn.
-        let unclaimed_cost_events =
-            crate::game::triggers::filter_already_collected_trigger_events_from(
-                state,
-                &deferred_cost_events,
-                0,
-                &[],
-            );
-        // CR 602.2b + CR 603.2: an announced target-bearing activation owns
-        // replacement-paused cost events until its stack commit. Earlier action
-        // fragments are not present in this action's event buffer, while the
-        // current fragment is collected once by the eventual stack boundary (or
-        // the next pending-action staging pass).
-        if !unclaimed_cost_events.is_empty() {
-            collection.collect(state, &unclaimed_cost_events);
-        }
-        return;
-    }
-
     // Two occurrence bases, filtered separately and never rebased into each
     // other: the carried fragments against the buffer-independent queued-context
     // witness, the current fragment against this action's buffer with its
@@ -3796,13 +3845,38 @@ pub(crate) fn settle_sacrifice_for_cost_events(
         current_start,
         &state.consumed_before_priority_trigger_events,
     );
-    let deferred_cost_events: Vec<GameEvent> = carried_cost_events
+    let ordinary_group: Vec<GameEvent> = carried_cost_events
         .into_iter()
         .chain(current_cost_events)
         .collect();
-    if !deferred_cost_events.is_empty() {
-        crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
-        crate::game::triggers::collect_delayed_triggers_into_deferred(state, &deferred_cost_events);
+    // CR 603.2c + CR 603.7b + CR 603.10a: delayed observers must see the same
+    // complete simultaneous departure group. Ordinary queued contexts are not
+    // evidence that delayed observers scanned it, and the retained fragments
+    // have no occurrence ordinal in this action's buffer.
+    let delayed_group: Vec<GameEvent> = deferred_cost_events
+        .into_iter()
+        .chain(crate::game::triggers::filter_consumed_trigger_events_from(
+            &events[..current_end],
+            current_start,
+            crate::game::triggers::TriggerCollectionRequester::Delayed,
+            &state.consumed_before_priority_trigger_events,
+        ))
+        .collect();
+    if !ordinary_group.is_empty() {
+        if let Some(collection) =
+            pending.and_then(|pending| pending.activation_trigger_collection.as_mut())
+        {
+            collection.collect(state, &ordinary_group);
+        } else {
+            crate::game::triggers::collect_triggers_into_deferred(state, &ordinary_group);
+        }
+    }
+    if !delayed_group.is_empty() {
+        // Claims below use the original full buffer, never this combined slice.
+        crate::game::triggers::collect_delayed_trigger_contexts_into_deferred(
+            state,
+            &delayed_group,
+        );
     }
     // The journal claims the whole current fragment, not just what survived the
     // filter: an occurrence the filter dropped is one an earlier collector
@@ -4127,25 +4201,11 @@ pub(crate) fn handle_sacrifice_for_cost(
         pending
             .ability
             .set_cost_paid_object_recursive(snapshot.clone());
-        // CR 400.7d: also stamp the spell object on the stack directly. A
-        // permanent spell whose only cost-paid-object reference lives in an
-        // ETB *trigger* (Adipose Offspring's "where X is the sacrificed
-        // creature's toughness") has no on-resolve Spell ability, so the
-        // ability-gated normalization in `stack::resolve` is skipped and the
-        // pipeline's `CastLinkSnapshot` would otherwise capture `None`.
-        // Stamping the stack object here fulfills the "already-stamped"
-        // contract that the resolution epilogue relies on for ability-less
-        // permanent spells, so the snapshot survives `reset_for_battlefield_entry`.
-        //
-        // Gated to spell casts only: activated-ability sacrifice costs share
-        // this resolver (`activation_ability_index` is set), but their
-        // `object_id` is the source permanent, whose own cast provenance must
-        // not be overwritten. A spell cast leaves this field `None`.
-        if pending.activation_ability_index.is_none() {
-            if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
-                spell_obj.cast_cost_paid_object = Some(snapshot);
-            }
-        }
+        // CR 400.7d: also stamp the spell object on the stack directly
+        // (spell casts only), so a permanent spell whose only cost-paid-object
+        // reference lives in an ETB *trigger* (Adipose Offspring's "where X is
+        // the sacrificed creature's toughness") still carries it.
+        stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY sacrificed object,
     // not just `chosen.first()` above, so this SAME ability's own target
@@ -4495,15 +4555,9 @@ pub(crate) fn handle_unattach_for_cost(
             pending
                 .ability
                 .set_cost_paid_object_recursive(snapshot.clone());
-            // Gated to spell casts only (same guard as `handle_sacrifice_for_cost`):
-            // an activation's `object_id` is the source permanent, whose own cast
-            // provenance must not be overwritten. Captain America's Throw is an
-            // activation, so this stamp is skipped.
-            if pending.activation_ability_index.is_none() {
-                if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
-                    spell_obj.cast_cost_paid_object = Some(snapshot);
-                }
-            }
+            // CR 400.7d: spell casts only — Captain America's Throw is an
+            // activation, so the shared seam skips this stamp.
+            stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
         }
     }
 
@@ -5837,6 +5891,7 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         pending.activation_trigger_collection.clone(),
         pending.crime_candidate,
         pending.activation_cost_snapshot.as_deref(),
+        pending.activation_cost_committed,
         events,
     )
 }
@@ -6799,6 +6854,11 @@ pub(super) fn push_activated_ability_to_stack(
     // CR 601.2f + CR 602.2b: the activation's cost-modifier carrier, handed to
     // every root this function rebuilds.
     activation_cost_snapshot: Option<&crate::types::casting_costs::ActivationCostSnapshot>,
+    // Engine policy (compare CR 601.2h, CR 733.1): whether a component of this
+    // activation's cost is already paid. Every root this function rebuilds for
+    // the unpaid suffix keeps that commitment, so the suffix's prompt still
+    // refuses a cancel.
+    activation_cost_committed: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     super::casting::require_locked_activation_cost(
@@ -6829,6 +6889,9 @@ pub(super) fn push_activated_ability_to_stack(
                 pending.activation_cost = remaining_cost.cloned();
                 pending.pending_loyalty_activation_player = pending_loyalty_activation_player;
                 pending.activation_trigger_collection = activation_trigger_collection.clone();
+                if activation_cost_committed {
+                    pending.mark_activation_cost_committed();
+                }
                 pending
             };
 
@@ -6939,6 +7002,9 @@ pub(super) fn push_activated_ability_to_stack(
         pending_interactive.pending_loyalty_activation_player = pending_loyalty_activation_player;
         pending_interactive.activation_target_selection = target_selection;
         pending_interactive.activation_trigger_collection = activation_trigger_collection.clone();
+        if activation_cost_committed {
+            pending_interactive.mark_activation_cost_committed();
+        }
         if let Some(waiting_for) = surface_next_unpaid_interactive_activation_cost(
             state,
             player,
@@ -7029,6 +7095,9 @@ pub(super) fn push_activated_ability_to_stack(
                 .or(pending_loyalty_activation_player);
             pending.activation_target_selection = target_selection;
             pending.activation_trigger_collection = activation_trigger_collection.clone();
+            if activation_cost_committed {
+                pending.mark_activation_cost_committed();
+            }
             if let Some(pending) = attach_pending_cast_to_cost_move(state, Box::new(pending)) {
                 state.pending_cast = Some(pending);
             }
@@ -7226,16 +7295,27 @@ pub(super) fn push_ability_entry(
         events,
     );
     if let Some(mut collection) = activation_trigger_collection {
-        collection.collect(state, events);
+        // CR 603.2c: an occurrence a cost step already collected (claimed in the
+        // ledger) is not collected again by the stack push.
+        let unclaimed = super::announcement_triggers::unclaimed_events(state, events, 0);
+        collection.collect(state, &unclaimed);
         let mut deferred_contexts = std::mem::take(&mut state.deferred_triggers);
         collection.commit_into(state, &mut deferred_contexts);
         state.deferred_triggers = deferred_contexts;
-        // CR 602.2b + CR 603.3b + CR 603.7c: Cost-payment events are claimed
-        // below because the activation transaction owns their trigger batch.
-        // Collect delayed triggers before that claim too; otherwise a one-shot
-        // delayed trigger such as Earthbend's dies-or-exiled return is hidden
-        // from the later priority scan and never reaches the stack.
-        super::triggers::collect_delayed_triggers_into_deferred(state, events);
+        // CR 603.2c + CR 603.7b: terminal cost groups already claimed for both
+        // collectors must not fire again. Keep ordinary-only claims and new
+        // finishing events visible, with their original full-buffer positions.
+        let delayed_input = super::triggers::unclaimed_trigger_events_from(
+            events,
+            0,
+            super::triggers::TriggerCollectionRequester::Delayed,
+            &state.consumed_before_priority_trigger_events,
+        );
+        super::triggers::collect_unclaimed_delayed_triggers_into_deferred(
+            state,
+            events,
+            &delayed_input,
+        );
         state
             .consumed_before_priority_trigger_events
             .extend(events.iter().enumerate().map(|(index, event)| {
@@ -12457,13 +12537,31 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // begins). `source_id = object_id` (self-contained; attribution snapshot is
     // the creature's own name). CR 608.2c: read from the *selected* permission
     // supporting THIS cast so a sibling permission's rider cannot leak.
-    if !cast_this_way_enters_mods.is_empty() {
+    //
+    // CR 608.2c + CR 601.2a: the rider's printed spell-quality condition ("If
+    // you cast a creature spell this way, it gains …") gates the grant: it is
+    // evaluated against the elected spell, which has all the characteristics of
+    // its card (CR 601.2a). A cast that does not match the printed quality is
+    // granted no modifications, per the instruction as written.
+    let rider_quality_matches =
+        cast_this_way_enters_mods
+            .cast_filter
+            .as_ref()
+            .is_none_or(|filter| {
+                crate::game::filter::matches_target_filter(
+                    state,
+                    object_id,
+                    filter,
+                    &crate::game::filter::FilterContext::neutral(),
+                )
+            });
+    if rider_quality_matches && !cast_this_way_enters_mods.is_empty() {
         state.add_transient_continuous_effect(
             object_id,
             player,
             crate::types::ability::Duration::Permanent,
             crate::types::ability::TargetFilter::SpecificObject { id: object_id },
-            cast_this_way_enters_mods,
+            cast_this_way_enters_mods.modifications,
             None,
         );
     }
@@ -12968,7 +13066,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                 source_id: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission,
                 cast_cost_modifier: None,
             };
@@ -13099,6 +13197,7 @@ fn handle_resolution_cast_success(
             face_policy,
             zones,
             graveyard_replacement,
+            enters_with_modifications,
             member_pool,
         } => {
             if let Some(destination) = graveyard_replacement.clone() {
@@ -13123,6 +13222,7 @@ fn handle_resolution_cast_success(
                 (*face_policy).clone(),
                 zones.clone(),
                 graveyard_replacement.clone(),
+                enters_with_modifications.clone(),
                 member_pool.clone(),
             );
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
@@ -13150,6 +13250,7 @@ fn handle_resolution_cast_success(
                     face_policy: *face_policy,
                     zones,
                     graveyard_replacement,
+                    enters_with_modifications,
                     member_pool,
                 },
             }))
@@ -16558,6 +16659,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.activation_trigger_collection.clone(),
                 pending.crime_candidate,
                 pending.activation_cost_snapshot.as_deref(),
+                pending.activation_cost_committed,
                 events,
             );
         }
@@ -17493,18 +17595,8 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
 
-    fn install_receipt_eligible_sacrifice_cursor(
-        state: &mut GameState,
-        source_id: ObjectId,
-        chosen: Vec<ObjectId>,
-        paused_at_index: usize,
-        origin: DelayedTriggerOrigin,
-    ) {
-        let selected = chosen
-            .iter()
-            .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
-            .collect();
-        let ability = ResolvedAbility::new(
+    fn optional_sacrifice_payment(source_id: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
             Effect::PayCost {
                 cost: AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1)),
                 scale: None,
@@ -17513,28 +17605,43 @@ mod tests {
             Vec::new(),
             source_id,
             PlayerId(0),
-        );
-        stack::begin_resolving_stack_entry(
-            state,
-            StackEntry {
-                id: ObjectId(99_000),
-                source_id,
-                controller: PlayerId(0),
-                kind: StackEntryKind::TriggeredAbility {
-                    source_id,
-                    ability: Box::new(ability.clone()),
-                    condition: None,
-                    trigger_event: None,
-                    description: Some("receipt stale sacrifice".to_string()),
-                    source_name: "Receipt source".to_string(),
-                    subject_match_count: None,
-                    die_result: None,
-                    provenance: None,
-                },
-            },
-            Some(TriggerFiring::ReceiptEligible(origin)),
         )
-        .expect("the fixture begins with no carrier installed");
+    }
+
+    fn receipt_trigger_carrier(source_id: ObjectId) -> StackEntry {
+        StackEntry {
+            id: ObjectId(99_000),
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(optional_sacrifice_payment(source_id)),
+                condition: None,
+                trigger_event: None,
+                description: Some("receipt stale sacrifice".to_string()),
+                source_name: "Receipt source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    }
+
+    fn install_receipt_eligible_sacrifice_cursor(
+        state: &mut GameState,
+        carrier: StackEntry,
+        firing: Option<TriggerFiring>,
+        chosen: Vec<ObjectId>,
+        paused_at_index: usize,
+    ) {
+        let source_id = carrier.source_id;
+        let selected = chosen
+            .iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
+            .collect();
+        let ability = optional_sacrifice_payment(source_id);
+        stack::begin_resolving_stack_entry(state, carrier, firing)
+            .expect("the fixture begins with no carrier installed");
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
                 Effect::NoOp,
@@ -17591,7 +17698,13 @@ mod tests {
             Zone::Battlefield,
         );
         let origin = receipt_origin(source, 70_001);
-        install_receipt_eligible_sacrifice_cursor(&mut state, source, vec![stale], 0, origin);
+        install_receipt_eligible_sacrifice_cursor(
+            &mut state,
+            receipt_trigger_carrier(source),
+            Some(TriggerFiring::ReceiptEligible(origin)),
+            vec![stale],
+            0,
+        );
         state.objects.get_mut(&stale).unwrap().incarnation += 1;
 
         let lifecycle = crate::game::lifecycle::enter_action_frame();
@@ -17637,10 +17750,10 @@ mod tests {
         let origin = receipt_origin(source, 70_003);
         install_receipt_eligible_sacrifice_cursor(
             &mut state,
-            source,
+            receipt_trigger_carrier(source),
+            Some(TriggerFiring::ReceiptEligible(origin)),
             vec![completed, stale],
             0,
-            origin,
         );
         state.objects.get_mut(&stale).unwrap().incarnation += 1;
 
@@ -17658,6 +17771,87 @@ mod tests {
         assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
         assert!(state.resolving_trigger_firing.is_none());
+    }
+
+    /// CR 608.2n: a stale suffix abandons a sorcery's paused sacrifice, but the
+    /// spell still owes its final part, which then puts it into the graveyard.
+    #[test]
+    fn stale_resolution_sacrifice_resume_keeps_the_spells_final_part() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(70_006),
+            PlayerId(0),
+            "Paused sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Sorcery];
+        let completed = create_object(
+            &mut state,
+            CardId(70_007),
+            PlayerId(0),
+            "Completed fodder".to_string(),
+            Zone::Graveyard,
+        );
+        let stale = create_object(
+            &mut state,
+            CardId(70_008),
+            PlayerId(0),
+            "Stale suffix".to_string(),
+            Zone::Battlefield,
+        );
+        let carrier = StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(70_006),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        install_receipt_eligible_sacrifice_cursor(
+            &mut state,
+            carrier,
+            None,
+            vec![completed, stale],
+            0,
+        );
+        state.resolving_spell_final_part =
+            Some(crate::types::game_state::OwedSpellFinalPart { spell });
+        state.objects.get_mut(&stale).unwrap().incarnation += 1;
+
+        let mut events = Vec::new();
+        resume_sacrifice_for_cost(&mut state, &mut events, 0).unwrap();
+        assert_eq!(
+            state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+            Some(spell)
+        );
+        assert!(state.resolving_spell_final_part.is_some());
+        assert!(state.active_ability_continuation().is_none());
+        assert!(state.pending_cost_move_resume.is_none());
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut events = Vec::new();
+        assert!(super::super::engine::run_spell_final_part_if_due(
+            &mut state,
+            &mut events
+        ));
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::StackResolved { object_id } if *object_id == spell
+                ))
+                .count(),
+            1
+        );
+        assert!(state.resolving_stack_entry.is_none());
     }
 
     fn choice_bearing_offer_test_mana_ability() -> AbilityDefinition {
@@ -18203,6 +18397,16 @@ mod tests {
         }
     }
 
+    /// A SPELL announcement's pending cast: the cost-payment park still parks its
+    /// paid-cost events publicly (only an activation's go to the action
+    /// boundary, see `activation_announcement_is_live`).
+    fn make_spell_pending(source_id: ObjectId) -> PendingCast {
+        PendingCast {
+            activation_ability_index: None,
+            ..make_pending(source_id)
+        }
+    }
+
     fn make_pending(source_id: ObjectId) -> PendingCast {
         PendingCast {
             object_id: source_id,
@@ -18265,6 +18469,60 @@ mod tests {
     fn announced(state: &GameState, mut pending: PendingCast) -> PendingCast {
         crate::game::casting::stamp_announced_activation_record(state, PlayerId(0), &mut pending);
         pending
+    }
+
+    /// CR 400.7j + CR 701.9c: a discard component publishes its settled
+    /// referent to the spell's carrier only for a card it discarded AND
+    /// delivered to a public zone. A card a replacement put into a hidden zone
+    /// unrevealed has undefined characteristics, so nothing is published; a
+    /// referent this component did not move is not its to publish.
+    #[test]
+    fn settled_public_discard_referent_requires_a_public_delivery_of_this_component() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(9_101),
+            PlayerId(0),
+            "Discard-Cost Spell".to_string(),
+            Zone::Stack,
+        );
+        let discarded = create_object(
+            &mut state,
+            CardId(9_102),
+            PlayerId(0),
+            "Discarded Card".to_string(),
+            Zone::Graveyard,
+        );
+        let mut pending = make_pending(spell);
+        pending.activation_ability_index = None;
+        let snapshot = {
+            let obj = &state.objects[&discarded];
+            CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())
+        };
+        pending
+            .ability
+            .set_cost_paid_object_recursive(snapshot.clone());
+
+        assert_eq!(
+            settled_public_discard_referent(&state, &pending, &[discarded]),
+            Some(snapshot),
+            "a card this component delivered to the graveyard is published"
+        );
+        assert_eq!(
+            settled_public_discard_referent(&state, &pending, &[spell]),
+            None,
+            "a referent this component did not move is not published"
+        );
+        state
+            .objects
+            .get_mut(&discarded)
+            .expect("discarded card row")
+            .zone = Zone::Library;
+        assert_eq!(
+            settled_public_discard_referent(&state, &pending, &[discarded]),
+            None,
+            "CR 701.9c: a hidden, unrevealed delivery leaves the carrier unstamped"
+        );
     }
 
     /// `resolved` with the pre-payment journal record for a direct
@@ -22019,6 +22277,26 @@ mod tests {
     /// graveyard-entry events must be parked before the non-Priority boundary.
     #[test]
     fn discard_for_cost_parks_triggers_when_later_discard_pauses_on_replacement() {
+        let state = later_discard_pauses_on_replacement(make_spell_pending);
+        assert!(
+            !state.deferred_triggers.is_empty(),
+            "earlier creature discard events must be parked when a later discard pauses on replacement choice"
+        );
+    }
+
+    /// CR 602.2a-b + CR 603.3b: the same pause inside an ACTIVATION leaves its cost
+    /// events to the action boundary (which stages them into the activation's
+    /// carrier), so nothing is parked publicly and nothing is claimed here.
+    #[test]
+    fn activation_discard_cost_events_are_left_to_the_action_boundary() {
+        let state = later_discard_pauses_on_replacement(make_pending);
+        assert!(state.deferred_triggers.is_empty());
+        assert!(state.consumed_before_priority_trigger_events.is_empty());
+    }
+
+    fn later_discard_pauses_on_replacement(
+        make_pending_for: fn(ObjectId) -> PendingCast,
+    ) -> GameState {
         use crate::parser::oracle::parse_oracle_text;
 
         let mut state = GameState::new_two_player(42);
@@ -22093,7 +22371,7 @@ mod tests {
         let waiting = handle_discard_for_cost(
             &mut state,
             PlayerId(0),
-            make_pending(source),
+            make_pending_for(source),
             2,
             &[creature, land],
             &[creature, land],
@@ -22107,11 +22385,7 @@ mod tests {
         );
         assert_eq!(state.objects[&creature].zone, Zone::Graveyard);
         assert_eq!(state.objects[&land].zone, Zone::Hand);
-        assert!(
-            !state.deferred_triggers.is_empty(),
-            "earlier creature discard events must be parked when a later discard \
-             pauses on replacement choice"
-        );
+        state
     }
 
     /// CR 603.2 + CR 603.3b: Resume loop mid-discard replacement pause must park
@@ -22193,7 +22467,7 @@ mod tests {
         handle_discard_for_cost(
             &mut state,
             PlayerId(0),
-            make_pending(source),
+            make_spell_pending(source),
             2,
             &[first_creature, second],
             &[first_creature, second],
@@ -22349,11 +22623,12 @@ mod tests {
 
     /// CR 603.2 + CR 603.3b: When discard-for-cost emits graveyard `ZoneChanged`
     /// events but `finish_pending_cost_or_cast` lands on `ManaPayment`, the
-    /// post-action pipeline is skipped and observer triggers must be parked in
-    /// `deferred_triggers` (mirrors `handle_sacrifice_for_cost`). Regression for
+    /// post-action pipeline is skipped and, for an activation, observer triggers
+    /// are left to the action boundary (not parked in `deferred_triggers`). Regression for
     /// Sefris + discard-before-mana activation costs (issue #4267).
     #[test]
-    fn discard_for_cost_parks_graveyard_triggers_when_mana_payment_remains() {
+    fn activation_discard_for_cost_leaves_graveyard_triggers_to_the_boundary_when_mana_payment_remains(
+    ) {
         use crate::parser::oracle::parse_oracle_text;
         use crate::types::mana::{ManaCost, ManaCostShard};
 
@@ -22418,7 +22693,6 @@ mod tests {
             shards: vec![ManaCostShard::Black],
         };
         pending.payment_mode = CastPaymentMode::Manual;
-        pending.activation_ability_index = Some(0);
 
         let mut events = Vec::new();
         let waiting = handle_discard_for_cost(
@@ -22436,19 +22710,27 @@ mod tests {
             matches!(waiting, WaitingFor::ManaPayment { .. }),
             "expected ManaPayment after discard when {{B}} remains, got {waiting:?}"
         );
+        // CR 602.2a-b + CR 603.3b: an activation's cost events are the action
+        // boundary's to stage into the activation's carrier (see
+        // `replacement_resumed_activation_discard_stages_triggers_into_the_carrier_when_mana_payment_remains`,
+        // which crosses that boundary): the handler neither parks nor claims them.
+        assert!(state.deferred_triggers.is_empty());
+        assert!(state.consumed_before_priority_trigger_events.is_empty());
         assert!(
-            !state.deferred_triggers.is_empty(),
-            "graveyard-entry observer triggers must be parked when discard-for-cost \
-             pauses before Priority"
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+            "the discard's graveyard event is left in the action's buffer"
         );
         assert_eq!(state.objects[&hand_creature].zone, Zone::Graveyard);
     }
 
-    /// CR 603.2 + CR 603.3b: Replacement-resumed discard-for-cost must park
-    /// observer triggers when the resume finishes on non-Priority (e.g. remaining
+    /// CR 603.2 + CR 603.3b: Replacement-resumed discard-for-cost must stage
+    /// observer triggers into the activation's carrier when the resume finishes on non-Priority (e.g. remaining
     /// `{B}` mana payment). Regression for issue #4267 replacement path.
     #[test]
-    fn replacement_resumed_discard_for_cost_parks_triggers_when_mana_payment_remains() {
+    fn replacement_resumed_activation_discard_stages_triggers_into_the_carrier_when_mana_payment_remains(
+    ) {
         use crate::parser::oracle::parse_oracle_text;
         use crate::types::mana::{ManaCost, ManaCostShard};
 
@@ -22514,7 +22796,6 @@ mod tests {
             shards: vec![ManaCostShard::Black],
         };
         pending.payment_mode = CastPaymentMode::Manual;
-        pending.activation_ability_index = Some(0);
 
         let mut events = Vec::new();
         let waiting = handle_discard_for_cost(
@@ -22542,10 +22823,20 @@ mod tests {
             "expected ManaPayment after replacement-resumed discard, got {:?}",
             state.waiting_for
         );
-        assert!(
-            !state.deferred_triggers.is_empty(),
-            "replacement-resumed discard must park graveyard-entry triggers when \
-             finish lands on ManaPayment"
+        // CR 602.2a-b + CR 603.3b: the activation's action boundary stages the
+        // resumed discard's graveyard-entry trigger into the activation's carrier,
+        // not into the public queue.
+        assert!(state.deferred_triggers.is_empty());
+        let carrier = state
+            .pending_cast
+            .as_ref()
+            .and_then(|pending| pending.activation_trigger_collection.as_ref())
+            .expect("the activation announcement holds a carrier");
+        let carrier = serde_json::to_value(carrier).unwrap();
+        assert_eq!(
+            carrier["pending_contexts"].as_array().map(Vec::len),
+            Some(1),
+            "the graveyard-entry observer is held by the activation: {carrier}"
         );
         assert_eq!(state.objects[&hand_creature].zone, Zone::Graveyard);
     }
@@ -23793,7 +24084,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -23921,7 +24212,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24004,7 +24295,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24055,7 +24346,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24115,7 +24406,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24133,7 +24424,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24185,7 +24476,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24257,7 +24548,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24294,7 +24585,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24366,7 +24657,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24384,7 +24675,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -28324,6 +28615,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             false,
             None,
+            false,
             &mut events,
         )
         .expect("concrete Count sacrifice must reach payment");
@@ -28441,6 +28733,7 @@ its replicate cost was paid.)\nDraw a card.";
                 None,
                 false,
                 None,
+                false,
                 &mut events,
             );
             assert!(matches!(
@@ -28719,6 +29012,7 @@ its replicate cost was paid.)\nDraw a card.";
                     None,
                     false,
                     None,
+                    false,
                     &mut events,
                 )
             }));
@@ -28842,6 +29136,7 @@ its replicate cost was paid.)\nDraw a card.";
                     None,
                     false,
                     None,
+                    false,
                     &mut events,
                 )
             }));
@@ -28938,6 +29233,7 @@ its replicate cost was paid.)\nDraw a card.";
                     None,
                     false,
                     None,
+                    false,
                     &mut Vec::new(),
                 )
                 .unwrap();
@@ -29103,6 +29399,7 @@ its replicate cost was paid.)\nDraw a card.";
                 None,
                 false,
                 None,
+                false,
                 &mut Vec::new(),
             )
             .expect("unsettled defensive root must request targets");
@@ -29223,6 +29520,7 @@ its replicate cost was paid.)\nDraw a card.";
                         None,
                         false,
                         None,
+                        false,
                         &mut events,
                     )
                 };
@@ -29374,6 +29672,7 @@ its replicate cost was paid.)\nDraw a card.";
                 None,
                 false,
                 None,
+                false,
                 &mut Vec::new(),
             )
             .expect("non-X defensive target root");
@@ -29434,6 +29733,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             false,
             None,
+            false,
             &mut events,
         )
         .expect("direct activation root must enter target selection");

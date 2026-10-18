@@ -4829,6 +4829,21 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     });
   });
 
+  it.each(["action_failed", "action_rejected"] as const)("preserves the guest session after unsolicited %s", async (type) => {
+    const { adapter, conn } = await joinedGuest();
+    const events = vi.fn();
+    adapter.onEvent(events);
+    await conn.simulateData(type === "action_failed"
+      ? { type, message: "Operation declined" }
+      : { type, rejection: { code: "invalid_action", disposition: "invalid", message: "Operation declined", related_object_ids: [] } });
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "operationFailed" }));
+    expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    const next = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({ type: "action_noop" });
+    await expect(next).resolves.toEqual({ events: [], log_entries: [] });
+    adapter.dispose();
+  });
+
   it("guest rejects a malformed rejection DTO without exposing its arbitrary message", async () => {
     const { peer } = createFakePeer();
     const conn = new FakeDataConnection();
@@ -4867,8 +4882,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     await conn.simulateData({ type: "action_failed", message: "Match concession unavailable" });
     await conn.simulateData({ type: "action_rejected", rejection: { message: "untrusted" } } as never);
-    expect(emitted).toHaveBeenCalledWith({ type: "error", message: "Match concession unavailable" });
-    expect(emitted).toHaveBeenCalledWith({ type: "error", message: "Host sent an invalid action rejection" });
+    expect(emitted).toHaveBeenCalledWith({ type: "operationFailed", message: "Match concession unavailable" });
+    expect(emitted).toHaveBeenCalledWith({ type: "operationFailed", message: "Host sent an invalid action rejection" });
   });
 
   it("guest snapshots stay coherent and strictly ordered across successive state updates", async () => {
@@ -5581,12 +5596,23 @@ describe("P2P wire-protocol version gate", () => {
     vi.useRealTimers();
   });
 
+  const bestowState = (): GameState => ({
+    ...remoteState("bestowed setup"),
+    objects: {
+      "42": {
+        id: 42, name: "Springheart Nantuko", owner: 0, controller: 0,
+        zone: "Battlefield", attached_to: { type: "Object", data: 43 },
+        bestow_form: { removed_creature_subtypes: ["Insect", "Monk"] },
+      },
+    },
+  } as unknown as GameState);
+
   const setupFrameAt = (wireProtocolVersion: number) => ({
     type: "game_setup" as const,
     wireProtocolVersion,
     assignedPlayerId: 1,
     playerToken: "seat-token",
-    state: remoteState("setup"),
+    state: bestowState(),
     events: [],
     legalActions: [],
     autoPassRecommended: false,
@@ -5624,7 +5650,7 @@ describe("P2P wire-protocol version gate", () => {
   // check back into the transport would surface here as the refusing half
   // never emitting.
   //
-  it.each([115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127])("refuses independent earlier wire history v%s", async (version) => {
+  it.each([115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132])("refuses independent earlier wire history v%s", async (version) => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
     await refusing.conn.simulateData(setupFrameAt(version));
@@ -5641,19 +5667,19 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Reverting WIRE_PROTOCOL_VERSION itself (130 → 129) breaks both
-  // halves' premise: the v129 frame now equals the reverted constant and is
+  // bump. Reverting WIRE_PROTOCOL_VERSION itself (134 → 133) breaks both
+  // halves' premise: the v133 frame now equals the reverted constant and is
   // admitted instead of refused — this test would fail at that first
-  // assertion ("promise resolved … instead of rejecting") — and the v130
+  // assertion ("promise resolved … instead of rejecting") — and the v134
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the
-  // reach-guard — without it "refuses v129" is also satisfied by a client
+  // reach-guard — without it "refuses v133" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v129) and admits its own (v130)", async () => {
+  it("refuses the previous wire protocol (v133) and admits its own (v134)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(129));
+    await refusing.conn.simulateData(setupFrameAt(133));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -5665,12 +5691,79 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(130));
+    await admitting.conn.simulateData(setupFrameAt(134));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
+    expect((await admitting.adapter.getState()).objects["42"]).toMatchObject({
+      id: 42, bestow_form: { removed_creature_subtypes: ["Insect", "Monk"] },
+    });
+    expect(refusing.emitted).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    expect(refusing.emitted).not.toHaveBeenCalledWith(expect.objectContaining({ type: "playerIdentity" }));
+    await expect(refusing.adapter.getState()).rejects.toThrow("No game state available");
     expect(admitting.emitted).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "reconnectFailed" }),
     );
+  });
+
+  it("refuses old reconnect acknowledgement before adopting populated Bestow state", async () => {
+    const refusing = makeGuest(new FakeDataConnection(), undefined, "prior-token");
+    await refusing.adapter.initialize();
+    await refusing.conn.simulateData({ ...setupFrameAt(133), type: "reconnect_ack" });
+    await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED", message: expect.stringContaining("Wire protocol mismatch"),
+    });
+    expect(refusing.emitted).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    expect(refusing.emitted).not.toHaveBeenCalledWith(expect.objectContaining({ type: "playerIdentity" }));
+    await expect(refusing.adapter.getState()).rejects.toThrow("No game state available");
+
+    const admitting = makeGuest(new FakeDataConnection(), undefined, "prior-token");
+    await admitting.adapter.initialize();
+    await admitting.conn.simulateData({ ...setupFrameAt(134), type: "reconnect_ack" });
+    await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
+    expect((await admitting.adapter.getState()).objects["42"]).toMatchObject({
+      id: 42, bestow_form: { removed_creature_subtypes: ["Insect", "Monk"] },
+    });
+    expect(admitting.emitted).toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    refusing.adapter.dispose();
+    admitting.adapter.dispose();
+  });
+
+  it("host rejects previous Bestow peers before seat or reconnect adoption", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const oldJoin = await joinGuest(emitConnection, {
+      type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } },
+      wireProtocolVersion: 133,
+    });
+    expect(await sentOfType(oldJoin, "reconnect_rejected")).toBeDefined();
+    expect(oldJoin.open).toBe(false);
+    expect(await sentOfType(oldJoin, "game_setup")).toBeUndefined();
+
+    const current = await joinGuest(emitConnection, {
+      type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } },
+      wireProtocolVersion: 134,
+    });
+    await adapter.initializeGame();
+    const setup = (await current.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string; assignedPlayerId: number } =>
+        typeof message === "object" && message !== null && (message as { type?: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    expect(setup!.assignedPlayerId).toBe(1);
+    expect(await sentOfType(current, "reconnect_rejected")).toBeUndefined();
+    current.simulateClose();
+    const oldReconnect = await joinGuest(emitConnection, {
+      type: "reconnect", playerToken: setup!.playerToken, wireProtocolVersion: 133,
+    });
+    expect(await sentOfType(oldReconnect, "reconnect_rejected")).toBeDefined();
+    expect(oldReconnect.open).toBe(false);
+    expect(await sentOfType(oldReconnect, "reconnect_ack")).toBeUndefined();
+    const currentReconnect = await joinGuest(emitConnection, {
+      type: "reconnect", playerToken: setup!.playerToken, wireProtocolVersion: 134,
+    });
+    expect(await sentOfType(currentReconnect, "reconnect_ack")).toBeDefined();
+    expect(await sentOfType(currentReconnect, "reconnect_rejected")).toBeUndefined();
+    adapter.dispose();
   });
 
   it("rejects a malformed present authority before bootstrap adoption", async () => {
@@ -6560,6 +6653,111 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
     return messages.filter((m) => (m as { type?: string }).type === "state_update") as
       Array<{ revision?: number; state?: { filteredFor?: number } }>;
   }
+
+  it("accepts a guest acknowledgement during a suspended AI loop without redundant sweep sends", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } } });
+    await adapter.initializeGame();
+    await guest.getSentMessages();
+    guest.stopAcking();
+    const held = deferred<void>();
+    const ai = vi.spyOn(adapter as unknown as { runAiLoop(): Promise<void> }, "runAiLoop")
+      .mockImplementationOnce(() => held.promise);
+    const action = guest.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    let acknowledgement = Promise.resolve();
+    try {
+      await vi.waitFor(() => expect(ai).toHaveBeenCalled(), { interval: 10, timeout: 2000 });
+      const published = await guest.getSentMessages();
+      const publishedCount = published.length;
+      const frame = published.find((msg) => (msg as P2PMessage).type === "state_update") as Extract<P2PMessage, { type: "state_update" }>;
+      expect(frame.revision).toEqual(expect.any(Number));
+      expect(frame.authority).toBeDefined();
+      acknowledgement = guest.simulateData({ type: "state_ack", revision: frame.revision, authority: frame.authority });
+      await vi.advanceTimersByTimeAsync(15000);
+      await (adapter as unknown as { deliveryQueue: Promise<void> }).deliveryQueue;
+      expect(statesSentTo((await guest.getSentMessages()).slice(publishedCount))).toHaveLength(0);
+    } finally {
+      held.resolve(undefined);
+      await Promise.all([action, acknowledgement]);
+      ai.mockRestore();
+      adapter.dispose();
+    }
+  });
+
+  it("does not claim a state acknowledgement from a channel that has not identified itself", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const hostile = new FakeOpenableConnection();
+    emitConnection(hostile as unknown as DataConnection);
+    hostile.fireOpen();
+    await hostile.simulateData({ type: "state_ack", revision: 1 });
+    // An unclaimed acknowledgement keeps ordinary dispatch, so the first-frame
+    // contract still rejects it instead of the fast path swallowing it.
+    const rejected = (await hostile.getSentMessages()).find((m) => (m as { type?: string }).type === "reconnect_rejected");
+    expect(rejected).toEqual(expect.objectContaining({ reasonCode: "first_message_invalid" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostile.open).toBe(false);
+    adapter.dispose();
+  });
+
+  it("rejects a fast-path acknowledgement stamped by a different host incarnation", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } } });
+    await adapter.initializeGame();
+    await guest.getSentMessages();
+    guest.stopAcking();
+    await guest.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    const frame = (await guest.getSentMessages()).find((m) => (m as P2PMessage).type === "state_update") as Extract<P2PMessage, { type: "state_update" }>;
+    expect(frame.authority).toBeDefined();
+    await guest.simulateData({
+      type: "state_ack",
+      revision: frame.revision,
+      authority: { ...frame.authority!, hostIncarnation: `${frame.authority!.hostIncarnation}-other` },
+    });
+    const rejected = (await guest.getSentMessages()).find((m) => (m as { type?: string }).type === "reconnect_rejected");
+    expect(rejected).toEqual(expect.objectContaining({ reason: "Host session superseded" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(guest.open).toBe(false);
+    adapter.dispose();
+  });
+
+  it.each(["queued", "in flight"] as const)("keeps redelivery single-flight while %s and permits the next retry", async (phase) => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } } });
+    await adapter.initializeGame();
+    await guest.getSentMessages();
+    guest.stopAcking();
+    await guest.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    const before = (await guest.getSentMessages()).length;
+    const held = deferred<unknown>();
+    const queue = adapter as unknown as {
+      deliveryQueue: Promise<void>;
+      enqueueDelivery(operation: () => Promise<unknown>): Promise<unknown>;
+    };
+    if (phase === "queued") {
+      void queue.enqueueDelivery(() => held.promise);
+    } else {
+      (mockGetViewerSnapshot as unknown as { mockImplementationOnce(fn: () => Promise<unknown>): void })
+        .mockImplementationOnce(() => held.promise);
+    }
+    try {
+      await vi.advanceTimersByTimeAsync(15000);
+      const drained = queue.deliveryQueue;
+      held.resolve({ state: { filteredFor: 1, players: [] }, actions: [], autoPassRecommended: false });
+      await drained;
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(5000);
+      await queue.deliveryQueue;
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(2);
+    } finally {
+      held.resolve({ state: { filteredFor: 1, players: [] }, actions: [], autoPassRecommended: false });
+      await queue.deliveryQueue;
+      adapter.dispose();
+    }
+  });
 
   it("redelivers the applied action's state after the guest's viewer read rejected", async () => {
     const { adapter, emitConnection } = makeHost(2, 5_000);

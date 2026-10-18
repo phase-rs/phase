@@ -15,6 +15,7 @@ pub(crate) mod sequence;
 pub(crate) mod subject;
 mod text_change;
 pub(crate) mod token;
+mod top_card_contest;
 mod zone_change_reflexive;
 
 pub(crate) use search::parse_search_name_reference_suffix;
@@ -333,10 +334,13 @@ fn clause_reflexive_result(clause: &ClauseIr) -> Option<AbilityCondition> {
 }
 
 /// CR 608.2c: decide where one candidate continuation clause attaches, given
-/// the delayed payloads still open in this chain.
+/// the delayed payloads still open in this chain. `link` is the `ClauseBoundary`
+/// that separated the previous clause from this one (a printed ", then" or a
+/// parser-normalized continuation link).
 fn classify_continuation_clause(
     clause: &ClauseIr,
     open: &[DelayedPayloadAntecedent],
+    link: Option<ClauseBoundary>,
 ) -> ContinuationVerdict {
     if clause_installs_delayed_trigger(clause) {
         return ContinuationVerdict::Emit {
@@ -357,6 +361,17 @@ fn classify_continuation_clause(
     let Some(antecedent) = open.iter().next_back() else {
         return ContinuationVerdict::Emit { veto: None };
     };
+    // CR 603.7a + CR 608.2c: "<instruction> at <time>, then <instruction>" — a
+    // `Then` link orders the second instruction after the first, and the
+    // first happens only when the delayed trigger resolves, so the
+    // then-continuation is part of that same delayed payload (Conqueror's
+    // Galleon: "exile it at end of combat, then return it to the battlefield
+    // transformed"). Read without the payload, it would resolve at creation
+    // time — before the exile it follows. The fold's contiguous-run check
+    // guarantees the previous clause is the installer or an earlier promotion.
+    if link == Some(ClauseBoundary::Then) {
+        return ContinuationVerdict::Nest;
+    }
     let result = clause_reflexive_result(clause);
     if result.as_ref().is_some_and(|result| {
         antecedent
@@ -407,7 +422,11 @@ fn classify_continuation_clause(
 fn resolve_delayed_payload_placements(clauses: &mut [ClauseIr], kind: AbilityKind) {
     let mut open: Vec<DelayedPayloadAntecedent> = Vec::new();
     let mut last_contiguous_clause = None;
+    // `ClauseIr::boundary` is the boundary FOLLOWING a clause, so this clause's
+    // link to its predecessor is the previous clause's `boundary`.
+    let mut link = None;
     for (clause_index, clause) in clauses.iter_mut().enumerate() {
+        let clause_link = std::mem::replace(&mut link, clause.boundary);
         // CR 603.7a: a continuation is relocated as a DEFINITION into the payload, so only a clause
         // that assembly emits as an independent sibling definition can be promoted. Every other
         // disposition is absorbed into, replaces, or patches a neighbour and emits no definition of
@@ -420,7 +439,7 @@ fn resolve_delayed_payload_placements(clauses: &mut [ClauseIr], kind: AbilityKin
             last_contiguous_clause = None;
             continue;
         }
-        let verdict = classify_continuation_clause(clause, &open);
+        let verdict = classify_continuation_clause(clause, &open, clause_link);
         // V2 → V3 → V4 → P-a/P-b: the classifier owns the decision; this table owns only the
         // registry transition. V2 opens an antecedent; the two vetoes preserve it but leave an
         // emitted top-level definition, so a later `Nest` must pass the contiguous-run check.
@@ -4303,12 +4322,16 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
 /// `grant_lingering_permissions` is the only runtime consumer of the rider.
 fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClause> {
     let (counter_type, rest) = parse_cast_this_way_enters_with_counter(lower)?;
+    // The counter grammar ends at " counter on it"; consume the sentence's own
+    // terminal period here so the shared completeness witness below can require
+    // an otherwise-exhausted remainder (a leftover "." or ".." must decline).
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     let counter_effect = Effect::AddPendingETBCounters {
         counter_type,
         count: QuantityExpr::Fixed { value: 1 },
     };
     // Counter-only rider (Osteomancer Adept, no tail) — unchanged behavior.
-    if rest.trim_end_matches('.').trim().is_empty() {
+    if rider_remainder_is_complete(rest) {
         return Some(parsed_clause(counter_effect));
     }
     // CR 205.1b: optional " and is a <descriptor>" additive type grant, where
@@ -4331,7 +4354,12 @@ fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClaus
     clause.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::AddPendingEntersModifications {
-            modifications: mods,
+            rider: crate::types::ability::PendingEntersModifications {
+                modifications: mods,
+                // The counter rider's type tail is an unconditional grant; the
+                // printed quality gate exists only on the gains-rider prefix.
+                cast_filter: None,
+            },
         },
     )));
     Some(clause)
@@ -4394,6 +4422,318 @@ fn entry_counter_rider_clause(
         }
         _ => None,
     }
+}
+
+/// The shared terminal-remainder witness for the cast-this-way rider family: a
+/// rider is a COMPLETE sentence only when the body grammar's remainder is
+/// exhausted modulo trailing whitespace (`terminated(space0, eof)`), so a
+/// period or any other leftover text cannot dispatch as a complete rider. The
+/// body grammars consume their own sentence period; a remainder that still
+/// carries punctuation is a partial parse and declines.
+fn rider_remainder_is_complete(remainder: &str) -> bool {
+    use nom::character::complete::space0;
+    use nom::combinator::{all_consuming, eof};
+    use nom::sequence::terminated;
+    all_consuming(terminated(
+        space0::<_, OracleError<'_>>,
+        eof::<_, OracleError<'_>>,
+    ))
+    .parse(remainder)
+    .is_ok()
+}
+
+/// CR 608.2c + CR 611.2a + CR 611.2c: the cast-permission gains-modifications
+/// rider — "If you cast a [quality] spell this way, it gains <continuous
+/// modifications>" (Strago and Relm; The Mysterious Sphere). Lowers to
+/// `Effect::AddPendingEntersModifications`, attached as the `CastFromZone` /
+/// `CastCopyOfCard` sub-ability and consumed as cast-permission metadata
+/// (recorded on the granted `ExileWithAltCost`, applied once at cast
+/// finalization scoped to the cast object).
+///
+/// The `"if you do, it gains …"` gate form is recognized at the chain seam
+/// (`parse_effect_chain_ir`), where the preceding clause is visible and the
+/// parent context can require a cast grant.
+///
+/// Invoked at the top of `parse_effect_clause`, BEFORE the clause shell peels a
+/// trailing duration: the carrier has no duration channel, so the recognizer
+/// must see (and refuse) a stated duration itself rather than let the peel hide
+/// it and the shell re-apply it to a mis-claimed permanent grant.
+///
+/// Declines, each for a stated reason:
+///   * a stated duration (`strip_trailing_duration` in the body helper) — the
+///     metadata carrier has no duration channel, so a duration-bound body must
+///     not be misrepresented as permanent (CR 611.2a);
+///   * the no-quality wording ("if you cast a spell this way, ") — owned by the
+///     chain-level `strip_cast_this_way_gate`, whose reading is a CR 603.7
+///     delayed trigger for the classes it serves; accepting the same text here
+///     with different semantics would be coverage dishonesty;
+///   * a partially-consumed or unclassifiable body — falls through to the
+///     existing lowering, never a silent drop.
+fn try_parse_cast_this_way_gains_rider(lower: &str) -> Option<ParsedEffectClause> {
+    let text = lower.trim_start();
+    let (rest, cast_filter) = parse_cast_this_way_gains_rider_prefix(text)?;
+    let (remainder, modifications) = try_parse_cast_this_way_gains_rider_body(rest)?;
+    if rider_remainder_is_complete(remainder) {
+        Some(parsed_clause(Effect::AddPendingEntersModifications {
+            rider: crate::types::ability::PendingEntersModifications {
+                modifications,
+                cast_filter,
+            },
+        }))
+    } else {
+        None
+    }
+}
+
+/// The shared prefix core of the gains-modifications rider: "if you cast
+/// <quality> spell this way, " (the quality noun phrase, parsed as a typed
+/// spell predicate) or the anaphoric "if you cast it this way, " (no quality →
+/// unconditional). Deliberately rejects the no-quality wording "if you cast a
+/// spell this way, " — that form is owned by the chain-level
+/// `strip_cast_this_way_gate` and must not be duplicated here with different
+/// semantics. A quality phrase that is not a recognized type phrase declines
+/// the whole rider rather than dropping the printed condition.
+fn parse_cast_this_way_gains_rider_prefix(text: &str) -> Option<(&str, Option<TargetFilter>)> {
+    let (rest, cast_filter) = preceded(
+        tag::<_, _, OracleError<'_>>("if you cast "),
+        alt((
+            value(None, tag::<_, _, OracleError<'_>>("it this way, ")),
+            nom::combinator::map(
+                terminated(
+                    map_opt(
+                        verify(
+                            take_until::<_, _, OracleError<'_>>(" spell this way, "),
+                            |quality: &&str| !matches!(quality.trim(), "a" | "an"),
+                        ),
+                        parse_spell_quality_filter,
+                    ),
+                    tag::<_, _, OracleError<'_>>(" spell this way, "),
+                ),
+                Some,
+            ),
+        )),
+    )
+    .parse(text)
+    .ok()?;
+    Some((rest, cast_filter))
+}
+
+/// CR 608.2c + CR 601.2a: parse the printed spell-quality noun phrase of a
+/// cast-this-way rider ("a creature", "an instant or sorcery") into the typed
+/// predicate evaluated against the elected spell at finalization. Returns
+/// `None` when the phrase is not a recognized type phrase — the rider then
+/// declines to parse rather than silently dropping its printed condition.
+fn parse_spell_quality_filter(quality: &str) -> Option<TargetFilter> {
+    let (filter, remainder) =
+        crate::parser::oracle_target::parse_type_phrase_folding(quality.trim());
+    remainder.trim().is_empty().then_some(filter)
+}
+
+/// The printed spell-quality predicate of a matched cast-this-way gains-rider
+/// sentence, for the swallow detector's quality-matched exemption. Returns
+/// `None` when the text is not a gains-rider sentence at all; `Some(None)` for
+/// the unconditional anaphoric form ("if you cast it this way"); `Some(Some(p))`
+/// for the quality form ("if you cast a creature spell this way" → the typed
+/// creature predicate). The caller matches the exact predicate against the
+/// delivered carrier's `cast_filter`, so a carrier missing the very condition
+/// its sentence names can never clear the warning.
+pub(crate) fn cast_this_way_gains_rider_sentence_quality(
+    text: &str,
+) -> Option<Option<TargetFilter>> {
+    let text = text.trim_start();
+    let (_, cast_filter) = parse_cast_this_way_gains_rider_prefix(text)?;
+    Some(cast_filter)
+}
+
+/// The shared body core of the gains-modifications rider: the anaphoric subject
+/// ("it gains …") plus the modification-body grammar. Returns the unconsumed
+/// remainder AND the typed modifications from the same pass, so the detector's
+/// consumed span and the lowering's accepted span cannot drift apart.
+///
+/// CR 611.2a: a stated duration declines — `AddPendingEntersModifications`
+/// carries no duration and is applied as `Duration::Permanent`, so a
+/// duration-bound body (Alaundo the Seer's "gains haste until end of turn")
+/// must stay on its existing lowering rather than be claimed as permanent.
+///
+/// Values come from the shared `parse_continuous_modifications` authority (the
+/// same classifier the existing counter/type rider family and the static route
+/// use), so a rider body and an identical static body cannot classify
+/// differently. The keyword/quoted grammar is the full-consumption witness:
+/// an empty quoted segment or an unknown keyword fails the match; an unknown
+/// non-empty quoted body is represented by the shared inner classifier as a
+/// GrantAbility carrying Unimplemented, never silently dropped.
+pub(crate) fn try_parse_cast_this_way_gains_rider_body(
+    text: &str,
+) -> Option<(&str, Vec<ContinuousModification>)> {
+    let text = text.trim_start();
+    // Anaphoric subject for the spell/permanent cast under the granted
+    // permission. `~` is the normalized self-reference form; the literal
+    // "this creature" form reaches this recognizer from the detector's raw
+    // unit text (mirroring `parse_cast_this_way_enters_with_counter`).
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it gains "),
+        tag("that creature gains "),
+        tag("this creature gains "),
+        tag("~ gains "),
+        tag("this permanent gains "),
+    ))
+    .parse(text)
+    .ok()?;
+    // `strip_trailing_duration` TRIMS both ends before parsing (its no-duration
+    // return is `rest.trim()`), and the body grammar's remainder is relative to
+    // that trimmed slice. Assemble the consumed span from the slice's own offset
+    // inside `text` plus the portion consumed from `body`, and re-slice the
+    // returned remainder from `text`: otherwise every caller's
+    // `text.len() - remainder.len()` span arithmetic is off by the trimmed
+    // bytes (and a populated `parse_continuous_modifications` window can reach
+    // into the unconsumed tail).
+    let rest_offset = text.len() - rest.len();
+    let (body, duration) = strip_trailing_duration(rest);
+    if duration.is_some() {
+        return None;
+    }
+    let body_offset = rest_offset + (rest.len() - rest.trim_start().len());
+    let (remainder, ()) = parse_cast_this_way_gains_rider_body_grammar(body).ok()?;
+    let consumed_len = body_offset + (body.len() - remainder.len());
+    let modifications =
+        crate::parser::oracle_static::parse_continuous_modifications(&text[..consumed_len]);
+    if modifications.is_empty() {
+        return None;
+    }
+    Some((&text[consumed_len..], modifications))
+}
+
+/// The gains-rider body grammar: one or more modification segments (an
+/// evergreen-keyword grant list or a quoted granted ability) separated by the
+/// printed separators, with an optional terminal period. The segments are the
+/// full-consumption witness; the values are classified by the shared
+/// `parse_continuous_modifications` authority, so the two can disagree only
+/// about whether a body is fully consumable, never about what it means.
+fn parse_cast_this_way_gains_rider_body_grammar(input: &str) -> OracleResult<'_, ()> {
+    let (rest, ()) = parse_cast_this_way_gains_rider_segment(input)?;
+    let (rest, _) = many0(preceded(
+        alt((tag(", and "), tag(", "), tag(" and "))),
+        parse_cast_this_way_gains_rider_segment,
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, ()))
+}
+
+/// One body segment: a quoted granted ability (required to classify non-empty
+/// through the shared inner classifier — only an empty quoted body fails the
+/// segment match, while an unknown non-empty quoted ability is represented as
+/// a GrantAbility carrying Unimplemented, never silently dropped) or an
+/// evergreen-keyword grant list.
+fn parse_cast_this_way_gains_rider_segment(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_cast_this_way_gains_rider_quoted_segment,
+        parse_cast_this_way_gains_rider_keyword_segment,
+    ))
+    .parse(input)
+}
+
+fn parse_cast_this_way_gains_rider_quoted_segment(input: &str) -> OracleResult<'_, ()> {
+    use nom::character::complete::char;
+    use nom::sequence::delimited;
+    let (rest, inner) = delimited(char('"'), take_until("\""), char('"')).parse(input)?;
+    if crate::parser::oracle_static::classify_quoted_inner(inner).is_empty() {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, ()))
+}
+
+fn parse_cast_this_way_gains_rider_keyword_segment(input: &str) -> OracleResult<'_, ()> {
+    // `parse_keyword_grant_list` returns (keywords, remainder); it never
+    // returns an empty list.
+    let (_keywords, rest) =
+        sequence::parse_keyword_grant_list(input).ok_or_else(|| oracle_err(input))?;
+    Ok((rest, ()))
+}
+
+/// The recognizer's own consumed span, shared with the swallow detector: runs
+/// the same prefix + body core the lowering runs and returns the consumed byte
+/// length only when the consumed span is a COMPLETE rider sentence. A
+/// partially-consumed body yields no span — the lowering's own accepted span
+/// and the detector's sentence span therefore agree by construction.
+///
+/// The trailing-sentence tolerance exists because the detector runs on the REST
+/// OF THE UNIT: at Strago's real rider sentence the remainder is
+/// `" activate only as a sorcery."` (BF-P2-7), so a literal whole-remainder
+/// emptiness test would return no span, sever at the quoted internal period,
+/// and regress the detector positive. The two legs are therefore:
+///
+/// 1. the lowering's own accepted span — remainder exhausted modulo trailing
+///    whitespace (the shared `rider_remainder_is_complete` witness; the body
+///    grammar consumes its own sentence period); or
+/// 2. the span ends at one of the body grammar's own sentence terminals (`.`,
+///    or the quoted segment's closing `."`) AND the untrimmed remainder does
+///    not resume the modification list. Every mid-list partial stop resumes at
+///    a separator the grammar restores (`parse_keyword_grant_list` and the
+///    body `many0` both restore the separator they failed on), so leg 2
+///    rejects it; a partial stop that never reaches a sentence terminal is
+///    rejected by the terminal test.
+pub(crate) fn cast_this_way_gains_rider_consumed_len(text: &str) -> Option<usize> {
+    let text = text.trim_start();
+    // ASCII lowercasing preserves byte offsets: the detector slices the
+    // ORIGINAL text by the returned length, so a Unicode-aware fold that
+    // changed any character's byte length would corrupt the span.
+    let lower = text.to_ascii_lowercase();
+    let (rest, _cast_filter) = parse_cast_this_way_gains_rider_prefix(&lower)?;
+    let (remainder, _modifications) = try_parse_cast_this_way_gains_rider_body(rest)?;
+    let span = text.len() - remainder.len();
+    if rider_remainder_is_complete(remainder) {
+        return Some(span);
+    }
+    if consumed_span_ends_at_sentence_terminal(&lower[..span])
+        && !remainder_resumes_modification_list(remainder)
+    {
+        return Some(span);
+    }
+    None
+}
+
+/// Whether `span` ends at one of the body grammar's own sentence terminals —
+/// the quoted segment's closing `."` or the consumed terminal `.` — parsed with
+/// the grammar's own terminal shapes against the span's tail bytes, anchored at
+/// the span's end so a non-terminal tail byte can never satisfy it.
+///
+/// The quoted terminal has TWO measured shapes. As printed it is `."`; the
+/// swallow detector's sentence-join normalization inserts a space after every
+/// period (`strip_represented_tiered_pairs_from_line` rejoins with `" "`), so by
+/// the time the detector runs this helper the same closing quote arrives as
+/// `. "` (BF-P2-7 measured shape). Both are the quoted segment's own terminal,
+/// so both are accepted. Structural classification of already-parsed text, not
+/// parsing dispatch.
+fn consumed_span_ends_at_sentence_terminal(span: &str) -> bool {
+    (1..=3).rev().any(|tail_len| {
+        let start = span.len().saturating_sub(tail_len);
+        span.is_char_boundary(start)
+            && matches!(
+                alt((
+                    tag::<_, _, OracleError<'_>>(".\""),
+                    tag(". \""),
+                    tag("."),
+                ))
+                .parse(&span[start..]),
+                Ok((rest, _)) if rest.is_empty()
+            )
+    })
+}
+
+/// Whether the untrimmed remainder resumes the modification list — i.e. starts
+/// at one of the body grammar's own separators. A partially-consumed body stops
+/// at the separator it failed on, so this rejects every mid-list partial whose
+/// span happens to end at a sentence terminal.
+fn remainder_resumes_modification_list(remainder: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>(", and "),
+        tag(", "),
+        tag(" and "),
+        tag("and "),
+    ))
+    .parse(remainder)
+    .is_ok()
 }
 
 /// CR 603.6 + CR 702.26a: One self-referential event verb of a delayed-trigger
@@ -6244,7 +6584,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         source_id: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     },
@@ -8786,6 +9126,21 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         if let Some(clause) =
             try_parse_temporary_cant_become_tapped(TextPair::new(text, &cant_tap_lower))
         {
+            return clause;
+        }
+    }
+    // CR 608.2c + CR 611.2a: "If you cast a [quality] spell this way, it gains …"
+    // — the gains-modifications cast-permission rider (Strago and Relm; The
+    // Mysterious Sphere). Attaches as the `CastFromZone`/`CastCopyOfCard`
+    // sub-ability, consumed as permission metadata. Like the temporary-attack
+    // recognizer above, it OWNS ITS DURATION (the carrier has no duration
+    // channel), so it must dispatch BEFORE the clause shell peels a trailing
+    // duration off the clause — otherwise a duration-bound body (Alaundo the
+    // Seer's "it gains haste until end of turn") reaches the recognizer with
+    // its duration already removed and would be claimed as a permanent grant.
+    {
+        let gains_lower = text.to_lowercase();
+        if let Some(clause) = try_parse_cast_this_way_gains_rider(&gains_lower) {
             return clause;
         }
     }
@@ -37968,6 +38323,9 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
                 rebind_event_context_amount_counts_in_ability(outcome_template, gate_qty);
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => {
+            rebind_event_context_amount_counts_in_ability(winner_effect, gate_qty);
+        }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -41586,6 +41944,9 @@ fn parse_effect_chain_ir_body(
     if let Some(ir) = parse_exile_top_each_library_with_collection_counter_ir(text, kind, ctx) {
         return ir;
     }
+    if let Some(ir) = top_card_contest::parse_exile_top_card_contest_ir(text, kind, ctx) {
+        return ir;
+    }
     if let Some(ir) = parse_balance_equalization_ir(text, kind, ctx) {
         return ir;
     }
@@ -43468,6 +43829,49 @@ fn parse_effect_chain_ir_body(
             (Some(reflexive), None) => Some(reflexive),
             (None, None) => None,
         };
+        // CR 608.2c + CR 611.2a: "If you do, it gains <modifications>" after the
+        // chain's most recent clause granted the cast is the same
+        // gains-modifications rider in its gate form (The Mysterious Sphere's
+        // copy route; synthetic Strago gate form). The parent context is what
+        // distinguishes this rider from a generic `IfYouDo` consequence, and
+        // this chain seam is the one place where the prior clauses are visible
+        // (mirroring `chain_granted_cast_permission_has_card_target`). A body
+        // this recognizer does not fully consume falls through unchanged, so
+        // every other "if you do, it gains …" member of the corpus keeps its
+        // existing lowering.
+        if condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+            && chain_most_recent_clause_is_cast_grant(builder.clauses())
+        {
+            if let Some((remainder, modifications)) =
+                try_parse_cast_this_way_gains_rider_body(&text)
+            {
+                if rider_remainder_is_complete(remainder) {
+                    builder
+                        .clause(
+                            normalized_text,
+                            parsed_clause(Effect::AddPendingEntersModifications {
+                                rider: crate::types::ability::PendingEntersModifications {
+                                    modifications,
+                                    // The "If you do, it gains …" gate form carries no
+                                    // printed spell-quality condition; the gate is the
+                                    // optional-effect-performed condition itself.
+                                    cast_filter: None,
+                                },
+                            }),
+                            chunk.boundary_after,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .condition(condition.clone())
+                        .push();
+                    continue;
+                }
+            }
+        }
         // CR 608.2c + CR 608.2d: When NO typed condition matched any pass above,
         // fall back to a structural-only strip that removes an unrepresentable
         // `If <X>, ` head ONLY when the body begins with `"you may "`. This
@@ -50182,6 +50586,26 @@ fn consequent_is_a_property_of_the_granted_cast(def: &AbilityDefinition) -> bool
         &*def.effect,
         Effect::CastFromZone { .. } | Effect::GenericEffect { .. }
     )
+}
+
+/// CR 608.2c: whether the chain's most recent emitted clause is a cast grant —
+/// the `CastFromZone` / `CastCopyOfCard` effects a gains-modifications rider can
+/// attach to as permission metadata. Deliberately NOT `GrantCastingPermission`:
+/// that class is owned by `refuse_cast_rider_on_lingering_grant`, which stays
+/// the fail-closed guard for lingering grants. Mirrors the reverse non-`Continue`
+/// walk of [`chain_granted_cast_permission_has_card_target`].
+fn chain_most_recent_clause_is_cast_grant(clauses: &[ClauseIr]) -> bool {
+    clauses
+        .iter()
+        .rev()
+        // allow-noncombinator: structural reverse walk over parsed clause IR, not parsing dispatch
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            matches!(
+                &clause.parsed.effect,
+                Effect::CastFromZone { .. } | Effect::CastCopyOfCard { .. }
+            )
+        })
 }
 
 /// CR 603.7: Checks whether an earlier clause in this chain granted a card-casting

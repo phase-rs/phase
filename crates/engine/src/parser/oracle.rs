@@ -9128,6 +9128,9 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
                 resolve_guards_in_ability(outcome_template, None);
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => {
+            resolve_guards_in_ability(winner_effect, None);
+        }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -9271,8 +9274,8 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            for modification in modifications {
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            for modification in rider.modifications.iter_mut() {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
@@ -9544,7 +9547,7 @@ fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
             enters_with_modifications,
             ..
         } => {
-            for modification in enters_with_modifications {
+            for modification in enters_with_modifications.modifications.iter_mut() {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
@@ -9653,19 +9656,29 @@ fn parse_oracle_pipeline(
     ParsedAbilities,
     Option<(OracleDocIr, ParsedAbilities, String)>,
 ) {
+    let _card_span =
+        tracing::debug_span!(target: "engine::parser::binding", "card", card_name).entered();
     let (normalized, refusals) = normalize_card_name_refs_reporting(oracle_text, card_name);
-    let mut ir = parse_normalized_oracle_ir(
-        oracle_text,
-        &normalized,
-        card_name,
-        mtgjson_keyword_names,
-        types,
-        subtypes,
-        observer,
-    );
+    let mut ir = {
+        let _stage = tracing::debug_span!(target: "engine::parser::binding", "stage", stage = "ir_production").entered();
+        parse_normalized_oracle_ir(
+            oracle_text,
+            &normalized,
+            card_name,
+            mtgjson_keyword_names,
+            types,
+            subtypes,
+            observer,
+        )
+    };
     ir.granter_name_refusals = refusals;
     let document_ir = capture_stages.then(|| ir.clone());
-    let mut parsed = lower_oracle_ir(&mut ir);
+    let mut parsed = {
+        let _stage =
+            tracing::debug_span!(target: "engine::parser::binding", "stage", stage = "ir_lowering")
+                .entered();
+        lower_oracle_ir(&mut ir)
+    };
     let mut raw_lowered = capture_stages.then(|| parsed.clone());
     render_granting_self_descriptions(&mut parsed, card_name);
     demote_unbound_delayed_sweeps(&mut parsed);
@@ -10239,6 +10252,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
                 demote_lifetimes_in_ability(outcome_template);
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => demote_lifetimes_in_ability(winner_effect),
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -10325,8 +10339,8 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         // made, and documented, in `types::ability_visit`.
         Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {}
         // --- nested continuous modifications ---
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            for m in modifications.iter_mut() {
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            for m in rider.modifications.iter_mut() {
                 demote_lifetimes_in_modification(m);
             }
         }
@@ -10997,8 +11011,8 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
         Effect::Unimplemented { description, .. } => {
             render_granter_ref_in_description(description, card_name)
         }
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            for m in modifications.iter_mut() {
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            for m in rider.modifications.iter_mut() {
                 render_modification_descriptions(m, card_name);
             }
         }
@@ -11112,7 +11126,7 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
                 },
             ..
         } => {
-            for m in enters_with_modifications.iter_mut() {
+            for m in enters_with_modifications.modifications.iter_mut() {
                 render_modification_descriptions(m, card_name);
             }
         }
@@ -11150,6 +11164,9 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
             for branch in results.iter_mut() {
                 render_ability_descriptions(&mut branch.effect, card_name);
             }
+        }
+        Effect::ExileTopCardContest { winner_effect } => {
+            render_ability_descriptions(winner_effect, card_name);
         }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,

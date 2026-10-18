@@ -4759,9 +4759,61 @@ pub struct RepeatUntilStopWitness {
     pub linked: Vec<ExiledStopInput>,
 }
 
+/// CR 104.4b: whether one `UntilStopConditions` iteration gave a player any
+/// decision — the carve-out separating a loop of mandatory actions (a draw)
+/// from a loop that contains an optional action (not a draw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepeatIterationChoice {
+    /// The iteration has offered no player decision, and its chain
+    /// carries no may-trigger key a stored "may" answer could have used in
+    /// place of a prompt. Every action in it was mandatory: an optional
+    /// instruction that could not be performed was never offered
+    /// (CR 608.2d — `optional_effect_is_infeasible` auto-declines it).
+    ///
+    /// A parked iteration retains this evidence until all child work settles.
+    MandatoryOnly(RepeatIterationMovement),
+    /// The iteration paused for a player decision, or a stored "may" answer
+    /// (CR 603.5, keyed by `may_trigger_origin`) could have stood in for one.
+    OptionalOffered,
+}
+
+/// Whether a mandatory-only `UntilStopConditions` iteration moved any object.
+///
+/// The stop witness (`exile_links::repeat_until_stop_witness`) is not a
+/// complete progress measure. It counts only linked-exile rows, which are
+/// written only when `exile_links::should_track_exiled_by_source` holds, while
+/// the repeat accepts any body. A body with no linked-exile consumer can exile a
+/// card with the witness unchanged. A stalled witness therefore proves the loop
+/// is repeating itself only when nothing else moved either.
+///
+/// COUPLING, recorded: zone movement is a COMPLETE progress measure only
+/// because every stop predicate `should_stop_repeat_until` reads is itself
+/// driven by a zone change — a card exiled by this source reaching its
+/// controller's hand, or two cards exiled by it sharing a name. An iteration
+/// that instead changes a life total or a counter therefore moves the loop no
+/// closer to stopping, so classing it `Stationary` is right: CR 104.4b asks
+/// whether a loop has "no way to stop", not whether the game state changed.
+/// A stop predicate reading anything but a zone would break that argument, and
+/// this witness would have to gain the matching event kind in the same change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepeatIterationMovement {
+    /// The iteration emitted no `GameEvent::ZoneChanged`: no object changed
+    /// zones and no token was created.
+    Stationary,
+    /// The iteration emitted at least one `GameEvent::ZoneChanged`.
+    ObjectsMoved,
+}
+
+/// CR 104.4b + CR 608.2c: whole-iteration evidence retained across queued work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatUntilIterationWitness {
+    pub choice: RepeatIterationChoice,
+    pub zone_changes_before: usize,
+}
+
 /// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
-/// (`RepeatContinuation`) paused when an iteration's process entered an
-/// interactive `WaitingFor` state.
+/// (`RepeatContinuation`) paused while its current iteration has queued work
+/// or a live player decision.
 ///
 /// The loop in `resolve_ability_chain` cannot set the repeat prompt while a
 /// player choice from the iteration is still unresolved. It stashes this
@@ -4785,6 +4837,8 @@ pub struct PendingRepeatUntil {
     /// safe direction to fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_progress: Option<RepeatUntilStopWitness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_progress: Option<RepeatUntilIterationWitness>,
 }
 
 /// CR 400.7 + CR 608.2c: a parent's target OCCURRENCES carried outside any
@@ -6562,6 +6616,14 @@ pub enum BatchCompletion {
         exiled_misses: Vec<ObjectId>,
         current_card: ObjectId,
     },
+    /// CR 701.13a + CR 608.2c + CR 616.1: One top-card exile contest round
+    /// (Timesifter) settled. Keep the contest ability and each contender's
+    /// proposed card so the comparison, any tie-repeat round, and the winner's
+    /// instruction run only after the round's simultaneous batch is delivered.
+    TopCardContestRoundComplete {
+        ability: Box<ResolvedAbility>,
+        round: Vec<(PlayerId, ObjectId)>,
+    },
     /// CR 702.85a + CR 616.1: A no-hit Cascade's randomized bottom batch has
     /// settled (including any redirected cards), so its completion events may
     /// fire exactly once.
@@ -6911,23 +6973,21 @@ pub enum BatchCompletion {
     },
 }
 
+/// CR 608.2c + CR 608.2n: an instant or sorcery whose instructions paused for a
+/// choice (CR 608.2d / CR 608.2g) still owes the final part of its resolution —
+/// leaving the stack — once those instructions are done. Owned by the resolution
+/// carrier it names (`resolving_stack_entry`), never by the spell's ability or
+/// stack entry, so a copy of the spell (CR 707.10) cannot inherit it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwedSpellFinalPart {
+    pub spell: ObjectId,
+}
+
 /// CR 603.3b + CR 608.2g: terminal settlement that must wait until the
 /// resolution-cast spell has completed its announcement. `source_id` proves
 /// the terminal batch belongs to the still-stashed resolving Ripple ability;
 /// the post-announcement boundary then combines this cast's triggers with the
 /// earlier accepted casts' parked observers before ordering the one batch.
-/// CR 608.2n + CR 608.2g: the move of a resolving instant or sorcery to the
-/// zone it goes to "as the final part" of its resolution, held back while the
-/// spell is paused on its own during-resolution free-cast window (Finale of
-/// Promise, Collected Conjuring). The spell stays on the stack until the window
-/// and the rest of its instructions are done; the destination is the one
-/// `resolve_top` selected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeferredSpellDelivery {
-    pub object_id: ObjectId,
-    pub destination: crate::types::zones::Zone,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResolutionCompletion {
     pub player: PlayerId,
@@ -7958,7 +8018,11 @@ pub struct FinalizePrePaymentChecks {
     pub cascade_cast_transformed: bool,
     pub resolution_success_waiting_for: Option<WaitingFor>,
     pub cast_this_way_etb_counter: Option<CounterType>,
-    pub cast_this_way_enters_mods: Vec<ContinuousModification>,
+    #[serde(
+        default,
+        deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat"
+    )]
+    pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
 }
 
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
@@ -8780,20 +8844,8 @@ impl GameState {
             .or_else(|| owners.first().copied())
     }
 
-    /// Temporarily removes the announcement-local trigger transaction from the
-    /// pending cast that currently owns it (any [`PendingCastOwner`]).
-    pub(crate) fn take_pending_activation_trigger_collection(
-        &mut self,
-    ) -> Option<Box<crate::game::triggers::PendingActivationTriggerCollection>> {
-        let owner = self.pending_trigger_carrier_owner()?;
-        self.pending_cast_at_mut(owner)?
-            .activation_trigger_collection
-            .take()
-    }
-
-    /// Restores the transaction removed by
-    /// [`Self::take_pending_activation_trigger_collection`] to the same active
-    /// casting continuation.
+    /// Restores a transaction taken from the announcement's `PendingCast` to
+    /// the same active casting continuation.
     pub(crate) fn restore_pending_activation_trigger_collection(
         &mut self,
         collection: Box<crate::game::triggers::PendingActivationTriggerCollection>,
@@ -11075,6 +11127,21 @@ pub enum CastOfferKind {
         /// the unrestricted behavior.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         member_pool: Vec<ObjectId>,
+        /// CR 608.2c + CR 611.2a: the cast-permission gains-modifications rider
+        /// ("If you cast a [quality] spell this way, it gains …", Strago and
+        /// Relm) snapshotted from the converting `CastFromZone` ability. Every
+        /// cast of the window receives it through its `ResolutionCastRequest`
+        /// (the elected-permission application point; CR 611.2f: such an effect
+        /// "do[es] not begin immediately" but applies when the player next puts
+        /// the appropriate spell on the stack), and the re-offers carry it
+        /// through `FreeCastOfferRemaining`. Empty for windows without a rider
+        /// and for saved states predating the field.
+        #[serde(
+            default,
+            deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat",
+            skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
+        )]
+        enters_with_modifications: crate::types::ability::PendingEntersModifications,
     },
     /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
     /// from a graveyard — "you may cast target X card from a graveyard", with
@@ -11095,6 +11162,19 @@ pub enum CastOfferKind {
         /// (e.g. "if that spell would be put into a graveyard, exile it instead").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+        /// CR 608.2c + CR 611.2a: the cast-permission gains-modifications rider
+        /// ("If you cast a [quality] spell this way, it gains …", Strago and
+        /// Relm) snapshotted from the offering `CastFromZone` ability; the
+        /// accept threads it into the elected permission (CR 611.2f: the
+        /// granted rider applies when the player next puts the appropriate
+        /// spell on the stack). Empty for every other paid offer and for saved
+        /// states predating the field.
+        #[serde(
+            default,
+            deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat",
+            skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
+        )]
+        enters_with_modifications: crate::types::ability::PendingEntersModifications,
         /// CR 712.14a: Whether the spell is cast transformed. Rare for this
         /// class; carried for parity with the free during-resolution casts.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -12690,6 +12770,41 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
     if state.next_delayed_trigger_instance <= max_instance {
         return Err(
             "delayed-trigger instance allocator is not above its install roots".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// CR 608.2n: an owed final part belongs to the instant or sorcery whose
+/// resolution carrier is installed. A restored marker that names no carrier, a
+/// non-spell carrier, a different spell, a spell with no object, or a permanent
+/// spell (CR 608.3: its resolution is not the instant/sorcery path) is rejected
+/// rather than published.
+pub(crate) fn validate_owed_spell_final_part_coherence(state: &GameState) -> Result<(), String> {
+    let Some(owed) = state.resolving_spell_final_part else {
+        return Ok(());
+    };
+    let names_installed_spell =
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|entry| match &entry.kind {
+                StackEntryKind::Spell { .. } => entry.id == owed.spell,
+                StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::TriggeredAbility { .. }
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. } => false,
+            });
+    if !names_installed_spell {
+        return Err("an owed spell final part must name the installed spell carrier".to_string());
+    }
+    if !state.objects.contains_key(&owed.spell) {
+        return Err("an owed spell final part must name an existing spell object".to_string());
+    }
+    if crate::game::stack::is_permanent_spell(state, owed.spell) {
+        return Err(
+            "an owed spell final part must name an instant or sorcery spell, not a permanent spell"
+                .to_string(),
         );
     }
     Ok(())
@@ -16727,6 +16842,9 @@ pub enum WaitingFor {
         player: PlayerId,
         card: ObjectId,
         remaining: Vec<(PlayerId, ObjectId)>,
+        /// CR 701.30c: selected bottoms wait until every participant has chosen.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bottom_cards: Vec<ObjectId>,
     },
     /// Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest between
     /// the resolving ability's controller (contestant 0) and `contest.contestants[1]`.
@@ -23453,15 +23571,16 @@ declare_game_state! {
     /// stack into its active resolution context. `None` is normal or legacy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resolving_trigger_firing: Option<TriggerFiring>,
+    /// CR 608.2n: see [`OwedSpellFinalPart`]. Paired with
+    /// `resolving_stack_entry` like `resolving_trigger_firing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolving_spell_final_part: Option<OwedSpellFinalPart>,
     /// CR 603.3b + CR 608.2g: a terminal resolution batch (currently Ripple)
     /// has settled, but its final spell is still completing announcement. Keep
     /// the provenance until the post-announcement priority pipeline can collect
     /// that spell's cast triggers into the same deferred ordering batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resolution_completion: Option<PendingResolutionCompletion>,
-    /// CR 608.2n + CR 608.2g: see [`DeferredSpellDelivery`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred_spell_delivery: Option<DeferredSpellDelivery>,
     /// CR 107.3i: the X announced for an in-flight COST, keyed by the object whose cost
     /// it is. CR 107.3i: "Normally, all instances of X on an object have the same value
     /// at any given time" — so a triggered ability of that SAME object which fires
@@ -23854,6 +23973,9 @@ pub(crate) struct GameStateDecode;
 const LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR: &str =
     "CreatureExploited snapshot lacks authoritative victim record; restore a save that contains the exploit departure record";
 
+const LEGACY_DEFERRED_SPELL_DELIVERY_ERROR: &str =
+    "legacy deferred_spell_delivery snapshot cannot prove which on-resolution hooks already ran; restore a save taken after the spell's free-cast window closed";
+
 const SERIALIZED_TRIGGER_DEFINITION_CORE_FIELDS: &[&str] = &[
     "execute",
     "valid_card",
@@ -23932,6 +24054,27 @@ fn migrate_legacy_exploited_trigger_roles(value: &mut serde_json::Value) {
         | serde_json::Value::Bool(_)
         | serde_json::Value::Number(_)
         | serde_json::Value::String(_) => {}
+    }
+}
+
+/// Rejects a snapshot that still carries the removed `deferred_spell_delivery` record.
+///
+/// CR 608.2n + CR 702.88a: before the final part of an instant or sorcery's
+/// resolution was owed on the resolution carrier (`resolving_spell_final_part`),
+/// a spell that paused on its own free-cast window had already armed its
+/// on-resolution hooks (rebound, paradigm, epic) and recorded only the chosen
+/// destination in `deferred_spell_delivery`. The carrier marker means the
+/// opposite: the hooks have NOT yet run. Completing an old snapshot through the
+/// final part would therefore re-arm them (a second rebound delayed trigger,
+/// CR 702.88a), and dropping the record would strand the spell in no zone. A
+/// record cannot say which hooks ran, so the snapshot is refused rather than
+/// guessed at. The key is the exact discriminator: it is never written by a
+/// current build, and `null` is not a record.
+fn reject_legacy_deferred_spell_delivery(value: &serde_json::Value) -> Result<(), String> {
+    let state = value.get("state").unwrap_or(value);
+    match state.get("deferred_spell_delivery") {
+        None | Some(serde_json::Value::Null) => Ok(()),
+        Some(_) => Err(LEGACY_DEFERRED_SPELL_DELIVERY_ERROR.to_string()),
     }
 }
 
@@ -24218,6 +24361,7 @@ impl GameStateDecode {
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
         validate_trigger_firing_coherence(&state)?;
+        validate_owed_spell_final_part_coherence(&state)?;
         validate_return_result_occurrence_coherence(&state)?;
         reject_zero_bound_shortcut_offer(&state)?;
         #[cfg(debug_assertions)]
@@ -24231,6 +24375,7 @@ impl GameStateDecode {
     ) -> Result<GameState, String> {
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
+        reject_legacy_deferred_spell_delivery(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
             migrate_legacy_trigger_firing_carriers(
@@ -24258,6 +24403,7 @@ impl GameStateDecode {
         // (`decode_persisted_resolution_state`), which is what a saved game restores
         // through and where installing a projection as authority is the actual defect.
         validate_trigger_firing_coherence(&state)?;
+        validate_owed_spell_final_part_coherence(&state)?;
         if state.viewer_projection.is_none() {
             validate_return_result_occurrence_coherence(&state)?;
         }
@@ -24287,6 +24433,7 @@ impl GameStateDecode {
         ));
         reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
+        reject_legacy_deferred_spell_delivery(value)?;
         if matches!(
             mode,
             GameStateDecodeMode::ResolutionWireV1 | GameStateDecodeMode::ResolutionWireV2
@@ -26048,6 +26195,11 @@ fn annotate_paused_exile_event(
 }
 
 impl GameState {
+    /// CR 608.2n: the final part the resolving instant or sorcery still owes, if any.
+    pub fn owed_spell_final_part(&self) -> Option<&OwedSpellFinalPart> {
+        self.resolving_spell_final_part.as_ref()
+    }
+
     /// CR 704.3: Whether the game is inside a process that no player receives
     /// priority during, so the state-based action check must wait until it
     /// completes. There are four owners:
@@ -26932,8 +27084,8 @@ impl GameState {
     /// It is NOT the frame's whole lifecycle: past the ignore choice, a
     /// results-table branch can suspend mid-loop on its own prompt
     /// (CR 706.3a + CR 608.2c), and the owner is then re-parked by
-    /// `park_die_roll_frame_for_resume` to carry the remaining dice. See that
-    /// method for which stack slot each case parks into.
+    /// the die driver outside the complete child stack captured before that
+    /// branch, carrying the remaining dice until it settles.
     pub fn push_die_roll_frame(&mut self, pending: PendingDieRoll) {
         self.resolution_stack.push_die_roll(pending);
     }
@@ -26953,41 +27105,6 @@ impl GameState {
         pending: PendingDieRoll,
     ) -> Result<(), ResolutionStackError> {
         self.resolution_stack.replace_active_die_roll(pending)
-    }
-
-    /// CR 706.3a + CR 608.2c: Parks the die-roll owner for a mid-loop resume,
-    /// choosing the structurally valid slot instead of assuming one.
-    ///
-    /// Three cases, and collapsing them is a stack-invariant bug:
-    ///
-    /// * the owner is already on top (this pass came from a keep choice) — swap
-    ///   it in place, keeping the stack top stable;
-    /// * the stack is empty (a first pass that never parked one) — push;
-    /// * something else owns the top. Past cursor 0 this frame is an
-    ///   `AfterChild` owner (see `ResolutionFrame::gate`), so a results-table
-    ///   branch that suspended on its OWN prompt is above us. Pushing there
-    ///   would bury that child's `DirectChoice`, which `validate` rejects
-    ///   (`buried_direct_choice`) because a direct-choice owner must be the top
-    ///   frame. Insert BELOW the active child instead — the frame waits on it,
-    ///   exactly like every other `AfterChild` owner.
-    pub fn park_die_roll_frame_for_resume(
-        &mut self,
-        pending: PendingDieRoll,
-    ) -> Result<(), ResolutionStackError> {
-        match self
-            .resolution_stack
-            .replace_active_die_roll(pending.clone())
-        {
-            Ok(()) => Ok(()),
-            Err(ResolutionStackError::Empty) => {
-                self.resolution_stack.push_die_roll(pending);
-                Ok(())
-            }
-            Err(ResolutionStackError::UnexpectedTop { .. }) => self
-                .resolution_stack
-                .insert_parent_of_active(ResolutionFrame::DieRoll(Box::new(pending))),
-            Err(error) => Err(error),
-        }
     }
 
     /// Re-parks the active coin-flip owner after it suspends for another keep
@@ -29600,8 +29717,8 @@ impl GameState {
             current_trigger_match_count: None,
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
+            resolving_spell_final_part: None,
             pending_resolution_completion: None,
-            deferred_spell_delivery: None,
             resolution_source_relatch: None,
             current_trigger_events: Vec::new(),
             last_discover_value: None,
@@ -32626,8 +32743,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         turn_up_paid_cost_source: _,
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
+        resolving_spell_final_part: _,
         pending_resolution_completion: _,
-        deferred_spell_delivery: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,
         stack_trigger_firings: _,
@@ -32925,7 +33042,7 @@ impl PartialEq for GameState {
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.payment_transaction == other.payment_transaction
             && self.pending_resolution_completion == other.pending_resolution_completion
-            && self.deferred_spell_delivery == other.deferred_spell_delivery
+            && self.resolving_spell_final_part == other.resolving_spell_final_part
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).
@@ -34307,6 +34424,7 @@ mod tests {
                 hit_card,
                 mana_spend_permission: None,
                 graveyard_replacement: None,
+                enters_with_modifications: Default::default(),
                 cast_transformed: false,
                 additional_cost: None,
                 cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -34461,6 +34579,163 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 611.2a (row 6.8): the two `CastOfferKind` carriers of the
+    /// gains-modifications rider deserialize a pre-fix payload without the
+    /// field to the default rider with the rest of the payload intact, omit
+    /// the field when the rider is empty, and round-trip a carried rider
+    /// (including its typed cast-quality predicate) exactly.
+    #[test]
+    fn cast_offer_rider_field_back_compat_and_skip_when_empty() {
+        use crate::types::ability::{
+            ContinuousModification, PendingEntersModifications, ResolutionCastFacePolicy,
+            ResolutionCastSuccessAction, ResolutionMvRejectAction,
+        };
+        use crate::types::keywords::Keyword;
+
+        let rider = PendingEntersModifications {
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            cast_filter: Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Creature),
+            )),
+        };
+        let policy =
+            ResolutionCastFacePolicy::new(TargetFilter::Any, ObjectId(7), PlayerId(0), None);
+        let cleanup = crate::types::ability::ResolutionCastCleanup {
+            source_id: ObjectId(7),
+            offer_id: None,
+            face_policy: policy.clone(),
+            exiled_misses: Vec::new(),
+            reject_action: ResolutionMvRejectAction::RemainExiled,
+            success_action: ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
+        };
+
+        // GraveyardPaidCast — an empty rider is skipped and a carried rider
+        // round-trips exactly.
+        let paid = CastOfferKind::GraveyardPaidCast {
+            hit_card: ObjectId(8),
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
+            cast_transformed: false,
+            additional_cost: None,
+            cleanup: cleanup.clone(),
+        };
+        let paid_value = serde_json::to_value(&paid).unwrap();
+        assert!(
+            paid_value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty paid rider must be skipped on the wire"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(paid_value).unwrap(),
+            paid
+        );
+        let ridden_paid = CastOfferKind::GraveyardPaidCast {
+            hit_card: ObjectId(8),
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            cast_transformed: false,
+            additional_cost: None,
+            cleanup: cleanup.clone(),
+        };
+        let ridden_value = serde_json::to_value(&ridden_paid).unwrap();
+        assert_eq!(
+            ridden_value["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(ridden_value).unwrap(),
+            ridden_paid
+        );
+
+        // FreeCastWindow — the same properties.
+        let window = CastOfferKind::FreeCastWindow {
+            candidates: vec![ObjectId(8)],
+            remaining_casts: Some(1),
+            remaining_mv_budget: None,
+            face_policy: policy.clone(),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
+            member_pool: Vec::new(),
+        };
+        let window_value = serde_json::to_value(&window).unwrap();
+        assert!(
+            window_value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty window rider must be skipped on the wire"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(window_value).unwrap(),
+            window
+        );
+        let ridden_window = CastOfferKind::FreeCastWindow {
+            candidates: vec![ObjectId(8)],
+            remaining_casts: Some(1),
+            remaining_mv_budget: None,
+            face_policy: policy,
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            member_pool: Vec::new(),
+        };
+        let ridden_window_value = serde_json::to_value(&ridden_window).unwrap();
+        assert_eq!(
+            ridden_window_value["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(ridden_window_value).unwrap(),
+            ridden_window
+        );
+
+        // A pre-fix payload that never had the key at all is the same shape.
+        let mut pre_fix = serde_json::to_value(&ridden_paid).unwrap();
+        pre_fix
+            .as_object_mut()
+            .unwrap()
+            .remove("enters_with_modifications");
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(pre_fix).unwrap(),
+            paid,
+            "a field-less pre-fix payload must read as an empty rider with the rest intact"
+        );
+
+        // A retained intermediate-build payload carries the bare array under
+        // the same key; the dual-shape deserializer restores it as the
+        // unconditional rider (no printed quality was recorded then).
+        let mut legacy_array = serde_json::to_value(&ridden_paid).unwrap();
+        legacy_array.as_object_mut().unwrap().insert(
+            "enters_with_modifications".to_string(),
+            serde_json::json!([{ "type": "AddKeyword", "keyword": "Haste" }]),
+        );
+        let legacy_paid: CastOfferKind = serde_json::from_value(legacy_array).unwrap();
+        let CastOfferKind::GraveyardPaidCast {
+            enters_with_modifications,
+            ..
+        } = legacy_paid
+        else {
+            panic!("the legacy paid offer must restore as GraveyardPaidCast");
+        };
+        assert_eq!(
+            enters_with_modifications,
+            crate::types::ability::PendingEntersModifications {
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+                cast_filter: None,
+            },
+            "a populated legacy offer array must restore as the unconditional rider"
+        );
+    }
+
     #[test]
     fn exploit_evidence_guard_rejects_obsolete_and_untrustworthy_snapshots() {
         let (state, _) = state_with_recorded_exploit();
@@ -34571,6 +34846,35 @@ mod tests {
                 "declared v{version}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn reject_legacy_deferred_spell_delivery_refuses_only_a_present_record() {
+        // CR 608.2n + CR 702.88a: absent and `null` are not a record.
+        reject_legacy_deferred_spell_delivery(&serde_json::json!({ "turn_number": 3 }))
+            .expect("an absent key is a current-format state");
+        reject_legacy_deferred_spell_delivery(
+            &serde_json::json!({ "deferred_spell_delivery": null }),
+        )
+        .expect("null is not a record");
+
+        let record = serde_json::json!({ "object_id": 7, "destination": "Exile" });
+        let bare = serde_json::json!({ "deferred_spell_delivery": record });
+        let error = reject_legacy_deferred_spell_delivery(&bare)
+            .expect_err("a recorded destination cannot say which hooks already ran");
+        assert!(
+            error.contains(LEGACY_DEFERRED_SPELL_DELIVERY_ERROR),
+            "{error}"
+        );
+
+        // The trusted envelope nests the state under `state`.
+        let envelope = serde_json::json!({ "state": bare });
+        let error = reject_legacy_deferred_spell_delivery(&envelope)
+            .expect_err("the key under `state` is refused too");
+        assert!(
+            error.contains(LEGACY_DEFERRED_SPELL_DELIVERY_ERROR),
+            "{error}"
+        );
     }
 
     fn legacy_exploited_definition(marker: &str, actor_id: u64) -> serde_json::Value {
@@ -38556,6 +38860,242 @@ mod tests {
                 .trigger_firing,
             Some(TriggerFiring::LegacyDelayed)
         );
+    }
+
+    fn owed_final_part_spell_carrier(id: ObjectId) -> StackEntry {
+        StackEntry {
+            id,
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(id.0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        }
+    }
+
+    fn owed_final_part_state(carrier: Option<StackEntry>, spell: ObjectId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.resolving_stack_entry = carrier;
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state
+    }
+
+    /// The engine's own raw persistence writer, which declares the current
+    /// resolution-wire version (so decode takes the typed-frame arm, not v1).
+    fn current_version_persisted_payload(state: &GameState) -> serde_json::Value {
+        let payload = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the raw snapshot serializes");
+        assert!(
+            payload
+                .get("resolution_state_version")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|version| version > 1),
+            "reach guard: the payload declares a current resolution-wire version"
+        );
+        payload
+    }
+
+    /// CR 608.2n: a restored owed final part must name the installed instant
+    /// or sorcery carrier. A marker with no carrier, a non-spell carrier, a
+    /// different spell, or a carrier naming no object is rejected on the
+    /// transport decode and on the persisted decode of a current-version
+    /// payload alike; a coherent one decodes and round-trips. (An unversioned
+    /// payload with no frames is a v1 one, whose completed-carrier
+    /// normalization clears the marker with its carrier.)
+    #[test]
+    fn an_owed_final_part_that_names_no_installed_spell_carrier_is_rejected_on_decode() {
+        let spell = ObjectId(4_201);
+        let activated = StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: spell,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    spell,
+                    PlayerId(0),
+                )),
+            },
+        };
+        let incoherent = [
+            ("no carrier", owed_final_part_state(None, spell)),
+            (
+                "a non-spell carrier",
+                owed_final_part_state(Some(activated), spell),
+            ),
+            (
+                "another spell's carrier",
+                owed_final_part_state(Some(owed_final_part_spell_carrier(ObjectId(4_202))), spell),
+            ),
+        ];
+        for (shape, state) in incoherent {
+            let raw = serde_json::to_value(&state).expect("the fixture serializes");
+            let transport = serde_json::from_value::<GameState>(raw.clone())
+                .expect_err("the transport decode rejects an incoherent marker");
+            assert!(
+                transport
+                    .to_string()
+                    .contains("an owed spell final part must name the installed spell carrier"),
+                "{shape}: rejected for the marker, got {transport}"
+            );
+            let versioned = current_version_persisted_payload(&state);
+            let persisted = serde_json::from_value::<PersistedGameState>(versioned)
+                .expect_err("the persisted decode rejects an incoherent marker");
+            assert!(
+                persisted
+                    .to_string()
+                    .contains("an owed spell final part must name the installed spell carrier"),
+                "{shape}: rejected for the marker, got {persisted}"
+            );
+        }
+
+        let absent = owed_final_part_state(Some(owed_final_part_spell_carrier(spell)), spell);
+        assert!(
+            !absent.objects.contains_key(&spell),
+            "reach guard: the installed carrier names no object"
+        );
+        const ABSENT: &str = "an owed spell final part must name an existing spell object";
+        let transport = serde_json::from_value::<GameState>(
+            serde_json::to_value(&absent).expect("the fixture serializes"),
+        )
+        .expect_err("the transport decode rejects a marker naming no object");
+        assert!(transport.to_string().contains(ABSENT), "{transport}");
+        let persisted = serde_json::from_value::<PersistedGameState>(
+            current_version_persisted_payload(&absent),
+        )
+        .expect_err("the persisted decode rejects a marker naming no object");
+        assert!(persisted.to_string().contains(ABSENT), "{persisted}");
+
+        let mut coherent = owed_final_part_state(None, ObjectId(0));
+        let spell = crate::game::zones::create_object(
+            &mut coherent,
+            CardId(4_201),
+            PlayerId(0),
+            "Owed Spell".to_string(),
+            crate::types::zones::Zone::Stack,
+        );
+        coherent
+            .objects
+            .get_mut(&spell)
+            .expect("the spell object exists")
+            .card_types
+            .core_types = vec![crate::types::card_type::CoreType::Sorcery];
+        coherent.resolving_stack_entry = Some(owed_final_part_spell_carrier(spell));
+        coherent.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        let raw = serde_json::to_value(&coherent).expect("the fixture serializes");
+        let decoded = serde_json::from_value::<GameState>(raw.clone())
+            .expect("a marker naming its installed spell carrier decodes");
+        assert_eq!(decoded, coherent, "and round-trips");
+        assert_eq!(
+            decoded.owed_spell_final_part(),
+            coherent.resolving_spell_final_part.as_ref()
+        );
+        let PersistedGameState::Raw(persisted) = serde_json::from_value::<PersistedGameState>(
+            current_version_persisted_payload(&coherent),
+        )
+        .expect("the persisted decode accepts the coherent marker") else {
+            panic!("an unenveloped payload decodes as a raw snapshot");
+        };
+        assert_eq!(
+            persisted.resolving_spell_final_part,
+            coherent.resolving_spell_final_part
+        );
+    }
+
+    /// CR 608.2n + CR 608.3: only an instant or sorcery owes the final part, so
+    /// a marker naming a permanent spell's carrier is rejected on both decodes.
+    #[test]
+    fn an_owed_final_part_naming_a_permanent_spell_is_rejected_on_decode() {
+        use crate::types::card_type::CoreType;
+        const PERMANENT: &str =
+            "an owed spell final part must name an instant or sorcery spell, not a permanent spell";
+        for core in [CoreType::Creature, CoreType::Instant, CoreType::Sorcery] {
+            let mut state = owed_final_part_state(None, ObjectId(0));
+            let spell = crate::game::zones::create_object(
+                &mut state,
+                CardId(4_301),
+                PlayerId(0),
+                "Owed Spell".to_string(),
+                crate::types::zones::Zone::Stack,
+            );
+            state
+                .objects
+                .get_mut(&spell)
+                .expect("the spell object exists")
+                .card_types
+                .core_types = vec![core];
+            state.resolving_stack_entry = Some(owed_final_part_spell_carrier(spell));
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+            let raw = serde_json::to_value(&state).expect("the fixture serializes");
+            let transport = serde_json::from_value::<GameState>(raw);
+            let persisted = serde_json::from_value::<PersistedGameState>(
+                current_version_persisted_payload(&state),
+            );
+            if core == CoreType::Creature {
+                let transport = transport.expect_err("the transport decode rejects it");
+                assert!(transport.to_string().contains(PERMANENT), "{transport}");
+                let persisted = persisted.expect_err("the persisted decode rejects it");
+                assert!(persisted.to_string().contains(PERMANENT), "{persisted}");
+            } else {
+                assert_eq!(
+                    transport.expect("an instant or sorcery marker decodes"),
+                    state,
+                    "{core:?}: round-trips"
+                );
+                let PersistedGameState::Raw(restored) =
+                    persisted.expect("the persisted decode accepts it")
+                else {
+                    panic!("an unenveloped payload decodes as a raw snapshot");
+                };
+                assert_eq!(
+                    restored.resolving_spell_final_part, state.resolving_spell_final_part,
+                    "{core:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2n: the v1 normalization of a completed resolution clears the
+    /// owed final part together with the carrier it belongs to; without the
+    /// paired clear, the marker would be left naming no carrier and rejected.
+    #[test]
+    fn v1_completed_carrier_normalization_clears_its_owed_final_part() {
+        let spell = ObjectId(4_203);
+        let mut state = owed_final_part_state(Some(owed_final_part_spell_carrier(spell)), spell);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut v1 = serde_json::to_value(state).expect("v1 fixture serializes");
+        v1["resolution_state_version"] = serde_json::Value::from(1);
+        assert!(
+            v1.get("resolving_spell_final_part").is_some(),
+            "reach guard: the v1 payload carries the marker"
+        );
+
+        let PersistedGameState::Raw(restored) = serde_json::from_value::<PersistedGameState>(v1)
+            .expect("the v1 completed carrier normalizes")
+        else {
+            panic!("an unenveloped payload decodes as a raw snapshot");
+        };
+        assert!(restored.resolving_stack_entry.is_none());
+        assert!(restored.resolving_spell_final_part.is_none());
+    }
+
+    /// CR 104.4b: the owed final part is resolution state, so two states that
+    /// differ only in it are different states.
+    #[test]
+    fn game_state_equality_compares_the_owed_final_part() {
+        let spell = ObjectId(4_204);
+        let owing = owed_final_part_state(Some(owed_final_part_spell_carrier(spell)), spell);
+        let mut settled = owing.clone();
+        assert_eq!(owing, settled);
+        settled.resolving_spell_final_part = None;
+        assert_ne!(owing, settled);
     }
 
     #[test]

@@ -1657,6 +1657,15 @@ mod tests {
             ),
         ));
         cases.push((
+            "ExileTopCardContest::winner_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ExileTopCardContest {
+                    winner_effect: Box::new(fight_def()),
+                },
+            ),
+        ));
+        cases.push((
             "RollDie::results[].effect",
             AbilityDefinition::new(
                 AbilityKind::Spell,

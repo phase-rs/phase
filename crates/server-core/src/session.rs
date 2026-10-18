@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
@@ -36,14 +36,13 @@ use engine::types::match_config::MatchConfig;
 use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
 use lobby_broker::protocol::code_in_use_message;
-use phase_ai::auto_play::AiActionsStop;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::Rng;
 use seat_reducer::types::{seat_team_info, DeckChoice, SeatDelta, SeatKind, SeatState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::filter::filter_state_for_player;
 use crate::game_log::GameFileCache;
@@ -51,6 +50,9 @@ use crate::persist::{PersistedLobbyMeta, PersistedSession};
 use crate::protocol::{PlayerSlotInfo, ServerErrorCode, ServerMessage};
 use crate::reconnect::ReconnectManager;
 use crate::takeback::PendingTakeback;
+
+mod ai_run;
+pub use ai_run::AiRunCursor;
 
 const TAKEBACK_INTERACTION_SESSION_PREFIX: &str = "rewind-";
 
@@ -253,15 +255,6 @@ pub struct AiRunOutcome {
     /// an AI driver failure. Transports must send the final state frames before
     /// publishing this record.
     pub fault: Option<AiDriverFault>,
-}
-
-/// Internal result of one uninterrupted AI decision batch. Keeping the exact
-/// stop reason until [`GameSession::run_ai`] has finished the engine-owned
-/// stack-resolution session is necessary: a safety cap is terminal only when
-/// an AI submitter is still eligible in the resulting state.
-struct AiActionBatch {
-    transitions: Vec<AiTransition>,
-    stop: AiActionsStop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1381,7 +1374,7 @@ impl GameSession {
     /// Only the final entry carries a decision snapshot. Stack automation remains
     /// in that ordinary transition stream rather than a separate Resolve All frame.
     /// The caller is responsible for filtering the state per-player before sending.
-    /// Returns an empty vec if the session has no AI seats.
+    /// Returns an empty transition stream if the session has no AI seats.
     ///
     /// GH #1507: also a no-op while a takeback request is pending. AI moves
     /// mutate `self.state` directly (not through `handle_action`'s pending-
@@ -1391,113 +1384,20 @@ impl GameSession {
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
     pub fn run_ai(&mut self) -> AiRunOutcome {
-        if let Some(fault) = self.ai_driver_fault.clone() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: Some(fault),
-            };
-        }
-        if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: None,
-            };
-        }
-
-        let batch = self.run_ai_action_batch();
-        let transitions = batch.transitions;
-        let failure = match batch.stop {
-            AiActionsStop::NoEligibleAiActor | AiActionsStop::ActionBudgetReached { .. } => None,
-            AiActionsStop::MissingAiConfig { player } => {
-                Some(AiDriverFailure::MissingAiConfig { player })
-            }
-            AiActionsStop::ChooseActionNone { player } => {
-                Some(AiDriverFailure::ChooseActionNone { player })
-            }
-            AiActionsStop::ApplyFailed { player, error, .. } => {
-                Some(AiDriverFailure::ApplyFailed {
-                    player,
-                    error: error.to_string(),
-                })
-            }
-            AiActionsStop::ActionSafetyCapReached { limit } if self.ai_seat_can_act() => {
-                Some(AiDriverFailure::ActionSafetyCapReached { limit })
-            }
-            AiActionsStop::ActionSafetyCapReached { .. } => None,
+        let mut cursor = match self.begin_ai_run() {
+            std::ops::ControlFlow::Break(outcome) => return outcome,
+            std::ops::ControlFlow::Continue(cursor) => cursor,
         };
-        let fault = failure
-            .clone()
-            .map(|failure| self.record_ai_driver_fault(failure));
-        AiRunOutcome {
-            transitions,
-            failure,
-            fault,
+        loop {
+            match self.advance_ai_run(cursor) {
+                std::ops::ControlFlow::Break(outcome) => return outcome,
+                std::ops::ControlFlow::Continue(next) => cursor = next,
+            }
         }
-    }
-
-    /// One uninterrupted run of AI decisions from the current state.
-    fn run_ai_action_batch(&mut self) -> AiActionBatch {
-        let mut rng = rand::rng();
-        let ai_session = self
-            .ai_session
-            .get_or_insert_with(|| AiSession::arc_from_game(&self.state));
-        let ai_results = phase_ai::auto_play::run_ai_actions(
-            &mut self.state,
-            &self.ai_seats,
-            &self.ai_configs,
-            &mut rng,
-            ai_session,
-        );
-
-        if !ai_results.is_empty() {
-            debug!(game = %self.game_code, ai_actions = ai_results.len(), "AI actions computed");
-        }
-
-        let stop = ai_results.stop;
-
-        let result_count = ai_results.results.len();
-        let transitions = ai_results
-            .results
-            .into_iter()
-            .enumerate()
-            .map(|(index, r)| {
-                let decision =
-                    (index + 1 == result_count).then(|| DecisionSnapshot::from_state(&r.state));
-                let revision = self.advance_state_revision();
-                // Per AI result, which is exactly the granularity
-                // `run_ai_actions` reports. This is what makes a turn that
-                // elapses entirely inside AI play still produce a rewind
-                // point; a rule that promoted entries out of
-                // `takeback_history` could not, because `run_ai` pushes none.
-                self.observe_transition(&r.events, &r.state);
-                // Per-game JSON debug log (issue #7978): this is the single
-                // AI-transition mint point every caller of `run_ai` funnels
-                // through (takeback approve/reject, reconnect, game start,
-                // Play-vs-AI start, and the AI follow-up after a human
-                // action) — one hook here covers all of them, matching the
-                // human-action hooks in `handle_action`/
-                // `handle_interaction_with_rejection`.
-                self.game_log
-                    .write_game_log_entries(&self.game_code, &r.log_entries);
-                AiTransition {
-                    state_revision: revision,
-                    state: r.state,
-                    events: r.events,
-                    log_entries: r.log_entries,
-                    decision,
-                }
-            })
-            .collect();
-
-        AiActionBatch { transitions, stop }
     }
 
     fn ai_seat_can_act(&self) -> bool {
-        acting_players(&self.state)
-            .into_iter()
-            .any(|player| self.ai_seats.contains(&player))
+        phase_ai::auto_play::eligible_ai_decision(&self.state, &self.ai_seats).is_some()
     }
 
     /// Recomputes the broadcast-ready fields (legal actions, auto-pass,
@@ -2277,18 +2177,41 @@ impl GameSession {
     /// entry — is `SessionManager::record_disconnect`, called by the same
     /// caller under the same held session guard.
     pub fn mark_disconnected(&mut self, player: PlayerId) {
+        self.mark_disconnected_at(player, std::time::Instant::now());
+    }
+
+    /// Preserve transport detection time across cleanup and session-lease waits.
+    pub fn mark_disconnected_at(&mut self, player: PlayerId, observed_at: std::time::Instant) {
+        if !self.connected[player.0 as usize] {
+            return;
+        }
         self.connected[player.0 as usize] = false;
-        // A seat away mid-contest pauses the contest clock and starts its
-        // reconnect grace (`engine::game::contest`).
-        self.note_contest_connection(player, false);
+        // Queue host-stamped presence; the admitted contest driver applies it.
+        self.queue_contest_connection_at(
+            player,
+            crate::contest::ContestPresence::Disconnected,
+            observed_at,
+        );
     }
 
     /// Mark a seat connected again, after the registry half
     /// (`SessionManager::attempt_reconnect`) has decided the grace period
     /// allows it.
     pub fn mark_connected(&mut self, player: PlayerId) {
+        self.mark_connected_at(player, std::time::Instant::now());
+    }
+
+    /// Use the same receipt time that the registry accepted for reconnect grace.
+    pub fn mark_connected_at(&mut self, player: PlayerId, observed_at: std::time::Instant) {
+        if self.connected[player.0 as usize] {
+            return;
+        }
         self.connected[player.0 as usize] = true;
-        self.note_contest_connection(player, true);
+        self.queue_contest_connection_at(
+            player,
+            crate::contest::ContestPresence::Connected,
+            observed_at,
+        );
     }
 
     pub fn reserve_seat(&mut self, display_name: String) -> Result<SeatReservation, String> {
@@ -2858,10 +2781,15 @@ impl SessionManager {
     /// the session half. Both run under one held session guard, so the presence
     /// gate the single `handle_disconnect` used to get from its registry lookup
     /// is supplied by the guard plus this call in the same critical section.
-    pub fn record_disconnect(&mut self, game_code: &str, player: PlayerId) {
+    pub fn record_disconnect(
+        &mut self,
+        game_code: &str,
+        player: PlayerId,
+        disconnected_at: Instant,
+    ) {
         let default_grace = self.reconnect.grace_period;
         self.reconnect
-            .record_disconnect(game_code, player, default_grace);
+            .record_disconnect(game_code, player, default_grace, disconnected_at);
         info!(game = %game_code, player = ?player, "player disconnected");
     }
 
@@ -2871,8 +2799,10 @@ impl SessionManager {
         &mut self,
         game_code: &str,
         player: PlayerId,
+        received_at: Instant,
     ) -> crate::reconnect::ReconnectResult {
-        self.reconnect.attempt_reconnect(game_code, player)
+        self.reconnect
+            .attempt_reconnect(game_code, player, received_at)
     }
 
     /// Look up game_code by player_token.
@@ -3063,7 +2993,7 @@ mod tests {
             };
             session.mark_disconnected(player);
         }
-        mgr.record_disconnect(game_code, player);
+        mgr.record_disconnect(game_code, player, std::time::Instant::now());
     }
 
     /// The pair `handle_reconnect` used to be: the session resolves the token,
@@ -3081,7 +3011,7 @@ mod tests {
                 .player_for_token(player_token)
                 .ok_or_else(|| "Invalid player token".to_string())?
         };
-        let outcome = mgr.attempt_reconnect(game_code, player);
+        let outcome = mgr.attempt_reconnect(game_code, player, std::time::Instant::now());
         let mut session = mgr
             .try_session(game_code)
             .ok_or_else(|| game_not_found(game_code))?;
@@ -3797,9 +3727,9 @@ mod tests {
         let (token2, _state) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
         let (other_code, other_token) = mgr.create_game(make_deck(), None);
 
-        mgr.record_disconnect(&code, PlayerId(0));
-        mgr.record_disconnect(&code, PlayerId(1));
-        mgr.record_disconnect(&other_code, PlayerId(0));
+        mgr.record_disconnect(&code, PlayerId(0), std::time::Instant::now());
+        mgr.record_disconnect(&code, PlayerId(1), std::time::Instant::now());
+        mgr.record_disconnect(&other_code, PlayerId(0), std::time::Instant::now());
 
         // While the game exists, both players' tokens resolve to it and both
         // seats hold a disconnect record.

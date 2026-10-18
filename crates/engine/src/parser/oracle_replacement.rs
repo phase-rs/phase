@@ -4547,8 +4547,29 @@ fn enters_with_counters_outcome(
     // CR 702.138c: "escapes with" / plural-subject "escape with" is
     // semantically "enters with" gated on escape.
     let is_escape = head.verb.is_escape();
-    // The payload after the entry verb's own "with ".
-    let after_with = head.after_with;
+    // The payload after the entry verb's own "with ", past any LEADING keyword
+    // riders ("…enters with flying and with X +1/+1 counters on it…", Dralnu's
+    // Pet). CR 614.1c makes those riders part of this one replacement; every
+    // reader below sees only the counter clause that follows them.
+    let (leading_keywords, after_with) = split_enters_with_leading_keyword_riders(head.after_with);
+    // CR 614.1c: a granted QUOTED ability is a printed part of the replacement
+    // this parser cannot carry. Once a leading keyword chain makes the line
+    // claimable, a quoted rider in the payload would be dropped silently, so the
+    // clause fails closed instead.
+    if !leading_keywords.is_empty()
+        && nom_primitives::strip_double_quoted_spans(head.after_with) != head.after_with
+    {
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
+    }
+    // CR 614.1c + CR 611.2a: one keyword list per replacement — the leading
+    // riders first, then the trailing "… and with <keyword>" riders. The trailing
+    // scan visits every marker, so it re-reads leading chain members; dedupe.
+    let mut keyword_riders = leading_keywords;
+    for keyword in parse_enters_with_keyword_riders(work_text) {
+        if !keyword_riders.contains(&keyword) {
+            keyword_riders.push(keyword);
+        }
+    }
     // CR 614.12: a distributive subject whose filter could not read the whole
     // subject cannot be carried; claiming it with a narrower filter would give
     // the counters to permanents the printed subject excludes.
@@ -4691,8 +4712,7 @@ fn enters_with_counters_outcome(
         // Compose with "enters tapped" if present (mirrors the single-counter
         // tail below). The keyword rider composes here too, for the same reason
         // it does there — CR 614.1c makes it part of this replacement.
-        let choice =
-            compose_enters_with_keyword_grant(choice, parse_enters_with_keyword_riders(work_text));
+        let choice = compose_enters_with_keyword_grant(choice, keyword_riders);
         let execute = if has_enters_tapped_phrase(work_text) {
             AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -4774,9 +4794,19 @@ fn enters_with_counters_outcome(
             Ok((_, (head, tail))) => (head, Some(tail)),
             Err(_) => (work_text, None),
         };
+    // CR 122.6: the "equal to" readers see only the counter clause's own text —
+    // from the payload remainder on. A leading keyword rider can print its own
+    // "equal to" ("ward—pay life equal to …"), which is not the counter count.
+    // `after_with` is a suffix slice of `work_text` and `clause_text` a prefix
+    // of it, so the payload's offset into `work_text` addresses `clause_text`.
+    let counter_clause_text = work_text
+        .len()
+        .checked_sub(after_with.len())
+        .and_then(|payload_offset| clause_text.get(payload_offset..))
+        .unwrap_or("");
     let mut count_expr = match leading_count {
         Some(count) => count,
-        None => parse_enters_counter_equal_to_quantity(clause_text)
+        None => parse_enters_counter_equal_to_quantity(counter_clause_text)
             .ok_or(EntersWithDecline::NotThisShape)?,
     };
     rewrite_variable_x_to_cost_x_paid(&mut count_expr);
@@ -4832,7 +4862,7 @@ fn enters_with_counters_outcome(
     // CR 122.6: For "a number of counters equal to [quantity]" and the
     // sibling shorthand "counters on it equal to [quantity]", parse the
     // dynamic expression.
-    if let Some(qty) = parse_enters_counter_equal_to_quantity(clause_text) {
+    if let Some(qty) = parse_enters_counter_equal_to_quantity(counter_clause_text) {
         count_expr = qty;
     }
     // CR 107.1a: a fractional count's rounding postmodifier prints after the
@@ -4881,8 +4911,7 @@ fn enters_with_counters_outcome(
     // CR 614.1c: the "and with <keyword>" rider is part of THIS replacement, so
     // it composes onto the same execute chain as the counters and inherits the
     // definition's gate (Invasion kicker cycle).
-    let put_counter =
-        compose_enters_with_keyword_grant(put_counter, parse_enters_with_keyword_riders(work_text));
+    let put_counter = compose_enters_with_keyword_grant(put_counter, keyword_riders);
     let execute = if has_enters_tapped_phrase(work_text) {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -5056,6 +5085,50 @@ fn resolve_enters_with_condition(
     }
 }
 
+/// CR 614.1c + CR 611.2a: the LEADING entry riders of an enters-with payload —
+/// "<keyword>[ and with <keyword>]* and with <counters>", the keyword-first
+/// mirror of [`parse_enters_with_keyword_riders`]: "…it enters with flying and
+/// with X +1/+1 counters on it, …" (Dralnu's Pet). Returns the keywords in
+/// printed order (deduplicated) and the payload remainder after the last one,
+/// so the counter readers see only the counter clause.
+///
+/// Anchored at the payload's start and read one `" and with "`-bounded
+/// candidate at a time. A candidate counts only when it is a WHOLE keyword:
+/// it is read with the remainder-checking `parse_router_keyword_fragment`, not
+/// the permissive trailing reader, because at the anchored start a counter noun
+/// phrase ("a flying counter on it") or a keyword followed by prose ("flying
+/// counters") must not be taken for a rider. The first candidate that is not a
+/// whole keyword ends the chain, and the payload from there is returned
+/// unchanged — a payload with no leading rider comes back whole.
+fn split_enters_with_leading_keyword_riders(
+    payload: &str,
+) -> (Vec<crate::types::keywords::Keyword>, &str) {
+    let mut keywords = Vec::new();
+    let mut remaining = payload;
+    while let Ok((after_marker, candidate)) = terminated(
+        take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
+        tag::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
+    )
+    .parse(remaining)
+    {
+        match crate::parser::oracle_keyword::parse_router_keyword_fragment(candidate) {
+            // CR 702.124a: partner abilities are deck-construction keywords that
+            // function before the game begins, never a quality a permanent gains
+            // as it enters. The shared keyword core also reads a Partner-family
+            // prefix without checking what follows it, so a Partner reading here
+            // is no evidence that the candidate is a whole keyword.
+            None | Some(crate::types::keywords::Keyword::Partner(_)) => break,
+            Some(keyword) => {
+                if !keywords.contains(&keyword) {
+                    keywords.push(keyword);
+                }
+            }
+        }
+        remaining = after_marker;
+    }
+    (keywords, remaining)
+}
+
 /// CR 614.1c + CR 611.2a: the `"and with <keyword>"` entry rider printed
 /// alongside an enters-with-counters clause by the Invasion kicker cycle —
 /// "…it enters with three +1/+1 counters on it and with trample" (Kavu Titan),
@@ -5152,8 +5225,12 @@ fn enters_with_rider_sentence(text: &str) -> &str {
 /// candidate terminators, so the two can never disagree about where a rider ends.
 const ENTERS_WITH_KEYWORD_RIDER_MARKER: &str = " and with ";
 
+/// The `", where x is "` tail marker (lowercase text): it ends the last rider's
+/// candidate, since the definition belongs to the counter count.
+const ENTERS_WITH_WHERE_X_TAIL_MARKER: &str = ", where x is ";
+
 /// One rider's text, bounded at the NEAREST terminator: the next `" and with "`
-/// marker, or the end of the sentence.
+/// marker, the `", where x is "` definition tail, or the end of the sentence.
 ///
 /// `alt` is deliberately NOT used. `alt` commits to the first branch that
 /// SUCCEEDS, not to the one whose terminator is nearest, so a marker-first `alt`
@@ -5168,7 +5245,7 @@ const ENTERS_WITH_KEYWORD_RIDER_MARKER: &str = " and with ";
 /// belt-and-braces bound for a trailing period rather than the primary defense.
 /// Terminators are `peek`ed, leaving the delimiter for the next `take_until`.
 fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &str> {
-    let candidates: [OracleResult<'_, &str>; 2] = [
+    let candidates: [OracleResult<'_, &str>; 3] = [
         terminated(
             take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
             peek(tag::<_, _, OracleError<'_>>(
@@ -5179,6 +5256,17 @@ fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &s
         terminated(
             take_until::<_, _, OracleError<'_>>("."),
             peek(tag::<_, _, OracleError<'_>>(".")),
+        )
+        .parse(input),
+        // CR 107.3: a trailing ", where X is <quantity>" defines X for the
+        // counter count and is not part of the rider ("…X +1/+1 counters on it
+        // and with haste, where X is …"); without this bound the last rider's
+        // candidate runs into the definition and the keyword is dropped.
+        terminated(
+            take_until::<_, _, OracleError<'_>>(ENTERS_WITH_WHERE_X_TAIL_MARKER),
+            peek(tag::<_, _, OracleError<'_>>(
+                ENTERS_WITH_WHERE_X_TAIL_MARKER,
+            )),
         )
         .parse(input),
     ];
@@ -6922,6 +7010,9 @@ fn replacement_condition_from_static(
         // `ReplacementCondition` carrier — fail closed like the other
         // uncarriable gates.
         | StaticCondition::HasBoon { .. }
+        // CR 500.8 + CR 506.1 + CR 608.2c: a per-turn phase-occurrence gate is
+        // not a replacement condition; fail closed.
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => None,
     }
 }
@@ -22614,10 +22705,6 @@ mod tests {
     fn enters_with_prose_counter_clause_fails_closed() {
         for (card, line) in [
             (
-                "Dralnu's Pet",
-                "If this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is the discarded card's mana value.",
-            ),
-            (
                 "Shoe Tree",
                 "This creature enters with up to two shoe counters on it. Use your shoes as counters.",
             ),
@@ -22708,22 +22795,14 @@ mod tests {
     /// instead of placing one counter (BASE: `Fixed 1`).
     #[test]
     fn enters_with_numberless_count_requires_equal_to_quantity() {
-        for (card, line) in [
-            (
-                "Thought Sponge",
-                "This creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.",
-            ),
-            (
-                "Master Biomancer",
-                "Each other creature you control enters with a number of additional +1/+1 counters on it equal to this creature's power and as a Mutant in addition to its other types.",
-            ),
-        ] {
-            assert!(
-                parse_replacement_line(line, card).is_none(),
-                "{card}: an unreadable equal-to count must fail closed, got {:?}",
-                parse_replacement_line(line, card)
-            );
-        }
+        let master_biomancer = parse_replacement_line(
+            "Each other creature you control enters with a number of additional +1/+1 counters on it equal to this creature's power and as a Mutant in addition to its other types.",
+            "Master Biomancer",
+        );
+        assert!(
+            master_biomancer.is_none(),
+            "Master Biomancer: an unreadable equal-to count must fail closed, got {master_biomancer:?}"
+        );
 
         // Reach guards: readable equal-to quantities still parse.
         let gyrus = parse_replacement_line(
@@ -22738,6 +22817,24 @@ mod tests {
                 [(CounterType::Plus1Plus1, count)] if !matches!(count, QuantityExpr::Fixed { .. })
             ),
             "got {gyrus_counters:?}"
+        );
+        let sponge = parse_replacement_line(
+            "This creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.",
+            "Thought Sponge",
+        )
+        .expect("readable draw extremum parses");
+        assert_eq!(
+            put_counters_in_chain(&sponge),
+            vec![(
+                CounterType::Plus1Plus1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDrawnThisTurn {
+                        player: crate::types::ability::PlayerScope::Opponent {
+                            aggregate: crate::types::ability::AggregateFunction::Max,
+                        },
+                    },
+                },
+            )]
         );
         assert!(parse_replacement_line(
             "Each other creature you control enters with a number of additional +1/+1 counters on it equal to Arwen's toughness.",
@@ -22922,38 +23019,524 @@ mod tests {
         );
     }
 
-    /// Dralnu's Pet: the keyword-first rider fails closed as an honest gap
-    /// instead of a prose `Generic` replacement.
+    /// Dralnu's Pet, verbatim (Kicker line included).
+    const DRALNUS_PET: &str = "Kicker—{2}{B}, Discard a creature card. (You may pay {2}{B} and discard a creature card in addition to any other costs as you cast this spell.)\nIf this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is the discarded card's mana value.";
+
+    /// Self counter placements as `(counter type, count)`, in chain order.
+    type CounterPlacements = Vec<(CounterType, QuantityExpr)>;
+
+    /// Every self `PutCounter` placement in `ability`'s sub-ability chain, in
+    /// chain order, as `(counter type, count)`.
+    fn chain_counter_placements(ability: &AbilityDefinition) -> CounterPlacements {
+        let mut found = Vec::new();
+        let mut cursor = Some(ability);
+        while let Some(node) = cursor {
+            if let Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::SelfRef,
+            } = &*node.effect
+            {
+                found.push((counter_type.clone(), count.clone()));
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        found
+    }
+
+    /// The count "the discarded card's mana value" reads: the cost-paid
+    /// object's mana value.
+    fn cost_paid_mana_value() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::CostPaidObject,
+            },
+        }
+    }
+
+    /// CR 614.1c + CR 611.2a: the leading-rider splitter reads only WHOLE
+    /// keywords from the payload's start, in order and deduplicated, and hands
+    /// back the counter clause that follows. Anything that is not a whole
+    /// keyword — a counter noun phrase, a keyword followed by prose, a
+    /// Partner-family prefix with trailing text (CR 702.124a) — ends the chain
+    /// and returns the payload unchanged.
     #[test]
-    fn dralnus_pet_keyword_first_rider_is_unsupported() {
+    fn split_enters_with_leading_keyword_riders_reads_only_whole_keywords() {
+        assert_eq!(
+            split_enters_with_leading_keyword_riders("flying and with x +1/+1 counters on it"),
+            (vec![Keyword::Flying], "x +1/+1 counters on it")
+        );
+        assert_eq!(
+            split_enters_with_leading_keyword_riders(
+                "flying and with first strike and with x +1/+1 counters on it"
+            ),
+            (
+                vec![Keyword::Flying, Keyword::FirstStrike],
+                "x +1/+1 counters on it"
+            )
+        );
+        assert_eq!(
+            split_enters_with_leading_keyword_riders(
+                "flying and with flying and with two +1/+1 counters on it"
+            ),
+            (vec![Keyword::Flying], "two +1/+1 counters on it"),
+            "a repeated leading keyword is listed once"
+        );
+        // A chain with no counter clause after it splits; the caller's count
+        // reader then finds no counters and declines the line.
+        assert_eq!(
+            split_enters_with_leading_keyword_riders("flying and with haste"),
+            (vec![Keyword::Flying], "haste")
+        );
+        for payload in [
+            "a flying counter on it and with haste",
+            "x +1/+1 counters",
+            "two +1/+1 counters on it and with flying",
+            "flying counters and with two +1/+1 counters on it",
+            "partner\u{2014}friends forever garbage and with two +1/+1 counters on it",
+            "partner\u{2014}character select nonsense and with two +1/+1 counters on it",
+            "choose a background nonsense and with two +1/+1 counters on it",
+            "choose a background and with two +1/+1 counters on it",
+        ] {
+            assert_eq!(
+                split_enters_with_leading_keyword_riders(payload),
+                (Vec::new(), payload),
+                "not a whole grantable keyword, so no leading rider: {payload:?}"
+            );
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i + CR 202.3: "the discarded card's mana value" reads
+    /// the card discarded to pay the cost (CR 608.2k) through every reader the
+    /// enters-with where-X binder consults.
+    #[test]
+    fn discarded_card_mana_value_reads_the_cost_paid_object() {
+        let expected = QuantityRef::ObjectManaValue {
+            scope: crate::types::ability::ObjectScope::CostPaidObject,
+        };
+        assert_eq!(
+            nom_quantity::parse_quantity_ref_complete("the discarded card's mana value")
+                .ok()
+                .map(|(_, qty)| qty),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            crate::parser::oracle_quantity::parse_event_context_quantity(
+                "the discarded card's mana value"
+            ),
+            Some(QuantityExpr::Ref {
+                qty: expected.clone()
+            })
+        );
+        assert_eq!(
+            parse_enters_where_x_tail_quantity("the discarded card's mana value."),
+            Some(QuantityExpr::Ref { qty: expected })
+        );
+    }
+
+    /// Dralnu's Pet: the keyword-first rider is ONE kicker-gated `Moved`
+    /// replacement (CR 614.1c + CR 702.33d) — the flying grant wrapping X
+    /// +1/+1 counters whose X is the discarded card's mana value — and its
+    /// kicker is exactly `{2}{B}` plus discarding a creature card (CR 702.33a).
+    /// Reverting the leading splitter returns the line to an unsupported gap.
+    #[test]
+    fn dralnus_pet_keyword_first_rider_is_supported() {
+        use crate::types::ability::{
+            AbilityCost, AdditionalCost, AdditionalCostRepeatability, CardSelectionMode,
+            DiscardSelfScope,
+        };
+
         let parsed = parse_oracle_text(
-            "Kicker—{2}{B}, Discard a creature card. (You may pay {2}{B} and discard a creature card in addition to any other costs as you cast this spell.)\nIf this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is the discarded card's mana value.",
+            DRALNUS_PET,
             "Dralnu's Pet",
             &["Kicker".to_string()],
             &["Creature".to_string()],
             &["Shapeshifter".to_string()],
         );
         assert!(
-            parsed.replacements.is_empty(),
-            "got {:?}",
-            parsed.replacements
-        );
-        assert!(
-            parsed
+            !parsed
                 .abilities
                 .iter()
                 .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
-            "the rider line must surface as an unsupported gap, got {:?}",
+            "the rider line must not surface as an unsupported gap, got {:?}",
             parsed.abilities
         );
+        assert_eq!(parsed.replacements.len(), 1, "{:?}", parsed.replacements);
+        let def = &parsed.replacements[0];
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::CastViaKicker {
+                variant: None,
+                kicker_cost: None,
+            })
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_keyword_grant(execute, Keyword::Flying);
+        assert_eq!(collect_granted_keywords(execute), vec![Keyword::Flying]);
+        assert_eq!(
+            chain_counter_placements(execute),
+            vec![(CounterType::Plus1Plus1, cost_paid_mana_value())]
+        );
+
+        // CR 702.33a: the kicker option is exactly {2}{B} AND discarding one
+        // chosen creature card.
+        assert_eq!(
+            parsed.additional_cost,
+            Some(AdditionalCost::Kicker {
+                costs: vec![AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![crate::types::mana::ManaCostShard::Black],
+                                generic: 2,
+                            },
+                        },
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                            selection: CardSelectionMode::Chosen,
+                            self_scope: DiscardSelfScope::FromHand,
+                        },
+                    ],
+                }],
+                repeatability: AdditionalCostRepeatability::Once,
+            })
+        );
+    }
+
+    /// CR 614.1c + CR 611.2a: the leading-rider grammar is a class, not one
+    /// card. Each line is one replacement whose execute grants exactly the
+    /// printed keywords (leading first, then trailing) over exactly the
+    /// printed counters.
+    #[test]
+    fn leading_keyword_rider_class_witnesses_are_supported() {
+        use crate::types::keywords::WardCost;
+
+        let fixed = |value| QuantityExpr::Fixed { value };
+        // The keyword building block's own reading of a parameterized keyword.
+        let keyword_of = |text: &str| {
+            crate::parser::oracle_keyword::parse_router_keyword_fragment(text)
+                .unwrap_or_else(|| panic!("{text} is a keyword"))
+        };
+        let cost_paid_power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::CostPaidObject,
+            },
+        };
+        let rows: Vec<(&str, Vec<Keyword>, CounterPlacements)> = vec![
+            (
+                "If this creature was kicked, it enters with flying and with two +1/+1 counters on it.",
+                vec![Keyword::Flying],
+                vec![(CounterType::Plus1Plus1, fixed(2))],
+            ),
+            (
+                "If this creature was kicked, it enters with flying and with first strike and with X +1/+1 counters on it, where X is the discarded card's mana value.",
+                vec![Keyword::Flying, Keyword::FirstStrike],
+                vec![(CounterType::Plus1Plus1, cost_paid_mana_value())],
+            ),
+            // Leading + trailing riders compose into one list, leading first.
+            (
+                "If this creature was kicked, it enters with flying and with two +1/+1 counters on it and with haste.",
+                vec![Keyword::Flying, Keyword::Haste],
+                vec![(CounterType::Plus1Plus1, fixed(2))],
+            ),
+            // CR 107.3: the where-X definition ends the last trailing rider's
+            // candidate, so "haste" survives next to a leading rider (REVERT
+            // DISCRIMINATOR for the ", where x is " bound in
+            // `parse_enters_with_keyword_rider_candidate`).
+            (
+                "If this creature was kicked, it enters with flying and with X +1/+1 counters on it and with haste, where X is the discarded card's mana value.",
+                vec![Keyword::Flying, Keyword::Haste],
+                vec![(CounterType::Plus1Plus1, cost_paid_mana_value())],
+            ),
+            // The same cost-paid referent family: the sacrificed creature.
+            (
+                "If this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is the sacrificed creature's power.",
+                vec![Keyword::Flying],
+                vec![(CounterType::Plus1Plus1, cost_paid_power)],
+            ),
+            // Any other definition keeps the shared where-X reader's own reading.
+            (
+                "If this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is the exiled card's mana value.",
+                vec![Keyword::Flying],
+                vec![(
+                    CounterType::Plus1Plus1,
+                    parse_enters_where_x_tail_quantity("the exiled card's mana value.")
+                        .expect("the where-X reader reads the definition"),
+                )],
+            ),
+            (
+                "If this creature was kicked, it enters with flying and with an additional +1/+1 counter on it.",
+                vec![Keyword::Flying],
+                vec![(CounterType::Plus1Plus1, fixed(1))],
+            ),
+            (
+                "If this creature was kicked, it enters with ward {2} and with two +1/+1 counters on it.",
+                vec![Keyword::Ward(WardCost::Mana(ManaCost::generic(2)))],
+                vec![(CounterType::Plus1Plus1, fixed(2))],
+            ),
+            (
+                "If this creature was kicked, it enters with forestwalk and with two +1/+1 counters on it.",
+                vec![keyword_of("forestwalk")],
+                vec![(CounterType::Plus1Plus1, fixed(2))],
+            ),
+            (
+                "If this creature was kicked, it enters with protection from red and with two +1/+1 counters on it.",
+                vec![keyword_of("protection from red")],
+                vec![(CounterType::Plus1Plus1, fixed(2))],
+            ),
+            // No gate at all.
+            (
+                "This creature enters with flying and with two +1/+1 counters on it.",
+                vec![Keyword::Flying],
+                vec![(CounterType::Plus1Plus1, fixed(2))],
+            ),
+        ];
+        for (line, keywords, counters) in rows {
+            let def = parse_replacement_line(line, "Synthetic Leading Rider")
+                .unwrap_or_else(|| panic!("leading-rider line must parse: {line}"));
+            let execute = def.execute.as_deref().expect("execute ability");
+            assert_eq!(collect_granted_keywords(execute), keywords, "{line}");
+            assert_eq!(chain_counter_placements(execute), counters, "{line}");
+        }
+    }
+
+    /// The leading splitter composes with every other enters-with shape the
+    /// counter clause can take: a conjoined counter list, the "a number of …
+    /// equal to" count, "enters tapped and with", "escapes with", a
+    /// distributive subject, and a counter choice.
+    #[test]
+    fn leading_keyword_rider_composes_with_every_counter_clause_shape() {
+        // Conjoined counter list: both placements survive under the grant.
+        let def = parse_replacement_line(
+            "If this creature was kicked, it enters with flying and with two +1/+1 counters and a trample counter on it.",
+            "Synthetic Leading Rider",
+        )
+        .expect("list line must parse");
+        let execute = def.execute.as_deref().expect("execute");
+        assert_eq!(collect_granted_keywords(execute), vec![Keyword::Flying]);
+        assert_eq!(
+            chain_counter_placements(execute).len(),
+            2,
+            "both list placements must survive: {execute:?}"
+        );
+
+        // "a number of … equal to <qty>": the count is the equal-to quantity.
+        let def = parse_replacement_line(
+            "This creature enters with flying and with a number of +1/+1 counters on it equal to the number of cards in your hand.",
+            "Synthetic Leading Rider",
+        )
+        .expect("equal-to line must parse");
+        let execute = def.execute.as_deref().expect("execute");
+        assert_eq!(collect_granted_keywords(execute), vec![Keyword::Flying]);
+        let placements = chain_counter_placements(execute);
+        assert_eq!(placements.len(), 1);
+        assert_ne!(
+            placements[0].1,
+            QuantityExpr::Fixed { value: 1 },
+            "the equal-to quantity, not a default single counter, is the count"
+        );
+
+        // "enters tapped and with": the tap rider still wraps the chain.
+        let def = parse_replacement_line(
+            "This creature enters tapped and with flying and with two +1/+1 counters on it.",
+            "Synthetic Leading Rider",
+        )
+        .expect("tapped line must parse");
+        let execute = def.execute.as_deref().expect("execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ));
+        assert_eq!(collect_granted_keywords(execute), vec![Keyword::Flying]);
+        assert_eq!(
+            chain_counter_placements(execute),
+            vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 })]
+        );
+
+        // CR 702.138c: "escapes with" keeps its escape gate.
+        let def = parse_replacement_line(
+            "This creature escapes with flying and with two +1/+1 counters on it.",
+            "Synthetic Leading Rider",
+        )
+        .expect("escape line must parse");
+        assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
+        assert_eq!(
+            collect_granted_keywords(def.execute.as_deref().expect("execute")),
+            vec![Keyword::Flying]
+        );
+
+        // CR 614.12: a distributive subject keeps its typed subset, and the
+        // grant targets each entering permanent itself.
+        let def = parse_replacement_line(
+            "Each other creature you control enters with flying and with a +1/+1 counter on it.",
+            "Synthetic Leading Rider",
+        )
+        .expect("distributive line must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert!(matches!(
+            &def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::Another)
+        ));
+        let execute = def.execute.as_deref().expect("execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
+        assert_eq!(collect_granted_keywords(execute), vec![Keyword::Flying]);
+
+        // CR 614.12a: a counter choice composes under the grant.
+        let def = parse_replacement_line(
+            "This creature enters with flying and with your choice of a +1/+1 counter or a deathtouch counter on it.",
+            "Synthetic Leading Rider",
+        )
+        .expect("choice line must parse");
+        let execute = def.execute.as_deref().expect("execute");
+        assert_eq!(collect_granted_keywords(execute), vec![Keyword::Flying]);
+        assert!(matches!(
+            &*execute.sub_ability.as_deref().expect("choice").effect,
+            Effect::ChooseOneOf { .. }
+        ));
+    }
+
+    /// CR 122.6: a leading keyword's own "equal to" (Ward's "pay life equal to
+    /// this creature's power") is not the counter count — the equal-to reader
+    /// sees only the counter clause. Twin: an "equal to" inside the counter
+    /// clause is still read.
+    #[test]
+    fn leading_keyword_equal_to_is_not_the_counter_count() {
+        use crate::types::keywords::WardCost;
+
+        let def = parse_replacement_line(
+            "This creature enters with ward—pay life equal to this creature's power and with two +1/+1 counters on it.",
+            "Synthetic Ward Rider",
+        )
+        .expect("ward-rider line must parse");
+        let execute = def.execute.as_deref().expect("execute");
+        assert_eq!(
+            collect_granted_keywords(execute),
+            vec![Keyword::Ward(WardCost::PayLifeEqualToPower)]
+        );
+        assert_eq!(
+            chain_counter_placements(execute),
+            vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 })],
+            "the ward cost's \"equal to\" must not replace the printed count"
+        );
+
+        // Twin: the counter clause's own equal-to quantity is the count.
+        let def = parse_replacement_line(
+            "This creature enters with ward—pay life equal to this creature's power and with a number of +1/+1 counters on it equal to the number of cards in your hand.",
+            "Synthetic Ward Rider",
+        )
+        .expect("ward-rider equal-to line must parse");
+        let placements = chain_counter_placements(def.execute.as_deref().expect("execute"));
+        assert_eq!(placements.len(), 1);
         assert!(
             matches!(
-                parsed.additional_cost,
-                Some(crate::types::ability::AdditionalCost::Kicker { .. })
+                &placements[0].1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { .. }
+                }
             ),
-            "reach guard: the kicker line parsed, got {:?}",
-            parsed.additional_cost
+            "the counter clause's equal-to quantity is read, got {:?}",
+            placements[0].1
         );
+    }
+
+    /// CR 614.1c: once a leading keyword chain makes a line claimable, a quoted
+    /// granted ability in the payload is a printed part of the replacement the
+    /// parser cannot carry, so the clause fails closed. Twin: the same line
+    /// without the quote is supported.
+    #[test]
+    fn leading_keyword_rider_with_a_quoted_rider_fails_closed() {
+        let quoted = "If this creature was kicked, it enters with flying and with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"";
+        assert_eq!(
+            parse_replacement_line(quoted, "Synthetic Quoted Rider"),
+            None
+        );
+        assert_eq!(
+            enters_with_fails_closed(quoted, "Synthetic Quoted Rider"),
+            Some(EntersWithGap::Clause)
+        );
+
+        let unquoted =
+            "If this creature was kicked, it enters with flying and with a +1/+1 counter on it.";
+        let def = parse_replacement_line(unquoted, "Synthetic Quoted Rider")
+            .expect("reach guard: the unquoted twin parses");
+        assert_eq!(
+            collect_granted_keywords(def.execute.as_deref().expect("execute")),
+            vec![Keyword::Flying]
+        );
+    }
+
+    /// Lines the leading splitter must NOT make claimable, each paired with a
+    /// supported twin so the decline is not vacuous: an unreadable where-X
+    /// property, a leading chain with no counter clause, Partner-family leads
+    /// (CR 702.124a), a second unread placement, an X-bearing counter list
+    /// under a where-X definition, and a distributive counter choice.
+    #[test]
+    fn leading_keyword_rider_declines_stay_declined() {
+        // Positive twin for every row below.
+        assert!(parse_replacement_line(
+            "If this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is the discarded card's mana value.",
+            "Synthetic Twin",
+        )
+        .is_some());
+        assert!(parse_replacement_line(
+            "This creature enters with flying and with two +1/+1 counters on it.",
+            "Synthetic Twin",
+        )
+        .is_some());
+
+        for line in [
+            // Unreadable where-X property.
+            "If this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is the discarded card's favorite color.",
+            // A foreign possessive is not this object's cost-paid referent.
+            "If this creature was kicked, it enters with flying and with X +1/+1 counters on it, where X is your Ring-bearer's power.",
+            // A leading chain with no counter clause.
+            "This creature enters with flying and with haste.",
+            // Partner-family leads are never grantable entry riders.
+            "This creature enters with choose a background nonsense and with two +1/+1 counters on it.",
+            "This creature enters with partner—character select nonsense and with two +1/+1 counters on it.",
+            "This creature enters with partner—friends forever garbage and with two +1/+1 counters on it.",
+        ] {
+            assert_eq!(
+                parse_replacement_line(line, "Synthetic Decline"),
+                None,
+                "must stay unclaimed: {line}"
+            );
+        }
+
+        for line in [
+            // A second placement after the recipient is unread.
+            "This creature enters with flying and with a +1/+1 counter on it and a lifelink counter on it.",
+            // An X-bearing list entry under a where-X definition.
+            "If this creature was kicked, it enters with flying and with X +1/+1 counters and a trample counter on it, where X is the discarded card's mana value.",
+            // A distributive subject cannot carry the self-only counter choice.
+            "Each other creature you control enters with flying and with your choice of a +1/+1 counter or a deathtouch counter on it.",
+        ] {
+            assert_eq!(
+                parse_replacement_line(line, "Synthetic Decline"),
+                None,
+                "must stay unclaimed: {line}"
+            );
+            assert_eq!(
+                enters_with_fails_closed(line, "Synthetic Decline"),
+                Some(EntersWithGap::Clause),
+                "must fail closed as a clause gap: {line}"
+            );
+        }
     }
 
     #[test]

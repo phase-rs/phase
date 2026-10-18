@@ -19,7 +19,7 @@ use crate::session::AiSession;
 
 /// Maximum AI actions before forcing a stop (safety invariant — not CR-derived).
 /// Typical AI sequences (mulligans + full turn) are 30–50 actions.
-const MAX_AI_ACTIONS_PER_SEQUENCE: usize = 200;
+pub const MAX_AI_ACTIONS_PER_SEQUENCE: usize = 200;
 
 /// Maximum host contest settlements one headless batch may perform before it
 /// gives up (safety invariant — not CR-derived). Settlement is host work, not an
@@ -127,7 +127,8 @@ pub struct AiActionsRun {
     pub stop: AiActionsStop,
 }
 
-fn eligible_ai_decision(
+/// Resolve the next AI-owned decision using the driver's authorization boundary.
+pub fn eligible_ai_decision(
     state: &GameState,
     ai_players: &HashSet<PlayerId>,
 ) -> Option<(PlayerId, PlayerId)> {
@@ -184,7 +185,7 @@ impl<'a> IntoIterator for &'a mut AiActionsRun {
 /// * `ai_players` — set of AI-controlled player IDs
 /// * `ai_configs` — per-player AI configuration
 ///
-/// CR 116.3: AI players receive and pass priority automatically.
+/// CR 117.3d: A player who passes gives priority to the next player in turn order.
 /// The loop terminates when a non-AI player receives priority or the game ends.
 pub fn run_ai_actions(
     state: &mut GameState,
@@ -243,10 +244,81 @@ pub fn run_ai_actions_bounded(
     )
 }
 
-/// [`run_ai_actions`] for a headless host: an Eye to Eye / Mouth to Mouth contest
-/// between two AI seats is settled in-batch on a deterministic virtual clock
-/// (`contest::settle_headless_contest`) instead of stopping the batch at a wait no seat
-/// acts on. A contest with a human contestant still hands off (`NoEligibleAiActor`).
+/// Choose and commit one AI action through the sequence driver's existing
+/// decision contract and apply boundaries, without a one-element result vector.
+/// The sequence caller owns its cumulative `MAX_AI_ACTIONS_PER_SEQUENCE` budget.
+pub fn run_ai_action(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+) -> std::ops::ControlFlow<AiActionsStop, AiActionResult> {
+    // CR 723.5: The controller makes the controlled player's decisions, so the
+    // authorized submitter, not the semantic owner, selects the AI config.
+    let Some((semantic_owner, actor)) = eligible_ai_decision(state, ai_players) else {
+        return std::ops::ControlFlow::Break(AiActionsStop::NoEligibleAiActor);
+    };
+    let config = match ai_configs.get(&actor) {
+        Some(config) => config,
+        None => {
+            tracing::warn!(player = ?actor, "AI seat has no config — stopping AI loop");
+            return std::ops::ControlFlow::Break(AiActionsStop::MissingAiConfig { player: actor });
+        }
+    };
+    let contract = AiDecisionContract::issue(state, semantic_owner);
+    let action = match choose_action_with_session(state, semantic_owner, config, rng, session) {
+        Some(action) => action,
+        None => {
+            tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");
+            return std::ops::ControlFlow::Break(AiActionsStop::ChooseActionNone { player: actor });
+        }
+    };
+    // The verified helper is the single classifier and checks that boundary
+    // again when applying. Everything else, including payment finalize, uses
+    // the ordinary interaction boundary and its issued revision/domain check.
+    // CR 601.2h: The reducer owns payment of the spell's total cost.
+    let is_stack_recheck_pass = verified_ai_stack_pass_player(state, &action).is_some();
+    if !is_stack_recheck_pass && !contract.permits(state, actor, &action) {
+        let error = EngineError::InvalidAction(
+            "AI chose an action outside its issued decision contract".to_string(),
+        );
+        tracing::error!(
+            ?semantic_owner,
+            ?actor,
+            "AI action violated decision contract"
+        );
+        return std::ops::ControlFlow::Break(AiActionsStop::ApplyFailed {
+            player: actor,
+            action: Box::new(action),
+            error,
+        });
+    }
+    let applied = if is_stack_recheck_pass {
+        apply_verified_ai_priority_pass(state, actor, &contract, action.clone())
+    } else {
+        apply_interaction(state, actor, semantic_owner, action.clone())
+    };
+    match applied {
+        Ok(result) => std::ops::ControlFlow::Continue(AiActionResult {
+            action,
+            state: state.clone(),
+            events: result.events,
+            log_entries: result.log_entries,
+        }),
+        Err(error) => {
+            tracing::error!(player = ?actor, %error, "AI action apply failed — stopping");
+            std::ops::ControlFlow::Break(AiActionsStop::ApplyFailed {
+                player: actor,
+                action: Box::new(action),
+                error,
+            })
+        }
+    }
+}
+
+/// [`run_ai_actions`] for a headless host. All-AI physical contests use a
+/// deterministic virtual clock; contests with a human still hand off.
 pub fn run_ai_actions_headless(
     state: &mut GameState,
     ai_players: &HashSet<PlayerId>,
@@ -265,11 +337,7 @@ pub fn run_ai_actions_headless(
     )
 }
 
-/// [`run_ai_actions_bounded`] for a headless host; see [`run_ai_actions_headless`].
-/// Settling a contest is host work and does not spend the batch budget: `max_actions`
-/// bounds applied AI actions only, so a bounded batch that settles a contest still
-/// applies its resumed action(s) and never returns `ActionBudgetReached` empty. A
-/// separate finite bound ([`MAX_HOST_SETTLEMENTS_PER_SEQUENCE`]) guards the settlements.
+/// Headless host work does not spend the caller's AI action budget.
 pub fn run_ai_actions_bounded_headless(
     state: &mut GameState,
     ai_players: &HashSet<PlayerId>,
@@ -291,10 +359,7 @@ pub fn run_ai_actions_bounded_headless(
     )
 }
 
-/// Settles any pending physical contest between AI seats when running under headless
-/// hosting. Host settlements are counted apart from AI actions. Returns `Ok(true)` if
-/// at least one contest settled, `Ok(false)` if no contest was present or if a contestant
-/// is human (so host settlement must not run), and `Err(())` if settlements hit the safety cap.
+/// Host settlements have their own finite budget, independent of AI actions.
 fn settle_headless_host_contests(
     state: &mut GameState,
     ai_players: &HashSet<PlayerId>,
@@ -315,7 +380,6 @@ fn settle_headless_host_contests(
             return Err(());
         }
         if !crate::contest::settle_headless_contest(state, ai_players, rng) {
-            // A human contestant's contest is not this host's to play.
             break;
         }
         *settlements += 1;
@@ -343,127 +407,38 @@ fn run_ai_actions_with_limit(
         };
     }
 
-    // The budget counts applied AI actions only; host settlements are counted apart.
+    // Only committed AI actions spend the caller's budget. Host settlement may
+    // resume another action at this same ordinal, even for a cap-one caller.
     let mut settlements = 0;
     while results.len() < limit {
-        // CR 723.5: Under turn control (Mindslaver, Emrakul), the authorized
-        // submitter is the controller — not the active player. Only run AI when
-        // that submitter is an AI seat; otherwise wait for the human controller
-        // (issue #1189).
-        let decision = eligible_ai_decision(state, ai_players);
-
-        let Some((semantic_owner, actor)) = decision else {
-            // A contest between AI seats has no actor, but a headless host has no clock
-            // or input to settle it with: play it out here and carry on.
-            match settle_headless_host_contests(
-                state,
-                ai_players,
-                contest_hosting,
-                &mut settlements,
-                rng,
-            ) {
-                Ok(true) => continue,
-                Ok(false) => {
-                    return AiActionsRun {
-                        results,
-                        stop: AiActionsStop::NoEligibleAiActor,
-                    };
-                }
-                Err(()) => {
-                    return AiActionsRun {
-                        results,
-                        stop: AiActionsStop::ActionSafetyCapReached {
-                            limit: MAX_HOST_SETTLEMENTS_PER_SEQUENCE,
-                        },
-                    };
+        match run_ai_action(state, ai_players, ai_configs, rng, session) {
+            std::ops::ControlFlow::Continue(result) => results.push(result),
+            std::ops::ControlFlow::Break(AiActionsStop::NoEligibleAiActor) => {
+                match settle_headless_host_contests(
+                    state,
+                    ai_players,
+                    contest_hosting,
+                    &mut settlements,
+                    rng,
+                ) {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        return AiActionsRun {
+                            results,
+                            stop: AiActionsStop::NoEligibleAiActor,
+                        };
+                    }
+                    Err(()) => {
+                        return AiActionsRun {
+                            results,
+                            stop: AiActionsStop::ActionSafetyCapReached {
+                                limit: MAX_HOST_SETTLEMENTS_PER_SEQUENCE,
+                            },
+                        };
+                    }
                 }
             }
-        };
-
-        let config = match ai_configs.get(&actor) {
-            Some(c) => c,
-            None => {
-                tracing::warn!(player = ?actor, "AI seat has no config — stopping AI loop");
-                return AiActionsRun {
-                    results,
-                    stop: AiActionsStop::MissingAiConfig { player: actor },
-                };
-            }
-        };
-
-        let contract = AiDecisionContract::issue(state, semantic_owner);
-        let action = match choose_action_with_session(state, semantic_owner, config, rng, session) {
-            Some(a) => a,
-            None => {
-                tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");
-                return AiActionsRun {
-                    results,
-                    stop: AiActionsStop::ChooseActionNone { player: actor },
-                };
-            }
-        };
-
-        // `verified_ai_stack_pass_player` is the single authority for this
-        // classification and is what `apply_verified_ai_priority_pass` itself
-        // gates on, so this router cannot drift from the boundary it selects.
-        // Everything it rejects belongs on the ordinary `apply_interaction`
-        // boundary — including a payment finalize, which the reducer routes to
-        // `finalize_mana_payment` (CR 601.2h).
-        let is_stack_recheck_pass = verified_ai_stack_pass_player(state, &action).is_some();
-        // Note the coupling: narrowing the classification above also brings a
-        // payment finalize back under `contract.permits`, which it bypassed
-        // while it was misclassified. `permits` additionally requires
-        // `state_revision` to still match, so a finalize proposed against a
-        // superseded state is now refused here rather than reaching the
-        // reducer — the same staleness discipline every other action already
-        // gets, not a special case.
-        if !is_stack_recheck_pass && !contract.permits(state, actor, &action) {
-            let error = EngineError::InvalidAction(
-                "AI chose an action outside its issued decision contract".to_string(),
-            );
-            tracing::error!(
-                ?semantic_owner,
-                ?actor,
-                "AI action violated decision contract"
-            );
-            return AiActionsRun {
-                results,
-                stop: AiActionsStop::ApplyFailed {
-                    player: actor,
-                    action: Box::new(action),
-                    error,
-                },
-            };
-        }
-
-        // The decision owner and authenticated AI actor are intentionally
-        // separate: control effects can make one player submit another
-        // player's pending choice.
-        let applied = if is_stack_recheck_pass {
-            apply_verified_ai_priority_pass(state, actor, &contract, action.clone())
-        } else {
-            apply_interaction(state, actor, semantic_owner, action.clone())
-        };
-        match applied {
-            Ok(result) => {
-                results.push(AiActionResult {
-                    action,
-                    state: state.clone(),
-                    events: result.events,
-                    log_entries: result.log_entries,
-                });
-            }
-            Err(e) => {
-                tracing::error!(player = ?actor, error = %e, "AI action apply failed — stopping");
-                return AiActionsRun {
-                    results,
-                    stop: AiActionsStop::ApplyFailed {
-                        player: actor,
-                        action: Box::new(action),
-                        error: e,
-                    },
-                };
-            }
+            std::ops::ControlFlow::Break(stop) => return AiActionsRun { results, stop },
         }
     }
 

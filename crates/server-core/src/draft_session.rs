@@ -425,7 +425,12 @@ impl DraftSessionManager {
     }
 
     /// Mark a player as disconnected.
-    pub fn handle_disconnect(&mut self, draft_code: &str, seat: usize) {
+    pub fn handle_disconnect(
+        &mut self,
+        draft_code: &str,
+        seat: usize,
+        disconnected_at: std::time::Instant,
+    ) {
         if let Some(session) = self.sessions.get_mut(draft_code) {
             session.connected[seat] = false;
             // Mirror into the engine bitmap so the view reflects it.
@@ -440,7 +445,7 @@ impl DraftSessionManager {
             let fake_pid = PlayerId(seat as u8);
             let default_grace = self.reconnect.grace_period;
             self.reconnect
-                .record_disconnect(draft_code, fake_pid, default_grace);
+                .record_disconnect(draft_code, fake_pid, default_grace, disconnected_at);
             info!(draft = %draft_code, seat, "player disconnected");
         }
     }
@@ -450,6 +455,7 @@ impl DraftSessionManager {
         &mut self,
         draft_code: &str,
         token: &str,
+        received_at: std::time::Instant,
     ) -> Result<DraftPlayerView, String> {
         let session = self
             .sessions
@@ -461,7 +467,10 @@ impl DraftSessionManager {
             .ok_or_else(|| "Invalid player token".to_string())?;
 
         let fake_pid = PlayerId(seat as u8);
-        match self.reconnect.attempt_reconnect(draft_code, fake_pid) {
+        match self
+            .reconnect
+            .attempt_reconnect(draft_code, fake_pid, received_at)
+        {
             crate::reconnect::ReconnectResult::Ok { .. }
             | crate::reconnect::ReconnectResult::NotFound => {
                 session.connected[seat] = true;
@@ -517,7 +526,8 @@ impl DraftSessionManager {
         // A restored seat starts disconnected, so its grace starts now.
         let grace = self.reconnect.grace_period;
         for player in claimed {
-            self.reconnect.record_disconnect(&draft_code, player, grace);
+            self.reconnect
+                .record_disconnect(&draft_code, player, grace, std::time::Instant::now());
         }
         Ok(())
     }
@@ -536,9 +546,9 @@ impl DraftSessionManager {
     /// Acts on every lapsed seat: a `Lobby` host's pod is removed, a `Lobby`
     /// guest's seat is freed, a `Drafting` seat is auto-picked. Consumes each
     /// lapse in the critical section that acts on it.
-    pub fn sweep_expired_seats(&mut self) -> DraftSeatSweep {
+    pub fn sweep_expired_seats(&mut self, as_of: std::time::Instant) -> DraftSeatSweep {
         let mut sweep = DraftSeatSweep::default();
-        for (draft_code, player) in self.reconnect.check_expired_with_players() {
+        for (draft_code, player) in self.reconnect.check_expired_with_players(as_of) {
             let seat = usize::from(player.0);
             if !sweep.affected.contains(&draft_code) {
                 sweep.affected.push(draft_code.clone());
@@ -1583,10 +1593,10 @@ mod tests {
         let mut mgr = DraftSessionManager::new();
         let (code, token, _) = mgr.create_draft(test_config(), "Alice".to_string());
 
-        mgr.handle_disconnect(&code, 0);
+        mgr.handle_disconnect(&code, 0, std::time::Instant::now());
         assert!(!mgr.sessions[&code].connected[0]);
 
-        let result = mgr.handle_reconnect(&code, &token);
+        let result = mgr.handle_reconnect(&code, &token, std::time::Instant::now());
         assert!(result.is_ok());
         assert!(mgr.sessions[&code].connected[0]);
     }
@@ -1884,7 +1894,7 @@ mod tests {
     fn join_draft_is_refused_while_the_host_is_away() {
         let mut mgr = DraftSessionManager::new();
         let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
-        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT, std::time::Instant::now());
         let tokens = mgr.sessions[&code].player_tokens.clone();
         let connected = mgr.sessions[&code].connected.clone();
         let indexed = mgr.token_to_draft.len();
@@ -1897,7 +1907,7 @@ mod tests {
         assert_eq!(mgr.sessions[&code].connected, connected);
         assert_eq!(mgr.token_to_draft.len(), indexed);
 
-        mgr.handle_reconnect(&code, &host_token)
+        mgr.handle_reconnect(&code, &host_token, std::time::Instant::now())
             .expect("host returns");
         let (_, seat, _) = mgr
             .join_draft(&code, "Bob".to_string(), None)
@@ -1910,16 +1920,17 @@ mod tests {
         let mut mgr = DraftSessionManager::new();
         let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
         assert!(mgr.is_live_lobby_pod(&code));
-        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT, std::time::Instant::now());
         assert!(mgr.is_live_lobby_pod(&code));
 
-        mgr.handle_reconnect(&code, &host_token)
+        mgr.handle_reconnect(&code, &host_token, std::time::Instant::now())
             .expect("host returns");
         mgr.reconnect.grace_period = std::time::Duration::ZERO;
-        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT, std::time::Instant::now());
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(
-            mgr.reconnect.check_expired_with_players(),
+            mgr.reconnect
+                .check_expired_with_players(std::time::Instant::now()),
             vec![(code.clone(), PlayerId(0))]
         );
         assert!(!mgr.is_live_lobby_pod(&code));
@@ -1939,16 +1950,16 @@ mod tests {
         let (waiting_guest, _, _) = mgr.join_draft(&waiting, "Finn".to_string(), None).unwrap();
         let drafting = start_pod(&mut mgr, test_config());
 
-        mgr.handle_disconnect(&reaped, 1);
-        mgr.handle_disconnect(&waiting, 1);
+        mgr.handle_disconnect(&reaped, 1, std::time::Instant::now());
+        mgr.handle_disconnect(&waiting, 1, std::time::Instant::now());
         mgr.reconnect.grace_period = std::time::Duration::ZERO;
-        mgr.handle_disconnect(&reaped, DRAFT_HOST_SEAT);
-        mgr.handle_disconnect(&freed, 1);
-        mgr.handle_disconnect(&drafting, DRAFT_HOST_SEAT);
+        mgr.handle_disconnect(&reaped, DRAFT_HOST_SEAT, std::time::Instant::now());
+        mgr.handle_disconnect(&freed, 1, std::time::Instant::now());
+        mgr.handle_disconnect(&drafting, DRAFT_HOST_SEAT, std::time::Instant::now());
         let pool_before = mgr.sessions[&drafting].session.pools[0].len();
         std::thread::sleep(std::time::Duration::from_millis(2));
 
-        let sweep = mgr.sweep_expired_seats();
+        let sweep = mgr.sweep_expired_seats(std::time::Instant::now());
 
         let reaped_codes: Vec<&str> = sweep.reaped.iter().map(|(c, _)| c.as_str()).collect();
         assert_eq!(reaped_codes, [reaped.as_str()]);

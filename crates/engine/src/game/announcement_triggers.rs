@@ -36,9 +36,41 @@ fn live_spell_announcement(state: &GameState) -> Option<ObjectId> {
         .then_some(pending.object_id)
 }
 
+/// Whether an ACTIVATION is announced right now, so its cost events have one
+/// custodian: [`end_action`], which stages them into the carrier of the
+/// action's resulting prompt.
+///
+/// CR 602.2a + CR 602.2b: an activated ability is announced like a spell and
+/// its costs are paid in the announcement. CR 603.3b: every ability that
+/// triggered since a player last received priority goes on the stack in one
+/// APNAP batch, so an activation's cost triggers wait for the activation's own
+/// and are put on the stack with them. A cost-payment step that parks those
+/// events itself (publicly, or in a carrier the action boundary then
+/// overwrites) splits that batch or loses them. A spell is deliberately not
+/// covered: its paid-cost events stay parked publicly and survive a cancel;
+/// routing them into a spell carrier would drop them on cancel, which needs the
+/// announcement-reversal machinery and is out of scope here. (Engine policy,
+/// compare CR 733.1: an activation is not offered a cancel once a cost is paid,
+/// so its carrier is not dropped with paid-cost events in it.)
+///
+/// `next_wait` is the prompt the paying step is about to return; the live
+/// announcement is read from the state and from that prompt, since a step that
+/// pauses on the activation's first action has not stored it yet.
+pub(crate) fn activation_announcement_is_live(state: &GameState, next_wait: &WaitingFor) -> bool {
+    state
+        .pending_trigger_carrier_owner()
+        .and_then(|owner| state.pending_cast_at(owner))
+        .or_else(|| next_wait.pending_cast_ref())
+        .is_some_and(|pending| pending.activation_ability_index.is_some())
+}
+
 /// The unscanned events in `events[start..]`, after occurrence claims and the
 /// queued zone-change witness (CR 603.2c: one trigger per occurrence).
-fn unclaimed_events(state: &GameState, events: &[GameEvent], start: usize) -> Vec<GameEvent> {
+pub(crate) fn unclaimed_events(
+    state: &GameState,
+    events: &[GameEvent],
+    start: usize,
+) -> Vec<GameEvent> {
     triggers::filter_already_collected_trigger_events_from(
         state,
         events,

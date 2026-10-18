@@ -53,14 +53,19 @@ const SERVER_HELLO = JSON.stringify({
   },
 });
 
+const CORRELATED_HELLO = JSON.stringify({
+  ...JSON.parse(SERVER_HELLO),
+  data: { ...JSON.parse(SERVER_HELLO).data, command_correlation: "CommandIdV1" },
+});
+
 /**
  * Drives an adapter through the openPhaseSocket handshake.
  * Returns the mock ws after the handshake settles.
  */
-async function completeHandshake(): Promise<MockWebSocket> {
+async function completeHandshake(hello = SERVER_HELLO): Promise<MockWebSocket> {
   await Promise.resolve();
   const ws = MockWebSocket.last!;
-  ws.dispatchSynthetic("message", SERVER_HELLO);
+  ws.dispatchSynthetic("message", hello);
   await Promise.resolve();
   await Promise.resolve();
   return ws;
@@ -1518,6 +1523,261 @@ describe("ServerDraftAdapter", () => {
       // Reach guard: the adapter under test IS in the match phase, so the
       // refusal above is the precondition and not a universally-throwing method.
       expect(adapter.currentPhase).toBe("match");
+    });
+  });
+});
+
+describe("ServerDraftAdapter game-command correlation", () => {
+  const keep: GameAction = { type: "MulliganDecision", data: { choice: { type: "Keep" } } };
+
+  /** One draft seat that has reached an accepted Full match on its own socket. */
+  async function seatInMatch(hello: string): Promise<{ seat: ServerDraftAdapter; socket: MockWebSocket }> {
+    MockWebSocket.last = null;
+    const seat = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const created = seat.createDraft({
+      displayName: "Seat",
+      setCodes: ["MKM"],
+      kind: "Premier",
+      public: true,
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      podSize: 2,
+    });
+    const socket = await completeHandshake(hello);
+    receive(socket, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+    await created;
+    enterAcceptedFullMatch(seat, socket);
+    return { seat, socket };
+  }
+
+  function sentCommandId(socket: MockWebSocket): unknown {
+    const frame = socket.send.mock.calls
+      .map(([raw]) => JSON.parse(raw as string) as { type?: string; command_id?: unknown })
+      .filter((sent) => sent.type === "Action" || sent.type === "Interaction")
+      .pop();
+    if (!frame) throw new Error("No game submission was sent");
+    return frame.command_id;
+  }
+
+  function deliverUpdate(socket: MockWebSocket, marker: string, commandId?: unknown): void {
+    socket.dispatchSynthetic("message", JSON.stringify({
+      type: "StateUpdate",
+      command_id: commandId,
+      data: { state: matchState(`reply-${marker}`), events: [{ marker }], full_key: FULL_KEY },
+    }));
+  }
+
+  describe("with CommandIdV1 negotiated", () => {
+    it("keeps both seats' simultaneous Keep submissions owned when the peer's StateUpdate arrives", async () => {
+      const seats = [await seatInMatch(CORRELATED_HELLO), await seatInMatch(CORRELATED_HELLO)];
+      try {
+        const outcomes = seats.map(({ seat }, player) => trackRejection(seat.submitAction(keep, player)));
+        const ids = seats.map(({ socket }) => sentCommandId(socket));
+        expect(ids).toEqual([expect.any(Number), expect.any(Number)]);
+
+        // Seat 0's Keep completes and is broadcast to seat 1 without seat 1's id.
+        deliverUpdate(seats[0].socket, "keep-0", ids[0]);
+        deliverUpdate(seats[1].socket, "keep-0-as-peer-update");
+        const first = await Promise.all(outcomes.map((read) => read()));
+        expect(deliveredEventMarker(first[0])).toBe("keep-0");
+        expect(first[1]).toBe("never settled");
+        await expect(seats[1].seat.submitAction(keep, 1)).rejects.toMatchObject({
+          code: AdapterErrorCode.ACTION_NOT_SENT,
+        });
+
+        deliverUpdate(seats[1].socket, "keep-1", ids[1]);
+        expect(deliveredEventMarker(await outcomes[1]())).toBe("keep-1");
+      } finally {
+        seats.forEach(({ seat }) => seat.dispose());
+      }
+    });
+
+    it("renders a peer StateUpdate as ambient state instead of settling the command", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        const events = vi.fn();
+        seat.onEvent(events);
+        const outcome = trackRejection(seat.submitAction(keep, 0));
+        deliverUpdate(socket, "peer-update");
+        expect(await outcome()).toBe("never settled");
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "gameStateUpdated" }));
+        expect(events).not.toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      } finally {
+        seat.dispose();
+      }
+    });
+
+    it("settles only on its own id for ActionNoOp, ActionRejected and ActionFailed", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        const events = vi.fn();
+        seat.onEvent(events);
+        const outcome = trackRejection(seat.submitAction(keep, 0));
+        const id = sentCommandId(socket);
+        if (typeof id !== "number") throw new Error("Expected a numeric command ID");
+        const data = {
+          message: "Another request failed",
+          rejection: { code: "invalid_action", disposition: "invalid", message: "Other rejection", related_object_ids: [] },
+        };
+        const errors = () => events.mock.calls.filter(([event]) => event.type === "error").length;
+        for (const type of ["ActionNoOp", "ActionRejected", "ActionFailed"]) {
+          receive(socket, type, data);
+        }
+        // An id-less ActionFailed still surfaces once; none of them settles or releases the slot.
+        expect(errors()).toBe(1);
+        for (const type of ["ActionNoOp", "ActionRejected", "ActionFailed"]) {
+          socket.dispatchSynthetic("message", JSON.stringify({ type, data, command_id: id + 1 }));
+        }
+        expect(errors()).toBe(1);
+        expect(await outcome()).toBe("never settled");
+        expect(events).not.toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+
+        socket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: id }));
+        await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      } finally {
+        seat.dispose();
+      }
+    });
+
+    it("rejects with a matching ActionRejected and ignores that command's late echo afterwards", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        const first = seat.submitAction(keep, 0);
+        const id = sentCommandId(socket);
+        socket.dispatchSynthetic("message", JSON.stringify({
+          type: "ActionRejected",
+          command_id: id,
+          data: { rejection: { code: "invalid_action", disposition: "invalid", message: "No", related_object_ids: [] } },
+        }));
+        await expect(first).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+
+        const next = trackRejection(seat.submitAction({ type: "PassPriority" }, 0));
+        const nextId = sentCommandId(socket);
+        expect(nextId).not.toEqual(id);
+        deliverUpdate(socket, "late-echo", id);
+        expect(await next()).toBe("never settled");
+        deliverUpdate(socket, "own", nextId);
+        expect(deliveredEventMarker(await next())).toBe("own");
+      } finally {
+        seat.dispose();
+      }
+    });
+
+    it("never reuses a command id after the slot is dropped by a socket close", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        const dropped = seat.submitAction(keep, 0);
+        const oldId = sentCommandId(socket);
+        const closed = expect(dropped).rejects.toMatchObject({ code: "WS_CLOSED" });
+        socket.dispatchSynthetic("close");
+        await closed;
+        socket.readyState = MockWebSocket.OPEN;
+        const next = trackRejection(seat.submitAction(keep, 0));
+        expect(sentCommandId(socket)).not.toEqual(oldId);
+        expect(await next()).toBe("never settled");
+      } finally {
+        seat.dispose();
+      }
+    });
+  });
+
+  describe("without the capability", () => {
+    it("sends no command_id and keeps settling on the first completion frame", async () => {
+      const { seat, socket } = await seatInMatch(SERVER_HELLO);
+      try {
+        const events = vi.fn();
+        seat.onEvent(events);
+        const outcome = trackRejection(seat.submitAction(keep, 0));
+        expect(sentCommandId(socket)).toBeUndefined();
+        // Any StateUpdate is the legacy acknowledgement, even one carrying an unrelated id.
+        deliverUpdate(socket, "legacy-first", 99);
+        expect(deliveredEventMarker(await outcome())).toBe("legacy-first");
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+
+        // With nothing pending, legacy still releases the indicator and surfaces a failure.
+        events.mockClear();
+        receive(socket, "ActionNoOp", undefined);
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        events.mockClear();
+        receive(socket, "ActionRejected", {
+          rejection: { code: "invalid_action", disposition: "invalid", message: "Nothing pending", related_object_ids: [] },
+        });
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        events.mockClear();
+        receive(socket, "ActionFailed", { message: "Nothing pending" });
+        expect(events).toHaveBeenCalledWith({ type: "error", message: "Nothing pending" });
+      } finally {
+        seat.dispose();
+      }
+    });
+  });
+
+  describe("pending-indicator bookkeeping", () => {
+    it("frees the slot when a listener throws while the submission is announced", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        let armed = true;
+        seat.onEvent((event) => {
+          if (event.type === "actionPendingChanged" && event.pending && armed) {
+            armed = false;
+            throw new Error("listener failed");
+          }
+        });
+        await expect(seat.submitAction(keep, 0)).rejects.toThrow("listener failed");
+        expect(submissionTypes(socket)).toEqual([]);
+
+        const next = trackRejection(seat.submitAction(keep, 0));
+        expect(submissionTypes(socket)).toEqual(["Action"]);
+        deliverUpdate(socket, "after-throw", sentCommandId(socket));
+        expect(deliveredEventMarker(await next())).toBe("after-throw");
+      } finally {
+        seat.dispose();
+      }
+    });
+
+    it.each(["close", "dispose"] as const)(
+      "sends nothing when a listener ends the connection with %s while the submission is announced",
+      async (ending) => {
+        const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+        try {
+          const events = vi.fn();
+          seat.onEvent(events);
+          seat.onEvent((event) => {
+            if (event.type !== "actionPendingChanged" || !event.pending) return;
+            if (ending === "close") {
+              socket.readyState = 3; // CLOSED
+              socket.dispatchSynthetic("close");
+            } else {
+              seat.dispose();
+            }
+          });
+          const outcome = trackRejection(seat.submitAction(keep, 0));
+          expect(await outcome()).toMatchObject({ code: "WS_CLOSED" });
+          expect(submissionTypes(socket)).toEqual([]);
+          // A send attempted against the ended connection would also report a transport error.
+          expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+        } finally {
+          seat.dispose();
+        }
+      },
+    );
+
+    it("announces the released indicator when the socket closes under a pending submission", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        const events = vi.fn();
+        seat.onEvent(events);
+        const pending = trackRejection(seat.submitAction(keep, 0));
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: true });
+        events.mockClear();
+        socket.readyState = 3; // CLOSED
+        socket.dispatchSynthetic("close");
+        expect(await pending()).toMatchObject({ code: "WS_CLOSED" });
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      } finally {
+        seat.dispose();
+      }
     });
   });
 });

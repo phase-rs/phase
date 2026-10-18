@@ -7383,7 +7383,7 @@ mod tests {
             duration: None,
             graveyard_replacement,
             enters_with_counter: None,
-            enters_with_modifications: vec![],
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };

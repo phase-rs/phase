@@ -548,7 +548,12 @@ export function GamePage() {
             : [...s.spectators, event.name],
         }));
         break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
+        break;
       case "error":
+        // Also the terminal surface for a native AI driver fault (the adapter
+        // emits `aiDriverFault`, then this `error`): the game cannot continue.
         useMultiplayerStore.getState().showToast(event.message);
         // Native engine sockets emit an error before close; the provider disposes
         // that terminal adapter, so no reconnectFailed event follows.
@@ -713,6 +718,9 @@ export function GamePage() {
             joinCode,
           },
         });
+        break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
