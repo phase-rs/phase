@@ -2681,6 +2681,7 @@ fn reservoir_kraken_order_changes_ready_attacker() {
             .add_creature(P1, "Shared untapped creature", 2, 2)
             .id();
         let mut runner = scenario.build();
+        crate::game::public_state::finalize_public_state(runner.state_mut());
         for source in [a, b] {
             let object = &runner.state().objects[&source];
             assert_eq!(object.trigger_definitions.len(), 1);
