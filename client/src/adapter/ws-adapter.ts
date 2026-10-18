@@ -215,6 +215,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 152: ParsedCondition.IsDuringUpkeep becomes CurrentPhaseIs { phases } for
+ *      named-step activation restrictions. Old native readers cannot decode the
+ *      new tag. Wire 134 moves with it.
  * 151: Populated GameObject.bestow_form carries the removed creature subtypes
  *      as an object instead of a boolean. Old native readers cannot decode it.
  *      Wire 133 moves with it.
@@ -919,7 +922,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 151;
+export const PROTOCOL_VERSION = 152;
 
 
 /**

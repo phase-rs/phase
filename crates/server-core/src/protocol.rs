@@ -3473,6 +3473,8 @@ mod tests {
         }
     }
 
+    /// v152: the `CurrentPhaseIs { phases }` activation-restriction condition
+    /// (replacing the unit `IsDuringUpkeep`) requires a versioned full-game peer.
     /// v151: populated Bestow form payloads require a versioned full-game peer.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
@@ -3714,8 +3716,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_151_for_populated_bestow_payloads() {
-        assert_eq!(PROTOCOL_VERSION, 151);
+    fn protocol_version_is_152_for_current_phase_restrictions() {
+        assert_eq!(PROTOCOL_VERSION, 152);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3726,7 +3728,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_151_for_populated_bestow_payloads` stays
+    /// `protocol_version_is_152_for_current_phase_restrictions` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

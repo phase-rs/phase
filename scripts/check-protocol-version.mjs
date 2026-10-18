@@ -77,6 +77,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v140 adds `AttackSubject::EventAttackers` (the attacked players of a trigger's attack
 // event) to ability player scopes in GameState.
 // v151 carries populated Bestow restoration payloads (object instead of boolean).
+// v152 replaces the unit `IsDuringUpkeep` condition with `CurrentPhaseIs { phases }`.
 // v141 adds `ExileLinkKind::CastCost` (CR 607.2q cast-cost exile links) to GameState.
 // v142 adds `LinkedExileSnapshot.incarnation` (CR 400.7) to GameState's linked-exile snapshots.
 // v143 retypes GameState's modal no-repeat history keys to `ObjectIncarnationRef` (CR 400.7).
@@ -187,7 +188,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      `enters_with_modifications` object and the effect's `rider` key), neither parseable
 //      by a v149 peer.
 // +80: v151 carries populated Bestow restoration payloads.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 80;
+// +81: v152 carries the `CurrentPhaseIs { phases }` restriction condition.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 81;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -293,7 +295,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 //      payload reshape (the permission's `enters_with_modifications` object and the
 //      effect's `rider` key).
 // +79: wire 133 moves with full-game v151 for populated Bestow payloads.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 79;
+// +80: wire 134 moves with full-game v152 for the `CurrentPhaseIs` condition.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 80;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

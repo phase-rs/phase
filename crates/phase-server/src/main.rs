@@ -20342,15 +20342,15 @@ mod handshake_tests {
     }
 
     #[test]
-    fn bestow_payload_full_game_refuses_previous_and_accepts_current() {
+    fn current_phase_restriction_full_game_refuses_previous_and_accepts_current() {
         // Independent literals discriminate a reverted version bump. A current
         // lobby version cannot rescue an incompatible full GameState reader.
         let classify = |protocol_version| {
             classify_hello_gate(
                 false,
                 &ClientMessage::ClientHello {
-                    client_version: "bestow-peer".into(),
-                    build_commit: "bestow-build".into(),
+                    client_version: "phase-restriction-peer".into(),
+                    build_commit: "phase-restriction-build".into(),
                     protocol_version,
                     lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                     wire_formats: Vec::new(),
@@ -20359,17 +20359,17 @@ mod handshake_tests {
             )
         };
         assert_eq!(
-            classify(150),
+            classify(151),
             HelloGateOutcome::RejectProtocol {
-                client: 150,
-                server: 151
+                client: 151,
+                server: 152
             }
         );
         assert_eq!(
-            classify(151),
+            classify(152),
             HelloGateOutcome::Accept(ClientHelloInfo {
-                client_version: "bestow-peer".into(),
-                build_commit: "bestow-build".into(),
+                client_version: "phase-restriction-peer".into(),
+                build_commit: "phase-restriction-build".into(),
                 wire_format: None,
             })
         );
