@@ -13,7 +13,11 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
-import { useAiDeckCatalog } from "../services/aiDeckCatalog";
+import {
+  useAiDeckCatalog,
+  type AiDeckCandidate,
+  type AiDeckCatalogResult,
+} from "../services/aiDeckCatalog";
 import { PileSourceChoice } from "../components/menu/PileSourceChoice";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
@@ -71,6 +75,22 @@ function setupDefaults(format: GameFormat): FormatConfig | null {
 
 // --- Component ---
 
+/**
+ * Content equality for the settled-catalog bailout. Legal candidates carry
+ * the preview's bracket data, so both id and bracket participate; the raw
+ * universe only drives toggle membership, where ids suffice.
+ */
+function sameCatalogCandidates(a: readonly AiDeckCandidate[], b: readonly AiDeckCandidate[]): boolean {
+  return (
+    a.length === b.length
+    && a.every((candidate, index) => candidate.id === b[index].id && candidate.bracket === b[index].bracket)
+  );
+}
+
+function sameCandidateIds(a: readonly AiDeckCandidate[], b: readonly AiDeckCandidate[]): boolean {
+  return a.length === b.length && a.every((candidate, index) => candidate.id === b[index].id);
+}
+
 export function GameSetupPage() {
   const { t } = useTranslation("game");
   const navigate = useNavigate();
@@ -117,6 +137,27 @@ export function GameSetupPage() {
     selectedFormat: formatConfig?.format,
     selectedMatchType: effectiveMatchType,
   });
+  // Last settled catalog for the human pool: a library-inventory rescan flips
+  // `loading` back on, and the deferred preview must keep showing the
+  // previous legal universe until the fresh one lands (not flash back to the
+  // display universe). Errors likewise keep the previous settled result. The
+  // update bails out on equal content (not identity): callers may pass a
+  // freshly-built result object every render, and an unconditional set would
+  // loop against that.
+  const [settledAiCatalog, setSettledAiCatalog] = useState<AiDeckCatalogResult | undefined>(undefined);
+  useEffect(() => {
+    if (aiCatalog.loading || aiCatalog.error !== null) return;
+    setSettledAiCatalog((prev) => {
+      if (
+        prev !== undefined
+        && sameCatalogCandidates(prev.candidates, aiCatalog.candidates)
+        && sameCandidateIds(prev.allCandidates, aiCatalog.allCandidates)
+      ) {
+        return prev;
+      }
+      return { candidates: aiCatalog.candidates, allCandidates: aiCatalog.allCandidates };
+    });
+  }, [aiCatalog]);
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(selectedFormat);
@@ -370,7 +411,7 @@ export function GameSetupPage() {
             randomSelectionMode="defer"
             bare
             onActiveDeckCompatChange={setSelectedCompat}
-            aiLegalCatalog={aiCatalog.loading ? undefined : aiCatalog.candidates}
+            aiCatalog={settledAiCatalog}
           />
 
           {/* Sidebar */}

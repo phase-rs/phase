@@ -14,6 +14,7 @@ const catalogMocks = vi.hoisted(() => ({
 vi.mock("../../../services/aiDeckCatalog", () => ({
   useAiDeckCatalog: () => ({
     candidates: catalogMocks.candidates,
+    allCandidates: catalogMocks.candidates,
     loading: false,
     error: null,
   }),

@@ -38,7 +38,7 @@ vi.mock("../../../services/engineRuntime", async () => ({
 const catalogState = vi.hoisted(() => ({ candidates: [] as unknown[] }));
 vi.mock("../../../services/aiDeckCatalog", async () => ({
   ...(await vi.importActual<typeof import("../../../services/aiDeckCatalog")>("../../../services/aiDeckCatalog")),
-  useAiDeckCatalog: () => ({ candidates: catalogState.candidates, loading: false, error: null }),
+  useAiDeckCatalog: () => ({ candidates: catalogState.candidates, allCandidates: catalogState.candidates, loading: false, error: null }),
 }));
 
 import { HostSetup } from "../HostSetup";

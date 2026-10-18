@@ -265,6 +265,7 @@ vi.mock("../services/aiDeckCatalog", () => ({
   })),
   useAiDeckCatalog: () => ({
     candidates: test.aiCandidates,
+    allCandidates: test.aiCandidates,
     loading: false,
     error: null,
   }),

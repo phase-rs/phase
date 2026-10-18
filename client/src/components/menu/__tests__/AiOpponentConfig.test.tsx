@@ -21,7 +21,7 @@ vi.mock("../../../services/aiDeckCatalog", async () => {
   );
   return {
     ...actual,
-    useAiDeckCatalog: () => ({ candidates: mockCandidates, loading: false, error: null }),
+    useAiDeckCatalog: () => ({ candidates: mockCandidates, allCandidates: mockCandidates, loading: false, error: null }),
   };
 });
 

@@ -48,7 +48,7 @@ import {
   savedDeckCatalogId,
   type DeckCatalogCandidate,
 } from "../../services/deckCatalog";
-import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
+import type { AiDeckCatalogResult } from "../../services/aiDeckCatalog";
 import {
   pickRandomDeckCandidate,
   randomDeckPriority,
@@ -648,15 +648,16 @@ interface MyDecksProps {
    */
   onActiveDeckCompatChange?: (compat: DeckCompatibilityResult | null) => void;
   /**
-   * Completed legal catalog hoisted from the setup page's shared AI catalog
-   * analysis. Present only in single-player setup once the analysis lands;
-   * the deferred human pool (tree, bracket base, counts, fallback) derives
-   * from this full universe — never the search-narrowed display — so the
-   * preview matches what game start can draw. Absent everywhere else
-   * (multiplayer select has no AI context, so the pool selection applies
-   * alone there).
+   * Completed catalog snapshot hoisted from the setup page's shared AI
+   * catalog analysis. Present only in single-player setup once the analysis
+   * lands; the deferred human pool (tree, bracket base, counts, fallback)
+   * derives from the legal `candidates` — never the search-narrowed display
+   * — so the preview matches what game start can draw, while group toggles
+   * clear overrides against the complete raw `allCandidates`. Absent
+   * everywhere else (multiplayer select has no AI context, so the pool
+   * selection applies alone there).
    */
-  aiLegalCatalog?: readonly AiDeckCandidate[];
+  aiCatalog?: AiDeckCatalogResult;
 }
 
 type MyDecksTab = "decks" | "subscriptions";
@@ -675,7 +676,7 @@ export function MyDecks({
   randomSelectionMode = "resolveImmediately",
   bare = false,
   onActiveDeckCompatChange,
-  aiLegalCatalog,
+  aiCatalog,
 }: MyDecksProps) {
   const { t } = useTranslation("menu");
   const effectiveOffline = useEffectiveOffline();
@@ -780,10 +781,10 @@ export function MyDecks({
   // display — so it matches what game start can draw. Present only in
   // single-player setup once the analysis lands; multiplayer select has no
   // AI context, so the pool selection applies alone there.
-  const useLegalPreview = randomSelectionMode === "defer" && aiLegalCatalog !== undefined;
+  const useLegalPreview = randomSelectionMode === "defer" && aiCatalog !== undefined;
   const legalBrackets = useMemo(
-    () => new Map((aiLegalCatalog ?? []).map((candidate) => [candidate.id, candidate.bracket] as const)),
-    [aiLegalCatalog],
+    () => new Map((aiCatalog?.candidates ?? []).map((candidate) => [candidate.id, candidate.bracket] as const)),
+    [aiCatalog],
   );
 
   const handleToggleStar = useCallback((name: string) => toggleStar(name), [toggleStar]);
@@ -1266,9 +1267,9 @@ export function MyDecks({
   // with legal membership cannot restore legal decks search already removed.
   // Tiles, search, and immediate mode keep the display universe.
   const poolTreeItems = useMemo<(PoolCandidate & BracketTaggedCandidate)[]>(() => {
-    if (useLegalPreview && aiLegalCatalog) return withCatalogSavedNames(aiLegalCatalog);
+    if (useLegalPreview && aiCatalog) return withCatalogSavedNames(aiCatalog.candidates);
     return withCatalogSavedNames(randomBaseCandidates);
-  }, [useLegalPreview, aiLegalCatalog, randomBaseCandidates]);
+  }, [useLegalPreview, aiCatalog, randomBaseCandidates]);
   // Complete toggleable universe for folder toggles: the display base above
   // is narrowed by search/source/set filters, but a toggle clears overrides
   // for every true group member. Saved-duplicate precons stay deduped (the
@@ -1299,6 +1300,37 @@ export function MyDecks({
       }),
     );
   }, [legalBrackets, catalogCandidates, compatibilities, deckNames, mode]);
+  // Raw toggleable universe for folder toggles in deferred mode: group
+  // membership comes from the complete catalog (every saved, feed, and
+  // precon deck regardless of format or legality), so an override on a
+  // currently-unlisted deck cannot survive a folder-wide unselect. Display,
+  // counts, and the draw itself stay on the legal `poolTreeItems` universe.
+  const poolToggleItems = useMemo(() => {
+    if (!useLegalPreview || !aiCatalog) return poolCompleteItems;
+    const saved = new Set(deckNames);
+    return withCatalogSavedNames(
+      aiCatalog.allCandidates.flatMap((candidate) => {
+        const deckName = candidate.source.type === "precon"
+          ? PRECON_PREFIX + candidate.name
+          : candidate.name;
+        if (
+          candidate.source.type === "precon"
+          && (saved.has(deckName) || saved.has(candidate.name))
+        ) {
+          return [];
+        }
+        return [{
+          id: candidate.id,
+          name: deckName,
+          deckName,
+          source: candidate.source,
+          knownFormat: candidate.knownFormat,
+          compatibility: compatibilities[deckName] ?? null,
+          bracket: legalBrackets.get(candidate.id) ?? null,
+        }];
+      }),
+    );
+  }, [useLegalPreview, aiCatalog, poolCompleteItems, deckNames, compatibilities, legalBrackets]);
   const poolBaseIds = useMemo(
     () =>
       useLegalPreview
@@ -2061,10 +2093,12 @@ export function MyDecks({
               <RandomPoolTree
                 pool="human"
                 items={poolTreeItems}
-                // Deferred items already are the complete legal universe (as
-                // on the AI side); display items need the search-independent
-                // universe for total folder toggles.
-                allItems={useLegalPreview ? undefined : poolCompleteItems}
+                // Toggle membership is the complete raw universe in deferred
+                // mode (as on the AI side): a folder toggle clears overrides
+                // for every true group member, including decks the legal
+                // display universe hides. Display items need the
+                // search-independent display universe for totals instead.
+                allItems={useLegalPreview ? poolToggleItems : poolCompleteItems}
                 baseIds={poolBaseIds}
                 showBracketFilter={
                   useLegalPreview && isCommanderFamilyFormat(selectedFormatForCompatibility ?? undefined)

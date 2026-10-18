@@ -12,6 +12,14 @@ import type { DeckArchetype } from "./engineRuntime";
 import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 import type { CommanderBracket } from "../types/bracket";
 import { effectiveBracket, isCommanderFamilyFormat } from "../types/bracket";
+import {
+  DECKS_CHANGED_EVENT,
+  FEED_DECK_ORIGINS_KEY,
+  FEED_SUBSCRIPTIONS_KEY,
+  STORAGE_KEY_PREFIX,
+  onSavedDeckRewritten,
+} from "../constants/storage";
+import { PROFILE_REPLACED_EVENT } from "../stores/cloudSyncStore";
 
 export type AiDeckSource = DeckCatalogSource;
 
@@ -39,6 +47,14 @@ export interface AiDeckCatalogOptions {
 
 export interface AiDeckCatalogResult {
   candidates: AiDeckCandidate[];
+  /**
+   * Complete raw universe the legal candidates were filtered from: every
+   * saved, feed, and precon deck regardless of format or legality. Pool
+   * group toggles clear overrides against this membership (an override on a
+   * currently-unlisted deck must not survive a folder-wide unselect), while
+   * display, counts, and draws use the legal `candidates`.
+   */
+  allCandidates: AiDeckCandidate[];
 }
 
 export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
@@ -154,7 +170,27 @@ export async function buildLegalAiDeckCatalog(
     const legalCandidateResult = await legalCandidate(candidate, options);
     if (legalCandidateResult !== null) candidates.push(legalCandidateResult);
   }
-  return { candidates };
+  return { candidates, allCandidates: rawCandidates };
+}
+
+/**
+ * Trailing debounce for library-inventory rescan triggers. Mutations arrive
+ * in bursts (migrations rewrite every deck at startup; feed refresh writes
+ * each mirror), and each trigger would otherwise start a full sequential
+ * analysis; the existing cancellation only drops their results, not their
+ * engine work. One trailing run per burst keeps previews fresh without it.
+ */
+const LIBRARY_RESCAN_DEBOUNCE_MS = 500;
+
+/** Deck-inventory localStorage keys: a cross-tab write to one of these changes the candidate universe. */
+function isInventoryStorageKey(key: string | null): boolean {
+  return (
+    // `clear()` reports a null key: re-read everything.
+    key === null ||
+    key.startsWith(STORAGE_KEY_PREFIX) ||
+    key === FEED_SUBSCRIPTIONS_KEY ||
+    key === FEED_DECK_ORIGINS_KEY
+  );
 }
 
 export function useAiDeckCatalog({
@@ -164,9 +200,42 @@ export function useAiDeckCatalog({
 }: AiDeckCatalogOptions): UseAiDeckCatalogResult {
   const [result, setResult] = useState<UseAiDeckCatalogResult>({
     candidates: [],
+    allCandidates: [],
     loading: enabled,
     error: null,
   });
+  // Library inventory revision: importing, deleting, adopting, or refreshing
+  // decks (here, in another tab, or via cloud sync) rescans the catalog so
+  // mounted previews never serve decks game start can no longer draw, or
+  // hide decks it can. Folder-only changes need no rescan — grouping reacts
+  // through the folder index instead.
+  const [libraryRevision, setLibraryRevision] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRescan = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        setLibraryRevision((revision) => revision + 1);
+      }, LIBRARY_RESCAN_DEBOUNCE_MS);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (isInventoryStorageKey(event.key)) scheduleRescan();
+    };
+    window.addEventListener(DECKS_CHANGED_EVENT, scheduleRescan);
+    window.addEventListener(PROFILE_REPLACED_EVENT, scheduleRescan);
+    window.addEventListener("storage", onStorage);
+    const unsubscribeRewritten = onSavedDeckRewritten(() => scheduleRescan());
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      window.removeEventListener(DECKS_CHANGED_EVENT, scheduleRescan);
+      window.removeEventListener(PROFILE_REPLACED_EVENT, scheduleRescan);
+      window.removeEventListener("storage", onStorage);
+      unsubscribeRewritten();
+    };
+  }, [enabled]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -180,6 +249,7 @@ export function useAiDeckCatalog({
         if (!cancelled) {
           setResult({
             candidates: [],
+            allCandidates: [],
             loading: false,
             error: error instanceof Error ? error.message : String(error),
           });
@@ -188,7 +258,7 @@ export function useAiDeckCatalog({
     return () => {
       cancelled = true;
     };
-  }, [selectedFormat, selectedMatchType, enabled]);
+  }, [selectedFormat, selectedMatchType, enabled, libraryRevision]);
 
   return result;
 }

@@ -598,6 +598,13 @@ export function HostSetup({
     () => withCatalogSavedNames(aiDeckCatalog.candidates),
     [aiDeckCatalog.candidates],
   );
+  // Group toggles clear overrides against the complete raw universe: the
+  // curation is format-global, so an override on a currently-unlisted deck
+  // must not survive a folder-wide unselect.
+  const poolToggleItems = useMemo(
+    () => withCatalogSavedNames(aiDeckCatalog.allCandidates),
+    [aiDeckCatalog.allCandidates],
+  );
   const poolBaseIds = useMemo(
     () =>
       new Set(
@@ -1536,7 +1543,7 @@ export function HostSetup({
           )}
           {effectiveAiSeats.length > 0 && !suppliesDeck && !aiDeckCatalog.loading && (
             <div className="surface-card rounded-panel border border-hairline p-4">
-              <RandomPoolTree pool="ai" items={poolTreeItems} baseIds={poolBaseIds} />
+              <RandomPoolTree pool="ai" items={poolTreeItems} allItems={poolToggleItems} baseIds={poolBaseIds} />
             </div>
           )}
 

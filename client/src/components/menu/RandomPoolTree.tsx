@@ -35,7 +35,7 @@ interface RandomPoolTreeProps {
    * from `resolveAiDrawBase`). When present the header reports playable
    * decks alongside selected ones and warns when the intersection is empty —
    * the case where draws silently fall back to the full base. Omit for pools
-   * with no sibling restriction (the human pool).
+   * with no sibling restriction (immediate human picks).
    */
   baseIds?: ReadonlySet<string>;
   /**
@@ -48,8 +48,11 @@ interface RandomPoolTreeProps {
    * Complete toggleable universe. `items` is the filtered display view (deck
    * search narrows it), but a folder toggle means "select/unselect ALL decks
    * in that folder" — its override-clearing must cover hidden members too, or
-   * a searched-out explicit include lingers invisibly. Defaults to `items`
-   * for callers with no display filtering (the AI pool surfaces).
+   * a searched-out explicit include lingers invisibly. Omit only when the
+   * display view already is the whole universe; the AI surfaces and the
+   * deferred human pool pass the complete raw catalog (including decks the
+   * legal display view hides) so overrides on unlisted decks cannot survive
+   * a folder-wide toggle.
    */
   allItems?: PoolCandidate[];
 }

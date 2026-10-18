@@ -1,14 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderHook, waitFor } from "@testing-library/react";
 
 import type { DeckCompatibilityResult } from "../deckCompatibility";
 import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
-import { buildLegalAiDeckCatalog, filterByBracket, type AiDeckCandidate } from "../aiDeckCatalog";
+import { buildLegalAiDeckCatalog, filterByBracket, useAiDeckCatalog, type AiDeckCandidate } from "../aiDeckCatalog";
 import { buildDeckCatalog } from "../deckCatalog";
 import { getCachedFeed, getDeckFeedOrigin, listSubscriptions } from "../feedService";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
-import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { DECKS_CHANGED_EVENT, FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { BUNDLED_CEDH_DECKS } from "../../data/cedhDecks";
 import { CEDH_BRACKET } from "../cedhLock";
 import type { BracketEstimate } from "../../types/bracket";
@@ -110,6 +111,26 @@ describe("buildLegalAiDeckCatalog", () => {
       "saved:Second",
       "saved:Third",
     ]);
+  });
+
+  it("returns the complete raw universe as allCandidates alongside the legal candidates", async () => {
+    saveDeck("Legal Deck", deck("Legal Card"));
+    saveDeck("Illegal Deck", deck("Illegal Starter"));
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Standard",
+      selectedMatchType: "Bo1",
+    });
+
+    // Draws, counts, and display use the legal universe only.
+    expect(catalog.candidates.map((candidate) => candidate.id)).toEqual(["saved:Legal Deck"]);
+    // Group toggles clear overrides against the raw universe: the illegal
+    // saved deck and the Commander-only bundled decks are unlisted for
+    // Standard, but an override on one must not survive a folder toggle.
+    const rawIds = catalog.allCandidates.map((candidate) => candidate.id);
+    expect(rawIds).toContain("saved:Legal Deck");
+    expect(rawIds).toContain("saved:Illegal Deck");
+    expect(rawIds).toContain("precon:BundledCedh_HeliodBallista_Demo");
   });
 
   it("includes legal saved Pauper Commander user decks", async () => {
@@ -420,6 +441,40 @@ describe("bundled cEDH decks", () => {
     expect(demo).toBeDefined();
     expect(demo?.source.type).toBe("precon");
     expect(demo?.bracket).toBe(CEDH_BRACKET);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useAiDeckCatalog — library-inventory rescan while mounted
+// ---------------------------------------------------------------------------
+
+describe("useAiDeckCatalog", () => {
+  it("rescans the catalog when the deck inventory changes while mounted", async () => {
+    saveDeck("First", deck("First Card"));
+    const { result, unmount } = renderHook(() =>
+      useAiDeckCatalog({ selectedFormat: "Standard", selectedMatchType: "Bo1" }),
+    );
+    try {
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.candidates.map((candidate) => candidate.id)).toEqual(["saved:First"]);
+
+      // Import a second deck while the setup screen stays mounted: the
+      // inventory event schedules a (debounced) rescan that picks it up, so
+      // mounted previews never hide decks game start can draw.
+      saveDeck("Second", deck("Second Card"));
+      window.dispatchEvent(new Event(DECKS_CHANGED_EVENT));
+      await waitFor(
+        () =>
+          expect(result.current.candidates.map((candidate) => candidate.id)).toEqual([
+            "saved:First",
+            "saved:Second",
+          ]),
+        { timeout: 5000 },
+      );
+      expect(result.current.allCandidates.map((candidate) => candidate.id)).toContain("saved:Second");
+    } finally {
+      unmount();
+    }
   });
 });
 

@@ -1426,7 +1426,10 @@ describe("MyDecks", () => {
           activeDeckName={null}
           onSelectDeck={vi.fn()}
           randomSelectionMode="defer"
-          aiLegalCatalog={[legalCandidate("Bracket Two", 2), legalCandidate("Bracket Five", 5)]}
+          aiCatalog={{
+            candidates: [legalCandidate("Bracket Two", 2), legalCandidate("Bracket Five", 5)],
+            allCandidates: [legalCandidate("Bracket Two", 2), legalCandidate("Bracket Five", 5)],
+          }}
         />,
       );
 
@@ -1490,7 +1493,10 @@ describe("MyDecks", () => {
           activeDeckName={null}
           onSelectDeck={vi.fn()}
           randomSelectionMode="defer"
-          aiLegalCatalog={[legalCandidate("Standard Deck", null)]}
+          aiCatalog={{
+            candidates: [legalCandidate("Standard Deck", null)],
+            allCandidates: [legalCandidate("Pauper Deck", null), legalCandidate("Standard Deck", null)],
+          }}
         />,
       );
 
@@ -1501,6 +1507,58 @@ describe("MyDecks", () => {
       // selection matches nothing: the zero-selection fallback warning fires.
       expect(screen.getByRole("button", { name: /Your random pool 0 of 1/ })).toBeInTheDocument();
       expect(screen.getByText(/Everything is excluded/)).toBeInTheDocument();
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("clears a hidden cross-format override when its folder is unselected", async () => {
+    saveDeck("Standard Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("Commander Deck", { main: [{ name: "Sol Ring", count: 60 }], sideboard: [] });
+    const commanderId = savedDeckCatalogId("Commander Deck");
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        // The Commander deck was excluded while browsing Commander; switching
+        // the setup to Standard hides it from the legal display universe, but
+        // the per-deck override persists in the format-global curation.
+        humanPoolSelection: setPoolDeckIncluded(emptyPoolSelection(), commanderId, false),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiCatalog={{
+            candidates: [legalCandidate("Standard Deck", null)],
+            allCandidates: [
+              legalCandidate("Standard Deck", null),
+              { ...legalCandidate("Commander Deck", null), knownFormat: "Commander" },
+            ],
+          }}
+        />,
+      );
+
+      // Display stays legal-only: the Commander deck has no tree checkbox …
+      await screen.findByText("Standard Deck");
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      await userEvent.click(screen.getByRole("button", { name: /Unfiled/ }));
+      expect(screen.getByRole("checkbox", { name: "Standard Deck" })).toBeInTheDocument();
+      expect(screen.queryByRole("checkbox", { name: "Commander Deck" })).not.toBeInTheDocument();
+
+      // … but the folder toggle covers the raw universe: unselecting Unfiled
+      // clears the hidden override instead of letting it linger invisibly.
+      await userEvent.click(screen.getByRole("checkbox", { name: "Unfiled" }));
+      const selection = usePreferencesStore.getState().humanPoolSelection;
+      expect(selection.excludedGroups).toContain(UNFILED_POOL_GROUP);
+      expect(selection.excludedDecks).not.toContain(commanderId);
     } finally {
       act(() => {
         usePreferencesStore.setState({ humanPoolSelection: restoreSelection });

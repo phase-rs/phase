@@ -136,7 +136,7 @@ export function AiOpponentConfig({
     selectedMatchType,
     enabled: catalog === undefined,
   });
-  const { candidates, loading, error } = catalog ?? fallbackCatalog;
+  const { candidates, allCandidates, loading, error } = catalog ?? fallbackCatalog;
 
   useEffect(() => {
     onCandidateCountChange?.(loading ? null : candidates.length);
@@ -193,6 +193,10 @@ export function AiOpponentConfig({
   // `pickAiSeatDecks` draws from — so a selection the bracket filter empties
   // warns instead of silently falling back.
   const poolTreeItems = useMemo(() => withCatalogSavedNames(candidates), [candidates]);
+  // Group toggles clear overrides against the complete raw universe: the
+  // curation is format-global, so an override on a currently-unlisted deck
+  // must not survive a folder-wide unselect.
+  const poolToggleItems = useMemo(() => withCatalogSavedNames(allCandidates), [allCandidates]);
   const poolBaseIds = useMemo(
     () =>
       new Set(
@@ -366,7 +370,7 @@ export function AiOpponentConfig({
           </div>
         )}
 
-        <RandomPoolTree pool="ai" items={poolTreeItems} baseIds={poolBaseIds} />
+        <RandomPoolTree pool="ai" items={poolTreeItems} allItems={poolToggleItems} baseIds={poolBaseIds} />
         {poolConflict !== null && (
           <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
             {t("aiOpponent.poolBracketConflict", { selected: poolConflict.selected, total: poolConflict.baseSize })}
