@@ -16,6 +16,47 @@ use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
 #[test]
+fn target_defined_token_duration_public_document() {
+    // SHAPE: synthetic full document with two printed targets, no delayed clause.
+    let parsed = parse_oracle_text("Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Target creature gets +1/+1 until end of turn.", "Synthetic duration Spirit", &[], &["Instant".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(parsed.statics.is_empty());
+    let chain: Vec<_> =
+        std::iter::successors(Some(&parsed.abilities[0]), |d| d.sub_ability.as_deref()).collect();
+    assert!(chain
+        .iter()
+        .all(|d| !matches!(*d.effect, Effect::Unimplemented { .. })));
+    assert!(matches!(
+        *chain[0].effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        chain
+            .iter()
+            .filter(|d| matches!(*d.effect, Effect::Token { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        chain
+            .iter()
+            .filter(
+                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+            )
+            .count(),
+        2
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+}
+
+#[test]
 fn coordinated_population_where_x_full_source_honesty() {
     assert_coordinated_where_x_full_source_honesty(&["", "the number of "]);
 }

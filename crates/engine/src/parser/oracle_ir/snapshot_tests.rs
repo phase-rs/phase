@@ -19,6 +19,16 @@ use crate::types::game_state::DistributionUnit;
 use crate::types::mana::{ManaCost, ManaCostShard};
 
 #[test]
+fn jev_target_defined_token() {
+    // Synthetic independent duration consumer; full Broken Visage also needs delayed cleanup.
+    let (ir, lowered) = parse_two_layer("Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Target creature gets +1/+1 until end of turn.", "Synthetic target-defined Spirit", &["Instant"], &[]);
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    insta::assert_json_snapshot!("jev_target_defined_token_ir", &ir);
+    insta::assert_json_snapshot!("jev_target_defined_token_lowered", &lowered);
+}
+
+#[test]
 fn repeated_population_full_card_ir() {
     let (ir, lowered) = parse_two_layer("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.\nCounter target noncreature spell.", "Machinist's Dismissal", &["Instant"], &[]);
     assert_eq!(lowered.statics.len(), 1);

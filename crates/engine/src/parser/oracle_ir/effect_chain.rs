@@ -890,10 +890,13 @@ pub(crate) struct ClauseIr {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_chosen_clause: Option<ClauseId>,
     /// CR 115.1 + CR 608.2c: where this clause's `ObjectScope::Target` reads take
-    /// their object from. Written only by the comparative "that creature" gate
-    /// after it proves the immediately preceding clause announced the object.
+    /// their object from. Comparative gates and token definitions write it
+    /// after proving the immediately preceding clause announced the object.
     #[serde(skip_serializing_if = "TargetReadOrigin::is_own")]
     pub(crate) target_reads: TargetReadOrigin,
+    /// CR 111.3 + CR 608.2c: exact creation completed by this defining sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_definition_owner: Option<ClauseId>,
     /// The prior return instruction whose actual results a delayed clause names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_return_result: Option<(ClauseId, ReturnResultReadSpec)>,
@@ -1034,6 +1037,7 @@ impl ClauseIr {
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads,
+            token_definition_owner,
             reads_return_result,
             source: _,
             disposition,
@@ -1063,6 +1067,7 @@ impl ClauseIr {
         *declares_chosen_clause = None;
         *reads_chosen_clause = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
+        *token_definition_owner = None;
         *reads_return_result = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,
@@ -1246,6 +1251,7 @@ impl ClauseIrBuilder {
             parsed,
             boundary,
             disposition,
+            token_definition_owner: None,
             condition: None,
             is_optional: false,
             opponent_may_scope: None,
@@ -1317,7 +1323,34 @@ impl ClauseIrBuilder {
     /// source-order `ClauseId` + `ChainRelative` span (re-locating its fragment in
     /// THIS chain), preserving all content. Keeps single-construction — still
     /// routes through [`ClauseIrBuilder::clause`] + [`ClauseDraft::push`].
-    pub(crate) fn absorb_clause(&mut self, c: ClauseIr) {
+    pub(crate) fn absorb_clauses(&mut self, mut clauses: Vec<ClauseIr>) {
+        // Relocate the complete batch before minting any member: ids are local
+        // to a chain, so an outer id with the same integer is unrelated.
+        let relocation: Vec<_> = clauses
+            .iter()
+            .enumerate()
+            .map(|(offset, c)| (c.id, ClauseId(self.next_clause_id + offset as u32)))
+            .collect();
+        for (offset, clause) in clauses.iter_mut().enumerate() {
+            if let Some(owner) = clause.token_definition_owner {
+                let mut matches = relocation
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (old, _))| *old == owner);
+                let mapped = matches.next().filter(|(producer, _)| *producer < offset);
+                if let Some((_, (_, new))) = mapped.filter(|_| matches.next().is_none()) {
+                    clause.token_definition_owner = Some(*new);
+                } else {
+                    clause.replace_with_gap("token_definition_owner_relocation");
+                }
+            }
+        }
+        for clause in clauses {
+            self.absorb_clause(clause);
+        }
+    }
+
+    fn absorb_clause(&mut self, c: ClauseIr) {
         // CR 608.2c: `placement` is deliberately NOT propagated. Every field below is
         // an intrinsic property of the clause; `placement` is a RELATIONAL verdict
         // about one position in one chain's delayed-payload placement registry, and a
@@ -1332,6 +1365,7 @@ impl ClauseIrBuilder {
             c.boundary,
             c.disposition,
         )
+        .token_definition_owner(c.token_definition_owner)
         .condition(c.condition)
         .is_optional(c.is_optional)
         .opponent_may_scope(c.opponent_may_scope)
@@ -1371,6 +1405,7 @@ pub(crate) struct ClauseDraft<'a> {
     parsed: ParsedEffectClause,
     boundary: Option<ClauseBoundary>,
     disposition: ClauseDisposition,
+    token_definition_owner: Option<ClauseId>,
     condition: Option<AbilityCondition>,
     is_optional: bool,
     opponent_may_scope: Option<OpponentMayScope>,
@@ -1392,6 +1427,10 @@ pub(crate) struct ClauseDraft<'a> {
 }
 
 impl ClauseDraft<'_> {
+    pub(crate) fn token_definition_owner(mut self, owner: Option<ClauseId>) -> Self {
+        self.token_definition_owner = owner;
+        self
+    }
     pub(crate) fn condition(mut self, v: Option<AbilityCondition>) -> Self {
         self.condition = v;
         self
@@ -1704,6 +1743,7 @@ impl ClauseDraft<'_> {
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads: TargetReadOrigin::OwnAnnouncement,
+            token_definition_owner: self.token_definition_owner,
             reads_return_result,
             source,
             disposition: self.disposition,
@@ -2369,5 +2409,66 @@ mod tests {
         assert_eq!(clause.player_scope, Some(PlayerFilter::All));
         assert_eq!(clause.parsed.duration, Some(Duration::Permanent));
         assert!(clause.parsed.sub_ability.is_some());
+    }
+}
+
+#[cfg(test)]
+mod token_definition_tests {
+    use super::*;
+    use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+
+    #[test]
+    fn token_definition_default_reset_clone_and_batch_remint() {
+        let text = "Create a 1/2 green Bear creature token. Create a colorless Construct artifact creature token named Twin. Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let definition = ir.clauses.last().unwrap();
+        let owner = definition
+            .token_definition_owner
+            .expect("source definition owner");
+        assert_eq!(owner, ir.clauses[1].id);
+        assert_eq!(definition.clone().token_definition_owner, Some(owner));
+        assert!(serde_json::to_value(&ir.clauses[0])
+            .unwrap()
+            .get("token_definition_owner")
+            .is_none());
+        assert!(serde_json::to_value(definition)
+            .unwrap()
+            .get("token_definition_owner")
+            .is_some());
+        let mut gap = definition.clone();
+        gap.replace_with_gap("unit gap");
+        assert_eq!(gap.token_definition_owner, None);
+        assert_eq!(gap.target_reads, TargetReadOrigin::OwnAnnouncement);
+        let mut outer = ClauseIrBuilder::new(text);
+        outer.absorb_clauses(ir.clauses[..2].to_vec());
+        // Outer id1 collides numerically with the nested creator's old id1.
+        outer.absorb_clauses(ir.clauses.clone());
+        let clauses = outer.finish();
+        assert_eq!(
+            clauses.last().unwrap().token_definition_owner,
+            Some(clauses[3].id)
+        );
+        assert_ne!(
+            clauses.last().unwrap().token_definition_owner,
+            Some(clauses[1].id)
+        );
+        let mut parent_read = ir.clauses.clone();
+        parent_read[1].target_reads = TargetReadOrigin::ParentAnnouncement;
+        let mut nested = ClauseIrBuilder::new(text);
+        nested.absorb_clauses(parent_read);
+        assert_eq!(
+            nested.finish()[1].target_reads,
+            TargetReadOrigin::ParentAnnouncement
+        );
+        let mut malformed = ir.clauses;
+        malformed.last_mut().unwrap().token_definition_owner = Some(ClauseId(999));
+        let mut outer = ClauseIrBuilder::new(text);
+        outer.absorb_clauses(malformed);
+        let clauses = outer.finish();
+        assert_eq!(clauses.last().unwrap().token_definition_owner, None);
+        assert!(matches!(
+            clauses.last().unwrap().parsed.effect,
+            Effect::Unimplemented { .. }
+        ));
     }
 }

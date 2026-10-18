@@ -26,6 +26,164 @@ use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
 
+const TARGET_DEFINED_TOKEN: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Target creature gets +1/+1 until end of turn.";
+
+// SHAPE: runtime discrimination lives in integration::jev_token_followup.
+#[test]
+fn token_pt_definition_has_exact_clause_owner() {
+    let ir = parse_effect_chain_ir(
+        TARGET_DEFINED_TOKEN,
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+    let creator = ir
+        .clauses
+        .iter()
+        .find(|c| matches!(c.parsed.effect, Effect::Token { .. }))
+        .expect("creation");
+    let definition = ir
+        .clauses
+        .iter()
+        .find(|c| {
+            matches!(
+                c.disposition.followup(),
+                Some(ContinuationAst::TokenSourcePowerToughness { .. })
+            )
+        })
+        .expect("definition");
+    assert_eq!(definition.token_definition_owner, Some(creator.id));
+    assert_eq!(
+        creator.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    let lowered = parse_effect_chain(TARGET_DEFINED_TOKEN, AbilityKind::Spell);
+    let token = std::iter::successors(Some(&lowered), |d| d.sub_ability.as_deref())
+        .find(|d| matches!(*d.effect, Effect::Token { .. }))
+        .unwrap();
+    let Effect::Token {
+        power, toughness, ..
+    } = token.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        *power,
+        PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target
+            }
+        })
+    );
+    assert_eq!(
+        *toughness,
+        PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: ObjectScope::Target
+            }
+        })
+    );
+}
+
+#[test]
+fn token_definition_followup_is_complete_and_scoped() {
+    assert!(sequence::parse_token_source_power_toughness_followup("Its power is equal to this creature's power and its toughness is equal to this creature's toughness.").is_some());
+    for fragment in [
+        "Its power is equal to that creature's power.",
+        "Its power is equal to that creature's toughness and its toughness is equal to that creature's power.",
+        "Its power is equal to that creature's power and its toughness is equal to that creature's toughness and flying.",
+        "Its power is equal to target creature's power and its toughness is equal to target creature's toughness.",
+    ] {
+        assert!(sequence::parse_token_source_power_toughness_followup(fragment).is_none(), "{fragment}");
+    }
+    for antecedent in [
+        "Tap target artifact.",
+        "Destroy up to one target creature.",
+        "Destroy up to zero target creatures.",
+        "Destroy X target creatures.",
+        "Destroy two target creatures.",
+        "Destroy all creatures.",
+        "You may destroy target creature.",
+        "If you control an artifact, destroy target creature.",
+        "Tap target creature and draw a card.",
+    ] {
+        let text = format!("{antecedent} Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.");
+        let def = parse_effect_chain(&text, AbilityKind::Spell);
+        assert!(
+            std::iter::successors(Some(&def), |d| d.sub_ability.as_deref())
+                .any(|d| matches!(*d.effect, Effect::Unimplemented { .. })),
+            "must refuse ambiguous antecedent: {text}: {def:#?}"
+        );
+    }
+}
+
+#[test]
+fn token_definition_does_not_leak_across_parse_boundaries_or_cleanup() {
+    let mut context = ParseContext::default();
+    let creator = parse_effect_chain_ir(
+        "Create a 1/2 green Bear creature token.",
+        AbilityKind::Spell,
+        &mut context,
+    );
+    assert!(creator
+        .clauses
+        .iter()
+        .all(|clause| clause.token_definition_owner.is_none()));
+    let orphan = parse_effect_chain_ir("Its power is equal to this creature's power and its toughness is equal to this creature's toughness.", AbilityKind::Spell, &mut context);
+    assert!(orphan
+        .clauses
+        .iter()
+        .all(|clause| clause.token_definition_owner.is_none()));
+    let def = parse_effect_chain("Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.", AbilityKind::Spell);
+    let effects: Vec<_> = std::iter::successors(Some(&def), |d| d.sub_ability.as_deref())
+        .map(|d| d.effect.as_ref())
+        .collect();
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Token { .. })),
+        "creation is represented"
+    );
+    assert!(
+        effects.iter().any(
+            |effect| effect
+                .unimplemented_description()
+                .is_some_and(|fragment| fragment
+                    == "Sacrifice the token at the beginning of the next end step")
+        ),
+        "exact cleanup remains strict until phase 6: {def:#?}"
+    );
+}
+
+#[test]
+fn gemini_engine_full_source_definition_keeps_source_scope() {
+    let parsed = parse_oracle_text("Whenever this creature attacks, create a colorless Construct artifact creature token named Twin that's attacking. Its power is equal to this creature's power and its toughness is equal to this creature's toughness. Sacrifice the token at end of combat.", "Gemini Engine", &[], &["Artifact".into(), "Creature".into()], &["Construct".into()]);
+    let trigger = parsed.triggers.first().expect("printed trigger");
+    // SHAPE only: the public synthetic source sibling exercises creation.
+    let execute = trigger.execute.as_deref().expect("token body");
+    let token = std::iter::successors(Some(execute), |definition| {
+        definition.sub_ability.as_deref()
+    })
+    .find(|definition| matches!(*definition.effect, Effect::Token { .. }))
+    .expect("source Token");
+    assert_eq!(token.target_reads, TargetReadOrigin::OwnAnnouncement);
+    assert!(matches!(
+        token.effect.as_ref(),
+        Effect::Token {
+            power: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source
+                }
+            }),
+            toughness: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Source
+                }
+            }),
+            ..
+        }
+    ));
+}
+
 fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAnaphorSource) {
     let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
         panic!("expected LoseLife, got {:?}", def.effect);
@@ -85511,4 +85669,66 @@ fn subject_creatures_not_of_chosen_type_pumps_all_excluding_chosen_type() {
     );
     // Without the duration the mass -3/-3 would never wear off.
     assert_eq!(pump.duration, Some(Duration::UntilEndOfTurn));
+}
+
+#[test]
+fn token_definition_rejects_multiple_creators_and_document_boundary_leaks() {
+    let definition = "Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+    for create in [
+        "Create a 1/2 green Bear creature token and a 3/4 red Goblin creature token.",
+        "Create a 1/2 green Bear creature token or a 3/4 red Goblin creature token.",
+    ] {
+        let ir = parse_effect_chain_ir(
+            &format!("{create} {definition}"),
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        assert!(ir
+            .clauses
+            .iter()
+            .all(|clause| clause.token_definition_owner.is_none()));
+        let output = assembly::assemble_effect_chain(&ir);
+        assert!(
+            std::iter::successors(Some(&output), |def| def.sub_ability.as_deref())
+                .any(|def| def.effect.unimplemented_description().is_some())
+        );
+    }
+    let document = crate::parser::oracle::parse_oracle_ir(&format!("Create a 1/2 green Bear creature token. Target creature gets +1/+1 until end of turn.\n{definition}"), "Synthetic paragraph boundary", &[], &["Instant".into()], &[]);
+    let encoded = serde_json::to_value(&document).unwrap();
+    assert!(!encoded.to_string().contains("token_definition_owner"));
+    let lowered = crate::parser::oracle::lower_oracle_ir(&document);
+    assert!(matches!(
+        *lowered.abilities[0].effect,
+        Effect::Token {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(2),
+            ..
+        }
+    ));
+    let modal = crate::parser::oracle::parse_oracle_ir(
+        &format!("Choose one —\n• Create a 1/2 green Bear creature token.\n• {definition}"),
+        "Synthetic mode boundary",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    let encoded = serde_json::to_value(&modal).unwrap();
+    assert!(!encoded.to_string().contains("token_definition_owner"));
+    let lowered = crate::parser::oracle::lower_oracle_ir(&modal);
+    assert_eq!(
+        lowered
+            .modal
+            .as_ref()
+            .expect("two separate modes")
+            .mode_count,
+        2
+    );
+    assert!(lowered.abilities.iter().any(|definition| matches!(
+        *definition.effect,
+        Effect::Token {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(2),
+            ..
+        }
+    )));
 }

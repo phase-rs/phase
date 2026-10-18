@@ -4990,6 +4990,7 @@ pub(super) fn apply_clause_continuation(
     continuation: ContinuationAst,
     kind: AbilityKind,
     env: &super::assembly::AssemblyEnv,
+    fragment: &str,
 ) {
     match continuation {
         ContinuationAst::SearchDestination {
@@ -6272,23 +6273,13 @@ pub(super) fn apply_clause_continuation(
                 enter_with_counters.push((counter_type, count));
             }
         }
-        ContinuationAst::TokenSourcePowerToughness {
-            power: followup_power,
-            toughness: followup_toughness,
-        } => {
-            let Some(previous) = defs.last_mut() else {
-                return;
-            };
-            // CR 608.2h + CR 111.3: source-defined token P/T is locked in as
-            // the token is created, using the resolving ability source's
-            // characteristics.
-            if let Effect::Token {
-                power, toughness, ..
-            } = &mut *previous.effect
-            {
-                *power = followup_power;
-                *toughness = followup_toughness;
-            }
+        ContinuationAst::TokenSourcePowerToughness { .. } => {
+            // Only assembly can consume an exact ClauseId owner. Intrinsic and
+            // scratch callers have no such authority and must refuse visibly.
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::unimplemented("token_definition_owner", fragment),
+            ));
         }
         ContinuationAst::RevealUntilKept {
             destination,
@@ -13140,6 +13131,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::Dig {
@@ -13219,6 +13211,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::DealDamage { excess, .. } = &*defs[0].effect else {
@@ -13255,6 +13248,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::Dig {
@@ -13304,6 +13298,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         // The Dig is patched into the choose-one exile shape.
@@ -13377,6 +13372,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         assert!(
@@ -13422,6 +13418,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::Dig {
@@ -13474,6 +13471,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");
@@ -13544,6 +13542,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
         // The Mill is left intact; a new ChangeZone def is pushed.
         assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");
@@ -14849,6 +14848,43 @@ mod tests {
         // Other verbs that happen to mention counters must not match.
         let result = try_parse_put_counters_on_token_followup("remove a +1/+1 counter on it");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn token_definition_without_assembly_owner_preserves_full_fragment_gap() {
+        let fragment = "Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+        let mut defs = vec![super::super::parse_effect_chain(
+            "Create a 1/2 green Bear creature token.",
+            AbilityKind::Spell,
+        )];
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            &defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::TokenSourcePowerToughness {
+                power: source_token_power_value(),
+                toughness: source_token_toughness_value(),
+            },
+            AbilityKind::Spell,
+            &env,
+            fragment,
+        );
+        assert!(matches!(
+            *defs[0].effect,
+            Effect::Token {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(2),
+                ..
+            }
+        ));
+        assert_eq!(
+            defs.last().unwrap().effect.unimplemented_description(),
+            Some(fragment)
+        );
     }
 
     #[test]

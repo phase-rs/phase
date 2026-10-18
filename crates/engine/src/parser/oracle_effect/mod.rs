@@ -6555,6 +6555,61 @@ fn try_parse_create_token_sequence(
     Some(clause)
 }
 
+/// CR 115.10a + CR 608.2c: a demonstrative names the immediately
+/// preceding mandatory single-creature announcement. Only an absorbed
+/// no-regeneration definition is transparent here.
+fn token_pt_parent_announcement(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
+    let mut previous = clauses.iter().rev();
+    let mut clause = previous.next()?;
+    while matches!(
+        clause.disposition,
+        ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::CantRegenerate { .. })
+        }
+    ) {
+        clause = previous.next()?;
+    }
+    if clause.condition.is_some()
+        || clause.parsed.condition.is_some()
+        || clause.is_optional
+        || clause.parsed.optional
+        || clause.opponent_may_scope.is_some()
+        || clause.repeat_for.is_some()
+        || clause.player_scope.is_some()
+        || clause
+            .multi_target
+            .as_ref()
+            .is_some_and(|spec| fixed_slot_count(spec) != Some(1))
+        || clause
+            .parsed
+            .multi_target
+            .as_ref()
+            .is_some_and(|spec| fixed_slot_count(spec) != Some(1))
+        || clause.parsed.sub_ability.is_some()
+        || clause.unless_pay.is_some()
+        || clause.parsed.unless_pay.is_some()
+        || clause.delayed_condition.is_some()
+        || clause.prefix_delayed_condition.is_some()
+        || !matches!(
+            clause.disposition,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None
+            }
+        )
+    {
+        return None;
+    }
+    let filter = single_declared_slot_filter(&clause.parsed.effect).ok()??;
+    match filter {
+        // allow-noncombinator: typed filter membership, not Oracle string dispatch.
+        TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Creature) => {
+            Some(clause)
+        }
+        _ => None,
+    }
+}
+
 fn token_source_pt_followup_can_apply_to_chunk(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -41133,6 +41188,12 @@ fn parse_effect_chain_ir_body(
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
     let outer_declared_slots = std::mem::take(&mut ctx.chain_declared_slots);
+    let mut pending_token_definition: Option<(
+        usize,
+        crate::parser::oracle_ir::effect_chain::ClauseId,
+        PtValue,
+        PtValue,
+    )> = None;
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
@@ -41159,7 +41220,56 @@ fn parse_effect_chain_ir_body(
             .map(|_| (builder.clauses().len(), chunk.text.clone()));
         builder.set_pending_leading_duration(chunk.leading_duration.clone());
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
+        // The lookahead's bound pair is consumed once, only by its next chunk.
+        if let Some((expected_chunk, owner, power, toughness)) = pending_token_definition.take() {
+            if expected_chunk == chunk_idx {
+                builder
+                    .clause(
+                        normalized_text,
+                        placeholder_parsed_clause("token_pt_definition"),
+                        chunk.boundary_after,
+                        ClauseDisposition::Continue {
+                            continuation: Some(ContinuationAst::TokenSourcePowerToughness {
+                                power,
+                                toughness,
+                            }),
+                        },
+                    )
+                    .token_definition_owner(Some(owner))
+                    .push();
+                continue;
+            }
+        }
+
         if normalized_text.is_empty() {
+            continue;
+        }
+        // CR 603.7a + CR 400.7j: this class needs the exact created-token
+        // incarnation set, supplied by phase 6; mutable LastCreated is insufficient.
+        let target_defined_creation = builder.clauses().iter().any(|clause| {
+            matches!(clause.parsed.effect, Effect::Token { .. })
+                && clause.target_reads == TargetReadOrigin::ParentAnnouncement
+        });
+        let normalized_lower = normalized_text.to_ascii_lowercase();
+        if target_defined_creation
+            && nom_primitives::scan_preceded(&normalized_lower, |input| {
+                value(
+                    (),
+                    (
+                        tag::<_, _, OracleError<'_>>("sacrifice "),
+                        alt((tag("the token"), tag("those tokens"))),
+                    ),
+                )
+                .parse(input)
+            })
+            .is_some()
+        {
+            unimplemented_clause(
+                &mut builder,
+                "exact_created_token_cleanup",
+                normalized_text,
+                chunk.boundary_after,
+            );
             continue;
         }
         let chain_parent_target_owner_scope_for_chunk = chain_parent_target_owner_scope.take();
@@ -42834,9 +42944,7 @@ fn parse_effect_chain_ir_body(
                         refuse_target_pt_threshold_rider_with_own_target(clause);
                     }
                 }
-                for c in body_ir.clauses {
-                    builder.absorb_clause(c);
-                }
+                builder.absorb_clauses(body_ir.clauses);
                 continue;
             }
         }
@@ -43398,14 +43506,61 @@ fn parse_effect_chain_ir_body(
                 Some(ControllerRef::ParentTargetController)
             )
             && chain_parent_target_controller_scope.is_some();
-        let token_pt_followup = chunks
+        let token_definition = chunks
             .get(chunk_idx + 1)
             .filter(|_| token_source_pt_followup_can_apply_to_chunk(normalized_text))
             .and_then(|next| {
-                let next_text = strip_leading_sequence_connector(&next.text).trim();
-                sequence::parse_token_source_power_toughness_followup(next_text)
+                sequence::parse_token_source_power_toughness_followup(
+                    strip_leading_sequence_connector(&next.text).trim(),
+                )
             })
-            .map(|(power, toughness)| TokenPtFollowup::PowerToughness { power, toughness });
+            .and_then(|(mut power, mut toughness)| {
+                let target_demonstrative = [&power, &toughness].iter().any(|value| {
+                    matches!(
+                        value,
+                        PtValue::Quantity(QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Demonstrative
+                            } | QuantityRef::Toughness {
+                                scope: ObjectScope::Demonstrative
+                            }
+                        })
+                    )
+                });
+                let origin = if target_demonstrative
+                    && ctx
+                        .demonstrative_object_ref
+                        .as_ref()
+                        .is_some_and(|reference| !matches!(reference, TargetFilter::ParentTarget))
+                {
+                    TargetReadOrigin::OwnAnnouncement
+                } else if target_demonstrative
+                    && token_pt_parent_announcement(builder.clauses()).is_some()
+                {
+                    for value in [&mut power, &mut toughness] {
+                        if let PtValue::Quantity(QuantityExpr::Ref {
+                            qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },
+                        }) = value
+                        {
+                            if *scope == ObjectScope::Demonstrative {
+                                *scope = ObjectScope::Target;
+                            }
+                        }
+                    }
+                    TargetReadOrigin::ParentAnnouncement
+                } else if target_demonstrative {
+                    return None;
+                } else {
+                    TargetReadOrigin::OwnAnnouncement
+                };
+                Some((power, toughness, origin))
+            });
+        let token_pt_followup = token_definition.as_ref().map(|(power, toughness, _)| {
+            TokenPtFollowup::PowerToughness {
+                power: power.clone(),
+                toughness: toughness.clone(),
+            }
+        });
         let nearest_bare_card_publisher = builder
             .clauses()
             .iter()
@@ -45130,7 +45285,13 @@ fn parse_effect_chain_ir_body(
                 // scan has to survive for this caller.
                 let mut temp_env = assembly::AssemblyEnv::default();
                 temp_env.observe(&temp_defs, None, assembly::NodeRole::Primary);
-                apply_clause_continuation(&mut temp_defs, ic.clone(), kind, &temp_env);
+                apply_clause_continuation(
+                    &mut temp_defs,
+                    ic.clone(),
+                    kind,
+                    &temp_env,
+                    previous.source.fragment().unwrap_or_default(),
+                );
                 (*temp_defs.last().unwrap().effect).clone()
             } else if previous.disposition.followup().is_some() {
                 // A non-absorbed clause with a followup continuation means the continuation
@@ -45707,6 +45868,17 @@ fn parse_effect_chain_ir_body(
             .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
             .declared_player_group(clause_declared_group)
             .push();
+
+        if let Some((power, toughness, origin)) = token_definition {
+            if let Some(creator) = builder.last_mut() {
+                if matches!(creator.parsed.effect, Effect::Token { .. })
+                    && creator.parsed.sub_ability.is_none()
+                {
+                    creator.target_reads = origin;
+                    pending_token_definition = Some((chunk_idx + 1, creator.id, power, toughness));
+                }
+            }
+        }
 
         // CR 115.1 + CR 608.2c: the comparative gate's "that creature" reads the
         // single object the immediately preceding instruction announced

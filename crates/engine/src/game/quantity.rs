@@ -8217,6 +8217,28 @@ where
     })
 }
 
+/// Select the stored occurrence, preserving damage-source binding precedence.
+/// This does not revalidate a target after another instruction moved it.
+pub(crate) fn selected_target_pt_object_occurrence(
+    ability: &ResolvedAbility,
+) -> Option<(usize, ObjectId)> {
+    match ability.context.target_damage_source {
+        Some(TargetDamageSourceBinding::Illegal) => None,
+        Some(TargetDamageSourceBinding::Bound) => match ability.targets.first() {
+            Some(TargetRef::Object(id)) => Some((0, *id)),
+            _ => None,
+        },
+        None => ability
+            .targets
+            .iter()
+            .enumerate()
+            .find_map(|(index, target)| match target {
+                TargetRef::Object(id) => Some((index, *id)),
+                _ => None,
+            }),
+    }
+}
+
 fn resolve_object_pt<F, G>(
     state: &GameState,
     scope: ObjectScope,
@@ -8298,6 +8320,26 @@ where
                 }
                 _ => 0,
             },
+            None if ability.is_some_and(|a| {
+                a.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement
+            }) =>
+            {
+                // CR 608.2h + CR 400.7j: read exactly the announced incarnation,
+                // live in its expected zone or from its departure information.
+                ability
+                    .and_then(|a| {
+                        selected_target_pt_object_occurrence(a).and_then(|(index, id)| {
+                            read_object_pt_by_id_for_incarnation(
+                                state,
+                                id,
+                                a.target_pin_at(index).map(|pin| pin.incarnation),
+                                &obj_extract,
+                                &lki_extract,
+                            )
+                        })
+                    })
+                    .unwrap_or(0)
+            }
             None => targets
                 .iter()
                 .find_map(|t| match t {
@@ -24812,5 +24854,164 @@ mod exile_card_population_tests {
             },
             1,
         );
+    }
+}
+
+#[cfg(test)]
+mod token_target_occurrence_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::TargetReadOrigin;
+
+    #[test]
+    fn token_parent_pt_uses_same_index_pin_and_versioned_lki() {
+        let mut scenario = GameScenario::new();
+        let id = scenario.add_creature(P1, "Selected incarnation", 7, 8).id();
+        let mut state = scenario.build().state().clone();
+        let old = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        let departure = state.objects[&id].snapshot_public_characteristics();
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![
+                TargetRef::Player(P0),
+                TargetRef::Object(id),
+                TargetRef::Object(id),
+            ],
+            ObjectId(999),
+            P0,
+        );
+        ability.target_reads = TargetReadOrigin::ParentAnnouncement;
+        ability.target_pins = vec![
+            None,
+            Some(old),
+            Some(ObjectIncarnationRef {
+                object_id: id,
+                incarnation: old.incarnation + 1,
+            }),
+        ];
+        assert_eq!(
+            selected_target_pt_object_occurrence(&ability),
+            Some((1, id))
+        );
+        let read = |state: &GameState, ability: &ResolvedAbility| {
+            (
+                resolve_quantity_with_targets(
+                    state,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    ability,
+                ),
+                resolve_quantity_with_targets(
+                    state,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    ability,
+                ),
+            )
+        };
+        let mut stale = departure.clone();
+        stale.power = Some(1);
+        stale.toughness = Some(2);
+        state.lki_cache.insert(id, stale);
+        assert_eq!(
+            read(&state, &ability),
+            (7, 8),
+            "matching live pin beats stale LKI"
+        );
+        state
+            .lki_by_incarnation
+            .entry(id)
+            .or_default()
+            .insert(old.incarnation, departure.clone());
+        let returned = state.objects.get_mut(&id).unwrap();
+        returned.incarnation += 1;
+        returned.power = Some(17);
+        returned.toughness = Some(19);
+        let new_departure = returned.snapshot_public_characteristics();
+        state.lki_cache.insert(id, new_departure.clone());
+        state
+            .lki_by_incarnation
+            .entry(id)
+            .or_default()
+            .insert(old.incarnation + 1, new_departure);
+        // CR 400.7 + CR 608.2h: neither the returned incarnation nor its newer
+        // id-cache entry replaces the selected occurrence's 7/8 departure.
+        assert_eq!(read(&state, &ability), (7, 8));
+        ability.target_pins[1] = Some(ObjectIncarnationRef {
+            object_id: id,
+            incarnation: old.incarnation + 1,
+        });
+        assert_eq!(read(&state, &ability), (17, 19));
+        ability.target_pins.clear();
+        assert_eq!(
+            read(&state, &ability),
+            (17, 19),
+            "legacy unpinned live reader"
+        );
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert_eq!(read(&state, &ability), (17, 19), "legacy id-cache fallback");
+        ability.targets.clear();
+        ability.target_pins.clear();
+        assert_eq!(selected_target_pt_object_occurrence(&ability), None);
+        assert_eq!(read(&state, &ability), (0, 0));
+    }
+
+    #[test]
+    fn token_parent_occurrence_preserves_damage_source_precedence() {
+        let mut scenario = GameScenario::new();
+        let selected = scenario.add_creature(P1, "Normal selected", 7, 8).id();
+        let bound = scenario.add_creature(P1, "Damage bound", 17, 19).id();
+        let state = scenario.build().state().clone();
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(P0), TargetRef::Object(selected)],
+            ObjectId(99),
+            P0,
+        );
+        ability.target_reads = TargetReadOrigin::ParentAnnouncement;
+        let power = |ability: &ResolvedAbility| {
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                ability,
+            )
+        };
+        assert_eq!(
+            selected_target_pt_object_occurrence(&ability),
+            Some((1, selected))
+        );
+        assert_eq!(power(&ability), 7);
+        ability.context.target_damage_source = Some(TargetDamageSourceBinding::Bound);
+        assert_eq!(
+            selected_target_pt_object_occurrence(&ability),
+            None,
+            "Bound only reads position zero"
+        );
+        assert_eq!(power(&ability), 0);
+        ability.targets[0] = TargetRef::Object(bound);
+        assert_eq!(
+            selected_target_pt_object_occurrence(&ability),
+            Some((0, bound))
+        );
+        assert_eq!(power(&ability), 17);
+        ability.context.target_damage_source = Some(TargetDamageSourceBinding::Illegal);
+        assert_eq!(selected_target_pt_object_occurrence(&ability), None);
+        assert_eq!(power(&ability), 0);
     }
 }

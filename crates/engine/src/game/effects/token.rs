@@ -474,123 +474,9 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (
-        script_name,
-        fallback_power,
-        fallback_toughness,
-        fallback_types,
-        fallback_colors,
-        fallback_keywords,
-        tapped,
-        count,
-        owner_filter,
-        enters_attacking,
-        fallback_supertypes,
-        token_statics,
-        etb_counters,
-        attach_to,
-    ) = match &ability.effect {
-        Effect::Token {
-            name,
-            power,
-            toughness,
-            types,
-            colors,
-            keywords,
-            tapped,
-            count,
-            owner,
-            attach_to,
-            enters_attacking,
-            supertypes,
-            static_abilities,
-            enter_with_counters,
-        } => (
-            name.clone(),
-            power.clone(),
-            toughness.clone(),
-            types.clone(),
-            colors.clone(),
-            keywords.clone(),
-            *tapped,
-            resolve_quantity_with_targets(state, count, ability).max(0) as u32,
-            owner,
-            *enters_attacking,
-            supertypes.clone(),
-            static_abilities.clone(),
-            enter_with_counters.clone(),
-            attach_to.as_ref(),
-        ),
-        _ => (
-            "Token".to_string(),
-            PtValue::Fixed(0),
-            PtValue::Fixed(0),
-            vec![],
-            vec![],
-            vec![],
-            false,
-            1,
-            &TargetFilter::Controller,
-            false,
-            vec![],
-            vec![],
-            vec![],
-            None,
-        ),
-    };
-    // CR 608.2b: a declared player whose target was illegal creates no token.
-    let Some(token_owner) = resolve_token_owner(state, ability, owner_filter) else {
+    let Some((spec, token_owner, enter_tapped, count)) = resolve_token_spec(state, ability) else {
         return no_token(state, ability, events);
     };
-
-    // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
-    // time. ParentTarget reads the first Object target (the for-each loop's
-    // per-iteration rebind binds it); Typed/event-context filters resolve via the
-    // shared target/event-context path.
-    //
-    // The result keeps "the instruction named no host" apart from "it named one
-    // and nothing bound it": CR 303.4i denies the entry of an Aura token in the
-    // second case and says nothing about the first, and the seam that applies
-    // that verdict runs after the CR 614 replacement pipeline, far from here.
-    let host_request = TokenHostRequest::from_binding(
-        attach_to.is_some(),
-        attach_to.and_then(|f| resolve_attach_host(state, ability, f)),
-    );
-
-    // CR 111.1 + CR 111.4: Resolve the token's characteristics into a
-    // self-describing `TokenSpec`. Script-name parsing takes precedence;
-    // typed `Effect::Token` fields are the fallback path.
-    let parsed = parse_token_script(&script_name).or_else(|| {
-        build_token_attrs_from_effect(
-            &script_name,
-            &fallback_power,
-            &fallback_toughness,
-            &fallback_types,
-            &fallback_colors,
-            &fallback_keywords,
-            &fallback_supertypes,
-            state,
-            ability,
-        )
-    });
-
-    // CR 122.6a: Resolve ETB counter quantities before proposing — the event
-    // carries fully-resolved counts, not quantity expressions.
-    let resolved_etb_counters = resolve_token_entry_counters(state, &etb_counters, ability);
-
-    let spec = build_token_spec(
-        &script_name,
-        parsed.as_ref(),
-        &fallback_power,
-        &fallback_toughness,
-        tapped,
-        enters_attacking,
-        token_statics,
-        resolved_etb_counters,
-        host_request,
-        ability,
-        state,
-    );
 
     // CR 614.1a: Propose entire token batch for replacement pipeline.
     // Replacement effects (Doubling Season, Primal Vigor) modify count.
@@ -598,7 +484,7 @@ pub fn resolve(
         owner: token_owner,
         spec: Box::new(spec),
         copy: None,
-        enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
+        enter_tapped,
         count,
         applied: state
             .post_replacement_token_choice_applied
@@ -3093,7 +2979,19 @@ pub(crate) fn resolve_token_spec(
             .and_then(|f| resolve_attach_host(state, ability, f)),
     );
 
-    let parsed = parse_token_script(name).or_else(|| {
+    let scripted = parse_token_script(name);
+    // CR 608.2b/c + CR 111.3: creation with defined characteristics requires
+    // information from the selected legal announcement. A real zero is valid.
+    // A successful legacy script supplies its own characteristics first.
+    if scripted.is_none()
+        && ability.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement
+        && [power, toughness].iter().any(|value| matches!(value,
+            PtValue::Quantity(expr) if crate::game::quantity::quantity_expr_contains_scope(expr, crate::types::ability::ObjectScope::Target)))
+        && crate::game::quantity::selected_target_pt_object_occurrence(ability).is_none()
+    {
+        return None;
+    }
+    let parsed = scripted.or_else(|| {
         build_token_attrs_from_effect(
             name, power, toughness, types, colors, keywords, supertypes, state, ability,
         )
@@ -4832,6 +4730,254 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         (state, events)
+    }
+
+    // Consumer-unit fixtures: hostile metadata combinations are intentional;
+    // public casts and replacement proposals are covered by jev_token_followup.
+    #[test]
+    fn target_defined_token_spec_requires_selected_information() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let object = scenario
+            .add_creature(PlayerId(1), "Selected zero", 0, 5)
+            .id();
+        let mut state = scenario.build().state().clone();
+        let mut ability = token_ability("Typed Spirit");
+        if let Effect::Token {
+            power,
+            toughness,
+            types,
+            ..
+        } = &mut ability.effect
+        {
+            *power = PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Target,
+                },
+            });
+            *toughness = PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Target,
+                },
+            });
+            *types = vec!["Creature".into(), "Spirit".into()];
+        }
+        ability.target_reads = crate::types::ability::TargetReadOrigin::ParentAnnouncement;
+        assert!(resolve_token_spec(&state, &ability).is_none());
+        assert!(bulk_token_shape(&state, &ability).is_none());
+        state.last_created_token_ids = vec![ObjectId(123)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.last_created_token_ids.is_empty());
+        assert!(events.iter().any(|e| matches!(e, GameEvent::EffectResolved { source_id, .. } if *source_id == ability.source_id)));
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            GameEvent::TokenCreated { .. }
+                | GameEvent::ZoneChanged {
+                    from: None,
+                    to: Zone::Battlefield,
+                    ..
+                }
+        )));
+        ability.targets = vec![TargetRef::Player(PlayerId(0)), TargetRef::Object(object)];
+        ability.announce_target_pins(&state);
+        for legacy in [false, true] {
+            if legacy {
+                ability.target_pins.clear();
+            }
+            let spec = resolve_token_spec(&state, &ability).unwrap().0;
+            assert_eq!(
+                (spec.characteristics.power, spec.characteristics.toughness),
+                (Some(0), Some(5))
+            );
+            assert!(bulk_token_shape(&state, &ability).is_some());
+        }
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::TokenCreated { .. })));
+        ability.context.target_damage_source =
+            Some(crate::types::ability::TargetDamageSourceBinding::Bound);
+        assert!(
+            resolve_token_spec(&state, &ability).is_none(),
+            "Bound cannot scan past player position zero"
+        );
+        ability.targets.swap(0, 1);
+        ability.target_pins.clear();
+        assert!(resolve_token_spec(&state, &ability).is_some());
+        ability.context.target_damage_source =
+            Some(crate::types::ability::TargetDamageSourceBinding::Illegal);
+        assert!(resolve_token_spec(&state, &ability).is_none());
+    }
+
+    #[test]
+    fn token_characteristic_dependency_refusal_is_scoped() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let source = scenario.add_creature(PlayerId(0), "Source", 17, 19).id();
+        let context = scenario
+            .add_creature(PlayerId(0), "Event or effect context", 5, 9)
+            .id();
+        let unrelated = scenario
+            .add_creature(PlayerId(1), "Unrelated target", 7, 8)
+            .id();
+        let state = scenario.build().state().clone();
+        let mut ability = token_ability("Typed Spirit");
+        ability.source_id = source;
+        ability.target_reads = crate::types::ability::TargetReadOrigin::ParentAnnouncement;
+        if let Effect::Token {
+            power,
+            toughness,
+            types,
+            ..
+        } = &mut ability.effect
+        {
+            *power = PtValue::Fixed(0);
+            *toughness = PtValue::Fixed(5);
+            *types = vec!["Creature".into()];
+        }
+        assert_eq!(
+            resolve_token_spec(&state, &ability)
+                .unwrap()
+                .0
+                .characteristics
+                .toughness,
+            Some(5)
+        );
+        for scope in [
+            crate::types::ability::ObjectScope::Source,
+            crate::types::ability::ObjectScope::EventSource,
+            crate::types::ability::ObjectScope::Demonstrative,
+            crate::types::ability::ObjectScope::CostPaidObject,
+        ] {
+            let snapshot = crate::types::ability::CostPaidObjectSnapshot {
+                object_id: context,
+                incarnation: state.objects[&context].incarnation,
+                lki: state.objects[&context].snapshot_public_characteristics(),
+            };
+            ability.effect_context_object = Some(snapshot.clone());
+            ability.cost_paid_object = Some(snapshot);
+            ability.context.creation_lookback_event = Some(Box::new(GameEvent::TokenCreated {
+                object_id: context,
+                source_id: source,
+                name: "unit event".into(),
+            }));
+            if let Effect::Token {
+                power, toughness, ..
+            } = &mut ability.effect
+            {
+                *power = PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Power { scope },
+                });
+                *toughness = PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness { scope },
+                });
+            }
+            for targets in [vec![], vec![TargetRef::Object(unrelated)]] {
+                ability.targets = targets;
+                let spec = resolve_token_spec(&state, &ability).unwrap().0;
+                let expected = if scope == crate::types::ability::ObjectScope::Source {
+                    (Some(17), Some(19))
+                } else {
+                    (Some(5), Some(9))
+                };
+                assert_eq!(
+                    (spec.characteristics.power, spec.characteristics.toughness),
+                    expected,
+                    "{scope:?}"
+                );
+                let mut resolved = state.clone();
+                let mut events = Vec::new();
+                resolve(&mut resolved, &ability, &mut events).unwrap();
+                let token = resolved
+                    .objects
+                    .values()
+                    .find(|object| object.is_token)
+                    .expect("normal typed creation reached");
+                assert_eq!((token.base_power, token.base_toughness), expected);
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        from: None,
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )));
+                assert!(events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+            }
+        }
+        ability.targets.clear();
+        let target_power = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+        });
+        let target_toughness = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+        });
+        for (p, t) in [
+            (target_power.clone(), PtValue::Fixed(5)),
+            (PtValue::Fixed(1), target_toughness),
+            (
+                PtValue::Quantity(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Target,
+                        },
+                    }),
+                    offset: 1,
+                }),
+                PtValue::Fixed(5),
+            ),
+        ] {
+            if let Effect::Token {
+                power, toughness, ..
+            } = &mut ability.effect
+            {
+                *power = p;
+                *toughness = t;
+            }
+            assert!(resolve_token_spec(&state, &ability).is_none());
+        }
+        ability.target_reads = crate::types::ability::TargetReadOrigin::OwnAnnouncement;
+        assert!(
+            resolve_token_spec(&state, &ability).is_some(),
+            "direct legacy target route"
+        );
+        ability.target_reads = crate::types::ability::TargetReadOrigin::ParentAnnouncement;
+        if let Effect::Token { name, .. } = &mut ability.effect {
+            *name = "w_1_1_soldier".into();
+        }
+        let spec = resolve_token_spec(&state, &ability).unwrap().0;
+        assert_eq!(
+            (spec.characteristics.power, spec.characteristics.toughness),
+            (Some(1), Some(1)),
+            "script characteristics outrank fallback dependency"
+        );
+        if let Effect::Token {
+            name,
+            power,
+            toughness,
+            count,
+            ..
+        } = &mut ability.effect
+        {
+            *name = "Typed Spirit".into();
+            *power = PtValue::Fixed(0);
+            *toughness = PtValue::Fixed(5);
+            *count = QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Target,
+                },
+            };
+        }
+        assert!(
+            resolve_token_spec(&state, &ability).is_some(),
+            "count-only dependency is outside P/T refusal"
+        );
     }
 
     // ── CR 608.2i: the entry RECORD is not gated on event emission ────────
