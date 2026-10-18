@@ -4461,6 +4461,76 @@ fn validate_current_instruction_batches(value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod revealed_result_legacy_tests {
     use super::*;
+    use crate::game::scenario::GameRunner;
+    use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+    use crate::types::zones::Zone;
+
+    fn current_writers_preserve_undrained_sought_batch(state: GameState, cards: &[ObjectId]) {
+        let pending = state.active_batch_delivery().unwrap();
+        assert!(
+            !pending.remaining.is_empty(),
+            "reach: a genuine undelivered tail"
+        );
+        assert_eq!(pending.requests.len(), pending.remaining.len());
+        for (request, member) in pending.requests.iter().zip(&pending.remaining) {
+            assert_eq!(request.object_id, *member);
+            assert_eq!(request.expected_origin, None);
+        }
+        assert_eq!(
+            state.players[0].life, 20,
+            "the independent tail has not run"
+        );
+        for card in cards {
+            assert_eq!(state.objects[card].zone, Zone::Library);
+            assert!(state.objects[card].perpetual_mods.is_empty());
+        }
+
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone()))).unwrap();
+        let trusted =
+            serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap();
+        let persisted_trusted =
+            serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap();
+        for saved in [&wire, &raw, &trusted, &persisted_trusted] {
+            let payload = saved.get("state").unwrap_or(saved);
+            assert_eq!(
+                payload["resolution_state_version"],
+                RESOLUTION_STATE_WIRE_VERSION
+            );
+            validate_current_instruction_batches(payload).unwrap();
+        }
+        // Every writer runs before any legal action drains the admitted legacy
+        // queue. Reloading these current saves is the regression discriminator.
+        let reloaded = [
+            serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap()
+                .into_game_state(),
+            serde_json::from_value::<PersistedGameState>(raw)
+                .unwrap()
+                .into_game_state()
+                .unwrap(),
+            serde_json::from_value::<TrustedGameStateEnvelope>(trusted)
+                .unwrap()
+                .into_game_state(),
+            serde_json::from_value::<PersistedGameState>(persisted_trusted)
+                .unwrap()
+                .into_game_state()
+                .unwrap(),
+        ];
+        for loaded in reloaded {
+            assert_eq!(loaded.active_batch_delivery(), Some(pending));
+            assert_eq!(loaded.return_result_frames, state.return_result_frames);
+            let mut runner = GameRunner::from_state(loaded);
+            // Normal legal replacement actions must settle both redirected Seek
+            // members before the +7 tail and the bound one-grant consumer.
+            crate::game::effects::seek::tests::finish_sought_pause(&mut runner, cards);
+            assert_eq!(runner.state().players[0].life, 27);
+            assert!(runner.state().active_batch_delivery().is_none());
+            assert!(runner.state().return_result_frames.is_empty());
+        }
+    }
+
     #[test]
     fn legacy_zone_results_and_unpinned_queues_keep_their_real_consumers() {
         let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
@@ -4486,9 +4556,121 @@ mod revealed_result_legacy_tests {
                 .values()
                 .flat_map(|frame| frame.values())
                 .all(|result| result.zone_changes().is_some()));
-            let mut loaded = crate::game::scenario::GameRunner::from_state(restored);
-            crate::game::effects::seek::tests::finish_sought_pause(&mut loaded, &cards);
+            current_writers_preserve_undrained_sought_batch(restored, &cards);
         }
+        // The full-request current twin must retain the same legal consumers.
+        current_writers_preserve_undrained_sought_batch(runner.state().clone(), &cards);
+    }
+
+    #[test]
+    fn legacy_remaining_only_batches_survive_current_writers_before_resume() {
+        let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let state = runner.state();
+        let pending = state.active_batch_delivery().unwrap();
+        assert!(!pending.remaining.is_empty());
+        assert_eq!(pending.remaining.len(), pending.requests.len());
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        let mut malformed_current = wire.clone();
+        visit_instruction_batches_mut(&mut malformed_current, |batch| {
+            batch.as_object_mut().unwrap().remove("requests");
+            Ok(())
+        })
+        .unwrap();
+        assert!(serde_json::from_value::<ResolutionStateWire>(malformed_current.clone()).is_err());
+        assert!(serde_json::from_value::<PersistedGameState>(malformed_current).is_err());
+        let mut legacy_payloads = Vec::new();
+        for version in 2..=6 {
+            let mut legacy = wire.clone();
+            legacy["resolution_state_version"] = Value::from(version);
+            legacy_payloads.push(legacy);
+        }
+        // Flatten this ordinary public pause through the historical v1 carrier
+        // fields, retaining its real continuation and replacement authority.
+        let mut v1 = wire.clone();
+        v1.as_object_mut().unwrap().remove("resolution_frames");
+        v1["resolution_state_version"] = Value::from(1);
+        for frame in state.resolution_stack.iter() {
+            match frame {
+                ResolutionFrame::AbilityContinuation(frame) => {
+                    assert!(v1.get("pending_continuation").is_none());
+                    v1["pending_continuation"] = serde_json::to_value(&frame.pending).unwrap();
+                    v1["pending_choose_zone_trigger_context"] =
+                        serde_json::to_value(&frame.choose_zone_trigger_context).unwrap();
+                }
+                ResolutionFrame::BatchDelivery(batch) => {
+                    assert!(v1.get("pending_batch_deliveries").is_none());
+                    v1["pending_batch_deliveries"] = serde_json::to_value(batch).unwrap();
+                }
+                ResolutionFrame::PostReplacement(drains) => {
+                    assert!(v1.get("post_replacement_drains").is_none());
+                    v1["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
+                }
+                ResolutionFrame::SpellResolution(spell) => {
+                    assert!(v1.get("pending_spell_resolution").is_none());
+                    v1["pending_spell_resolution"] = serde_json::to_value(spell).unwrap();
+                }
+                other => panic!("unexpected frame in ordinary sought pause: {other:?}"),
+            }
+        }
+        assert!(v1.get("pending_batch_deliveries").is_some());
+        let mut alias = v1.clone();
+        alias["pending_mill_deliveries"] = alias
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_batch_deliveries")
+            .unwrap();
+        for legacy in [v1, alias] {
+            let mut full_requests = legacy.clone();
+            visit_instruction_batches_mut(&mut full_requests, |batch| {
+                for request in batch["requests"].as_array_mut().unwrap() {
+                    request.as_object_mut().unwrap().remove("expected_origin");
+                }
+                Ok(())
+            })
+            .unwrap();
+            let restored = serde_json::from_value::<ResolutionStateWire>(full_requests)
+                .unwrap()
+                .into_game_state();
+            current_writers_preserve_undrained_sought_batch(restored, &cards);
+            legacy_payloads.push(legacy);
+        }
+
+        for legacy in legacy_payloads {
+            for empty_array in [false, true] {
+                let mut legacy = legacy.clone();
+                let mut visited = 0;
+                visit_instruction_batches_mut(&mut legacy, |batch| {
+                    assert!(!batch["remaining"].as_array().unwrap().is_empty());
+                    visited += 1;
+                    batch.as_object_mut().unwrap().remove("requests");
+                    if empty_array {
+                        batch["requests"] = Value::Array(Vec::new());
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(visited, 1, "reach: exactly one nonempty legacy batch");
+                let restored = serde_json::from_value::<ResolutionStateWire>(legacy)
+                    .unwrap()
+                    .into_game_state();
+                current_writers_preserve_undrained_sought_batch(restored, &cards);
+            }
+        }
+
+        // Unversioned historical runtime-stack ingress selects the existing
+        // typed legacy compatibility route before the same current writers.
+        let mut raw = serde_json::to_value(state).unwrap();
+        visit_instruction_batches_mut(&mut raw, |batch| {
+            batch.as_object_mut().unwrap().remove("requests");
+            Ok(())
+        })
+        .unwrap();
+        let restored = serde_json::from_value::<PersistedGameState>(raw)
+            .unwrap()
+            .into_game_state()
+            .unwrap();
+        current_writers_preserve_undrained_sought_batch(restored, &cards);
     }
 }
 
@@ -4994,6 +5176,13 @@ impl ResolutionStateWire {
                 }
                 let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
+                if version < RESOLUTION_STATE_WIRE_VERSION {
+                    for frame in frames.frames.iter_mut() {
+                        if let ResolutionFrame::BatchDelivery(batch) = frame {
+                            crate::game::zone_pipeline::normalize_legacy_batch_requests(batch);
+                        }
+                    }
+                }
                 frames.recover_draw_sequence_allocator();
                 frames.recover_discard_allocator();
                 frames.recover_post_replacement_frame_id_allocator();
@@ -5342,7 +5531,10 @@ impl LegacyBatchDeliveryWire {
     }
 
     fn into_frame(self) -> Option<PendingBatchDeliveries> {
-        self.pending_batch_deliveries
+        self.pending_batch_deliveries.map(|mut batch| {
+            crate::game::zone_pipeline::normalize_legacy_batch_requests(&mut batch);
+            batch
+        })
     }
 }
 

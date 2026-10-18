@@ -1612,6 +1612,32 @@ fn anticipated_zone_change_delivery(
     ))
 }
 
+/// Materialize the ordinary uniform requests admitted by historical saves.
+/// Explicit legacy loading uses the same reconstruction as the runtime fallback
+/// so saving an undrained legacy batch writes a complete current request queue.
+pub(crate) fn normalize_legacy_batch_requests(pending: &mut PendingBatchDeliveries) {
+    if pending.requests.is_empty() {
+        pending.requests = pending
+            .remaining
+            .iter()
+            .map(|&obj_id| {
+                let mut req = ZoneMoveRequest::effect(
+                    obj_id,
+                    pending.destination,
+                    pending.source_id.unwrap_or(obj_id),
+                );
+                req.mods.enter_tapped = pending.enter_tapped;
+                req.exile_links.tracking = pending.exile_tracking;
+                if let Some(position) = pending.library_placement.clone() {
+                    req = req.at_library_position(position);
+                }
+                req.replacement_applied = pending.replacement_applied.clone();
+                req.into_pending()
+            })
+            .collect();
+    }
+}
+
 /// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the
 /// per-object replacement choice that paused it resolved (and its object's
 /// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
@@ -1641,22 +1667,19 @@ fn anticipated_zone_change_delivery(
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    if let Some(pending) = state.active_batch_delivery().cloned() {
+    if let Some(mut pending) = state.active_batch_delivery().cloned() {
+        normalize_legacy_batch_requests(&mut pending);
         let PendingBatchDeliveries {
             mut logical_zone_change_group,
             paused_current,
             remaining,
             destination,
-            source_id,
-            enter_tapped,
-            exile_tracking,
-            library_placement,
             completion,
-            replacement_applied,
             requests,
             attempted,
             zone_change_record_start,
             mut deferred_events,
+            ..
         } = pending;
         deferred_events.append(events);
         let attempted = if attempted.is_empty() {
@@ -1664,27 +1687,10 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
         } else {
             attempted
         };
-        let reqs: Vec<ZoneMoveRequest> = if requests.is_empty() {
-            remaining
-                .into_iter()
-                .map(|obj_id| {
-                    let mut req =
-                        ZoneMoveRequest::effect(obj_id, destination, source_id.unwrap_or(obj_id));
-                    req.mods.enter_tapped = enter_tapped;
-                    req.exile_links.tracking = exile_tracking;
-                    if let Some(position) = library_placement.clone() {
-                        req = req.at_library_position(position);
-                    }
-                    req.replacement_applied = replacement_applied.clone();
-                    req
-                })
-                .collect()
-        } else {
-            requests
-                .into_iter()
-                .map(ZoneMoveRequest::from_pending)
-                .collect()
-        };
+        let reqs = requests
+            .into_iter()
+            .map(ZoneMoveRequest::from_pending)
+            .collect();
         if let Some(ref paused_current) = paused_current {
             crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                 state,

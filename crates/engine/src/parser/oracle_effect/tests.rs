@@ -124,6 +124,7 @@ fn ordinary_scoped_reveal_carries_unless_payment() {
 #[test]
 fn all_revealed_consumer_preserves_complete_gap_at_both_entries() {
     for fragment in [
+        "If all cards revealed this way are creature cards, put those cards onto the battlefield",
         "If all cards revealed in this way are artifact cards, draw a card",
         "Then if all cards revealed this way are unsupported predicates, do something unsupported",
     ] {
@@ -141,7 +142,28 @@ fn all_revealed_consumer_preserves_complete_gap_at_both_entries() {
         assert!(
             matches!(&ir.clauses[1].parsed.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case(fragment))
         );
+        assert!(ir.clauses[1].reads_return_result.is_none());
     }
+    // CR 110.2a + CR 608.2c: the bare instruction has a different controller;
+    // this consumer supports the explicit individual-owner instruction only.
+    let owner_text = "Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    let owner = parse_effect_chain(owner_text, AbilityKind::Spell);
+    assert!(matches!(*owner.effect, Effect::RevealTop { count: 1, .. }));
+    let reader = owner.sub_ability.as_deref().unwrap();
+    assert!(matches!(
+        *reader.effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(owner.declares_return_result.is_some());
+    assert_eq!(
+        reader.reads_return_result.as_ref().map(|(id, _)| *id),
+        owner.declares_return_result
+    );
     // Adjacent non-universal conditions retain their own admission route.
     for text in [
         "If you control a creature, draw a card",

@@ -62,12 +62,12 @@ pub(crate) fn parse_all_revealed_move(text: &str) -> Option<Effect> {
             .parse(input)?;
         let (input, _) =
             alt((tag(" onto the battlefield"), tag(" on the battlefield"))).parse(input)?;
-        let (input, _) = opt((
+        let (input, _) = (
             tag(" under "),
             alt((tag("their owners'"), tag("their owners’"))),
             tag(" control"),
-        ))
-        .parse(input)?;
+        )
+            .parse(input)?;
         let (input, _) = (opt(tag(".")), eof).parse(input)?;
         Ok((input, ()))
     })?;
