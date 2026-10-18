@@ -6557,8 +6557,10 @@ fn try_parse_create_token_sequence(
 
 /// CR 115.10a + CR 608.2c: a demonstrative names the immediately
 /// preceding mandatory single-creature announcement. Only an absorbed
-/// no-regeneration definition is transparent here.
-fn token_pt_parent_announcement(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
+/// no-regeneration definition is transparent here. CR 608.2h: battlefield
+/// announcements use their pinned live/LKI reader; nonbattlefield cards retain
+/// the effect-context snapshot of their expected zone.
+fn token_pt_antecedent_origin(clauses: &[ClauseIr]) -> Option<TargetReadOrigin> {
     let mut previous = clauses.iter().rev();
     let mut clause = previous.next()?;
     while matches!(
@@ -6604,7 +6606,11 @@ fn token_pt_parent_announcement(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
     match filter {
         // allow-noncombinator: typed filter membership, not Oracle string dispatch.
         TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Creature) => {
-            Some(clause)
+            Some(if filter.denotes_battlefield_objects() {
+                TargetReadOrigin::ParentAnnouncement
+            } else {
+                TargetReadOrigin::OwnAnnouncement
+            })
         }
         _ => None,
     }
@@ -43534,22 +43540,21 @@ fn parse_effect_chain_ir_body(
                         .is_some_and(|reference| !matches!(reference, TargetFilter::ParentTarget))
                 {
                     TargetReadOrigin::OwnAnnouncement
-                } else if target_demonstrative
-                    && token_pt_parent_announcement(builder.clauses()).is_some()
-                {
-                    for value in [&mut power, &mut toughness] {
-                        if let PtValue::Quantity(QuantityExpr::Ref {
-                            qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },
-                        }) = value
-                        {
-                            if *scope == ObjectScope::Demonstrative {
-                                *scope = ObjectScope::Target;
+                } else if target_demonstrative {
+                    let origin = token_pt_antecedent_origin(builder.clauses())?;
+                    if origin == TargetReadOrigin::ParentAnnouncement {
+                        for value in [&mut power, &mut toughness] {
+                            if let PtValue::Quantity(QuantityExpr::Ref {
+                                qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },
+                            }) = value
+                            {
+                                if *scope == ObjectScope::Demonstrative {
+                                    *scope = ObjectScope::Target;
+                                }
                             }
                         }
                     }
-                    TargetReadOrigin::ParentAnnouncement
-                } else if target_demonstrative {
-                    return None;
+                    origin
                 } else {
                     TargetReadOrigin::OwnAnnouncement
                 };

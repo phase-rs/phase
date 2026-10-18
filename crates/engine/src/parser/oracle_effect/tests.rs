@@ -85,6 +85,49 @@ fn token_pt_definition_has_exact_clause_owner() {
 }
 
 #[test]
+fn token_definition_keeps_nonbattlefield_card_context() {
+    // SHAPE: the public duration sibling also resolves through ordinary casting.
+    let text = "Exile target creature card from your graveyard. Create a black Zombie creature token. Its power is equal to that card's power and its toughness is equal to that card's toughness.";
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    let creator = ir
+        .clauses
+        .iter()
+        .find(|clause| matches!(clause.parsed.effect, Effect::Token { .. }))
+        .expect("graveyard-card construction");
+    let definition = ir
+        .clauses
+        .iter()
+        .find(|clause| {
+            matches!(
+                clause.disposition.followup(),
+                Some(ContinuationAst::TokenSourcePowerToughness { .. })
+            )
+        })
+        .expect("complete separate definition");
+    assert_eq!(definition.token_definition_owner, Some(creator.id));
+    assert_eq!(creator.target_reads, TargetReadOrigin::OwnAnnouncement);
+    let lowered = parse_effect_chain(text, AbilityKind::Spell);
+    assert_attachment_chain_has_no_unimplemented(&lowered);
+    let token = lowered.sub_ability.as_deref().expect("Zombie creation");
+    assert!(matches!(
+        token.effect.as_ref(),
+        Effect::Token {
+            power: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative
+                }
+            }),
+            toughness: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative
+                }
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn token_definition_followup_is_complete_and_scoped() {
     assert!(sequence::parse_token_source_power_toughness_followup("Its power is equal to this creature's power and its toughness is equal to this creature's toughness.").is_some());
     for fragment in [

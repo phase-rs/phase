@@ -6,7 +6,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ShieldKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -166,6 +166,16 @@ fn duration_target_defined_spirit_uses_departure_pt() {
         .counters
         .insert(engine::types::counter::CounterType::Plus1Plus1, 2);
     b.runner.cast(b.modifier).target_object(b.b).resolve();
+    // CR 117.3b + CR 117.3d: resolution returns priority to active P1; pass to P0.
+    assert!(matches!(
+        b.runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    b.runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        b.runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
     assert_eq!(
         (
             b.runner.state().objects[&b.b].power,
@@ -309,6 +319,16 @@ fn duration_construction_no_regeneration_rider_reaches_destroy() {
             "Return target creature to its owner's hand.",
         );
         b.runner.cast(b.regen).target_object(b.b).resolve();
+        // CR 117.3b + CR 117.3d: P0 casts the next spell after P1 passes priority.
+        assert!(matches!(
+            b.runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        b.runner.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            b.runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
         assert!(b.runner.state().objects[&b.b]
             .replacement_definitions
             .iter()
@@ -408,25 +428,63 @@ fn source_defined_twin_preserves_source_despite_prior_target() {
         .declare_attackers(&[(source, AttackTarget::Player(P1))])
         .unwrap()
         .events;
+    let WaitingFor::TriggerTargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected attack trigger target prompt: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let chosen = TargetRef::Object(target);
+    assert!(target_slots[selection.current_slot]
+        .legal_targets
+        .contains(&chosen));
+    let trigger_entry = runner
+        .state()
+        .pending_trigger_entry
+        .expect("trigger construction");
+    // CR 603.3d: choose the real trigger's legal target before receiving priority.
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(chosen.clone()),
+            })
+            .unwrap()
+            .events,
+    );
+    assert!(runner.state().pending_trigger_entry.is_none());
+    assert!(runner.state().pending_trigger.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let entry = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == trigger_entry)
+        .expect("completed trigger on stack");
+    assert_eq!(entry.source_id, source);
+    assert!(entry
+        .ability()
+        .expect("trigger body")
+        .targets
+        .contains(&chosen));
     for _ in 0..16 {
-        if matches!(
-            runner.state().waiting_for,
-            engine::types::game_state::WaitingFor::TargetSelection { .. }
-        ) {
-            events.extend(
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target)),
-                    })
-                    .unwrap()
-                    .events,
-            );
-        } else if !runner.state().stack.is_empty() {
-            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
-        } else {
+        if runner.state().stack.is_empty() {
             break;
         }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
     }
+    assert!(runner.state().stack.is_empty());
     assert!(runner.state().objects[&target].tapped);
     let tokens: Vec<_> = runner
         .state()
@@ -457,6 +515,16 @@ fn duration_target_qualifiers_are_checked_before_initial_resolution() {
         let mut b = board(CONSTRUCTION, (7, 8), false, false, response);
         if needs_shield {
             b.runner.cast(b.regen).target_object(b.b).resolve();
+            // CR 117.3b + CR 117.3d: return the next construction's casting seat to P0.
+            assert!(matches!(
+                b.runner.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ));
+            b.runner.act(GameAction::PassPriority).unwrap();
+            assert!(matches!(
+                b.runner.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
         }
         let mut committed = b.runner.cast(b.spell).target_objects(&[b.b, b.c]).commit();
         let outcome = committed.cast(b.response).target_object(b.b).resolve();
@@ -472,4 +540,104 @@ fn duration_target_qualifiers_are_checked_before_initial_resolution() {
                 .contains(&engine::types::card_type::CoreType::Artifact));
         }
     }
+}
+
+#[test]
+fn duration_graveyard_card_definition_uses_last_graveyard_pt() {
+    // Synthetic duration consumer: full Ritual text plus an independent tail.
+    let oracle = "Exile target creature card from your graveyard. Create a black Zombie creature token. Its power is equal to that card's power and its toughness is equal to that card's toughness. Target creature gets +1/+1 until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
+    scenario.with_library_top(P1, &["Plains", "Plains", "Plains"]);
+    let card = scenario
+        .add_creature(P0, "Graveyard characteristic source", 2, 5)
+        .id();
+    let independent = scenario
+        .add_creature(P0, "Independent duration target", 11, 13)
+        .id();
+    let modifier = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic departure modifier",
+            true,
+            "Target creature gets +3/+1 until end of turn.",
+        )
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic graveyard preparation",
+            true,
+            "Destroy target creature.",
+        )
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic duration Ritual", true, oracle)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(modifier).target_object(card).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        (
+            runner.state().objects[&card].power,
+            runner.state().objects[&card].toughness
+        ),
+        (Some(5), Some(6))
+    );
+    runner
+        .cast(destroy)
+        .target_object(card)
+        .resolve()
+        .assert_zone(&[card], Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    // CR 400.7 + CR 608.2h: the graveyard card has its own characteristics,
+    // distinct from the real 5/6 battlefield departure snapshot.
+    let stale = &runner.state().lki_cache[&card];
+    assert_eq!((stale.power, stale.toughness), (Some(5), Some(6)));
+    assert_eq!(
+        (
+            runner.state().objects[&card].power,
+            runner.state().objects[&card].toughness
+        ),
+        (Some(2), Some(5))
+    );
+    let graveyard_incarnation = runner.state().objects[&card].incarnation;
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[card, independent])
+        .resolve();
+    outcome.assert_zone(&[card], Zone::Exile);
+    assert_ne!(
+        outcome.state().objects[&card].incarnation,
+        graveyard_incarnation
+    );
+    let tokens: Vec<_> = outcome
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.is_token)
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    let token = tokens[0];
+    // CR 111.3 + CR 608.2h: creation uses the last graveyard 2/5, not old 5/6 LKI.
+    assert_eq!((token.base_power, token.base_toughness), (Some(2), Some(5)));
+    assert_eq!((token.owner, token.controller), (P0, P0));
+    assert_eq!(token.name, "Zombie");
+    assert_eq!(token.zone, Zone::Battlefield);
+    assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::TokenCreated { object_id, source_id, .. } if *object_id == token.id && *source_id == spell)).count(), 1);
+    assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: None, to: Zone::Battlefield, .. } if *object_id == token.id)).count(), 1);
+    assert_eq!(
+        (
+            outcome.state().objects[&independent].power,
+            outcome.state().objects[&independent].toughness
+        ),
+        (Some(12), Some(14))
+    );
 }
