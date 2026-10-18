@@ -3473,10 +3473,13 @@ mod tests {
         }
     }
 
-    /// v152: `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
-    /// conditions (and ability/filter definitions) of `GameState`; a v151 peer
+    /// v153: `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
+    /// conditions (and ability/filter definitions) of `GameState`; a v152 peer
     /// cannot deserialize the new tagged variant. P2P moves in lockstep
-    /// (wire 134); lobby messages unchanged.
+    /// (wire 135); lobby messages unchanged.
+    /// v152: `ShortcutDecisionSchema` gains `suggested_declaration` and
+    /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
+    /// drops them, so it must be refused before it receives v152 state.
     /// v151: populated Bestow form payloads require a versioned full-game peer.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
@@ -3717,11 +3720,11 @@ mod tests {
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
-    /// The v152 bump adds the `FilterProp::Prepared` tag (CR 722.3a) to the
+    /// The v153 bump adds the `FilterProp::Prepared` tag (CR 722.3a) to the
     /// serialized trigger-condition carrier.
     #[test]
-    fn protocol_version_is_152_for_prepared_designation() {
-        assert_eq!(PROTOCOL_VERSION, 152);
+    fn protocol_version_is_153_for_prepared_designation() {
+        assert_eq!(PROTOCOL_VERSION, 153);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3732,7 +3735,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_152_for_prepared_designation` stays
+    /// `protocol_version_is_153_for_prepared_designation` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

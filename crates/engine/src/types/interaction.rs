@@ -1185,8 +1185,9 @@ pub struct InteractionShortcutPreview {
     /// second point would state the split over choices the reader cannot identify.
     ///
     /// The amounts come from whichever producer minted the element. In the offer's published list
-    /// (`loop_shortcut_preview`) they are the canonical even split of `count`, remainder on the
-    /// earliest ids, empty exactly when that first point holds no candidate. In a preview of a
+    /// (`loop_shortcut_preview`) they are the offer's suggested declaration cut at `count` when
+    /// the offer publishes one, else the canonical even split of `count`, remainder on the
+    /// earliest ids; empty exactly when that first point holds no candidate. In a preview of a
     /// player's own declaration (`declared_shortcut_preview`) they are the amounts that player
     /// authored — positive parts summing to `count` over a duplicate-free subset of those ids,
     /// enforced by the declaration ingress rather than by this type — and never empty: that
@@ -1194,23 +1195,21 @@ pub struct InteractionShortcutPreview {
     /// responder's view of a declaration (`declared_sequence_preview`) they are the segment
     /// LENGTHS the declared count partitions into over the iterations that decision's
     /// announcements start at: successive differences summing to `count`, one per published id,
-    /// never empty — and NOT necessarily positive, since a step starting exactly at the count
-    /// takes a zero-length segment.
+    /// never empty and each positive, because a step starting at or past the count is never
+    /// reached and is not stated.
     ///
     /// CR 119.3: `entries` follow this allocation ONLY when the period's life map names
     /// exactly one losing seat that this allocation itself announces and the slot's announced
     /// magnitude is the whole of that seat's per-period loss, which is what makes it positive —
-    /// per-seat life magnitudes are then this split multiplied by that rate, and they still
-    /// total the period. On every other offer a non-empty allocation still ships beside entries
-    /// folded from the raw period, because the allocation states the declaration and the
-    /// entries state what the engine can attribute. On the RESPOND side that separation goes one
-    /// step further: a declaration whose partition is stated and whose magnitudes are not ships
-    /// this allocation beside an EMPTY `entries`, rather than withholding the whole element
+    /// per-seat life magnitudes are then each seat's RESOLVING announcements multiplied by that
+    /// rate (CR 603.3d: its part, plus the trigger already in flight when that aims at it, less
+    /// the last announcement, which never resolves), and they still total the period. On every
+    /// other offer a non-empty allocation still ships beside entries folded from the raw period,
+    /// because the allocation states the declaration and the entries state what the engine can
+    /// attribute. On the RESPOND side that separation goes one step further: a declaration whose
+    /// partition is stated and whose magnitudes are not ships this allocation beside an EMPTY
+    /// `entries`, rather than withholding the whole element
     /// (`game::interaction::declared_sequence_preview`).
-    ///
-    /// The magnitudes are this declaration's arithmetic. On a drive whose first cycle resolves
-    /// a target announced before the drive begins, the realized split is shifted one cycle at
-    /// each boundary while the total stays exact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allocation: Vec<AmountAssignment>,
 }

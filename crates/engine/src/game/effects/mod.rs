@@ -4543,7 +4543,9 @@ fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
 
 /// Whether a child owns an object-selection slot independent of its parent's
 /// already-bound object. Reflexive continuations retain their context-owned
-/// referent even when their effect is a resolution-time typed zone choice.
+/// referent even when their effect is a resolution-time typed zone choice,
+/// unless that choice reads only parent metadata
+/// (`effect_refs_parent_target_metadata`).
 fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
     (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
         && !effect_requires_parent_target_object(&sub.effect)
@@ -4553,8 +4555,15 @@ fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
             .target_filter()
             .is_some_and(TargetFilter::references_exiled_by_source)
             && !effect_requires_parent_target_object(&sub.effect))
+        // CR 608.2c + CR 608.2d + CR 608.2h: "If that spell is countered this
+        // way, its controller may put a creature card from their hand onto the
+        // battlefield" (Fold into Aether). The parent object anchors only the
+        // choosing player, read from its last known information through the
+        // parent referent context; the card is a fresh choice made while the
+        // effect is applied, so the countered spell is not its candidate.
         || (has_resolution_owned_zone_choice(sub)
-            && !sub_ability_target_belongs_to_reflexive_context(sub))
+            && (!sub_ability_target_belongs_to_reflexive_context(sub)
+                || effect_refs_parent_target_metadata(&sub.effect)))
         || choose_one_of_branches_own_object_choice(sub)
 }
 

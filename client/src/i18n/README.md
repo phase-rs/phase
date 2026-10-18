@@ -19,7 +19,11 @@ Never wrap with `t()`:
 - Card Oracle text, token rules text, ability/reminder text.
 - Card names, player names, object IDs.
 - Engine enum strings interpolated into text (phase, mana type, counter type).
-- `className`, CSS, data attributes, dev/debug strings, console logs.
+- `className`, CSS, data attributes, developer-only diagnostics, console logs.
+
+Player-facing sandbox tool labels, forms, and help are chrome and use `t()`,
+even when their components or wire actions are named `Debug`. Raw diagnostic
+logs and engine enum values remain unchanged.
 
 In hybrid spots like `GameLog.formatEvent`, translate the **template** and
 interpolate engine data raw:

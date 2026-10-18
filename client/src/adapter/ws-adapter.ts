@@ -215,10 +215,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 152 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
- *      conditions (and ability/filter definitions) of GameState. A v151 peer
+ * 153 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
+ *      conditions (and ability/filter definitions) of GameState. A v152 peer
  *      cannot deserialize the new tagged variant. P2P moves in lockstep to
- *      wire 134.
+ *      wire 135.
+ * 152 — ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
+ *      ShortcutProposal gains leading_aims; a v151 peer drops them. Wire 134 moves
+ *      with it.
  * 151: Populated GameObject.bestow_form carries the removed creature subtypes
  *      as an object instead of a boolean. Old native readers cannot decode it.
  *      Wire 133 moves with it.
@@ -923,8 +926,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 152;
-
+export const PROTOCOL_VERSION = 153;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

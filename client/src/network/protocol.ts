@@ -106,10 +106,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  134 — GameState carries trigger conditions that can name the prepared
- *       designation (FilterProp Prepared, CR 722.3a). A v133 peer cannot
+ *  135 — GameState carries trigger conditions that can name the prepared
+ *       designation (FilterProp Prepared, CR 722.3a). A v134 peer cannot
  *       deserialize the new tagged variant, so first contact rejects the
- *       skew. Bumped with full-game protocol 152.
+ *       skew. Bumped with full-game protocol 153.
+ *  134 — game_setup and state_update carry GameState whose loop offers may carry
+ *       ShortcutDecisionSchema suggested_declaration and leading_aims, and
+ *       ShortcutProposal leading_aims. Bumped in lockstep with full-game protocol 152.
  *  133: Populated GameObject.bestow_form carries removed creature subtypes
  *       as an object instead of the legacy boolean; full-game protocol 151.
  *  132 — game_setup and state_update carry GameState whose casting permissions may
@@ -715,7 +718,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 134 as const;
+export const WIRE_PROTOCOL_VERSION = 135 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
