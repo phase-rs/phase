@@ -1993,12 +1993,17 @@ enum ObjectScopeRead {
     Unscoped,
     /// CR 608.2h: reads information from the scoped object (power, toughness,
     /// mana value, colors, name, name stickers, typeline, mana symbols,
-    /// intensity). A resolution-only referent must be determined once, at
-    /// resolution, and an absent one yields no information.
+    /// intensity), determined once when the effect is applied. When a
+    /// resolution-only scope has no bound referent,
+    /// `quantity_expr_missing_resolution_only_referent` treats the read as
+    /// absent rather than 0.
     ObjectInformation(ObjectScope),
-    /// CR 608.2h + CR 122.1: counts counters on the scoped object. Its resolvers
-    /// own a live-vs-LKI ladder, so it names its scope but is neither
-    /// snapshotted nor pre-gated on referent presence.
+    /// CR 122.1: counts counters on the scoped object. It names its scope for
+    /// `quantity_expr_contains_scope`, but is never pre-gated on referent
+    /// presence because its resolvers own a live-vs-LKI ladder (CR 608.2h).
+    /// `quantity_expr_uses_resolution_only_object_scope` also leaves it
+    /// dynamic; that preserves the earlier verdict and is not derived from
+    /// the CR.
     CounterCount(ObjectScope),
 }
 
@@ -2018,7 +2023,7 @@ fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => ObjectScopeRead::ObjectInformation(*scope),
         QuantityRef::CountersOn { scope, .. } => ObjectScopeRead::CounterCount(*scope),
-        // CR 123.1 + CR 123.6e: "that sticker" names a sticker, not an object
+        // CR 123.1 + CR 123.6d / CR 123.6e: "that sticker" names a sticker, not an object
         // ("Stickers are not objects"); no such sticker reads 0.
         QuantityRef::NameStickerLetterCount { stickers: NameStickerSet::ThatSticker, letters: _ } => ObjectScopeRead::Unscoped,
         // Object reads on their own axis: an own target slot
@@ -2132,12 +2137,12 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             ObjectScopeRead::ObjectInformation(scope) => scope_is_resolution_only(scope),
             // CR 608.2h: `QuantityRef::CountersOn` is classified
             // `ObjectScopeRead::CounterCount`, not `ObjectInformation`.
-            // Its resolvers own their live-vs-LKI ladder, so a
-            // departed referent (a destroyed `ChainRootTarget`, an exiled
-            // `Source`) still reports a real recorded count; classifying it as a
-            // resolution-only object read would let
-            // `quantity_expr_missing_resolution_only_referent` gate that read
-            // `false` before the ladder ever runs.
+            // Leaving it dynamic preserves the pre-#10002 verdict; its
+            // resolvers own their live-vs-LKI ladder (a departed
+            // `ChainRootTarget` or exiled `Source` still reports a recorded
+            // count), which is why the helper keeps it out of
+            // `ObjectInformation` and so out of
+            // `quantity_expr_missing_resolution_only_referent`'s gate.
             ObjectScopeRead::CounterCount(_) => false,
             ObjectScopeRead::Unscoped => false,
         },
@@ -23070,7 +23075,7 @@ mod tests {
         )
     }
 
-    /// CR 701.57c + CR 608.2h: classifier 3 gates an absent referent for every
+    /// CR 608.2h: classifier 3 gates an absent referent for every
     /// object-information reference (`Intensity` included) and never gates
     /// `CountersOn` or an unscoped reference.
     #[test]
@@ -23123,8 +23128,10 @@ mod tests {
         ));
     }
 
-    /// CR 701.57c + CR 608.2c: a `QuantityCheck` over an absent `Intensity`
-    /// referent is false rather than comparing the `.unwrap_or(0)` fallback.
+    /// CR 608.2c: a `QuantityCheck` over an absent `Intensity` referent is
+    /// false rather than comparing the `.unwrap_or(0)` fallback. Regression
+    /// guard for the missing-referent policy of
+    /// `quantity_expr_missing_resolution_only_referent`.
     #[test]
     fn quantity_check_over_absent_intensity_referent_is_false() {
         let mut state = GameState::new_two_player(42);

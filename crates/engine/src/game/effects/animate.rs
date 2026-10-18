@@ -467,7 +467,7 @@ mod tests {
             obj.intensity = 3;
         }
         // The trigger-event source is the entering permanent, so
-        // `Intensity { CostPaidObject }` resolves (slot-2 fallback) to its intensity.
+        // `Intensity { CostPaidObject }` resolves (trigger-event fallback) to its intensity.
         state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
             object_id: entering,
             from: Some(Zone::Hand),
