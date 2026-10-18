@@ -3408,3 +3408,13 @@ fn krumar_initiate_preserves_full_activation_in_both_layers() {
     insta::assert_json_snapshot!("krumar_initiate_ir", &ir);
     insta::assert_json_snapshot!("krumar_initiate_lowered", &lowered);
 }
+
+#[test]
+fn locket_name_population() {
+    let (ir, lowered) = parse_two_layer("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.", "Locket of Yesterdays", &["Artifact"], &[]);
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered.abilities.is_empty());
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("locket_name_population_ir", &ir);
+    insta::assert_json_snapshot!("locket_name_population_lowered", &lowered);
+}

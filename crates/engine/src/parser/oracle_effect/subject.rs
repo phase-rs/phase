@@ -6736,6 +6736,7 @@ fn build_restriction_clause(
             | TargetFilter::And { .. }
             | TargetFilter::StackAbility { .. }
             | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
             | TargetFilter::PlayerMatching { .. }

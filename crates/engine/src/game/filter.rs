@@ -25,8 +25,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    AttackDeclarationRecord, CastingVariant, CounterAddedRecord, DamageRecord, GameState,
+    LKISnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -172,6 +172,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -418,6 +419,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -576,6 +578,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -961,6 +964,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -1321,6 +1325,8 @@ pub fn normalize_contextual_filter_with_liveness(
 /// receiver; it is NOT a licence to build the literal or `..*ctx` by hand.)
 #[derive(Clone, Copy)]
 pub struct FilterContext<'a> {
+    /// Exact selected spell authority, bound only for cast-time evaluation.
+    pub casting_spell: Option<CastSpellContext>,
     pub source_id: ObjectId,
     pub source_controller: Option<PlayerId>,
     pub ability: Option<&'a ResolvedAbility>,
@@ -1365,6 +1371,47 @@ pub struct FilterContext<'a> {
     pub declared_slot_view: Option<&'a [Option<crate::game::targeting::DeclaredSlotBinding>]>,
     /// CR 201.5a: the granter stamped on the definition this filter is read for.
     pub granting_object: Option<ObjectIncarnationRef>,
+}
+
+/// CR 601.2a + CR 601.2b: the exact spell and selected casting characteristics.
+#[derive(Debug, Clone, Copy)]
+pub struct CastSpellContext {
+    pub object_id: ObjectId,
+    pub casting_variant: CastingVariant,
+}
+
+impl CastSpellContext {
+    pub fn for_spell(state: &GameState, object_id: ObjectId) -> Self {
+        let casting_variant = super::casting::announced_spell_entry(state, object_id)
+            .and_then(|entry| match &entry.kind {
+                StackEntryKind::Spell {
+                    casting_variant, ..
+                } => Some(*casting_variant),
+                _ => None,
+            })
+            .or_else(|| {
+                state
+                    .pending_cast
+                    .as_ref()
+                    .filter(|pending| pending.object_id == object_id)
+                    .map(|pending| pending.casting_variant)
+            })
+            .unwrap_or_else(|| {
+                if state
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|object| object.fused_split_spell)
+                {
+                    CastingVariant::Fuse
+                } else {
+                    CastingVariant::Normal
+                }
+            });
+        Self {
+            object_id,
+            casting_variant,
+        }
+    }
 }
 
 impl<'a> FilterContext<'a> {
@@ -1436,10 +1483,17 @@ fn source_controller_or_lki(state: &GameState, source_id: ObjectId) -> Option<Pl
 }
 
 impl<'a> FilterContext<'a> {
+    /// Bind the exact selected spell for this cast-time filter evaluation.
+    pub fn with_casting_spell(mut self, casting_spell: CastSpellContext) -> Self {
+        self.casting_spell = Some(casting_spell);
+        self
+    }
+
     /// Context-free object matching. Use only for constraints whose filters are
     /// printed object qualities rather than source/controller-relative clauses.
     pub fn neutral() -> Self {
         Self {
+            casting_spell: None,
             source_id: ObjectId(0),
             source_controller: None,
             ability: None,
@@ -1461,6 +1515,7 @@ impl<'a> FilterContext<'a> {
     pub fn from_source(state: &GameState, source_id: ObjectId) -> Self {
         let source_controller = source_controller_or_lki(state, source_id);
         Self {
+            casting_spell: None,
             source_id,
             source_controller,
             ability: None,
@@ -1478,6 +1533,7 @@ impl<'a> FilterContext<'a> {
     /// replacement-effect matching, etc.
     pub fn from_source_with_controller(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
+            casting_spell: None,
             source_id,
             source_controller: Some(controller),
             ability: None,
@@ -1495,6 +1551,7 @@ impl<'a> FilterContext<'a> {
     /// with the same storage id. The controller is latched with that source.
     pub fn from_trigger_source(source: &'a TriggerSourceContext) -> Self {
         Self {
+            casting_spell: None,
             source_id: source.identity.reference.object_id,
             source_controller: Some(source.lki.controller),
             ability: None,
@@ -1515,6 +1572,7 @@ impl<'a> FilterContext<'a> {
         controller: PlayerId,
     ) -> Self {
         Self {
+            casting_spell: None,
             source_id: source.identity.reference.object_id,
             source_controller: Some(controller),
             ability: None,
@@ -1537,6 +1595,7 @@ impl<'a> FilterContext<'a> {
     ) -> Self {
         let source_controller = source_controller_or_lki(state, source_id);
         Self {
+            casting_spell: None,
             source_id,
             source_controller,
             ability: None,
@@ -1554,6 +1613,7 @@ impl<'a> FilterContext<'a> {
     /// `chosen_x` and `targets` captured at cast time.
     pub fn from_ability(ability: &'a ResolvedAbility) -> Self {
         Self {
+            casting_spell: None,
             source_id: ability.source_id,
             source_controller: Some(ability.controller),
             ability: Some(ability),
@@ -1573,6 +1633,7 @@ impl<'a> FilterContext<'a> {
         recipient_id: ObjectId,
     ) -> Self {
         Self {
+            casting_spell: None,
             source_id: ability.source_id,
             source_controller: Some(ability.controller),
             ability: Some(ability),
@@ -1595,6 +1656,7 @@ impl<'a> FilterContext<'a> {
         controller: PlayerId,
     ) -> Self {
         Self {
+            casting_spell: None,
             source_id: ability.source_id,
             source_controller: Some(controller),
             ability: Some(ability),
@@ -2165,6 +2227,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -2431,6 +2494,7 @@ pub(crate) fn filter_contains_filter_prop(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -3352,6 +3416,7 @@ fn rewrite_filter_props(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -4053,6 +4118,9 @@ pub(crate) fn matches_stack_target_filter(
     match filter {
         TargetFilter::Any => true,
         TargetFilter::StackSpell => matches!(&entry.kind, StackEntryKind::Spell { .. }),
+        TargetFilter::CastingSpell => ctx
+            .casting_spell
+            .is_some_and(|spell| spell.object_id == stack_obj_id),
         TargetFilter::StackAbility {
             controller,
             tag,
@@ -4150,6 +4218,7 @@ fn stack_entry_controller_matches(
         ctx.recipient_id,
         ctx.triggering_object,
         ctx.granting_object,
+        ctx.casting_spell,
     );
     match controller {
         None => true,
@@ -4236,6 +4305,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOnly,
     )
 }
@@ -4575,6 +4645,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.triggering_object,
             ctx.declared_slot_view,
             ctx.granting_object,
+            ctx.casting_spell,
             ControllerLookup::OwnerZone,
         );
     }
@@ -4595,6 +4666,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::OwnerZone,
     )
 }
@@ -4919,6 +4991,7 @@ pub(crate) fn matches_target_filter_on_object(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -4956,6 +5029,7 @@ fn entry_filter_matches_staged(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -5002,6 +5076,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.triggering_object,
                     ctx.declared_slot_view,
                     ctx.granting_object,
+                    ctx.casting_spell,
                     ControllerLookup::LiveOrLki,
                 );
             }
@@ -5071,6 +5146,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.triggering_object,
                     ctx.declared_slot_view,
                     ctx.granting_object,
+                    ctx.casting_spell,
                     ControllerLookup::LiveOrLki,
                 )
             })
@@ -5096,6 +5172,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.triggering_object,
                 ctx.declared_slot_view,
                 ctx.granting_object,
+                ctx.casting_spell,
                 ControllerLookup::LiveOrLki,
             )
         }
@@ -5172,6 +5249,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -5220,6 +5298,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -5272,6 +5351,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -5517,6 +5597,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOnly,
     )
 }
@@ -5690,6 +5771,7 @@ fn filter_inner_with_lookup(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         controller_lookup,
     )
 }
@@ -5709,6 +5791,7 @@ fn filter_inner_for_object(
     triggering_object: Option<TriggeringObjectRef>,
     declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
     granting_object: Option<ObjectIncarnationRef>,
+    casting_spell: Option<CastSpellContext>,
     controller_lookup: ControllerLookup,
 ) -> bool {
     match filter {
@@ -5892,7 +5975,8 @@ fn filter_inner_for_object(
                             recipient_id,
                             triggering_object,
                             granting_object,
-                        );
+        casting_spell,
+    );
                         match source_defending_player(state, &source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -5910,7 +5994,8 @@ fn filter_inner_for_object(
                             recipient_id,
                             triggering_object,
                             granting_object,
-                        );
+        casting_spell,
+    );
                         match source_chosen_player(&source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -5988,7 +6073,8 @@ fn filter_inner_for_object(
                 recipient_id,
                 triggering_object,
                 granting_object,
-            );
+        casting_spell,
+    );
             source_ctx.declared_slot_view = declared_slot_view;
             properties.iter().all(|p| match p {
                 FilterProp::Owned { controller } => {
@@ -6013,6 +6099,7 @@ fn filter_inner_for_object(
             triggering_object,
             declared_slot_view,
             granting_object,
+            casting_spell,
             controller_lookup,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
@@ -6030,6 +6117,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                casting_spell,
                 controller_lookup,
             )
         }),
@@ -6048,6 +6136,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                casting_spell,
                 controller_lookup,
             )
         }),
@@ -6068,9 +6157,11 @@ fn filter_inner_for_object(
                     triggering_object,
                     declared_slot_view,
                     granting_object,
+                    casting_spell,
                 },
             )
         }
+        TargetFilter::CastingSpell => casting_spell.is_some_and(|spell| spell.object_id == object_id),
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
         // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
@@ -6169,7 +6260,8 @@ fn filter_inner_for_object(
             recipient_id,
             triggering_object,
             granting_object,
-        )
+        casting_spell,
+    )
         .chosen_attributes
         .iter()
         .any(|attr| {
@@ -6272,6 +6364,7 @@ fn filter_inner_for_object(
                     triggering_object,
                     declared_slot_view,
                     granting_object,
+                    casting_spell,
                     controller_lookup,
                 )
         }
@@ -6290,7 +6383,8 @@ fn filter_inner_for_object(
                 recipient_id,
                 triggering_object,
                 granting_object,
-            );
+        casting_spell,
+    );
             let linked = if trigger_source.is_some() {
                 source_ctx.linked_exile_snapshot
             } else {
@@ -6406,7 +6500,8 @@ fn filter_inner_for_object(
                 recipient_id,
                 triggering_object,
                 granting_object,
-            );
+        casting_spell,
+    );
             let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
                 _ => None,
@@ -6426,6 +6521,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                casting_spell,
             };
             state
                 .last_chosen_damage_source
@@ -6580,7 +6676,8 @@ fn zone_change_filter_inner(
                 None,
                 triggering_object,
                 ctx.granting_object,
-            );
+        ctx.casting_spell,
+    );
 
             // CR 400.1 + CR 109.4: a zone without controllers answers the controller axis
             // for every seat reading the same container, like the live-object door.
@@ -6712,7 +6809,8 @@ fn zone_change_filter_inner(
                 None,
                 triggering_object,
                 ctx.granting_object,
-            );
+        ctx.casting_spell,
+    );
             let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
                     ChosenAttribute::CardName(n) => Some(n.as_str()),
                     _ => None,
@@ -6747,7 +6845,8 @@ fn zone_change_filter_inner(
                     None,
                     triggering_object,
                     ctx.granting_object,
-                )
+        ctx.casting_spell,
+    )
                 .chosen_attributes
                 .iter()
                 .any(|attr| matches!(attr, ChosenAttribute::Card(pin) if *pin == occurrence))
@@ -6804,6 +6903,7 @@ fn zone_change_filter_inner(
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner => false,
@@ -7105,6 +7205,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -7291,6 +7392,14 @@ pub fn spell_object_matches_filter_from_state_for(
             // itself from the command zone — Eminence must not reduce its
             // own cost).
             spell_object_id: Some(spell_obj.id),
+            casting_spell: Some(CastSpellContext {
+                object_id: spell_obj.id,
+                casting_variant: if fused {
+                    CastingVariant::Fuse
+                } else {
+                    CastSpellContext::for_spell(state, spell_obj.id).casting_variant
+                },
+            }),
         }),
     )
 }
@@ -7331,6 +7440,7 @@ struct SpellFilterContext<'a> {
     /// `SpellCastRecord.spell_object_id` and is resolved in `game::quantity`'s
     /// own-cast exclusion arm, not through this context.
     spell_object_id: Option<ObjectId>,
+    casting_spell: Option<CastSpellContext>,
 }
 
 fn spell_object_matches_filter_inner(
@@ -7429,6 +7539,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -7858,6 +7969,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
 
 /// Context about the source of an ability, used during filter property evaluation.
 struct SourceContext<'a> {
+    casting_spell: Option<CastSpellContext>,
     id: ObjectId,
     controller: Option<PlayerId>,
     /// CR 601.2c + CR 608.2b: mirror of `FilterContext::declared_slot_view`, read
@@ -7944,6 +8056,7 @@ pub(crate) fn source_defending_player_for_test(
         None,
         None,
         trigger_source,
+        None,
         None,
         None,
         None,
@@ -8034,6 +8147,7 @@ fn source_context_from_filter<'a>(
     recipient_id: Option<ObjectId>,
     triggering_object: Option<TriggeringObjectRef>,
     granting_object: Option<ObjectIncarnationRef>,
+    casting_spell: Option<CastSpellContext>,
 ) -> SourceContext<'a> {
     let (lki, attached_to, saddled_by, convoked_creatures, linked_exile_snapshot) =
         if let Some(source) = trigger_source {
@@ -8123,6 +8237,7 @@ fn source_context_from_filter<'a>(
         });
 
     SourceContext {
+        casting_spell,
         id: source_id,
         controller: source_controller.or(Some(lki.controller)),
         declared_slot_view: None,
@@ -8370,6 +8485,7 @@ fn aura_can_enchant_referenced_target(
                 triggering_object: source.triggering_object,
                 declared_slot_view: source.declared_slot_view,
                 granting_object: source.granting_object,
+                casting_spell: source.casting_spell,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
@@ -8401,6 +8517,7 @@ fn resolve_filter_threshold(
             source.controller.unwrap_or(PlayerId(0)),
             QuantityContext {
                 granting_object: source.granting_object,
+                spell: source.casting_spell,
                 ..QuantityContext::new(source.id)
             },
         ),
@@ -10238,7 +10355,7 @@ fn shared_quality_values(
             if source.name.is_empty() {
                 HashSet::new()
             } else {
-                HashSet::from([source.name.to_ascii_lowercase()])
+                HashSet::from([source.name.to_lowercase()])
             }
         }
         SharedQuality::ManaValue => HashSet::from([source.mana_value.to_string()]),
@@ -10325,6 +10442,9 @@ fn object_shared_quality_values(
     // CR 202.3d + CR 709.4b: A split card off the stack shares its combined mana
     // value and combined colors; both no-op for single-face cards. Bound to a
     // local because `SharedQualitySource.colors` borrows a slice.
+    if matches!(quality, SharedQuality::Name) {
+        return obj.effective_names().into_iter().collect();
+    }
     let effective_colors = obj.effective_colors();
     shared_quality_values(
         SharedQualitySource {
@@ -10435,6 +10555,16 @@ fn evaluate_shares_quality(
     relation: &SharedQualityRelation,
     source: &SourceContext<'_>,
 ) -> bool {
+    if reference
+        .as_deref()
+        .is_some_and(|reference| matches!(reference, TargetFilter::CastingSpell))
+        && source
+            .casting_spell
+            .and_then(|spell| state.objects.get(&spell.object_id))
+            .is_none()
+    {
+        return false;
+    }
     let shares = reference.as_ref().is_none_or(|reference_filter| {
         object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
     });
@@ -10476,6 +10606,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             attachments: Vec::new(),
         });
     SourceContext {
+        casting_spell: context.casting_spell,
         id: context.source_id,
         controller: Some(context.source_controller),
         lki: lki.clone(),
@@ -10627,6 +10758,31 @@ fn object_shares_quality_with_reference_filter(
     reference_filter: &TargetFilter,
     source: &SourceContext<'_>,
 ) -> bool {
+    if matches!(reference_filter, TargetFilter::CastingSpell) {
+        return source
+            .casting_spell
+            .and_then(|spell| {
+                let object = state.objects.get(&spell.object_id)?;
+                let mut projected = object.clone();
+                projected.zone = Zone::Stack;
+                projected.fused_split_spell = spell.casting_variant == CastingVariant::Fuse;
+                let values = if matches!(quality, SharedQuality::Name) {
+                    object
+                        .spell_names_for(spell.casting_variant)
+                        .into_iter()
+                        .collect()
+                } else {
+                    object_shared_quality_values(&projected, quality, &state.all_creature_types)
+                };
+                Some(object_shares_quality_values(
+                    obj,
+                    quality,
+                    &values,
+                    &state.all_creature_types,
+                ))
+            })
+            .unwrap_or(false);
+    }
     if matches!(reference_filter, TargetFilter::ParentTarget) {
         return parent_target_shared_quality_values(state, source, quality).is_some_and(|values| {
             object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
@@ -10677,6 +10833,7 @@ fn object_shares_quality_with_reference_filter(
         triggering_object: source.triggering_object,
         declared_slot_view: source.declared_slot_view,
         granting_object: source.granting_object,
+        casting_spell: source.casting_spell,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
     // creature you control" or "a creature card in your graveyard" to the zone
@@ -11428,6 +11585,7 @@ mod tests {
             source,
             Some(PlayerId(0)),
             Some(&child),
+            None,
             None,
             None,
             None,
@@ -18884,6 +19042,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         // Leg 1: legendary creature (Arbaaz Mir, In Garruk's Wake-style ETB).
@@ -18958,6 +19117,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -19061,6 +19221,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -19196,8 +19357,17 @@ mod tests {
         assert_eq!(record.power, Some(2), "snapshot must capture current power");
         assert_eq!(record.toughness, Some(2));
 
-        let source_ctx =
-            source_context_from_filter(&state, id, Some(PlayerId(0)), None, None, None, None, None);
+        let source_ctx = source_context_from_filter(
+            &state,
+            id,
+            Some(PlayerId(0)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let pt_filter = |scope| FilterProp::PtComparison {
             stat: PtStat::Power,
             scope,
@@ -19341,6 +19511,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let token_record = ZoneChangeRecord {
@@ -19420,6 +19591,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -19559,6 +19731,7 @@ mod tests {
             &state,
             src,
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -23015,5 +23188,108 @@ mod entry_projection_tests {
         ));
         unrelated.inherit_delivery_boundary(&original);
         assert!(!unrelated.parks_delivery(&original));
+    }
+}
+
+#[cfg(test)]
+mod casting_name_context_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    #[test]
+    fn cast_binding_survives_recursive_filters_without_source_or_stack_fallback() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_artifact_from_oracle(P1, "Unrelated source", "")
+            .id();
+        let spell = scenario.add_spell_to_hand(P0, "Exact spell", true).id();
+        let matching = scenario
+            .add_spell_to_graveyard(P0, "Exact spell", true)
+            .id();
+        let different = scenario
+            .add_spell_to_graveyard(P0, "Unrelated source", true)
+            .id();
+        let runner = scenario.build();
+        let shared =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+        let nested = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, shared.clone()],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SpecificObject { id: different }),
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source_with_controller(source, P0);
+        assert!(!matches_target_filter(
+            runner.state(),
+            matching,
+            &nested,
+            &ctx
+        ));
+        let bound = ctx.with_casting_spell(CastSpellContext {
+            object_id: spell,
+            casting_variant: CastingVariant::Normal,
+        });
+        assert!(matches_target_filter(
+            runner.state(),
+            matching,
+            &nested,
+            &bound
+        ));
+        assert!(!matches_target_filter(
+            runner.state(),
+            different,
+            &shared,
+            &bound
+        ));
+        assert!(matches_target_filter(
+            runner.state(),
+            spell,
+            &TargetFilter::CastingSpell,
+            &bound
+        ));
+        assert!(!matches_target_filter(
+            runner.state(),
+            source,
+            &TargetFilter::CastingSpell,
+            &bound
+        ));
+        for relation in [
+            SharedQualityRelation::Shares,
+            SharedQualityRelation::DoesNotShare,
+        ] {
+            let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation,
+                },
+            ]));
+            assert!(!matches_target_filter(
+                runner.state(),
+                matching,
+                &filter,
+                &ctx
+            ));
+            let missing = ctx.with_casting_spell(CastSpellContext {
+                object_id: ObjectId(u64::MAX),
+                casting_variant: CastingVariant::Normal,
+            });
+            assert!(!matches_target_filter(
+                runner.state(),
+                matching,
+                &filter,
+                &missing
+            ));
+        }
     }
 }

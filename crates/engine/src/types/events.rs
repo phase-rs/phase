@@ -589,7 +589,7 @@ impl EventObjectSnapshot {
             // exiled with the source, so no exile-link payload is carried for it.
             TargetFilter::ExiledBySource => PermanentDomainFalse,
             // CR 701.50a connives a *permanent*, never a stack entry.
-            TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => PermanentDomainFalse,
+            TargetFilter::StackAbility { .. } | TargetFilter::StackSpell | TargetFilter::CastingSpell => PermanentDomainFalse,
             // Player-axis selectors: false on the object axis. This preserves current
             // semantics for a nonsensical player-Connives subject rather than inventing one.
             TargetFilter::Player

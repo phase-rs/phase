@@ -678,7 +678,8 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 125 as const;
+// 126: TargetFilter.CastingSpell requires typed peers that decode the new tag.
+export const WIRE_PROTOCOL_VERSION = 126 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

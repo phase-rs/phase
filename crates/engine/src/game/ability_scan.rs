@@ -3550,7 +3550,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             }
             acc
         }
-        TargetFilter::StackSpell => Axes::NONE,
+        TargetFilter::StackSpell | TargetFilter::CastingSpell => Axes::NONE,
         TargetFilter::SpecificObject { id: _ } => Axes::NONE,
         TargetFilter::SpecificPlayer { id: _ } => Axes::NONE,
         TargetFilter::Neighbor { direction: _ } => Axes::NONE,

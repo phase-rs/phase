@@ -1293,3 +1293,9 @@ fn neutral_plural_pronoun_they_becomes_creature_static() {
         "expected AddKeyword(Vigilance) in {mods:?}"
     );
 }
+
+#[test]
+fn locket_name_population() {
+    let def = parse_static_line("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.").unwrap();
+    insta::assert_json_snapshot!("locket_name_population", &def);
+}

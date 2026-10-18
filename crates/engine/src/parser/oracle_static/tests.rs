@@ -39899,3 +39899,51 @@ fn repeated_static_disjoint_admission_and_overlap_refusal() {
         );
     }
 }
+
+#[test]
+fn locket_static_complete_population_and_honest_suffix() {
+    // SHAPE: the type, relative owner and locative are independent grammar axes.
+    for (head, zone, owner) in [
+        ("card", "your graveyard", ControllerRef::You),
+        ("artifact card", "your hand", ControllerRef::You),
+        (
+            "creature card",
+            "an opponent's graveyard",
+            ControllerRef::Opponent,
+        ),
+    ] {
+        let source = format!("Spells you cast cost {{1}} less to cast for each {head} with the same name as that spell in {zone}.");
+        let definition = parse_static_line(&source).expect("complete generic population");
+        let StaticMode::ModifyCost {
+            dynamic_count:
+                Some(QuantityRef::ObjectCount {
+                    filter: TargetFilter::And { filters },
+                }),
+            ..
+        } = &definition.mode
+        else {
+            panic!("complete cast-relative population")
+        };
+        assert_eq!(filters.len(), 3);
+        assert!(
+            matches!(&filters[1], TargetFilter::Typed(typed) if typed.properties == vec![FilterProp::SharesQuality { quality: SharedQuality::Name, reference: Some(Box::new(TargetFilter::CastingSpell)), relation: SharedQualityRelation::Shares }])
+        );
+        assert!(
+            matches!(&filters[2], TargetFilter::Typed(typed) if typed.properties.iter().any(|property| matches!(property, FilterProp::Owned { controller } if *controller == owner)))
+        );
+    }
+    for body in [
+        "card with the same name as that spell",
+        "card with the same name as that impostor in your graveyard",
+        "mystery with the same name as that spell in your graveyard",
+        "card with the same name as that spell in your graveyard and",
+    ] {
+        assert!(
+            parse_static_line(&format!(
+                "Spells you cast cost {{1}} less to cast for each {body}."
+            ))
+            .is_none(),
+            "{body}"
+        );
+    }
+}

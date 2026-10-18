@@ -1768,6 +1768,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::And { .. }
             | TargetFilter::StackAbility { .. }
             | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -1903,6 +1904,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::Typed(_)
             | TargetFilter::StackAbility { .. }
             | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::AttachedTo
             | TargetFilter::LastCreated

@@ -36,8 +36,9 @@ use crate::types::ability::{
     CastManaSpentMetric, Comparator, ControllerRef, CountBinding, CountScope, DamageChannel,
     DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet, ObjectProperty,
     ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
-    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
-    ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SharedQualityRelation,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -2816,6 +2817,58 @@ fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRe
     ))
 }
 
+/// CR 201.2a + CR 601.2f: a complete population relative to the spell being priced.
+/// The recognized introducer commits the suffix, so malformed references/locatives
+/// cannot fall back to a generic card count.
+pub(crate) fn parse_cast_spell_name_population(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, head) = take_until(" with the same ").parse(input)?;
+    let (rest, (_, quality, _)) = (
+        tag(" with the same "),
+        value(SharedQuality::Name, tag("name")),
+        tag(" as "),
+    )
+        .parse(rest)?;
+    let (rest, reference) =
+        cut(value(TargetFilter::CastingSpell, tag("that spell"))).parse(rest)?;
+    let (head_filter, remainder) =
+        parse_type_phrase_folding_with_ctx(head, &mut ParseContext::default());
+    if head.is_empty()
+        || !remainder.is_empty()
+        || !quantity_filter_has_meaningful_content(&head_filter)
+    {
+        return Err(nom::Err::Failure(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let (rest, locative) = cut(preceded(
+        tag(" "),
+        terminated(
+            parse_population_locative,
+            (nom::character::complete::space0, eof),
+        ),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    head_filter,
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::SharesQuality {
+                            quality,
+                            reference: Some(Box::new(reference)),
+                            relation: SharedQualityRelation::Shares,
+                        },
+                    ])),
+                    locative,
+                ],
+            },
+        },
+    ))
+}
+
 fn parse_population_locative(input: &str) -> OracleResult<'_, TargetFilter> {
     let (_, _) = peek(tag("in ")).parse(input)?;
     let (mut properties, controller, consumed) =
@@ -3406,6 +3459,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -3543,6 +3597,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -14790,5 +14845,47 @@ mod tests {
                 .is_err(),
             "no superlative means no aggregate axis — must not match"
         );
+    }
+}
+
+#[cfg(test)]
+mod casting_name_population_tests {
+    use super::*;
+
+    #[test]
+    fn cast_name_population_complete_and_committed_suffix() {
+        for (head, zone) in [
+            ("card", "your graveyard"),
+            ("artifact card", "your hand"),
+            ("creature card", "an opponent's graveyard"),
+        ] {
+            let input = format!("{head} with the same name as that spell in {zone}");
+            let (rest, quantity) = parse_cast_spell_name_population(&input).unwrap();
+            assert!(rest.is_empty());
+            assert!(
+                matches!(quantity, QuantityRef::ObjectCount { filter: TargetFilter::And { filters } } if filters.len() == 3)
+            );
+        }
+        for input in [
+            "card with the same name as that spell",
+            "card with the same name as that impostor in your graveyard",
+            "mystery with the same name as that spell in your graveyard",
+            "card with the same name as that spell in your graveyard unfinished",
+            "card with the same name as that spellbook in your graveyard",
+        ] {
+            assert!(
+                matches!(
+                    parse_cast_spell_name_population(input),
+                    Err(nom::Err::Failure(_))
+                ),
+                "{input}"
+            );
+        }
+        assert!(matches!(
+            parse_cast_spell_name_population(
+                "artifact you control and each artifact card in your hand"
+            ),
+            Err(nom::Err::Error(_))
+        ));
     }
 }

@@ -12561,6 +12561,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::AllPlayers
         | TargetFilter::Opponent
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::Named { .. }
         // CR 615: a parse-layer compound recipient, lowered to
         // `DamageTargetFilter` before runtime.

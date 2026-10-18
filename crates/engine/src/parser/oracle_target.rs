@@ -9856,6 +9856,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -23618,5 +23619,31 @@ mod color_or_type_union {
         }
         assert!(parse_type_phrase_union("Giant", &scope).is_none());
         assert!(parse_type_phrase_union("Goblin or Shaman you know", &scope).is_none());
+    }
+}
+
+#[cfg(test)]
+mod casting_name_reference_preservation_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_same_name_nouns_keep_source_or_parent_authority() {
+        assert_eq!(
+            parse_same_name_suffix("with the same name as this creature")
+                .unwrap()
+                .0,
+            FilterProp::SameName
+        );
+        assert_eq!(
+            parse_same_name_suffix("with the same name as ~").unwrap().0,
+            FilterProp::SameName
+        );
+        assert_eq!(
+            parse_same_name_suffix("with the same name as that creature")
+                .unwrap()
+                .0,
+            FilterProp::SameNameAsParentTarget
+        );
+        assert!(parse_same_name_suffix("with the same name as that spell").is_none());
     }
 }

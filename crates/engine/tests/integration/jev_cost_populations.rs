@@ -24,6 +24,987 @@ use std::path::Path;
 
 const SAILORS: &str = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
 
+const LOCKET: &str = "Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.";
+const BEHOLD: &str = "Scry 2, then draw two cards.\nForetell {1}{U} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+
+fn synthetic_name_face(
+    name: &str,
+    layout: LayoutKind,
+    cost: ManaCost,
+    oracle: &str,
+) -> BackFaceData {
+    let parsed = engine::parser::parse_oracle_text(oracle, name, &[], &["Instant".into()], &[]);
+    assert!(parsed.parse_warnings.is_empty());
+    assert!(parsed
+        .abilities
+        .iter()
+        .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })));
+    BackFaceData {
+        name: name.into(),
+        layout_kind: Some(layout),
+        mana_cost: cost,
+        card_types: engine::types::card_type::CardType {
+            core_types: vec![engine::types::card_type::CoreType::Instant],
+            ..Default::default()
+        },
+        abilities: parsed.abilities,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn locket_selected_face_names() {
+    use engine::types::game_state::{CastingVariant, CastingVariantFace};
+    // Synthetic split witnesses exercise selected half, two off-stack names,
+    // and one contribution from a card sharing both fused names.
+    for (variant, face, paid, gain, name) in [
+        (
+            CastingVariant::Normal,
+            CastingVariantFace::Left,
+            5,
+            1,
+            "Synthetic Alpha",
+        ),
+        (
+            CastingVariant::Normal,
+            CastingVariantFace::Right,
+            1,
+            2,
+            "Synthetic Beta",
+        ),
+        (
+            CastingVariant::Fuse,
+            CastingVariantFace::Left,
+            7,
+            3,
+            "Synthetic Alpha",
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, paid);
+        add_locket(&mut scenario);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic Alpha", true, "You gain 1 life.")
+            .with_mana_cost(blue_cost(5, 1))
+            .with_keyword(Keyword::Fuse)
+            .id();
+        let both = scenario
+            .add_spell_to_graveyard(P0, "Synthetic Beta", true)
+            .id();
+        scenario.add_spell_to_graveyard(P0, "Synthetic Beta", true);
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .back_face = Some(synthetic_name_face(
+            "Synthetic Beta",
+            LayoutKind::Split,
+            blue_cost(2, 1),
+            "You gain 2 life.",
+        ));
+        runner.state_mut().objects.get_mut(&both).unwrap().back_face = Some(synthetic_name_face(
+            "Synthetic Alpha",
+            LayoutKind::Split,
+            blue_cost(5, 1),
+            "You gain 1 life.",
+        ));
+        assert_eq!(runner.state().objects[&both].effective_names().len(), 2);
+        let committed = runner
+            .cast(spell)
+            .casting_variant_face(variant, face)
+            .commit();
+        assert_eq!(committed.state().objects[&spell].name, name);
+        assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        assert_eq!(
+            committed.selected_casting_variant().unwrap().variant,
+            variant
+        );
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_life_delta(P0, gain);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+    }
+}
+
+#[test]
+fn locket_adventure_and_modal_names() {
+    use engine::types::game_state::CastingVariant;
+    for creature_face in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, if creature_face { 3 } else { 2 });
+        add_locket(&mut scenario);
+        let spell = scenario
+            .add_creature_to_hand(P0, "Synthetic adventurer", 2, 2)
+            .with_mana_cost(blue_cost(3, 1))
+            .id();
+        let ordinary = scenario
+            .add_creature_to_graveyard(P0, "Synthetic adventurer", 2, 2)
+            .id();
+        scenario.add_spell_to_graveyard(P0, "Synthetic Journey", true);
+        let mut runner = scenario.build();
+        for id in [spell, ordinary] {
+            runner.state_mut().objects.get_mut(&id).unwrap().back_face = Some(synthetic_name_face(
+                "Synthetic Journey",
+                LayoutKind::Adventure,
+                blue_cost(2, 1),
+                "You gain 2 life.",
+            ));
+        }
+        let committed = runner.cast(spell).adventure_face(creature_face).commit();
+        assert_eq!(
+            committed.state().objects[&spell].name,
+            if creature_face {
+                "Synthetic adventurer"
+            } else {
+                "Synthetic Journey"
+            }
+        );
+        assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        let outcome = committed.resolve();
+        outcome.assert_zone(
+            &[spell],
+            if creature_face {
+                Zone::Battlefield
+            } else {
+                Zone::Exile
+            },
+        );
+        outcome.assert_life_delta(P0, if creature_face { 0 } else { 2 });
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+    }
+    for back in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, if back { 2 } else { 4 });
+        add_locket(&mut scenario);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic modal front", true, "You gain 1 life.")
+            .with_mana_cost(blue_cost(3, 1))
+            .id();
+        scenario.add_spell_to_graveyard(P0, "Synthetic modal back", true);
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .back_face = Some(synthetic_name_face(
+            "Synthetic modal back",
+            LayoutKind::Modal,
+            blue_cost(2, 1),
+            "You gain 2 life.",
+        ));
+        let committed = runner.cast(spell).modal_back_face(back).commit();
+        assert_eq!(
+            committed.state().objects[&spell].name,
+            if back {
+                "Synthetic modal back"
+            } else {
+                "Synthetic modal front"
+            }
+        );
+        assert_eq!(
+            committed.state().objects[&spell].spell_names_for(CastingVariant::Normal),
+            vec![if back {
+                "synthetic modal back"
+            } else {
+                "synthetic modal front"
+            }]
+        );
+        assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_life_delta(P0, if back { 2 } else { 1 });
+    }
+}
+
+#[test]
+fn locket_unnamed_and_actual_face_down_nonmatch() {
+    use engine::types::game_state::CastingVariant;
+    for name in ["Synthetic named creature", ""] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, if name.is_empty() { 4 } else { 3 });
+        let source = add_locket(&mut scenario);
+        let spell = scenario
+            .add_creature_to_hand(P0, name, 2, 2)
+            .with_mana_cost(blue_cost(3, 1))
+            .id();
+        scenario.add_creature_to_graveyard(P0, name, 2, 2);
+        let mut runner = scenario.build();
+        assert_eq!(
+            locket_count(&runner, source, spell),
+            if name.is_empty() { 0 } else { 1 }
+        );
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_zone(&[spell], Zone::Battlefield);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+    }
+    for face_down in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, 3);
+        add_locket(&mut scenario);
+        let spell = scenario
+            .add_creature_to_hand(P0, "Synthetic morph creature", 4, 4)
+            .with_keyword(Keyword::Morph(ManaCost::generic(2)))
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        scenario.add_creature_to_graveyard(P0, "Synthetic morph creature", 4, 4);
+        scenario.add_creature_to_graveyard(P0, "", 2, 2);
+        let mut runner = scenario.build();
+        let variant = if face_down {
+            CastingVariant::FaceDown
+        } else {
+            CastingVariant::Normal
+        };
+        let committed = runner.cast(spell).casting_variant(variant).commit();
+        assert_eq!(
+            committed.state().objects[&spell]
+                .spell_names_for(variant)
+                .is_empty(),
+            face_down
+        );
+        assert_eq!(
+            committed.state().players[0].mana_pool.total(),
+            0,
+            "named {4}-1 and unnamed face-down {3} are separate payable branches"
+        );
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[spell], Zone::Battlefield);
+        assert_eq!(outcome.state().objects[&spell].face_down, face_down);
+        assert_eq!(
+            outcome.state().objects[&spell].power,
+            Some(if face_down { 2 } else { 4 })
+        );
+    }
+}
+
+#[test]
+fn locket_reference_serde_and_loaded_cast() {
+    use engine::types::ability::StaticDefinition;
+    // Literal legacy tags are compatibility fixtures, not derived expected encodings.
+    for (json, filter) in [
+        (r#"{"type":"SelfRef"}"#, TargetFilter::SelfRef),
+        (r#"{"type":"ParentTarget"}"#, TargetFilter::ParentTarget),
+        (r#"{"type":"StackSpell"}"#, TargetFilter::StackSpell),
+        (r#"{"type":"CastingSpell"}"#, TargetFilter::CastingSpell),
+    ] {
+        let loaded: TargetFilter = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded, filter);
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::from_str::<Value>(json).unwrap()
+        );
+    }
+    let definition = locket_definition();
+    let encoded = serde_json::to_string(&definition).unwrap();
+    let loaded: StaticDefinition = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(loaded, definition);
+    let (runner, source, spell) = locket_board(2, 4);
+    let state_json = serde_json::to_string(runner.state()).unwrap();
+    let state: GameState = serde_json::from_str(&state_json).unwrap();
+    assert_eq!(state.objects[&source].static_definitions[0], loaded);
+    let mut runner = GameRunner::from_state(state);
+    assert_eq!(locket_count(&runner, source, spell), 2);
+    let outcome = runner.cast(spell).resolve();
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    outcome.assert_life_delta(P0, 1);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+}
+
+#[test]
+fn locket_export_string_loader_compatibility() {
+    let raw =
+        shared_card_export_json().expect("fresh full export required at the run-end boundary");
+    let entry = raw.get("locket of yesterdays").expect("exported Locket");
+    assert_eq!(
+        entry.get("oracle_text").and_then(Value::as_str),
+        Some(LOCKET)
+    );
+    let mut entries = Map::new();
+    entries.insert("locket of yesterdays".to_string(), entry.clone());
+    let db = CardDatabase::from_json_str(&to_string(&entries).unwrap()).unwrap();
+    let face = db.get_face_by_name("Locket of Yesterdays").unwrap();
+    assert_eq!(face.static_abilities.as_slice(), &[locket_definition()]);
+    let (mut runner, source, spell) = locket_board(2, 4);
+    let object = runner.state_mut().objects.get_mut(&source).unwrap();
+    object.static_definitions = face.static_abilities.clone().into();
+    object.base_static_definitions = std::sync::Arc::new(face.static_abilities.clone());
+    let outcome = runner.cast(spell).resolve();
+    outcome.assert_life_delta(P0, 1);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+}
+
+fn locket_definition() -> engine::types::ability::StaticDefinition {
+    use engine::types::ability::{SharedQuality, SharedQualityRelation};
+    let parsed = engine::parser::parse_oracle_text(
+        LOCKET,
+        "Locket of Yesterdays",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    assert!(parsed.abilities.is_empty());
+    assert_eq!(parsed.statics.len(), 1);
+    let definition = parsed.statics[0].clone();
+    assert_eq!(
+        definition.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+    let StaticMode::ModifyCost {
+        mode,
+        amount,
+        dynamic_count: Some(quantity),
+        spell_filter,
+        ..
+    } = &definition.mode
+    else {
+        panic!("complete Locket modifier")
+    };
+    assert_eq!(*mode, CostModifyMode::Reduce);
+    assert_eq!(*amount, ManaCost::generic(1));
+    assert!(spell_filter.is_none());
+    assert_eq!(
+        *quantity,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::card()),
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::Name,
+                            reference: Some(Box::new(TargetFilter::CastingSpell)),
+                            relation: SharedQualityRelation::Shares,
+                        }
+                    ])),
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        },
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        }
+                    ])),
+                ]
+            }
+        }
+    );
+    definition
+}
+
+fn add_locket(scenario: &mut GameScenario) -> ObjectId {
+    let expected = locket_definition();
+    let id = scenario
+        .add_artifact_from_oracle(P0, "Locket of Yesterdays", LOCKET)
+        .id();
+    // The fixture itself is parsed from the complete printed Oracle, not injected AST.
+    assert!(matches!(expected.mode, StaticMode::ModifyCost { .. }));
+    id
+}
+
+fn locket_count(runner: &GameRunner, source: ObjectId, spell: ObjectId) -> i32 {
+    let StaticMode::ModifyCost {
+        dynamic_count: Some(qty),
+        ..
+    } = locket_definition().mode
+    else {
+        unreachable!()
+    };
+    engine::game::quantity::resolve_quantity_with_spell(
+        runner.state(),
+        &QuantityExpr::Ref { qty },
+        P0,
+        source,
+        spell,
+    )
+}
+
+fn locket_board(matches: usize, pool: usize) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, pool);
+    let source = add_locket(&mut scenario);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic named instant", true, "You gain 1 life.")
+        .with_mana_cost(blue_cost(5, 1))
+        .id();
+    for _ in 0..matches {
+        scenario.add_spell_to_graveyard(P0, "Synthetic named instant", true);
+    }
+    for name in [
+        "Locket of Yesterdays",
+        "Different name one",
+        "Different name two",
+    ] {
+        scenario.add_spell_to_graveyard(P0, name, true);
+    }
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic named instant", true, "You gain 1 life.")
+        .with_mana_cost(blue_cost(5, 1));
+    scenario.add_spell_to_exile(P0, "Synthetic named instant", true);
+    scenario.add_creature(P0, "Synthetic named instant", 1, 1);
+    scenario.add_spell_to_graveyard(P1, "Synthetic named instant", true);
+    (scenario.build(), source, spell)
+}
+
+#[test]
+fn locket_name_population_cost() {
+    // CR 118.7a: only generic mana is reduced, with a zero generic floor.
+    for (matches, pool) in [(2, 4), (0, 6), (8, 1)] {
+        let (mut runner, source, spell) = locket_board(matches, pool);
+        assert_eq!(locket_count(&runner, source, spell), matches as i32);
+        assert_eq!(
+            engine::game::casting::effective_spell_cost(runner.state(), P0, spell),
+            Some(blue_cost(5u32.saturating_sub(matches as u32), 1))
+        );
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_life_delta(P0, 1);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+    }
+    let (mut runner, source, spell) = locket_board(2, 3);
+    assert_eq!(locket_count(&runner, source, spell), 2);
+    assert!(
+        runner.cast(spell).try_resolve().is_err(),
+        "one short after the payable sibling"
+    );
+    let (mut runner, source, spell) = locket_board(2, 4);
+    assert_eq!(locket_count(&runner, source, spell), 2);
+    runner.state_mut().players[0].mana_pool = (0..4)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect();
+    assert!(
+        runner.cast(spell).try_resolve().is_err(),
+        "generic reduction cannot pay blue"
+    );
+}
+
+#[test]
+fn locket_independent_cast_authorities() {
+    use engine::types::ability::{CardPlayMode, StaticDefinition};
+    use engine::types::statics::{CastFrequency, GraveyardPermissionPool};
+    for (sources, opponent_control, foreign_spell) in
+        [(2, false, false), (1, true, false), (1, false, true)]
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let payable = if opponent_control { 6 } else { 6 - sources * 2 };
+        mana(&mut scenario, payable);
+        let source = add_locket(&mut scenario);
+        if sources == 2 {
+            add_locket(&mut scenario);
+        }
+        // Foreign ownership of a functioning source does not change "your".
+        let spell = if foreign_spell {
+            scenario
+                .add_spell_to_graveyard(P1, "Authority instant", true)
+                .from_oracle_text("You gain 1 life.")
+                .with_mana_cost(blue_cost(5, 1))
+                .id()
+        } else {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Authority instant", true, "You gain 1 life.")
+                .with_mana_cost(blue_cost(5, 1))
+                .id()
+        };
+        for _ in 0..2 {
+            scenario.add_spell_to_graveyard(P0, "Authority instant", true);
+        }
+        scenario.add_spell_to_graveyard(P0, "Locket of Yesterdays", true);
+        scenario.add_spell_to_graveyard(P1, "Authority instant", true);
+        if foreign_spell {
+            scenario
+                .add_enchantment_from_oracle(P0, "Synthetic any-graveyard name permission", "")
+                .with_static_definition(
+                    StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                        frequency: CastFrequency::Unlimited,
+                        play_mode: CardPlayMode::Cast,
+                        graveyard_destination_replacement: None,
+                        extra_cost: None,
+                        enters_with_counter: None,
+                        required_cast_keyword: None,
+                        pool: GraveyardPermissionPool::AnyGraveyard,
+                    })
+                    .affected(TargetFilter::Typed(TypedFilter::card())),
+                );
+        }
+        let mut runner = scenario.build();
+        let object = runner.state_mut().objects.get_mut(&source).unwrap();
+        object.owner = P1;
+        if opponent_control {
+            object.controller = P1;
+            object.base_controller = Some(P1);
+        }
+        assert_eq!(locket_count(&runner, source, spell), 2);
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_life_delta(P0, 1);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+        assert_eq!(outcome.state().objects[&source].owner, P1);
+    }
+    let (mut runner, source, spell) = locket_board(2, 4);
+    runner.cast(spell).resolve().assert_life_delta(P0, 1);
+    let next = runner.state().players[0]
+        .hand
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Synthetic named instant")
+        .unwrap();
+    let source_object = runner.state_mut().objects.get_mut(&source).unwrap();
+    source_object.controller = P1;
+    source_object.base_controller = Some(P1);
+    runner.state_mut().players[0].mana_pool = (0..6)
+        .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+        .collect();
+    let outcome = runner.cast(next).resolve();
+    outcome.assert_life_delta(P0, 1);
+    outcome.assert_zone(&[next], Zone::Graveyard);
+    assert_eq!(
+        outcome.mana_pool_total(P0),
+        0,
+        "the subsequent cast pays full price after source control changes"
+    );
+}
+
+#[test]
+fn locket_no_stack_or_target_fallback() {
+    use engine::game::filter::{matches_target_filter, CastSpellContext, FilterContext};
+    use engine::types::ability::{SharedQuality, SharedQualityRelation};
+    use engine::types::game_state::CastingVariant;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, 9);
+    let source = add_locket(&mut scenario);
+    let unrelated = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unrelated stack name", true, "You gain 2 life.")
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let target = scenario
+        .add_creature(P1, "Unrelated target name", 2, 2)
+        .id();
+    let first = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "First priced instant",
+            true,
+            "Target creature gets +1/+1 until end of turn.",
+        )
+        .with_mana_cost(blue_cost(5, 1))
+        .id();
+    let next = scenario
+        .add_spell_to_hand_from_oracle(P0, "Second priced instant", true, "You gain 1 life.")
+        .with_mana_cost(blue_cost(5, 1))
+        .id();
+    let member = scenario
+        .add_spell_to_graveyard(P0, "First priced instant", true)
+        .id();
+    scenario.add_spell_to_graveyard(P0, "First priced instant", true);
+    scenario.add_spell_to_graveyard(P0, "Second priced instant", true);
+    for name in [
+        "Unrelated stack name",
+        "Unrelated target name",
+        "Locket of Yesterdays",
+    ] {
+        for _ in 0..3 {
+            scenario.add_spell_to_graveyard(P0, name, true);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.cast(unrelated).commit();
+    assert_eq!(locket_count(&runner, source, first), 2);
+    let outcome = runner.cast(first).target_object(target).resolve();
+    assert_eq!(outcome.mana_pool_total(P0), 5);
+    assert_eq!(outcome.state().objects[&target].power, Some(3));
+    outcome.assert_life_delta(P0, 2);
+    assert_eq!(locket_count(&runner, source, next), 1);
+    let outcome = runner.cast(next).resolve();
+    outcome.assert_life_delta(P0, 1);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+    // No explicit cast context: the same positive board cannot borrow a source,
+    // chosen target, stack event, or LKI authority, even under inversion.
+    let StaticMode::ModifyCost {
+        dynamic_count: Some(qty),
+        ..
+    } = locket_definition().mode
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        resolve_quantity(runner.state(), &QuantityExpr::Ref { qty }, P0, source),
+        0
+    );
+    for relation in [
+        SharedQualityRelation::Shares,
+        SharedQualityRelation::DoesNotShare,
+    ] {
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation,
+                }]),
+            );
+        let absent = FilterContext::from_source_with_controller(source, P0);
+        assert!(!matches_target_filter(
+            runner.state(),
+            member,
+            &filter,
+            &absent
+        ));
+        let missing = absent.with_casting_spell(CastSpellContext {
+            object_id: ObjectId(u64::MAX),
+            casting_variant: CastingVariant::Normal,
+        });
+        assert!(!matches_target_filter(
+            runner.state(),
+            member,
+            &filter,
+            &missing
+        ));
+        let bound = absent.with_casting_spell(CastSpellContext {
+            object_id: first,
+            casting_variant: CastingVariant::Normal,
+        });
+        assert_eq!(
+            matches_target_filter(runner.state(), member, &filter, &bound),
+            relation == SharedQualityRelation::Shares
+        );
+    }
+}
+
+#[test]
+fn locket_graveyard_announcement_and_lock() {
+    use engine::types::ability::{CardPlayMode, StaticDefinition};
+    use engine::types::statics::{CastFrequency, GraveyardPermissionPool};
+    for cancel in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, 1);
+        let source = add_locket(&mut scenario);
+        let spell = scenario
+            .add_spell_to_graveyard(P0, "Synthetic locked instant", true)
+            .with_mana_cost(blue_cost(5, 1))
+            .from_oracle_text("You gain 1 life.")
+            .id();
+        scenario.add_spell_to_graveyard(P0, "Synthetic locked instant", true);
+        let mana_source = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Synthetic locked instant",
+                "Sacrifice this artifact: Add {C}{C}{C}{C}.",
+            )
+            .id();
+        scenario
+            .add_enchantment_from_oracle(P0, "Synthetic graveyard casting", "")
+            .with_static_definition(
+                StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                    frequency: CastFrequency::Unlimited,
+                    play_mode: CardPlayMode::Cast,
+                    graveyard_destination_replacement: None,
+                    extra_cost: None,
+                    enters_with_counter: None,
+                    required_cast_keyword: None,
+                    pool: GraveyardPermissionPool::OwnGraveyard,
+                })
+                .affected(TargetFilter::Typed(TypedFilter::card())),
+            );
+        let mut runner = scenario.build();
+        assert_eq!(
+            locket_count(&runner, source, spell),
+            2,
+            "in-origin preview includes the unannounced card"
+        );
+        begin_manual(&mut runner, spell);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        assert_eq!(locket_count(&runner, source, spell), 1);
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            blue_cost(4, 1)
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: mana_source,
+                ability_index: 0,
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&mana_source].zone, Zone::Graveyard);
+        assert_eq!(locket_count(&runner, source, spell), 2);
+        // CR 601.2f: the newly arrived matching card cannot change the locked total.
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            blue_cost(4, 1)
+        );
+        if cancel {
+            runner.act(GameAction::CancelCast).unwrap();
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert!(runner.state().objects[&spell].spell_announcement.is_none());
+            assert!(!runner.state().stack.iter().any(|entry| entry.id == spell));
+            assert_eq!(locket_count(&runner, source, spell), 3);
+            runner.state_mut().players[0].mana_pool = (0..4)
+                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+                .collect();
+            let outcome = runner.cast(spell).resolve();
+            outcome.assert_zone(&[spell], Zone::Graveyard);
+            outcome.assert_life_delta(P0, 1);
+            assert_eq!(
+                outcome.mana_pool_total(P0),
+                0,
+                "retry binds the new two-card population"
+            );
+        } else {
+            runner.act(GameAction::PassPriority).unwrap();
+            assert!(runner.state().pending_cast.is_none());
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_eq!(runner.state().objects[&spell].mana_spent_to_cast_amount, 5);
+            let before = runner.state().players[0].life;
+            runner.resolve_top();
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert_eq!(runner.state().players[0].life, before + 1);
+        }
+    }
+}
+
+#[test]
+fn cast_name_population_modifier_sources() {
+    for source_kind in ["self", "battlefield", "temporary"] {
+        for matching in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            mana(&mut scenario, if matching { 4 } else { 6 });
+            let source = if source_kind == "battlefield" {
+                scenario
+                    .add_artifact_from_oracle(P0, "Synthetic independent dynamic source", "")
+                    .with_static_definition(locket_definition())
+                    .id()
+            } else {
+                scenario
+                    .add_artifact_from_oracle(P0, "Synthetic independent dynamic source", "")
+                    .id()
+            };
+            let oracle = if source_kind == "self" {
+                "This spell costs {1} less to cast for each card with the same name as that spell in your graveyard.\nYou gain 1 life."
+            } else {
+                "You gain 1 life."
+            };
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Synthetic dynamic spell", true, oracle)
+                .with_mana_cost(blue_cost(5, 1))
+                .id();
+            for _ in 0..2 {
+                scenario.add_spell_to_graveyard(
+                    P0,
+                    if matching {
+                        "Synthetic dynamic spell"
+                    } else {
+                        "Synthetic independent dynamic source"
+                    },
+                    true,
+                );
+            }
+            let definition = locket_definition();
+            let mut runner = scenario.build();
+            match source_kind {
+                "self" => {
+                    let statics = &runner.state().objects[&spell].static_definitions;
+                    assert_eq!(statics.len(), 1);
+                    assert!(matches!(
+                        &statics[0].mode,
+                        StaticMode::ModifyCost {
+                            dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+                            ..
+                        }
+                    ));
+                }
+                "battlefield" => {
+                    assert_eq!(runner.state().objects[&source].static_definitions.len(), 1);
+                }
+                "temporary" => {
+                    runner
+                        .state_mut()
+                        .add_transient_continuous_effect(
+                            source,
+                            P0,
+                            Duration::UntilEndOfTurn,
+                            TargetFilter::SpecificPlayer { id: P0 },
+                            vec![ContinuousModification::GrantStaticAbility {
+                                definition: Box::new(definition),
+                            }],
+                            None,
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            engine::game::layers::flush_layers(runner.state_mut());
+            assert_eq!(
+                locket_count(&runner, source, spell),
+                if matching { 2 } else { 0 }
+            );
+            assert_eq!(
+                engine::game::casting::effective_spell_cost(runner.state(), P0, spell),
+                Some(blue_cost(if matching { 3 } else { 5 }, 1)),
+                "{source_kind}, matching={matching}"
+            );
+            let outcome = runner.cast(spell).resolve();
+            outcome.assert_zone(&[spell], Zone::Graveyard);
+            outcome.assert_life_delta(P0, 1);
+            assert_eq!(
+                outcome.mana_pool_total(P0),
+                0,
+                "{source_kind}, matching={matching}"
+            );
+        }
+    }
+}
+
+#[test]
+fn locket_foretell_face_up_name() {
+    use engine::types::game_state::{CastingVariant, StackEntryKind};
+    for matching in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, 2);
+        let source = add_locket(&mut scenario);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Behold the Multiverse", true)
+            .with_mana_cost(blue_cost(3, 1))
+            .from_oracle_text_with_keywords(&["Foretell", "Scry"], BEHOLD)
+            .id();
+        scenario.add_spell_to_graveyard(
+            P0,
+            if matching {
+                "Behold the Multiverse"
+            } else {
+                "Other name"
+            },
+            true,
+        );
+        for _ in 0..5 {
+            scenario.add_spell_to_library_top(P0, "Synthetic draw marker", true);
+        }
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&spell].parse_warnings.is_empty());
+        assert!(runner.state().objects[&spell]
+            .keywords
+            .contains(&Keyword::Foretell(blue_cost(1, 1))));
+        assert_eq!(runner.state().objects[&spell].abilities.len(), 1);
+        assert!(!matches!(
+            runner.state().objects[&spell].abilities[0].effect.as_ref(),
+            Effect::Unimplemented { .. }
+        ));
+        runner
+            .act(GameAction::Foretell {
+                object_id: spell,
+                card_id: runner.state().objects[&spell].card_id,
+            })
+            .unwrap();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        let object = &runner.state().objects[&spell];
+        assert_eq!(object.zone, Zone::Exile);
+        assert!(object.face_down && object.foretold);
+        assert_eq!(object.name, "Behold the Multiverse");
+        assert!(object.effective_names().is_empty());
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Foretell),
+            vec!["behold the multiverse"]
+        );
+        // Existing Foretell fixture recipe: the permission tests the recorded turn.
+        runner.state_mut().turn_number += 1;
+        runner.state_mut().players[0].mana_pool = (0..if matching { 1 } else { 2 })
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect();
+        assert_eq!(locket_count(&runner, source, spell), i32::from(matching));
+        let committed = runner
+            .cast(spell)
+            .casting_variant(CastingVariant::Foretell)
+            .commit();
+        let entry = committed
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == spell)
+            .unwrap();
+        assert!(
+            matches!(&entry.kind, StackEntryKind::Spell { casting_variant: CastingVariant::Foretell, actual_mana_spent, .. } if *actual_mana_spent == if matching { 1 } else { 2 })
+        );
+        assert!(!committed.state().objects[&spell].spell_is_cast_face_down());
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_hand_drawn(P0, 2);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+    }
+}
+
+#[test]
+fn locket_concealed_exile_ordinary_cost_name() {
+    use engine::types::ability::{CastingPermission, ExileGrantCostProvenance};
+    use engine::types::game_state::CastingVariant;
+    for matching in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, if matching { 3 } else { 4 });
+        let source = add_locket(&mut scenario);
+        let spell = scenario
+            .add_spell_to_exile(P0, "Behold the Multiverse", true)
+            .with_mana_cost(blue_cost(3, 1))
+            .from_oracle_text_with_keywords(&["Foretell", "Scry"], BEHOLD)
+            .id();
+        scenario.add_spell_to_graveyard(
+            P0,
+            if matching {
+                "Behold the Multiverse"
+            } else {
+                "Other name"
+            },
+            true,
+        );
+        for _ in 0..5 {
+            scenario.add_spell_to_library_top(P0, "Synthetic ordinary draw marker", true);
+        }
+        let mut runner = scenario.build();
+        let mut permission = alternative_permission(P0, 3, 0);
+        let CastingPermission::ExileWithAltCost {
+            cost,
+            cost_provenance,
+            cast_cost_modifier,
+            ..
+        } = &mut permission
+        else {
+            unreachable!()
+        };
+        *cost = blue_cost(3, 1);
+        *cost_provenance = ExileGrantCostProvenance::NormalCost;
+        *cast_cost_modifier = None;
+        let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+        object.face_down = true;
+        object.casting_permissions = vec![permission];
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Normal),
+            vec!["behold the multiverse"]
+        );
+        assert_eq!(locket_count(&runner, source, spell), i32::from(matching));
+        let committed = runner.cast(spell).commit();
+        assert!(!committed.state().objects[&spell].spell_is_cast_face_down());
+        assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_hand_drawn(P0, 2);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+    }
+}
+
 fn blue_cost(generic: u32, blue: usize) -> ManaCost {
     ManaCost::Cost {
         generic,

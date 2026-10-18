@@ -2577,6 +2577,45 @@ impl GameObject {
         }
     }
 
+    /// CR 201.2a + CR 709.4a: all live names, with unnamed/concealed objects
+    /// contributing no name. A split card outside the stack has both names.
+    pub fn effective_names(&self) -> Vec<String> {
+        if self.face_down {
+            return Vec::new();
+        }
+        self.names_with_other_half(self.split_half_to_combine())
+    }
+
+    /// CR 406.3a + CR 708.4 + CR 709.3b: selected spell characteristics,
+    /// independent of the card's retained origin zone or concealed-exile flag.
+    pub fn spell_names_for(
+        &self,
+        variant: crate::types::game_state::CastingVariant,
+    ) -> Vec<String> {
+        if variant == crate::types::game_state::CastingVariant::FaceDown
+            || self.spell_is_cast_face_down()
+        {
+            return Vec::new();
+        }
+        self.names_with_other_half(
+            self.fused_split_half_for(variant == crate::types::game_state::CastingVariant::Fuse),
+        )
+    }
+
+    fn names_with_other_half(&self, other: Option<&BackFaceData>) -> Vec<String> {
+        let mut names = Vec::new();
+        for name in std::iter::once(self.name.as_str()).chain(other.map(|half| half.name.as_str()))
+        {
+            if !name.is_empty() {
+                let name = name.to_lowercase();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
     /// The other Split half to combine when this object is being cast as a FUSED
     /// split spell (CR 702.102b). `None` for non-fused casts and non-split objects,
     /// so callers combine both halves ONLY for a fused spell. Distinct from
@@ -5640,5 +5679,68 @@ mod tests {
         entering.prepared_copy_source = Some(ObjectId(77));
         entering.reset_for_battlefield_exit();
         assert_eq!(entering.prepared_copy_source, None);
+    }
+}
+
+#[cfg(test)]
+mod casting_name_set_tests {
+    use super::*;
+    use crate::types::game_state::CastingVariant;
+
+    #[test]
+    fn cast_names_project_selected_split_and_concealed_characteristics() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Alpha".into(),
+            Zone::Graveyard,
+        );
+        object.back_face = Some(BackFaceData {
+            name: "Beta".into(),
+            layout_kind: Some(LayoutKind::Split),
+            ..Default::default()
+        });
+        assert_eq!(object.effective_names(), vec!["alpha", "beta"]);
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Normal),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Fuse),
+            vec!["alpha", "beta"]
+        );
+        object.zone = Zone::Stack;
+        assert_eq!(object.effective_names(), vec!["alpha"]);
+        object.fused_split_spell = true;
+        assert_eq!(object.effective_names(), vec!["alpha", "beta"]);
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Normal),
+            vec!["alpha"]
+        );
+        object.back_face = None;
+        object.face_down = true;
+        object.zone = Zone::Exile;
+        assert!(object.effective_names().is_empty());
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Foretell),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Normal),
+            vec!["alpha"]
+        );
+        assert!(object.spell_names_for(CastingVariant::FaceDown).is_empty());
+        object.name.clear();
+        assert!(object.spell_names_for(CastingVariant::Normal).is_empty());
+        object.face_down = false;
+        assert!(object.effective_names().is_empty());
+        object.name = "ÉCHO".into();
+        object.back_face = Some(BackFaceData {
+            name: "écho".into(),
+            layout_kind: Some(LayoutKind::Split),
+            ..Default::default()
+        });
+        assert_eq!(object.effective_names(), vec!["écho"]);
     }
 }

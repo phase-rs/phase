@@ -3283,6 +3283,7 @@ enum AttachHostAuthority {
 /// semantics from a wildcard.
 fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority {
     let authority = match filter {
+        TargetFilter::CastingSpell => AttachHostAuthority::NoHost,
         // CR 608.2c + CR 109.4: a reference to the resolution-chosen player is a
         // `Typed` filter BY SHAPE, but it is a context reference — the engine
         // says so through `chosen_player_index`, which is what

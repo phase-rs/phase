@@ -80,7 +80,7 @@ pub struct QuantityContext {
     /// ~"). `None` outside cast-time cost-modifier resolution. A
     /// [`QuantityRef::SharedCardTypes`] read without this authority fails closed
     /// to zero rather than treating the static source as the grammatical subject.
-    pub spell: Option<ObjectId>,
+    pub spell: Option<super::filter::CastSpellContext>,
     /// CR 121.2a + CR 614.1a: The amount carried by the proposed event a
     /// replacement condition is being evaluated against — the draw count a
     /// count-form antecedent ("would draw two or more cards") compares. Set
@@ -1694,12 +1694,29 @@ pub fn resolve_quantity_with_spell(
     source_id: ObjectId,
     spell_id: ObjectId,
 ) -> i32 {
+    resolve_quantity_with_casting_spell(
+        state,
+        expr,
+        controller,
+        source_id,
+        super::filter::CastSpellContext::for_spell(state, spell_id),
+    )
+}
+
+/// Resolve against an explicitly selected cast without inferring any source/target authority.
+pub fn resolve_quantity_with_casting_spell(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    spell: super::filter::CastSpellContext,
+) -> i32 {
     resolve_quantity_with_ctx(
         state,
         expr,
         controller,
         QuantityContext {
-            spell: Some(spell_id),
+            spell: Some(spell),
             ..QuantityContext::new(source_id)
         },
     )
@@ -4663,6 +4680,7 @@ fn resolve_ref(
         }
     };
     filter_ctx.recipient_id = ctx.recipient;
+    filter_ctx.casting_spell = ctx.spell;
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         // CR 402: hand size for the scoped player(s).
@@ -5436,7 +5454,7 @@ fn resolve_ref(
                 return 0;
             };
             let subject_types: HashSet<CoreType> =
-                characteristic_view_for_object(state, subject_id)
+                characteristic_view_for_object(state, subject_id.object_id)
                     .map(|view| view.core_types().to_vec())
                     .unwrap_or_default()
                     .into_iter()

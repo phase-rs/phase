@@ -7920,6 +7920,9 @@ pub enum TargetFilter {
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
     StackSpell,
+    /// CR 601.2a + CR 601.2f: the exact spell currently being cost-modified.
+    /// Available only through an explicit cast-time filter context.
+    CastingSpell,
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
@@ -22048,6 +22051,7 @@ impl TargetFilter {
         matches!(
             self,
             TargetFilter::None
+                | TargetFilter::CastingSpell
                 | TargetFilter::SelfRef
                 | TargetFilter::SourceOrPaired
                 | TargetFilter::Controller
@@ -22329,9 +22333,9 @@ impl TargetFilter {
             // instead of defaulting to the battlefield when the filter is (or
             // contains, via `And`) a stack-spell reference (Secret Arcade's
             // "permanent spells you control").
-            TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => {
-                Some(crate::types::zones::Zone::Stack)
-            }
+            TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::StackAbility { .. } => Some(crate::types::zones::Zone::Stack),
             _ => None,
         }
     }

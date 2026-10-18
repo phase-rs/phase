@@ -2295,6 +2295,7 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 }
             }
         }
+        TargetFilter::CastingSpell => None,
         TargetFilter::StackSpell => {
             let event = event?;
             // CR 601.2i + CR 603.2: On a spell-cast trigger, "that spell" /

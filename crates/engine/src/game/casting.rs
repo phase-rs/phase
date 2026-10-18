@@ -1347,6 +1347,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                     land_obj.id,
                     filter,
                     &super::filter::FilterContext {
+                        casting_spell: None,
                         source_id: *source,
                         source_controller,
                         ability: None,
@@ -3093,6 +3094,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -12378,7 +12380,19 @@ fn collect_self_spell_cost_modifiers(
             let qty_expr = crate::types::ability::QuantityExpr::Ref {
                 qty: qty_ref.clone(),
             };
-            super::quantity::resolve_quantity(state, &qty_expr, caster, spell_id).max(0) as u32
+            super::quantity::resolve_quantity_with_casting_spell(
+                state,
+                &qty_expr,
+                caster,
+                spell_id,
+                super::filter::CastSpellContext {
+                    object_id: spell_id,
+                    casting_variant: casting_variant.unwrap_or_else(|| {
+                        super::filter::CastSpellContext::for_spell(state, spell_id).casting_variant
+                    }),
+                },
+            )
+            .max(0) as u32
         } else {
             1
         };
@@ -13024,12 +13038,18 @@ fn collect_battlefield_cost_modifiers(
                 };
                 // CR 205.2a + CR 607.2a: thread the spell as the `SharedCardTypes`
                 // intersection subject while `bf_id` remains the exile-link anchor.
-                super::quantity::resolve_quantity_with_spell(
+                super::quantity::resolve_quantity_with_casting_spell(
                     state,
                     &qty_expr,
                     source_controller,
                     bf_id,
-                    spell_id,
+                    super::filter::CastSpellContext {
+                        object_id: spell_id,
+                        casting_variant: casting_variant.unwrap_or_else(|| {
+                            super::filter::CastSpellContext::for_spell(state, spell_id)
+                                .casting_variant
+                        }),
+                    },
                 )
                 .max(0) as u32
             } else {
@@ -13177,11 +13197,18 @@ fn collect_battlefield_cost_modifiers(
                     let qty_expr = crate::types::ability::QuantityExpr::Ref {
                         qty: qty_ref.clone(),
                     };
-                    super::quantity::resolve_quantity(
+                    super::quantity::resolve_quantity_with_casting_spell(
                         state,
                         &qty_expr,
                         tce.controller,
                         tce.source_id,
+                        super::filter::CastSpellContext {
+                            object_id: spell_id,
+                            casting_variant: casting_variant.unwrap_or_else(|| {
+                                super::filter::CastSpellContext::for_spell(state, spell_id)
+                                    .casting_variant
+                            }),
+                        },
                     )
                     .max(0) as u32
                 } else {
@@ -23685,6 +23712,7 @@ fn apply_mana_spell_grants(
             // `SharesQuality` reference filter would have resolved via an object scan
             // only and could miss a registered-but-uninstantiated commander.
             let filter_ctx = crate::game::filter::FilterContext {
+                casting_spell: None,
                 source_id: unit.source_id,
                 source_controller: Some(caster),
                 ability: None,
@@ -29260,6 +29288,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }

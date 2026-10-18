@@ -1433,7 +1433,8 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
             chain_root.unwrap_or(WriteScope::EventObject)
         }
         TargetFilter::LastCreated => WriteScope::Created,
-        TargetFilter::None
+        TargetFilter::CastingSpell
+        | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
@@ -2388,6 +2389,7 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
 /// serde oracle's whole-value walk). `ParentTargetSlot` is deliberately excluded.
 fn legacy_target_filter(f: &TargetFilter) -> bool {
     match f {
+        TargetFilter::CastingSpell => false,
         // CR 102.1: the player-axis crossing. `legacy_player_filter` is the
         // authority for whether a player predicate carries a legacy-12 tag
         // (`PlayerAttribute`'s quantity payloads can), so delegate rather than
@@ -2645,6 +2647,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
 /// but classifies for member-boundness, not the frozen-12 tags.
 fn member_bound_target_filter(f: &TargetFilter) -> bool {
     match f {
+        TargetFilter::CastingSpell => false,
         // Per-source tracked/exiled/chosen storage, attachments, event- and
         // replacement-context referents (fail-closed: `ParentTargetSlot`/
         // `StackAbility` are parent/stack-context referents outside the legacy-12
@@ -7199,6 +7202,7 @@ fn filter_prop_reads_player_choice_label(prop: &FilterProp) -> bool {
 /// the 12 tags). Composite filters descend to catch nested event refs.
 fn rw_target_filter(x: &TargetFilter) -> RwProfile {
     let mut p = match x {
+        TargetFilter::CastingSpell => RwProfile::empty(),
         // D5 carriers (9 TargetFilter tags of the 12).
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner

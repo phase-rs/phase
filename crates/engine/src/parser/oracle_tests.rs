@@ -34267,3 +34267,86 @@ fn repeated_full_card_preserves_independent_instructions() {
     assert_eq!(coordinated.statics.len(), 1);
     assert!(coordinated.parse_warnings.is_empty());
 }
+
+// SHAPE: runtime payment/resolution is covered by integration::jev_cost_populations.
+#[test]
+fn locket_complete_name_population_shape() {
+    let oracle = "Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Locket of Yesterdays",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    assert!(parsed.abilities.is_empty());
+    assert_eq!(parsed.statics.len(), 1);
+    let StaticMode::ModifyCost {
+        mode,
+        amount,
+        dynamic_count:
+            Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::And { filters },
+            }),
+        ..
+    } = &parsed.statics[0].mode
+    else {
+        panic!("complete cost population")
+    };
+    assert_eq!(*mode, crate::types::statics::CostModifyMode::Reduce);
+    assert_eq!(*amount, crate::types::mana::ManaCost::generic(1));
+    assert_eq!(filters.len(), 3);
+    assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::card()));
+    assert_eq!(
+        filters[1],
+        TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(TargetFilter::CastingSpell)),
+                relation: SharedQualityRelation::Shares
+            }])
+        )
+    );
+    assert_eq!(
+        filters[2],
+        TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        ]))
+    );
+    assert_eq!(
+        parsed.statics[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+    for body in [
+        "card with the same name as that spell in your unknown",
+        "card with the same name as that spell in your graveyard unfinished",
+        "card with the same name as that impostor in your graveyard",
+        "card with the same name as that spellbook in your graveyard",
+    ] {
+        let text = format!("Spells you cast cost {{1}} less to cast for each {body}.");
+        let malformed = parse_oracle_text(
+            &text,
+            "Synthetic malformed Locket",
+            &[],
+            &["Artifact".into()],
+            &[],
+        );
+        assert!(malformed.statics.is_empty(), "{body}");
+        assert!(
+            !malformed.parse_warnings.is_empty()
+                || malformed
+                    .abilities
+                    .iter()
+                    .any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+            "malformed full source must remain visibly unsupported: {body}"
+        );
+    }
+}

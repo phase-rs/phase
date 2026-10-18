@@ -750,6 +750,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             format!("{tag_prefix}{kind_word}{controller_suffix} on stack")
         }
         TargetFilter::StackSpell => "spell on stack".into(),
+        TargetFilter::CastingSpell => "spell being cast".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
