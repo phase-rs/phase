@@ -77,6 +77,26 @@ fn recipient(
         }
         return Some(ObjectIncarnationRef::from_object(object));
     }
+    // CR 608.2k + CR 400.7: an untargeted context reference names its own
+    // referent, even if the chain inherited an unrelated announced target.
+    // Event roles use the shared mutation reader to check the event's stamp;
+    // other context references use their ordinary filter/slot authority.
+    if target.is_context_ref() && !matches!(target, TargetFilter::ParentTarget) {
+        let ids = match target {
+            TargetFilter::TriggeringSource | TargetFilter::EventTarget => {
+                crate::game::targeting::resolve_event_referent_objects(
+                    state,
+                    target,
+                    ability.source_id,
+                )
+            }
+            _ => crate::game::targeting::resolved_object_ids_for_filter(state, ability, target),
+        };
+        let [id] = ids.as_slice() else {
+            return None;
+        };
+        return state.objects.get(id).map(ObjectIncarnationRef::from_object);
+    }
     let (index, id) = ability
         .targets
         .iter()
@@ -859,6 +879,75 @@ mod tests {
             recipient(&state, &ability, &TargetFilter::ParentTarget).unwrap(),
             first_pin
         );
+        let context_id = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Context referent".into(),
+            Zone::Battlefield,
+        );
+        let context_pin = ObjectIncarnationRef::from_object(&state.objects[&context_id]);
+        state.current_trigger_event = Some(GameEvent::PermanentTapped {
+            object_id: context_id,
+            caused_by: None,
+            incarnation: Some(context_pin.incarnation),
+        });
+        state.objects.get_mut(&source).unwrap().attached_to =
+            Some(crate::game::game_object::AttachTarget::Object(context_id));
+        state.last_created_token_ids = vec![context_id];
+        for target in [
+            TargetFilter::TriggeringSource,
+            TargetFilter::AttachedTo,
+            TargetFilter::SpecificObject { id: context_id },
+            TargetFilter::GrantingObject {
+                bound: Some(context_pin),
+            },
+            TargetFilter::LastCreated,
+        ] {
+            assert_eq!(
+                recipient(&state, &ability, &target),
+                Some(context_pin),
+                "the context authority must override unrelated inherited targets: {target:?}"
+            );
+        }
+        assert_eq!(
+            recipient(
+                &state,
+                &ability,
+                &TargetFilter::ParentTargetSlot { index: 1 }
+            ),
+            Some(ObjectIncarnationRef::from_object(&state.objects[&second]))
+        );
+        state.objects.get_mut(&context_id).unwrap().incarnation += 1;
+        assert!(
+            recipient(&state, &ability, &TargetFilter::TriggeringSource).is_none(),
+            "the event's stale incarnation must not be recaptured"
+        );
+        assert!(recipient(
+            &state,
+            &ability,
+            &TargetFilter::GrantingObject {
+                bound: Some(context_pin)
+            }
+        )
+        .is_none());
+        state.last_created_token_ids.push(second);
+        assert!(
+            recipient(&state, &ability, &TargetFilter::LastCreated).is_none(),
+            "a singular instruction cannot silently select one member of a context set"
+        );
+        state.current_trigger_event = None;
+        state.objects.get_mut(&source).unwrap().attached_to = None;
+        for target in [
+            TargetFilter::TriggeringSource,
+            TargetFilter::EventTarget,
+            TargetFilter::AttachedTo,
+        ] {
+            assert!(
+                recipient(&state, &ability, &target).is_none(),
+                "absent context cannot substitute an inherited target: {target:?}"
+            );
+        }
         state.objects.get_mut(&first).unwrap().incarnation += 1;
         assert!(
             recipient(&state, &ability, &TargetFilter::ParentTarget).is_none(),

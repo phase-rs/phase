@@ -531,14 +531,94 @@ fn public_source_parent_excerpt_adds_first_counter_and_keeps_other_kinds() {
             let source = s
                 .add_creature_to_hand_from_oracle(P0, "Immard, the Stormcleaver", 4, 4, PARENT)
                 .id();
-            s.with_counter(source, charge(), initial)
-                .with_counter(source, oil(), 2)
-                .with_counter(other, charge(), 8);
+            s.with_counter(other, charge(), 8);
+            let oil_response = s
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic oil baseline response",
+                    true,
+                    "Put two oil counters on target creature.",
+                )
+                .id();
+            let charge_response = s
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic charge baseline response",
+                    true,
+                    "Put two charge counters on target creature.",
+                )
+                .id();
             let mut r = s.build();
             if add {
                 r = reload(r, true);
             }
-            let outcome = r.cast(source).resolve();
+            let mut committed = r.cast(source).commit();
+            let mut stacked = false;
+            for _ in 0..30 {
+                if committed.state().objects[&source].zone == Zone::Battlefield
+                    && committed
+                        .state()
+                        .stack
+                        .iter()
+                        .any(|entry| entry.source_id == source)
+                {
+                    stacked = true;
+                    break;
+                }
+                assert!(matches!(
+                    committed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                committed.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(stacked, "the public cast must stack its real ETB trigger");
+            // CR 122.2: establish counters on the entered permanent through
+            // public responses; counters on a hand card do not survive entry.
+            for response in [Some(oil_response), (initial > 0).then_some(charge_response)]
+                .into_iter()
+                .flatten()
+            {
+                let mut response_commit = committed.cast(response).target_object(source).commit();
+                for _ in 0..20 {
+                    if response_commit.state().objects[&response].zone == Zone::Graveyard {
+                        break;
+                    }
+                    assert!(matches!(
+                        response_commit.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    response_commit.act(GameAction::PassPriority).unwrap();
+                }
+                assert_eq!(
+                    response_commit.state().objects[&response].zone,
+                    Zone::Graveyard
+                );
+                assert!(response_commit
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == source));
+            }
+            assert_eq!(
+                committed.state().objects[&source]
+                    .counters
+                    .get(&charge())
+                    .copied()
+                    .unwrap_or(0),
+                initial
+            );
+            assert_eq!(
+                committed.state().objects[&source]
+                    .counters
+                    .get(&oil())
+                    .copied(),
+                Some(2)
+            );
+            assert!(matches!(
+                committed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            let outcome = committed.resolve();
             outcome.assert_zone(&[source], Zone::Battlefield);
             assert!(outcome.events().iter().any(|event| matches!(
                 event,
@@ -557,6 +637,292 @@ fn public_source_parent_excerpt_adds_first_counter_and_keeps_other_kinds() {
             assert_eq!(n(&r, source, &oil()), 2);
             assert_eq!(n(&r, other, &charge()), 8);
             assert_eq!(event_count(&events, source, &charge(), add), 1);
+        }
+    }
+}
+#[test]
+fn public_nonself_trigger_adjusts_its_event_recipient_and_refuses_departed_twin() {
+    // Synthetic class consumer. CR 608.2k + CR 400.7: "it" names the entering
+    // creature, and a later zone change cannot substitute another incarnation.
+    for departed in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let watcher = s
+            .add_creature_from_oracle(
+                P0,
+                "Synthetic nonself watcher",
+                2,
+                4,
+                "Whenever another creature enters, put a charge counter on it or remove one from it. You gain 1 life.",
+            )
+            .id();
+        let decoy = s.add_creature(P0, "Same entrant", 2, 4).id();
+        s.with_counter(watcher, charge(), 8)
+            .with_counter(watcher, oil(), 3)
+            .with_counter(decoy, charge(), 7);
+        let entrant = s
+            .add_creature_to_hand_from_oracle(P0, "Same entrant", 2, 4, "")
+            .id();
+        let response = s
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic event recipient departure",
+                true,
+                "Destroy target creature.",
+            )
+            .id();
+        let mut r = s.build();
+        let mut committed = r.cast(entrant).commit();
+        let mut stacked = false;
+        for _ in 0..30 {
+            if committed.state().objects[&entrant].zone == Zone::Battlefield
+                && committed
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == watcher)
+            {
+                stacked = true;
+                break;
+            }
+            assert!(matches!(
+                committed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            committed.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(stacked, "the real nonself ETB trigger must reach the stack");
+        let stamp = ObjectIncarnationRef::from_object(&committed.state().objects[&entrant]);
+        let trigger = committed
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == watcher)
+            .unwrap()
+            .ability()
+            .unwrap();
+        assert!(
+            trigger.targets.is_empty(),
+            "event recipients declare no target slot"
+        );
+        assert!(matches!(
+            trigger.effect,
+            Effect::ChooseCounterAdjustment {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ));
+        if departed {
+            let mut response_commit = committed.cast(response).target_object(entrant).commit();
+            for _ in 0..20 {
+                if response_commit.state().objects[&entrant].zone == Zone::Graveyard {
+                    break;
+                }
+                assert!(matches!(
+                    response_commit.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                response_commit.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(
+                response_commit.state().objects[&entrant].zone,
+                Zone::Graveyard
+            );
+            assert_ne!(
+                ObjectIncarnationRef::from_object(&response_commit.state().objects[&entrant]),
+                stamp
+            );
+            assert!(response_commit
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == watcher));
+        }
+        let outcome = committed.resolve();
+        assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::ChooseCounterAdjustment, source_id, .. } if *source_id == watcher)));
+        if departed {
+            outcome.assert_zone(&[entrant], Zone::Graveyard);
+            outcome.assert_life_delta(P0, 1);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(event_count(outcome.events(), entrant, &charge(), true), 0);
+            assert_eq!(n(&r, entrant, &charge()), 0);
+            let mut events = vec![];
+            finish(&mut r, &mut events);
+            assert_eq!(r.life(P0), 21);
+        } else {
+            outcome.assert_zone(&[entrant], Zone::Battlefield);
+            outcome.assert_life_delta(P0, 0);
+            prompt(&r, 1);
+            let WaitingFor::ChooseOneOfBranch {
+                parent_occurrences, ..
+            } = &r.state().waiting_for
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                parent_occurrences.occurrences(),
+                vec![(
+                    engine::types::ability::TargetRef::Object(entrant),
+                    Some(stamp)
+                )]
+            );
+            r = reload(r, true);
+            let events = choose(&mut r, 0);
+            assert_eq!(n(&r, entrant, &charge()), 1);
+            assert_eq!(event_count(&events, entrant, &charge(), true), 1);
+            assert_eq!(event_count(&events, entrant, &charge(), false), 0);
+            assert_eq!(r.life(P0), 21);
+        }
+        assert_eq!(n(&r, watcher, &charge()), 8);
+        assert_eq!(n(&r, watcher, &oil()), 3);
+        assert_eq!(n(&r, decoy, &charge()), 7);
+    }
+}
+#[test]
+fn public_damage_trigger_adjustment_uses_event_target_instead_of_dealer() {
+    // Synthetic passive-voice class. CR 608.2k: the damaged creature is "it".
+    for index in [0, 1] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let watcher = s.add_creature_from_oracle(
+            P0, "Synthetic damage watcher", 2, 4,
+            "Whenever a creature is dealt damage, put a charge counter on it or remove one from it. You gain 1 life.",
+        ).id();
+        let recipient = s.add_creature(P1, "Damage recipient", 2, 4).id();
+        let decoy = s.add_creature(P0, "Other recipient", 2, 4).id();
+        s.with_counter(recipient, charge(), 2)
+            .with_counter(recipient, oil(), 2)
+            .with_counter(watcher, charge(), 8)
+            .with_counter(decoy, charge(), 7);
+        let spell = s
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic damage dealer",
+                true,
+                "Deal 1 damage to target creature.",
+            )
+            .id();
+        let mut r = s.build();
+        let outcome = r.cast(spell).target_object(recipient).resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_life_delta(P0, 0);
+        assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::DamageDealt { source_id, target: engine::types::ability::TargetRef::Object(id), amount: 1, .. } if *source_id == spell && *id == recipient)));
+        prompt(&r, 2);
+        let WaitingFor::ChooseOneOfBranch {
+            parent_occurrences, ..
+        } = &r.state().waiting_for
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            parent_occurrences.occurrences(),
+            vec![(
+                engine::types::ability::TargetRef::Object(recipient),
+                Some(ObjectIncarnationRef::from_object(
+                    &r.state().objects[&recipient]
+                ))
+            )]
+        );
+        r = reload(r, true);
+        let events = choose(&mut r, index);
+        assert_eq!(n(&r, recipient, &charge()), if index == 0 { 1 } else { 3 });
+        assert_eq!(event_count(&events, recipient, &charge(), index == 1), 1);
+        assert_eq!(event_count(&events, spell, &charge(), true), 0);
+        assert_eq!(n(&r, recipient, &oil()), 2);
+        assert_eq!(n(&r, watcher, &charge()), 8);
+        assert_eq!(n(&r, decoy, &charge()), 7);
+        assert_eq!(n(&r, spell, &charge()), 0);
+        assert_eq!(r.life(P0), 21);
+    }
+}
+#[test]
+fn loaded_bound_context_adjustment_delivers_and_keeps_pin_after_pause() {
+    // Synthetic loaded-definition consumer of the ordinary context-filter reader.
+    // CR 400.7: a new incarnation after the actual prompt cannot receive delivery.
+    for stale in [false, true] {
+        for index in [0, 1] {
+            let mut s = GameScenario::new();
+            s.at_phase(Phase::PreCombatMain);
+            let recipient = s.add_creature(P0, "Bound recipient", 2, 4).id();
+            let decoy = s.add_creature(P0, "Bound context decoy", 2, 4).id();
+            s.with_counter(recipient, charge(), 2)
+                .with_counter(recipient, oil(), 2)
+                .with_counter(decoy, charge(), 8);
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseCounterAdjustment {
+                    adjustment: CounterAdjustment::AddOrRemove,
+                    counters: CounterMatch::OfType(charge()),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SpecificObject { id: recipient },
+                },
+            );
+            def.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )));
+            let def: AbilityDefinition =
+                serde_json::from_str(&serde_json::to_string(&def).unwrap()).unwrap();
+            let spell = s
+                .add_spell_to_hand(P0, "Synthetic bound context", true)
+                .with_ability_definition(def)
+                .id();
+            let mut r = s.build();
+            let outcome = r.cast(spell).resolve();
+            outcome.assert_zone(&[spell], Zone::Graveyard);
+            outcome.assert_life_delta(P0, 0);
+            prompt(&r, 2);
+            let pin = ObjectIncarnationRef::from_object(&r.state().objects[&recipient]);
+            let WaitingFor::ChooseOneOfBranch {
+                parent_occurrences, ..
+            } = &r.state().waiting_for
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                parent_occurrences.occurrences(),
+                vec![(
+                    engine::types::ability::TargetRef::Object(recipient),
+                    Some(pin)
+                )]
+            );
+            r = reload(r, true);
+            if stale {
+                // Marked hostile mutation: no legal priority action exists in this pause.
+                r.state_mut()
+                    .objects
+                    .get_mut(&recipient)
+                    .unwrap()
+                    .incarnation += 1;
+                assert_ne!(
+                    ObjectIncarnationRef::from_object(&r.state().objects[&recipient]),
+                    pin
+                );
+            }
+            let events = choose(&mut r, index);
+            assert_eq!(
+                n(&r, recipient, &charge()),
+                if stale {
+                    2
+                } else if index == 0 {
+                    1
+                } else {
+                    3
+                }
+            );
+            assert_eq!(
+                event_count(&events, recipient, &charge(), index == 1),
+                if stale { 0 } else { 1 }
+            );
+            assert_eq!(n(&r, recipient, &oil()), 2);
+            assert_eq!(n(&r, decoy, &charge()), 8);
+            assert_eq!(r.life(P0), 21);
         }
     }
 }
