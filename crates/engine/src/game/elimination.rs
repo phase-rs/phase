@@ -2106,6 +2106,7 @@ mod tests {
             requests: vec![
                 crate::types::game_state::PendingBatchZoneMoveRequest {
                     object_id: leaving,
+                    expected_origin: None,
                     destination: Zone::Graveyard,
                     cause: crate::types::game_state::PendingBatchZoneChangeCause::StateBasedAction,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -2126,6 +2127,7 @@ mod tests {
                 },
                 crate::types::game_state::PendingBatchZoneMoveRequest {
                     object_id: surviving,
+                    expected_origin: None,
                     destination: Zone::Graveyard,
                     cause: crate::types::game_state::PendingBatchZoneChangeCause::StateBasedAction,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,

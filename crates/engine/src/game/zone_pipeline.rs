@@ -35,6 +35,50 @@ use crate::game::effects::change_zone::shuffle_library;
 use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::ability::FaceDownProfile;
 
+#[cfg(test)]
+mod instruction_origin_tests {
+    use super::*;
+    #[test]
+    fn original_proposal_checks_pin_before_entry_replacements() {
+        for fault in 0..3 {
+            let mut state = GameState::new_two_player(42);
+            let id = zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(1),
+                PlayerId(1),
+                "Selected member".into(),
+                Zone::Library,
+            );
+            let pin = ObjectIncarnationRef::from_object(&state.objects[&id]);
+            let request = ZoneMoveRequest::effect(id, Zone::Battlefield, ObjectId(99))
+                .performed_by(PlayerId(0))
+                .expecting_origin(pin, Zone::Library);
+            let request = ZoneMoveRequest::from_pending(request.into_pending());
+            assert_eq!(request.expected_origin, Some((pin, Zone::Library)));
+            match fault {
+                1 => zones::move_to_zone(&mut state, id, Zone::Hand, &mut Vec::new()),
+                2 => {
+                    zones::move_to_zone(&mut state, id, Zone::Hand, &mut Vec::new());
+                    zones::move_to_zone(&mut state, id, Zone::Library, &mut Vec::new());
+                }
+                _ => {}
+            }
+            let mut events = Vec::new();
+            move_object_with_terminal(&mut state, request, &mut events);
+            if fault == 0 {
+                assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+                assert_eq!(state.objects[&id].controller, PlayerId(1));
+            } else {
+                assert_ne!(state.objects[&id].zone, Zone::Battlefield);
+                assert!(
+                    events.is_empty(),
+                    "stale original proposal never reaches replacement consult"
+                );
+            }
+        }
+    }
+}
+
 /// Why this zone change is happening. Determines pipeline engagement (PLAN §3)
 /// and is carried onto `ProposedEvent::ZoneChange.cause` / `ZoneChangeRecord`.
 ///
@@ -197,6 +241,7 @@ pub struct ExileLinkSpec {
 /// pipeline copy except change_zone already did this).
 pub struct ZoneMoveRequest {
     pub object_id: ObjectId,
+    pub expected_origin: Option<(ObjectIncarnationRef, Zone)>,
     pub to: Zone,
     pub cause: ZoneChangeCause,
     pub mods: EntryMods,
@@ -217,6 +262,11 @@ pub struct ZoneMoveRequest {
 }
 
 impl ZoneMoveRequest {
+    /// CR 400.7: preserve the selected incarnation until its original proposal.
+    pub(crate) fn expecting_origin(mut self, pin: ObjectIncarnationRef, zone: Zone) -> Self {
+        self.expected_origin = Some((pin, zone));
+        self
+    }
     fn into_pending(self) -> PendingBatchZoneMoveRequest {
         let cause = match self.cause {
             ZoneChangeCause::Effect { source } => PendingBatchZoneChangeCause::Effect { source },
@@ -243,6 +293,7 @@ impl ZoneMoveRequest {
         };
         PendingBatchZoneMoveRequest {
             object_id: self.object_id,
+            expected_origin: self.expected_origin,
             destination: self.to,
             cause,
             enter_tapped: self.mods.enter_tapped,
@@ -289,6 +340,7 @@ impl ZoneMoveRequest {
         };
         Self {
             object_id: pending.object_id,
+            expected_origin: pending.expected_origin,
             to: pending.destination,
             cause,
             mods: EntryMods {
@@ -317,6 +369,7 @@ impl ZoneMoveRequest {
     pub fn effect(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::Effect { source },
             mods: EntryMods::default(),
@@ -331,6 +384,7 @@ impl ZoneMoveRequest {
     pub fn cost(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::Cost { source },
             mods: EntryMods::default(),
@@ -349,6 +403,7 @@ impl ZoneMoveRequest {
     pub fn spell_resolution_default(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::SpellResolutionDefault,
             mods: EntryMods::default(),
@@ -363,6 +418,7 @@ impl ZoneMoveRequest {
     pub fn state_based_action(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::StateBasedAction,
             mods: EntryMods::default(),
@@ -390,6 +446,7 @@ impl ZoneMoveRequest {
     ) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to: Zone::Hand,
             cause: ZoneChangeCause::Draw {
                 seed_applied: seed_applied.clone(),
@@ -411,6 +468,7 @@ impl ZoneMoveRequest {
     pub fn casting_to_stack(object_id: ObjectId, source: ObjectId, caster: PlayerId) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to: Zone::Stack,
             cause: ZoneChangeCause::CastingToStack { source },
             mods: EntryMods {
@@ -431,6 +489,7 @@ impl ZoneMoveRequest {
     pub fn pregame(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::PregameProcedure,
             mods: EntryMods::default(),
@@ -446,6 +505,7 @@ impl ZoneMoveRequest {
     pub fn player_left_game(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::PlayerLeftGame,
             mods: EntryMods::default(),
@@ -463,6 +523,7 @@ impl ZoneMoveRequest {
     pub(crate) fn merged_component(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::MergedComponentRouting,
             mods: EntryMods::default(),
@@ -477,6 +538,7 @@ impl ZoneMoveRequest {
     pub fn debug(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::DebugCommand,
             mods: EntryMods::default(),
@@ -788,6 +850,14 @@ pub(crate) fn move_object_with_terminal(
     };
     let from_zone = object.zone;
     let member = ObjectIncarnationRef::from_object(object);
+    // CR 400.7: every original proposal, including a resumed queued member,
+    // must still name the selected object in its selected zone.
+    if req
+        .expected_origin
+        .is_some_and(|(pin, zone)| pin != member || zone != from_zone)
+    {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
 
     // CR 111.8 + CR 603.2g (PLAN §8 Risk #11): Hoist the cheap object-level guards that
     // `zones::move_to_zone` enforces unconditionally to BEFORE the replacement
@@ -7593,6 +7663,7 @@ mod sought_completion_order_tests {
             .return_result_frames
             .values()
             .flat_map(|frame| frame.values())
+            .filter_map(|result| result.zone_changes())
             .find(|records| !records.is_empty())
             .unwrap()[0]
             .clone();

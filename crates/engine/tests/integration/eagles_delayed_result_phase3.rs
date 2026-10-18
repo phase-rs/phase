@@ -1748,7 +1748,10 @@ fn paused_return_result_restore_rejects_corrupt_authority_before_resume() {
         .return_result_frames
         .get_mut(&occurrence_id)
         .unwrap()
-        .insert(ReturnResultId(u32::MAX), vec![secret_record]);
+        .insert(
+            ReturnResultId(u32::MAX),
+            engine::types::game_state::InstructionResult::ZoneChanges(vec![secret_record]),
+        );
     leak_probe.active_return_result_occurrence = Some(occurrence_id);
     assert!(serde_json::to_string(&leak_probe)
         .expect("private result carrier serializes")

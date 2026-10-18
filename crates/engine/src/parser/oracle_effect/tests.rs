@@ -124,17 +124,23 @@ fn ordinary_scoped_reveal_carries_unless_payment() {
 #[test]
 fn all_revealed_consumer_preserves_complete_gap_at_both_entries() {
     for fragment in [
-        "If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control",
         "If all cards revealed in this way are artifact cards, draw a card",
         "Then if all cards revealed this way are unsupported predicates, do something unsupported",
     ] {
         let leaf = parse_effect_clause(fragment, &mut ParseContext::default());
-        assert!(matches!(&leaf.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source == fragment));
+        assert!(
+            matches!(&leaf.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source == fragment)
+        );
         let text = format!("Each player reveals the top card of their library. {fragment}.");
         let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
         assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
-        assert!(matches!(ir.clauses[0].parsed.effect, Effect::Dig { .. } | Effect::RevealTop { .. }));
-        assert!(matches!(&ir.clauses[1].parsed.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case(fragment)));
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::Dig { .. } | Effect::RevealTop { .. }
+        ));
+        assert!(
+            matches!(&ir.clauses[1].parsed.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case(fragment))
+        );
     }
     // Adjacent non-universal conditions retain their own admission route.
     for text in [
@@ -149,6 +155,113 @@ fn all_revealed_consumer_preserves_complete_gap_at_both_entries() {
         assert!(
             !matches!(&clause.effect, Effect::Unimplemented { name, .. } if name == "all_revealed_result_consumer")
         );
+    }
+}
+
+#[test]
+fn all_revealed_reader_requires_exact_clause_owner() {
+    let unbound = "If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control";
+    assert!(matches!(
+        parse_effect_clause(unbound, &mut ParseContext::default()).effect,
+        Effect::Unimplemented { .. }
+    ));
+    for predicate in ["creature", "artifact"] {
+        let text = format!("Each player reveals the top two cards of their library. If all cards revealed this way are {predicate} cards, put those cards onto the battlefield under their owners' control.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert_eq!(
+            ir.clauses[1]
+                .reads_return_result
+                .as_ref()
+                .map(|(id, _)| *id),
+            Some(ir.clauses[0].id)
+        );
+        let chain = parse_effect_chain(&text, AbilityKind::Spell);
+        let reader = chain.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            reader.reads_return_result.as_ref().map(|(id, _)| *id),
+            chain.declares_return_result
+        );
+        assert!(matches!(
+            *reader.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::None,
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                enters_under: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            reader.condition,
+            Some(AbilityCondition::QuantityCheck { .. })
+        ));
+        assert_eq!(reader.player_scope, None);
+    }
+}
+
+#[test]
+fn all_revealed_relation_refuses_ambiguous_producers_and_residuals() {
+    let reader = "If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    for producer in [
+        "You may reveal the top card of your library.",
+        "Reveal the top card of your library unless you pay 1 life.",
+        "If you control a creature, reveal the top card of your library.",
+        "Look at the top card of your library.",
+        "Reveal cards from the top of your library until you reveal a creature card.",
+    ] {
+        let text = format!("{producer} {reader}");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        let last = ir.clauses.last().unwrap();
+        assert!(
+            matches!(last.parsed.effect, Effect::Unimplemented { .. }),
+            "{text}: {ir:#?}"
+        );
+        assert!(last.reads_return_result.is_none());
+    }
+    for suffix in [
+        " tapped",
+        " with an additional +1/+1 counter on them",
+        " while you control a creature",
+    ] {
+        let text = format!("Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control{suffix}.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::RevealTop { .. } | Effect::Dig { .. }
+        ));
+        assert!(
+            ir.clauses
+                .iter()
+                .any(|clause| matches!(clause.parsed.effect, Effect::Unimplemented { .. })),
+            "{ir:#?}"
+        );
+    }
+    for text in [
+        format!("Reveal the top card of your library.\n\n{reader}"),
+        format!("Choose one —\n• Reveal the top card of your library.\n• {reader}"),
+    ] {
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic relation boundary",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert!(!parsed.abilities.is_empty());
+        fn check(definition: &AbilityDefinition) {
+            assert!(definition.declares_return_result.is_none());
+            assert!(definition.reads_return_result.is_none());
+            if let Some(sub) = &definition.sub_ability {
+                check(sub);
+            }
+            for mode in &definition.mode_abilities {
+                check(mode);
+            }
+        }
+        for definition in &parsed.abilities {
+            check(definition);
+        }
     }
 }
 use crate::game::coverage::card_face_has_unimplemented_parts;

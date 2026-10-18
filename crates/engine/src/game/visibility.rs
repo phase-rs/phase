@@ -14837,6 +14837,7 @@ mod sought_result_privacy_tests {
             .return_result_frames
             .values_mut()
             .flat_map(|frame| frame.values_mut())
+            .filter_map(|result| result.zone_changes_mut())
             .find(|records| !records.is_empty())
             .unwrap();
         records[0].name = "PRIVATE_SOUGHT_RESULT_SENTINEL".into();

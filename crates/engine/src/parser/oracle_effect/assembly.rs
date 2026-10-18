@@ -2076,6 +2076,128 @@ fn valid_sought_cost_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {
             ))
 }
 
+fn valid_all_revealed_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {
+    let Some((id, spec)) = &reader.reads_return_result else {
+        return false;
+    };
+    if reader.revealed_result_reader().as_ref() != Some(spec) {
+        return false;
+    }
+    let Some(reader_index) = ir
+        .clauses
+        .iter()
+        .position(|clause| std::ptr::eq(clause, reader))
+    else {
+        return false;
+    };
+    let mut producers = ir
+        .clauses
+        .iter()
+        .enumerate()
+        .filter(|(_, clause)| clause.id == *id);
+    let Some((index, producer)) = producers.next() else {
+        return false;
+    };
+    producers.next().is_none()
+        && index < reader_index
+        && index + 1 == reader_index
+        && producer.id < reader.id
+        && producer.revealed_result_producer()
+        && (producer.repeat_for.is_none() || index == 0)
+}
+
+#[cfg(test)]
+mod revealed_reader_assembly_tests {
+    use super::*;
+    #[test]
+    fn all_revealed_stored_owner_and_complete_reader_are_validated() {
+        let text = "Reveal the top card of your library. Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+        let ir =
+            super::super::parse_effect_chain_ir(text, AbilityKind::Spell, &mut Default::default());
+        assert_eq!(ir.clauses.len(), 3);
+        assert_eq!(
+            ir.clauses[2].reads_return_result.as_ref().unwrap().0,
+            ir.clauses[1].id
+        );
+        assert!(valid_all_revealed_reader(&ir, &ir.clauses[2]));
+        let positive = assemble_effect_chain(&ir);
+        let producer = positive.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            producer.declares_return_result,
+            Some(ReturnResultId(ir.clauses[1].id.0))
+        );
+        for fault in 0..13 {
+            let mut bad = ir.clone();
+            match fault {
+                0 => bad.clauses[2].reads_return_result = None,
+                1 => bad.clauses[2].reads_return_result.as_mut().unwrap().0 = ClauseId(999),
+                2 => bad.clauses[0].id = bad.clauses[1].id,
+                3 => bad.clauses[2].reads_return_result.as_mut().unwrap().0 = bad.clauses[2].id,
+                4 => bad.clauses[1].is_optional = true,
+                5 => {
+                    bad.clauses[1].parsed.effect = Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    }
+                }
+                6 => {
+                    bad.clauses[2].reads_return_result.as_mut().unwrap().1.noun = TargetFilter::Any
+                }
+                7 => bad.clauses[2].condition = None,
+                8 => {
+                    if let Effect::ChangeZone { destination, .. } =
+                        &mut bad.clauses[2].parsed.effect
+                    {
+                        *destination = Zone::Hand;
+                    }
+                }
+                9 => {
+                    bad.clauses[2]
+                        .reads_return_result
+                        .as_mut()
+                        .unwrap()
+                        .1
+                        .recipient = ControllerRef::You
+                }
+                10 => {
+                    bad.clauses[1].disposition = ClauseDisposition::Continue { continuation: None }
+                }
+                11 => {
+                    bad.clauses[1].disposition = ClauseDisposition::Absorb {
+                        rider: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                player: TargetFilter::Controller,
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                        )),
+                        kind: AbsorbKind::DieExile,
+                    }
+                }
+                12 => bad.clauses[2].reads_return_result.as_mut().unwrap().0 = bad.clauses[0].id,
+                _ => unreachable!(),
+            }
+            assert!(
+                !valid_all_revealed_reader(&bad, &bad.clauses[2]),
+                "fault {fault}"
+            );
+            let output = assemble_effect_chain(&bad);
+            let nodes: Vec<_> =
+                std::iter::successors(Some(&output), |node| node.sub_ability.as_deref()).collect();
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| matches!(*node.effect, Effect::Unimplemented { .. })),
+                "fault {fault}: {output:#?}"
+            );
+            assert!(nodes
+                .iter()
+                .all(|node| node.reads_return_result.is_none()
+                    && node.declares_return_result.is_none()));
+        }
+    }
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -2936,7 +3058,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             target, modification: crate::types::ability::PerpetualModification::ModifyCost { .. }
         } if (*target == TargetFilter::None || clause_ir.reads_return_result.is_some())
             && !valid_sought_cost_reader(ir, clause_ir));
-        let clause_effect = if invalid_sought_reader {
+        let universal_source =
+            super::is_all_revealed_result_consumer(clause_ir.source.fragment().unwrap_or_default());
+        let invalid_revealed_reader = universal_source && !valid_all_revealed_reader(ir, clause_ir);
+        let clause_effect = if invalid_revealed_reader {
+            Effect::unimplemented(
+                "all_revealed_result_consumer",
+                clause_ir.source.fragment().unwrap_or_default(),
+            )
+        } else if invalid_sought_reader {
             Effect::unimplemented(
                 "sought_cost_antecedent",
                 clause_ir.source.fragment().unwrap_or_default(),
@@ -2958,13 +3088,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .as_ref()
                 .is_some_and(|(id, _)| *id == clause_ir.id)
                 && (!matches!(reader.parsed.effect, Effect::ApplyPerpetual { modification: crate::types::ability::PerpetualModification::ModifyCost { .. }, .. }) || valid_sought_cost_reader(ir, reader))
+                && (!super::is_all_revealed_result_consumer(reader.source.fragment().unwrap_or_default()) || valid_all_revealed_reader(ir, reader))
         }) {
             def.declares_return_result = Some(ReturnResultId(clause_ir.id.0));
         }
         def.reads_return_result = clause_ir
             .reads_return_result
             .as_ref()
-            .filter(|_| !invalid_sought_reader)
+            .filter(|_| !invalid_sought_reader && !invalid_revealed_reader)
             .map(|(id, spec)| (ReturnResultId(id.0), spec.clone()));
         // CR 702.26a: Preserve clause provenance on parent-target tap riders so
         // host-bound phase-in rewrites can match the exact printed phrase without

@@ -4652,6 +4652,41 @@ fn resolve_ref(
     chosen_x: Option<u32>,
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    if let Some(reader) =
+        ability.filter(|reader| crate::game::effects::is_named_revealed_reader(reader))
+    {
+        match qty {
+            QuantityRef::TrackedSetSize => {
+                return crate::game::effects::named_revealed_members(state, reader)
+                    .map(|members| usize_to_i32_saturating(members.len()))
+                    .unwrap_or(0)
+            }
+            QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by: None,
+            } => {
+                let context = crate::game::filter::FilterContext::from_ability(reader);
+                return crate::game::effects::named_revealed_members(state, reader)
+                    .map(|members| {
+                        usize_to_i32_saturating(
+                            members
+                                .iter()
+                                .filter(|pin| {
+                                    crate::game::filter::matches_target_filter(
+                                        state,
+                                        pin.object_id,
+                                        filter,
+                                        &context,
+                                    )
+                                })
+                                .count(),
+                        )
+                    })
+                    .unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
     let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller

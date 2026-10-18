@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn ordinary_reveal_public_document_and_preserve_gap() {
+fn game_preserve_complete_public_reveal_chain() {
     let scalar = "Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.";
     let parsed = parse_oracle_text(scalar, "Synthetic aggregate", &[], &["Instant".into()], &[]);
     assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
@@ -52,10 +52,31 @@ fn ordinary_reveal_public_document_and_preserve_gap() {
     assert_eq!(parsed.triggers.len(), 1);
     let head = parsed.triggers[0].execute.as_deref().unwrap();
     assert!(matches!(*head.effect, Effect::RevealTop { .. }));
-    let gap = head.sub_ability.as_deref().unwrap();
-    assert!(
-        matches!(&*gap.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case("If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control"))
+    let reader = head.sub_ability.as_deref().unwrap();
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert_eq!(
+        reader.reads_return_result.as_ref().map(|(id, _)| *id),
+        head.declares_return_result
     );
+    assert!(head.declares_return_result.is_some());
+    assert!(matches!(
+        *reader.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::None,
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        reader.condition,
+        Some(AbilityCondition::QuantityCheck {
+            comparator: Comparator::EQ,
+            ..
+        })
+    ));
+    assert_eq!(reader.player_scope, None);
 }
 
 #[test]

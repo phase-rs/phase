@@ -4016,7 +4016,8 @@ impl ResolutionStack {
 /// every draw frame to carry its result owner explicitly, including `null`.
 /// Version 5 adds the simultaneous-draw dealer to the draw frame.
 /// Version 6 carries exact creation owners, queued work, and saved copy tails.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
+/// Version 7 distinguishes revealed membership and preserves original queued origins.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 7;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4381,6 +4382,116 @@ fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Re
 /// and the typed-frame branch deserializes the field straight back into
 /// `ResolutionStack`.
 /// The move below is a rename, not a reinterpretation.
+fn visit_instruction_batches_mut(
+    value: &mut Value,
+    mut visit: impl FnMut(&mut Value) -> Result<(), String>,
+) -> Result<(), String> {
+    for carrier in ["resolution_stack", "resolution_frames"] {
+        if let Some(frames) = value
+            .get_mut(carrier)
+            .and_then(|stack| stack.get_mut("frames"))
+            .and_then(Value::as_array_mut)
+        {
+            for frame in frames {
+                if frame.get("type").and_then(Value::as_str) == Some("BatchDelivery") {
+                    if let Some(batch) = frame.get_mut("data") {
+                        visit(batch)?;
+                    }
+                }
+            }
+        }
+    }
+    for carrier in ["pending_batch_deliveries", "pending_mill_deliveries"] {
+        if let Some(batch) = value.get_mut(carrier).filter(|batch| !batch.is_null()) {
+            visit(batch)?;
+        }
+    }
+    Ok(())
+}
+
+fn has_current_instruction_result_markers(value: &Value) -> bool {
+    let revealed = value
+        .get("return_result_frames")
+        .and_then(Value::as_object)
+        .is_some_and(|frames| {
+            frames
+                .values()
+                .filter_map(Value::as_object)
+                .flat_map(|frame| frame.values())
+                .any(Value::is_object)
+        });
+    let mut origins = false;
+    let _ = visit_instruction_batches_mut(&mut value.clone(), |batch| {
+        origins |= batch
+            .get("requests")
+            .and_then(Value::as_array)
+            .is_some_and(|requests| {
+                requests
+                    .iter()
+                    .any(|request| request.get("expected_origin").is_some())
+            });
+        Ok(())
+    });
+    revealed || origins
+}
+
+fn validate_current_instruction_batches(value: &Value) -> Result<(), String> {
+    visit_instruction_batches_mut(&mut value.clone(), |batch| {
+        let remaining = batch
+            .get("remaining")
+            .and_then(Value::as_array)
+            .ok_or("current batch has no remaining members")?;
+        let requests = batch.get("requests").and_then(Value::as_array);
+        if requests.map_or(0, Vec::len) != remaining.len() {
+            return Err("current batch is missing exact queued requests".into());
+        }
+        if let Some(requests) = requests {
+            for (request, member) in requests.iter().zip(remaining) {
+                if request.get("object_id") != Some(member)
+                    || request.get("expected_origin").is_none()
+                {
+                    return Err("current batch request identity/origin is missing".into());
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod revealed_result_legacy_tests {
+    use super::*;
+    #[test]
+    fn legacy_zone_results_and_unpinned_queues_keep_their_real_consumers() {
+        let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        for version in 2..=6 {
+            let mut legacy = wire.clone();
+            legacy["resolution_state_version"] = Value::from(version);
+            visit_instruction_batches_mut(&mut legacy, |batch| {
+                if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                    for request in requests {
+                        request.as_object_mut().unwrap().remove("expected_origin");
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+            let restored: ResolutionStateWire = serde_json::from_value(legacy).unwrap();
+            let restored = restored.into_game_state();
+            assert!(restored
+                .return_result_frames
+                .values()
+                .flat_map(|frame| frame.values())
+                .all(|result| result.zone_changes().is_some()));
+            let mut loaded = crate::game::scenario::GameRunner::from_state(restored);
+            crate::game::effects::seek::tests::finish_sought_pause(&mut loaded, &cards);
+        }
+    }
+}
+
 pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), String> {
     reject_wire_projection_marker(value)?;
     let object = value
@@ -4389,6 +4500,8 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
     if object.contains_key("resolution_state_version") {
         return Ok(());
     }
+    let current_instruction_result = has_current_instruction_result_markers(value);
+    let object = value.as_object_mut().expect("checked object");
     let unversioned_stack_has_delivery_owner = object
         .get("resolution_stack")
         .map(has_draw_sequence_delivery_owner)
@@ -4470,7 +4583,9 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             object.insert("resolution_frames".to_string(), frames);
             object.insert(
                 "resolution_state_version".to_string(),
-                Value::from(if unversioned_stack_has_delivery_owner {
+                Value::from(if current_instruction_result {
+                    RESOLUTION_STATE_WIRE_VERSION
+                } else if unversioned_stack_has_delivery_owner {
                     LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
                 } else {
                     LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION
@@ -4480,7 +4595,11 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
         None => {
             object.insert(
                 "resolution_state_version".to_string(),
-                Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION),
+                Value::from(if current_instruction_result {
+                    RESOLUTION_STATE_WIRE_VERSION
+                } else {
+                    LEGACY_RESOLUTION_STATE_WIRE_VERSION
+                }),
             );
         }
     }
@@ -4593,15 +4712,47 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | 5 | RESOLUTION_STATE_WIRE_VERSION => {
-                GameStateDecodeMode::ResolutionWireV4
-            }
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+            | 5
+            | 6
+            | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, 6, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
+        if version < RESOLUTION_STATE_WIRE_VERSION {
+            let mut legacy_authority = value.clone();
+            visit_instruction_batches_mut(&mut legacy_authority, |batch| {
+                if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                    for request in requests {
+                        if request.get("expected_origin").is_some_and(Value::is_null) {
+                            request.as_object_mut().unwrap().remove("expected_origin");
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            if has_current_instruction_result_markers(&legacy_authority) {
+                return Err(
+                    "legacy resolution state cannot declare revealed-result/origin authority"
+                        .into(),
+                );
+            }
+            visit_instruction_batches_mut(&mut value, |batch| {
+                if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                    for request in requests {
+                        if let Some(request) = request.as_object_mut() {
+                            request.insert("expected_origin".into(), Value::Null);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        } else {
+            validate_current_instruction_batches(&value)?;
+        }
         if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
         }
@@ -6458,6 +6609,25 @@ mod tests {
         v1["pending_batch_deliveries"] =
             serde_json::to_value(pending).expect("legacy batch delivery serializes");
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        visit_instruction_batches_mut(&mut v1, |batch| {
+            if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                for request in requests {
+                    request.as_object_mut().unwrap().remove("expected_origin");
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut alias = v1.clone();
+        let batch = alias
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_batch_deliveries")
+            .unwrap();
+        alias["pending_mill_deliveries"] = batch;
+        let alias: ResolutionStateWire = serde_json::from_value(alias)
+            .expect("v1 mill alias remains an ordinary unpinned batch");
+        assert!(alias.game_state().active_batch_delivery().is_some());
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 batch delivery fixture converts through the wire")
@@ -7222,7 +7392,7 @@ mod tests {
 
     #[test]
     fn resolution_wire_contract_pins_v6_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 6);
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 7);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
@@ -9278,6 +9448,6 @@ mod tests {
         let error = serde_json::from_value::<ResolutionStateWire>(future)
             .expect_err("an unknown version is refused")
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, or 5"), "{error}");
+        assert!(error.contains("1, 2, 3, 4, 5, 6, or 7"), "{error}");
     }
 }

@@ -9,6 +9,29 @@ use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
+#[cfg(test)]
+mod revealed_result_following_condition_tests {
+    #[test]
+    fn game_preserve_following_condition_is_on_the_move() {
+        use crate::types::ability::{AbilityCondition, Effect};
+        let parsed = crate::parser::parse_oracle_text("At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Game Preserve", &[], &["Enchantment".into()], &[]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let head = parsed.triggers[0].execute.as_deref().unwrap();
+        assert!(head.condition.is_none());
+        assert!(matches!(*head.effect, Effect::RevealTop { .. }));
+        let reader = head.sub_ability.as_deref().unwrap();
+        assert!(matches!(
+            reader.condition,
+            Some(AbilityCondition::QuantityCheck { .. })
+        ));
+        assert!(head.declares_return_result.is_some());
+        assert_eq!(
+            reader.reads_return_result.as_ref().map(|(id, _)| *id),
+            head.declares_return_result
+        );
+    }
+}
+
 use super::oracle_effect::conditions::{source_saddled_filter, split_leading_conditional};
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
 use super::oracle_effect::{

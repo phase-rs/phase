@@ -27487,14 +27487,16 @@ impl ChosenGroupId {
     }
 }
 
-/// Identity of one zone-result instruction in a parsed ability chain.
-/// The historical wire name is retained for returns and digital Seek results.
+/// Identity of one instruction result in a parsed ability chain.
+/// The historical wire name covers zone changes and completed revealed membership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReturnResultId(pub u32);
 
 /// Printed relation to a zone-result producer. Delayed return consumers apply
 /// the noun/destination/recipient predicate; digital Seek grants consume that
-/// producer's completed moved cards, including redirected arrivals.
+/// producer's completed moved cards, including redirected arrivals. Revealed
+/// readers use Library/ParentTargetOwner to name the whole owner-entry set;
+/// the noun supplies only the universal predicate, never a subset to move.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReturnResultReadSpec {
     pub noun: TargetFilter,
@@ -44782,6 +44784,30 @@ mod chain_description_backfill_tests {
 #[cfg(test)]
 mod sought_result_serde_tests {
     use super::*;
+    #[test]
+    fn revealed_result_metadata_roundtrips_and_threads_existing_constructors() {
+        let parsed = crate::parser::parse_oracle_text("At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Game Preserve", &[], &["Enchantment".into()], &[]);
+        let definition = parsed.triggers[0].execute.as_deref().unwrap();
+        assert!(definition.declares_return_result.is_some());
+        let restored: AbilityDefinition =
+            serde_json::from_str(&serde_json::to_string(definition).unwrap()).unwrap();
+        assert_eq!(&restored, definition);
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            &restored,
+            crate::types::identifiers::ObjectId(9),
+            crate::types::player::PlayerId(0),
+        );
+        let reader = resolved.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            resolved.declares_return_result,
+            reader.reads_return_result.as_ref().map(|(id, _)| *id)
+        );
+        let roundtrip: ResolvedAbility =
+            serde_json::from_value(serde_json::to_value(&resolved).unwrap()).unwrap();
+        assert_eq!(roundtrip, resolved);
+        let swapped = crate::game::ability_utils::apply_instead_swap(&resolved, reader);
+        assert_eq!(swapped.reads_return_result, reader.reads_return_result);
+    }
     #[test]
     fn sought_result_populated_existing_shape_roundtrips_and_converts() {
         let text =

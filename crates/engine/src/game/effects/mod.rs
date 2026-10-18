@@ -1532,6 +1532,20 @@ pub(crate) fn publish_return_result(
     result_id: crate::types::ability::ReturnResultId,
     records: Vec<ZoneChangeRecord>,
 ) -> Result<(), EffectError> {
+    publish_instruction_result(
+        state,
+        occurrence_id,
+        result_id,
+        crate::types::game_state::InstructionResult::ZoneChanges(records),
+    )
+}
+
+fn publish_instruction_result(
+    state: &mut GameState,
+    occurrence_id: ReturnResultOccurrenceId,
+    result_id: crate::types::ability::ReturnResultId,
+    result: crate::types::game_state::InstructionResult,
+) -> Result<(), EffectError> {
     let frame = state
         .return_result_frames
         .get_mut(&occurrence_id)
@@ -1541,18 +1555,135 @@ pub(crate) fn publish_return_result(
             "duplicate return result".to_string(),
         ));
     }
-    frame.insert(result_id, records);
+    frame.insert(result_id, result);
     Ok(())
 }
 
 fn publish_empty_return_result_for_active(
     state: &mut GameState,
     result_id: crate::types::ability::ReturnResultId,
+    effect: &Effect,
 ) -> Result<(), EffectError> {
     let occurrence_id = state
         .active_return_result_occurrence
         .ok_or_else(|| EffectError::MissingParam("return result occurrence".to_string()))?;
-    publish_return_result(state, occurrence_id, result_id, Vec::new())
+    let result = if matches!(
+        effect,
+        Effect::RevealTop { .. } | Effect::Dig { reveal: true, .. }
+    ) {
+        crate::types::game_state::InstructionResult::RevealedCards(
+            crate::types::game_state::RevealedInstructionResult {
+                revealed_cards: Vec::new(),
+            },
+        )
+    } else {
+        crate::types::game_state::InstructionResult::ZoneChanges(Vec::new())
+    };
+    publish_instruction_result(state, occurrence_id, result_id, result)
+}
+
+pub(crate) fn publish_reveal_result_for_ability(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    ids: Vec<ObjectId>,
+) -> Result<(), EffectError> {
+    if let Some(result_id) = ability.declares_return_result {
+        let occurrence = state
+            .active_return_result_occurrence
+            .ok_or_else(|| EffectError::MissingParam("reveal occurrence".into()))?;
+        let members = ids
+            .iter()
+            .map(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .map(ObjectIncarnationRef::from_object)
+                    .ok_or_else(|| EffectError::MissingParam("revealed member".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        publish_instruction_result(
+            state,
+            occurrence,
+            result_id,
+            crate::types::game_state::InstructionResult::RevealedCards(
+                crate::types::game_state::RevealedInstructionResult {
+                    revealed_cards: members,
+                },
+            ),
+        )?;
+    }
+    publish_reveal_result(state, ids);
+    Ok(())
+}
+
+pub(crate) fn is_named_revealed_reader(ability: &ResolvedAbility) -> bool {
+    ability
+        .reads_return_result
+        .as_ref()
+        .is_some_and(|(_, spec)| {
+            matches!(ability.effect, Effect::ChangeZone { .. })
+                || (spec.destination == Zone::Library
+                    && spec.recipient == ControllerRef::ParentTargetOwner)
+        })
+}
+
+/// CR 608.2c + CR 400.7: both operands and the move read one exact occurrence.
+pub(crate) fn named_revealed_members<'a>(
+    state: &'a GameState,
+    ability: &ResolvedAbility,
+) -> Result<&'a [ObjectIncarnationRef], EffectError> {
+    named_revealed_members_for_occurrence(state, ability, state.active_return_result_occurrence)
+}
+
+pub(crate) fn named_revealed_members_for_occurrence<'a>(
+    state: &'a GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+) -> Result<&'a [ObjectIncarnationRef], EffectError> {
+    let Some((id, spec)) = &ability.reads_return_result else {
+        return Err(EffectError::MissingParam("reveal reader".into()));
+    };
+    let shape = matches!(&ability.effect, Effect::ChangeZone {
+        target: TargetFilter::None, origin: Some(crate::types::zones::Zone::Library), destination: crate::types::zones::Zone::Battlefield,
+        owner_library: false, enter_transformed: false, enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified, enters_attacking: false, up_to: false,
+        enter_with_counters, conditional_enter_with_counters, face_down_profile: None, enters_modified_if: None
+    } if enter_with_counters.is_empty() && conditional_enter_with_counters.is_empty());
+    let condition = matches!(&ability.condition, Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref { qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by: None } }, comparator: crate::types::ability::Comparator::EQ,
+        rhs: QuantityExpr::Ref { qty: QuantityRef::TrackedSetSize }
+    }) if filter.as_ref() == &spec.noun);
+    if !shape
+        || !condition
+        || ability.player_scope.is_some()
+        || ability.optional
+        || ability.unless_pay.is_some()
+        || ability.repeat_for.is_some()
+        || ability.repeat_until.is_some()
+        || spec.destination != crate::types::zones::Zone::Library
+        || spec.recipient != ControllerRef::ParentTargetOwner
+    {
+        return Err(EffectError::InvalidParam("reveal reader shape/spec".into()));
+    }
+    let occurrence =
+        occurrence.ok_or_else(|| EffectError::MissingParam("reveal occurrence".into()))?;
+    let members = state
+        .return_result_frames
+        .get(&occurrence)
+        .and_then(|frame| frame.get(id))
+        .and_then(|result| result.revealed_cards())
+        .ok_or_else(|| EffectError::MissingParam("named revealed result".into()))?;
+    let mut seen = std::collections::HashSet::new();
+    if members.iter().any(|pin| {
+        !seen.insert(pin.object_id)
+            || !pin.is_current(state)
+            || state.objects[&pin.object_id].zone != crate::types::zones::Zone::Library
+    }) {
+        return Err(EffectError::InvalidParam(
+            "revealed member identity/origin".into(),
+        ));
+    }
+    Ok(members)
 }
 
 fn branch_declares_return_result(
@@ -1591,6 +1722,202 @@ fn branch_declares_return_result(
             .mode_abilities
             .iter()
             .any(|mode| definition_declares_return_result(mode, result_id))
+}
+
+#[cfg(test)]
+mod revealed_instruction_authority_tests {
+    use super::*;
+    use crate::types::game_state::{InstructionResult, RevealedInstructionResult};
+
+    #[test]
+    fn revealed_reader_refuses_missing_wrong_kind_spec_and_occurrence_before_equality() {
+        let text = "Reveal the top card of your library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Synthetic exact reader",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let def = parsed.abilities[0].sub_ability.as_deref().unwrap();
+        let base =
+            crate::game::ability_utils::build_resolved_from_def(def, ObjectId(100), PlayerId(0));
+        assert!(is_named_revealed_reader(&base));
+        let id = base.reads_return_result.as_ref().unwrap().0;
+        for fault in 0..12 {
+            let mut state = GameState::new_two_player(42);
+            begin_return_result_occurrence(&mut state).unwrap();
+            let occurrence = state.active_return_result_occurrence.unwrap();
+            let mut reader = base.clone();
+            if fault != 0 {
+                let producer = crate::game::ability_utils::build_resolved_from_def(
+                    &parsed.abilities[0],
+                    ObjectId(100),
+                    PlayerId(0),
+                );
+                publish_reveal_result_for_ability(&mut state, &producer, Vec::new()).unwrap();
+            }
+            match fault {
+                1 => {
+                    state
+                        .return_result_frames
+                        .get_mut(&occurrence)
+                        .unwrap()
+                        .insert(id, InstructionResult::ZoneChanges(Vec::new()));
+                }
+                2 => {
+                    reader.reads_return_result.as_mut().unwrap().0 =
+                        crate::types::ability::ReturnResultId(u32::MAX);
+                }
+                3 => {
+                    reader.reads_return_result.as_mut().unwrap().1.destination = Zone::Hand;
+                }
+                4 => {
+                    reader.reads_return_result.as_mut().unwrap().1.recipient = ControllerRef::You;
+                }
+                5 => {
+                    begin_return_result_occurrence(&mut state).unwrap();
+                }
+                6 => {
+                    reader.condition = Some(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Fixed { value: 0 },
+                        comparator: crate::types::ability::Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    });
+                }
+                7 => {
+                    let member = crate::game::zones::create_object(
+                        &mut state,
+                        crate::types::identifiers::CardId(1),
+                        PlayerId(0),
+                        "Duplicate current member".into(),
+                        Zone::Library,
+                    );
+                    let pin = ObjectIncarnationRef::from_object(&state.objects[&member]);
+                    state
+                        .return_result_frames
+                        .get_mut(&occurrence)
+                        .unwrap()
+                        .insert(
+                            id,
+                            InstructionResult::RevealedCards(RevealedInstructionResult {
+                                revealed_cards: vec![pin; 2],
+                            }),
+                        );
+                }
+                9 => state.return_result_frames.clear(),
+                10 => reader.reads_return_result.as_mut().unwrap().1.noun = TargetFilter::Any,
+                11 => {
+                    reader.effect = Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 7 },
+                    }
+                }
+                _ => {}
+            }
+            let mut events = Vec::new();
+            let result = resolve_chain_body(&mut state, &reader, &mut events, 1);
+            if fault == 8 {
+                assert!(result.is_ok(), "present empty is an authorized 0==0");
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChangeZone,
+                        ..
+                    }
+                )));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "unavailable authority must not become numeric zero: {fault}"
+                );
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChangeZone,
+                        ..
+                    }
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn exact_reveal_counts_ignore_newest_mirror_and_stale_battlefield_lki() {
+        let mut s = crate::game::scenario::GameScenario::new();
+        let member = s
+            .add_creature_to_hand(PlayerId(0), "Current creature", 2, 2)
+            .id();
+        let decoy = s.add_land_to_library_top(PlayerId(0), "Decoy land").id();
+        let mut runner = s.build();
+        let state = runner.state_mut();
+        crate::game::zones::move_to_zone(state, member, Zone::Library, &mut Vec::new());
+        let mut stale = state.objects[&member].snapshot_public_characteristics();
+        stale.card_types = vec![crate::types::card_type::CoreType::Land];
+        state.lki_cache.insert(member, stale);
+        let parsed = crate::parser::parse_oracle_text("Reveal the top card of your library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Synthetic exact reader", &[], &["Instant".into()], &[]);
+        let reader = crate::game::ability_utils::build_resolved_from_def(
+            parsed.abilities[0].sub_ability.as_deref().unwrap(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        begin_return_result_occurrence(state).unwrap();
+        let id = reader.reads_return_result.as_ref().unwrap().0;
+        publish_reveal_result_for_ability(
+            state,
+            &{
+                let mut producer = crate::game::ability_utils::build_resolved_from_def(
+                    &parsed.abilities[0],
+                    ObjectId(100),
+                    PlayerId(0),
+                );
+                producer.declares_return_result = Some(id);
+                producer
+            },
+            vec![member],
+        )
+        .unwrap();
+        publish_reveal_result(state, vec![decoy]);
+        let AbilityCondition::QuantityCheck { lhs, rhs, .. } = reader.condition.as_ref().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(state, lhs, &reader),
+            1
+        );
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(state, rhs, &reader),
+            1
+        );
+        assert!(evaluate_condition(
+            reader.condition.as_ref().unwrap(),
+            state,
+            &reader
+        ));
+        let enclosing = state.active_return_result_occurrence;
+        with_iteration_return_result_occurrence(state, &reader, |child| {
+            assert_ne!(child.active_return_result_occurrence, enclosing);
+            let mut producer = reader.clone();
+            producer.declares_return_result = Some(id);
+            publish_reveal_result_for_ability(child, &producer, Vec::new())?;
+            assert_eq!(
+                crate::game::quantity::resolve_quantity_with_targets(child, lhs, &reader),
+                0
+            );
+            assert_eq!(
+                crate::game::quantity::resolve_quantity_with_targets(child, rhs, &reader),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(state.active_return_result_occurrence, enclosing);
+        assert_eq!(named_revealed_members(state, &reader).unwrap().len(), 1);
+        change_zone::resolve(state, &reader, &mut Vec::new()).unwrap();
+        assert_eq!(state.objects[&member].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&decoy].zone, Zone::Library);
+    }
 }
 
 /// Clears replacement-scoped token facts only after the authoritative stack drains.
@@ -4807,7 +5134,7 @@ pub(super) fn resolve_optional_effect_decision(
                     .as_deref()
                     .is_none_or(|branch| !branch_declares_return_result(branch, result_id))
                 {
-                    publish_empty_return_result_for_active(state, result_id)?;
+                    publish_empty_return_result_for_active(state, result_id, &ability.effect)?;
                 }
             }
             if let Some(branch) = decline_branch {
@@ -7458,6 +7785,10 @@ fn detach_after_player_scope_local_chain(
     referent_introduced: bool,
 ) -> Option<Box<ResolvedAbility>> {
     let mut next = node.sub_ability.take()?;
+    if is_named_revealed_reader(&next) {
+        next.player_scope = None;
+        return Some(next);
+    }
     // CR 115.10 + CR 608.2c: a decline-branch sub-ability whose own condition is
     // a performed-gate (IfYouDo / IfAPlayerDoes / Not-wrapped / composite) is
     // per-opponent by construction — its gate only has meaning relative to the
@@ -15641,6 +15972,11 @@ fn resolve_chain_body(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
+    if is_named_revealed_reader(ability) && ability.player_scope.is_some() {
+        return Err(EffectError::InvalidParam(
+            "named revealed reader cannot fan out".into(),
+        ));
+    }
     // CR 115.10a + CR 301.5f + CR 303.4b: an untargeted "enchanted/equipped X"
     // recipient is bound to the source's host as this instruction begins to
     // resolve, before its conditions and effect read it. With no provable host
@@ -16493,6 +16829,9 @@ fn resolve_chain_body(
     // CR 608.2c: Evaluate top-level condition before emitting any optional or unless-pay
     // choice. This must run after player_scope binding so scoped abilities test
     // conditions relative to the scoped player.
+    if is_named_revealed_reader(ability) {
+        named_revealed_members(state, ability)?;
+    }
     if let Some(ref condition) = ability.condition {
         if !evaluate_condition(condition, state, ability) {
             // CR 608.2c: A skipped return instruction has a settled empty
@@ -16506,7 +16845,7 @@ fn resolve_chain_body(
                     .as_deref()
                     .is_none_or(|other| !branch_declares_return_result(other, result_id))
                 {
-                    publish_empty_return_result_for_active(state, result_id)?;
+                    publish_empty_return_result_for_active(state, result_id, &ability.effect)?;
                 }
             }
             if let Some(ref else_branch) = ability.else_ability {
@@ -18546,7 +18885,11 @@ fn resolve_chain_body(
 
         // Check if the sub_ability has a condition that gates its execution.
         // Casting-time conditions are evaluated against the parent's SpellContext.
-        if let Some(ref condition) = sub.condition {
+        if let Some(condition) = sub
+            .condition
+            .as_ref()
+            .filter(|_| !is_named_revealed_reader(sub))
+        {
             // CR 608.2c: "Instead" overrides are terminal — the Cow swap above either
             // replaced the parent's effect (condition met) or didn't (condition not met).
             // When NOT swapped, the base chain (else_ability) runs after the parent's own
@@ -18848,7 +19191,7 @@ fn resolve_chain_body(
                         .as_deref()
                         .is_none_or(|other| !branch_declares_return_result(other, result_id))
                     {
-                        publish_empty_return_result_for_active(state, result_id)?;
+                        publish_empty_return_result_for_active(state, result_id, &sub.effect)?;
                     }
                 }
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
@@ -18935,7 +19278,11 @@ fn resolve_chain_body(
                                 })
                             {
                                 if let Some(result_id) = sibling_resolved.declares_return_result {
-                                    publish_empty_return_result_for_active(state, result_id)?;
+                                    publish_empty_return_result_for_active(
+                                        state,
+                                        result_id,
+                                        &sibling_resolved.effect,
+                                    )?;
                                 }
                                 current = sibling.sub_ability.as_ref();
                                 continue;
@@ -19176,9 +19523,10 @@ fn resolve_chain_body(
             };
             if (ability.declares_return_result.is_some_and(|result_id| {
                 crate::types::game_state::reads_return_result_id(&sub_clone, result_id)
-            }) || state
-                .resolution_stack
-                .copy_token_at_child_boundary(child_stack_start))
+            }) || is_named_revealed_reader(ability)
+                || state
+                    .resolution_stack
+                    .copy_token_at_child_boundary(child_stack_start))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,
@@ -20241,6 +20589,9 @@ pub(crate) fn evaluate_condition(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> bool {
+    if is_named_revealed_reader(ability) && named_revealed_members(state, ability).is_err() {
+        return false;
+    }
     match condition {
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
             let Some(dying_object) =

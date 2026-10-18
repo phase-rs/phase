@@ -63,6 +63,54 @@ fn maybe_negate(cond: AbilityCondition, negated: bool) -> AbilityCondition {
     }
 }
 
+/// CR 608.2c: the predicate consumes one explicitly named reveal instruction.
+pub(crate) fn parse_all_revealed_condition<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(AbilityCondition, TargetFilter, &'a str)> {
+    let lower = text.to_lowercase();
+    let (predicate, body) = nom_on_lower(text, &lower, |input| {
+        let (input, _) = (
+            opt(tag("then ")),
+            tag("if "),
+            tag("all cards "),
+            tag("revealed "),
+            opt(tag("in ")),
+            tag("this way are "),
+        )
+            .parse(input)?;
+        map(
+            terminated(take_until::<_, _, OracleError<'_>>(", "), tag(", ")),
+            str::to_string,
+        )
+        .parse(input)
+    })?;
+    let (filter, leftover) =
+        parse_type_phrase_folding_with_ctx(&predicate, &mut ctx.clone_player_antecedents());
+    all_consuming(multispace0::<_, OracleError<'_>>)
+        .parse(leftover)
+        .ok()?;
+    if matches!(filter, TargetFilter::None | TargetFilter::Any) {
+        return None;
+    }
+    Some((
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter.clone()),
+                    caused_by: None,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+        },
+        filter,
+        body,
+    ))
+}
+
 /// CR 702.171b: The runtime filter matching the saddled designation. Shared by
 /// the affirmative and negated `SourceIsSaddled` bridges in
 /// `static_condition_to_ability_condition`, and by the `SourceIsSaddled` arm of

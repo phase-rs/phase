@@ -3558,8 +3558,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_145_for_exact_token_creation() {
-        assert_eq!(PROTOCOL_VERSION, 145);
+    fn protocol_version_is_146_for_exact_revealed_results() {
+        assert_eq!(PROTOCOL_VERSION, 146);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3570,7 +3570,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_145_for_exact_token_creation` stays
+    /// `protocol_version_is_146_for_exact_revealed_results` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

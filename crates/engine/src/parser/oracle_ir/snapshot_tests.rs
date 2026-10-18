@@ -106,15 +106,46 @@ fn ordinary_reveal_scalar_two_layers() {
         chain.clauses[0].parsed.effect,
         Effect::Dig { reveal: true, .. } | Effect::RevealTop { .. }
     ));
-    assert!(
-        matches!(&chain.clauses[1].parsed.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case("If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control"))
+    assert_eq!(
+        chain.clauses[1]
+            .reads_return_result
+            .as_ref()
+            .map(|(id, _)| *id),
+        Some(chain.clauses[0].id)
     );
+    assert!(matches!(
+        chain.clauses[1].parsed.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::None,
+            origin: Some(crate::types::zones::Zone::Library),
+            destination: crate::types::zones::Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(chain.clauses[1].condition.is_some());
     let lowered = lower_oracle_ir(&mut ir);
     let reveal = lowered.triggers[0].execute.as_deref().unwrap();
     assert!(matches!(*reveal.effect, Effect::RevealTop { .. }));
-    assert!(
-        matches!(&*reveal.sub_ability.as_deref().unwrap().effect, Effect::Unimplemented { description: Some(source), .. } if source.eq_ignore_ascii_case("If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control"))
+    let reader = reveal.sub_ability.as_deref().unwrap();
+    assert_eq!(
+        reader.reads_return_result.as_ref().map(|(id, _)| *id),
+        reveal.declares_return_result
     );
+    assert!(reveal.declares_return_result.is_some());
+    assert!(matches!(
+        *reader.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::None,
+            origin: Some(crate::types::zones::Zone::Library),
+            destination: crate::types::zones::Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(lowered.parse_warnings.is_empty(), "{lowered:#?}");
+    insta::assert_yaml_snapshot!("jev_game_preserve_ir", ir);
+    insta::assert_yaml_snapshot!("jev_game_preserve_lowered", lowered);
 }
 
 const OUTER_ORDINARY_SPIRIT: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.";

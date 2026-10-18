@@ -6294,6 +6294,9 @@ pub enum PendingBatchZoneChangeCause {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBatchZoneMoveRequest {
     pub object_id: ObjectId,
+    /// CR 400.7: the original instruction's exact member and origin.
+    #[serde(deserialize_with = "deserialize_expected_origin")]
+    pub expected_origin: Option<(ObjectIncarnationRef, Zone)>,
     pub destination: Zone,
     pub cause: PendingBatchZoneChangeCause,
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
@@ -6336,6 +6339,121 @@ pub struct PendingBatchZoneMoveRequest {
         skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
     )]
     pub face_down_in_exile: crate::types::ability::ExileConcealment,
+}
+
+fn deserialize_expected_origin<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<(ObjectIncarnationRef, Zone)>, D::Error> {
+    Option::<(InstructionMemberWire, Zone)>::deserialize(deserializer)
+        .map(|origin| origin.map(|(pin, zone)| (pin.into(), zone)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionMemberWire {
+    object_id: ObjectId,
+    incarnation: u64,
+}
+
+impl From<InstructionMemberWire> for ObjectIncarnationRef {
+    fn from(pin: InstructionMemberWire) -> Self {
+        Self::of(pin.object_id, pin.incarnation)
+    }
+}
+
+/// CR 608.2c: result kind belongs to the instruction, including an empty result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InstructionResult {
+    ZoneChanges(Vec<ZoneChangeRecord>),
+    RevealedCards(RevealedInstructionResult),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevealedInstructionResult {
+    #[serde(deserialize_with = "deserialize_revealed_members")]
+    pub revealed_cards: Vec<ObjectIncarnationRef>,
+}
+
+fn deserialize_revealed_members<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ObjectIncarnationRef>, D::Error> {
+    let members: Vec<ObjectIncarnationRef> =
+        Vec::<InstructionMemberWire>::deserialize(deserializer)?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+    let mut seen = HashSet::new();
+    if members.iter().any(|pin| !seen.insert(pin.object_id)) {
+        return Err(serde::de::Error::custom(
+            "duplicate revealed instruction member",
+        ));
+    }
+    Ok(members)
+}
+
+impl InstructionResult {
+    pub fn zone_changes(&self) -> Option<&[ZoneChangeRecord]> {
+        match self {
+            Self::ZoneChanges(records) => Some(records),
+            Self::RevealedCards(_) => None,
+        }
+    }
+    pub fn zone_changes_mut(&mut self) -> Option<&mut Vec<ZoneChangeRecord>> {
+        match self {
+            Self::ZoneChanges(records) => Some(records),
+            Self::RevealedCards(_) => None,
+        }
+    }
+    pub fn revealed_cards(&self) -> Option<&[ObjectIncarnationRef]> {
+        match self {
+            Self::RevealedCards(result) => Some(&result.revealed_cards),
+            Self::ZoneChanges(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod revealed_result_codec_tests {
+    use super::*;
+    #[test]
+    fn instruction_result_preserves_kind_and_required_origin_presence() {
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!({"revealed_cards": []}),
+        ] {
+            let result: InstructionResult = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&result).unwrap(), value);
+            assert_ne!(
+                result.zone_changes().is_some(),
+                result.revealed_cards().is_some()
+            );
+        }
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"revealed_cards": [], "records": []}),
+            serde_json::json!({"revealed_cards": [null]}),
+            serde_json::json!({"revealed_cards": [1]}),
+            serde_json::json!({"revealed_cards": [{"object_id": 1,"incarnation": 3}, {"object_id": 1,"incarnation": 3}]}),
+        ] {
+            assert!(serde_json::from_value::<InstructionResult>(bad).is_err());
+        }
+        let ordinary = serde_json::json!({"object_id": 1, "destination": "Battlefield", "cause": {"Effect": {"source": 9}}, "expected_origin": null});
+        let request: PendingBatchZoneMoveRequest =
+            serde_json::from_value(ordinary.clone()).unwrap();
+        assert_eq!(request.expected_origin, None);
+        assert!(serde_json::to_value(&request)
+            .unwrap()
+            .get("expected_origin")
+            .is_some());
+        let mut missing = ordinary;
+        missing.as_object_mut().unwrap().remove("expected_origin");
+        assert!(
+            serde_json::from_value::<PendingBatchZoneMoveRequest>(missing).is_err(),
+            "Option alone does not enforce this key"
+        );
+    }
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -12365,6 +12483,63 @@ pub(crate) fn live_return_result_occurrences(
 }
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
+    fn validate_reveal_readers(
+        state: &GameState,
+        root: &ResolvedAbility,
+        occurrence: Option<ReturnResultOccurrenceId>,
+        mut future: HashSet<ReturnResultId>,
+    ) -> Result<(), String> {
+        if let Some(id) = root.declares_return_result {
+            future.insert(id);
+        }
+        if crate::game::effects::is_named_revealed_reader(root)
+            && root
+                .reads_return_result
+                .as_ref()
+                .is_some_and(|(id, _)| !future.contains(id))
+        {
+            crate::game::effects::named_revealed_members_for_occurrence(state, root, occurrence)
+                .map_err(|error| format!("invalid live reveal reader: {error:?}"))?;
+        }
+        if let Some(sub) = &root.sub_ability {
+            validate_reveal_readers(state, sub, occurrence, future.clone())?;
+        }
+        if let Some(other) = &root.else_ability {
+            validate_reveal_readers(state, other, occurrence, future)?;
+        }
+        Ok(())
+    }
+    let revealed_authority = state
+        .return_result_frames
+        .values()
+        .flat_map(|frame| frame.values())
+        .any(|result| result.revealed_cards().is_some());
+    for frame in state.resolution_stack.iter() {
+        if let ResolutionFrame::BatchDelivery(batch) = frame {
+            let exact = revealed_authority
+                || batch
+                    .requests
+                    .iter()
+                    .any(|request| request.expected_origin.is_some());
+            if exact
+                && (batch.remaining.len() != batch.requests.len()
+                    || batch
+                        .remaining
+                        .iter()
+                        .zip(&batch.requests)
+                        .any(|(id, request)| *id != request.object_id))
+            {
+                return Err("revealed-result batch is missing exact queued requests".into());
+            }
+            for request in &batch.requests {
+                if request.expected_origin.is_some_and(|(pin, zone)| {
+                    pin.object_id != request.object_id || zone != Zone::Library
+                }) {
+                    return Err("revealed-result queued request has incompatible origin".into());
+                }
+            }
+        }
+    }
     if state.next_return_result_occurrence_id == 0 {
         return Err("return-result occurrence allocator is zero".to_string());
     }
@@ -12398,7 +12573,12 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         None if has_return_result_metadata(&frame.ability) => {
             Err("return-result optional effect has no occurrence stamp".to_string())
         }
-        _ => Ok(()),
+        _ => validate_reveal_readers(
+            state,
+            &frame.ability,
+            frame.return_result_occurrence,
+            HashSet::new(),
+        ),
     };
 
     let mut parked_publishers = HashSet::new();
@@ -12430,6 +12610,12 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             ResolutionFrame::OptionalEffect(optional) => validate_optional_frame(optional)?,
             ResolutionFrame::AbilityContinuation(frame) => {
                 let pending = &frame.pending;
+                validate_reveal_readers(
+                    state,
+                    &pending.chain,
+                    pending.return_result_occurrence,
+                    HashSet::new(),
+                )?;
                 match pending.return_result_occurrence {
                     Some(id) if !frame_exists(id) => {
                         return Err(format!(
@@ -21874,7 +22060,7 @@ declare_game_state! {
     /// CR 608.2c: Isolated instruction-result records for every live resolving root.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub return_result_frames:
-        BTreeMap<ReturnResultOccurrenceId, BTreeMap<ReturnResultId, Vec<ZoneChangeRecord>>>,
+        BTreeMap<ReturnResultOccurrenceId, BTreeMap<ReturnResultId, InstructionResult>>,
     /// The synchronous execution context; parked continuations carry their own stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_return_result_occurrence: Option<ReturnResultOccurrenceId>,
@@ -48348,7 +48534,7 @@ mod sought_result_current_tests {
                     bad.return_result_frames
                         .get_mut(&occurrence_id)
                         .unwrap()
-                        .insert(result_id, Vec::new());
+                        .insert(result_id, InstructionResult::ZoneChanges(Vec::new()));
                 }
                 3 => {
                     let completion = bad.active_batch_delivery().unwrap().completion.clone();

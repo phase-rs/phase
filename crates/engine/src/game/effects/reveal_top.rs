@@ -30,7 +30,7 @@ pub fn resolve(
         return resolve_for_players(state, ability, &targeted_players, events);
     }
     let Some(player) = super::resolve_player_for_context_ref(state, ability, player_filter) else {
-        super::publish_reveal_result(state, Vec::new());
+        super::publish_reveal_result_for_ability(state, ability, Vec::new())?;
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         return Ok(());
     };
@@ -90,7 +90,7 @@ pub(super) fn resolve_for_players(
     }
     // CR 608.2c: even an empty completed instruction replaces the earlier result.
     // The Vec preserves first-seen order when a format shares one library.
-    super::publish_reveal_result(state, accumulated);
+    super::publish_reveal_result_for_ability(state, ability, accumulated)?;
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Reveal,
         source_id: ability.source_id,
@@ -107,6 +107,39 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn named_reveal_publishes_present_empty_for_zero_count_and_empty_domain() {
+        for empty_domain in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Unselected live card".into(),
+                Zone::Library,
+            );
+            super::super::begin_return_result_occurrence(&mut state).unwrap();
+            let occurrence = state.active_return_result_occurrence.unwrap();
+            let result_id = crate::types::ability::ReturnResultId(9);
+            let mut ability =
+                make_reveal_top_ability(PlayerId(0), PlayerId(0), if empty_domain { 1 } else { 0 });
+            ability.declares_return_result = Some(result_id);
+            resolve_for_players(
+                &mut state,
+                &ability,
+                if empty_domain { &[] } else { &[PlayerId(0)] },
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                state.return_result_frames[&occurrence][&result_id].revealed_cards(),
+                Some([].as_slice())
+            );
+            assert!(state.last_revealed_ids.is_empty());
+            assert_eq!(state.objects[&card].zone, Zone::Library);
+        }
+    }
 
     fn make_reveal_top_ability(
         controller: PlayerId,

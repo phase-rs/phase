@@ -216,7 +216,9 @@ pub(crate) mod tests {
             .state()
             .return_result_frames
             .values()
-            .any(|frame| frame.values().any(|records| !records.is_empty())));
+            .any(|frame| frame.values().any(|records| records
+                .zone_changes()
+                .is_some_and(|records| !records.is_empty()))));
         (runner, cards, source)
     }
 

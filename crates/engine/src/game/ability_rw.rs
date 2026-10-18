@@ -9839,6 +9839,26 @@ mod tests {
 mod sought_reader_rw_tests {
     use super::*;
     #[test]
+    fn game_preserve_named_membership_is_member_bound() {
+        let parsed = crate::parser::parse_oracle_text("At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Game Preserve", &[], &["Enchantment".into()], &[]);
+        let definition = parsed.triggers[0].execute.as_deref().unwrap();
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            definition,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(resolved
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .reads_return_result
+            .is_some());
+        let profile = ability_rw_profile(&resolved);
+        assert!(profile.reads_member_bound());
+        assert!(profile.reads_board.any());
+        assert!(profile.writes_external.any());
+    }
+    #[test]
     fn sought_parsed_chain_is_member_bound_with_persistent_card_writes() {
         let parsed = crate::parser::parse_oracle_text(
             r#"Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain "This spell costs {1} less to cast.""#,

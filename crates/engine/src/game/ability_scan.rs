@@ -11340,6 +11340,25 @@ mod tests {
 mod sought_reader_scan_tests {
     use super::*;
     #[test]
+    fn game_preserve_named_membership_remains_conservative() {
+        let parsed = crate::parser::parse_oracle_text("At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Game Preserve", &[], &["Enchantment".into()], &[]);
+        let root = parsed.triggers[0].execute.as_deref().unwrap();
+        let reader = root.sub_ability.as_deref().unwrap();
+        assert!(reader.reads_return_result.is_some());
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            reader,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(ability_definition_reads_sibling_mutable(root));
+        assert!(ability_uses_event_context(&resolved));
+        assert!(ability_reads_sibling_mutable(&resolved));
+        assert!(ability_reads_projected_resource(&resolved));
+        assert!(crate::game::resolution_prompt::chain_offers_choice(
+            &resolved
+        ));
+    }
+    #[test]
     fn sought_parsed_chain_retains_dynamic_result_and_color_reads() {
         let parsed = crate::parser::parse_oracle_text(
             r#"Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain "This spell costs {1} less to cast.""#,

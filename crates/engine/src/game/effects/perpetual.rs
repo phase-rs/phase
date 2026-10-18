@@ -45,6 +45,9 @@ pub(crate) fn prepare_sought_cost_grant(
         .get(&occurrence)
         .and_then(|frame| frame.get(result_id))
         .ok_or_else(|| EffectError::MissingParam("settled seek result".to_string()))?;
+    let records = records
+        .zone_changes()
+        .ok_or_else(|| EffectError::InvalidParam("seek result kind".into()))?;
     // Terminal records belong to this instruction's completed logical batch.
     // A redirected arrival is still a sought card; a no-move has no record.
     let mut ids: Vec<_> = records.iter().map(|record| record.object_id).collect();
@@ -1726,11 +1729,15 @@ mod sought_exact_recipient_tests {
             .find_map(|(occurrence, frame)| {
                 frame
                     .iter()
-                    .find(|(_, records)| !records.is_empty())
+                    .find(|(_, records)| {
+                        records
+                            .zone_changes()
+                            .is_some_and(|records| !records.is_empty())
+                    })
                     .map(|(id, records)| (*occurrence, *id, records.clone()))
             })
             .unwrap();
-        let recipient = records[0].object_id;
+        let recipient = records.zone_changes().unwrap()[0].object_id;
         let text = "For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
         let full = format!("Seek two cards. {text}");
         let parsed = crate::parser::parse_oracle_text(
@@ -1812,7 +1819,10 @@ mod sought_exact_recipient_tests {
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
-            .insert(result_id, Vec::new());
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::ZoneChanges(Vec::new()),
+            );
         let empty = prepare_sought_cost_grant(&state, &ability)
             .unwrap()
             .unwrap();
@@ -1821,6 +1831,22 @@ mod sought_exact_recipient_tests {
         };
         assert_eq!(*target, TargetFilter::None);
         assert!(perpetual_target_object_ids(&state, &empty, target).is_empty());
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::RevealedCards(
+                    crate::types::game_state::RevealedInstructionResult {
+                        revealed_cards: Vec::new(),
+                    },
+                ),
+            );
+        assert!(
+            prepare_sought_cost_grant(&state, &ability).is_err(),
+            "wrong-kind empty is not a settled empty zone result"
+        );
         assert_eq!(
             concrete_recipients(&TargetFilter::Or {
                 filters: vec![
@@ -1842,11 +1868,15 @@ mod sought_exact_recipient_tests {
             .find_map(|(occurrence, frame)| {
                 frame
                     .iter()
-                    .find(|(_, records)| !records.is_empty())
+                    .find(|(_, records)| {
+                        records
+                            .zone_changes()
+                            .is_some_and(|records| !records.is_empty())
+                    })
                     .map(|(id, records)| (*occurrence, *id, records.clone()))
             })
             .unwrap();
-        let mut hand = records[0].clone();
+        let mut hand = records.zone_changes().unwrap()[0].clone();
         hand.core_types = vec![crate::types::card_type::CoreType::Creature];
         hand.to_zone = Zone::Hand;
         hand.arrival.owner = PlayerId(0);
@@ -1859,7 +1889,12 @@ mod sought_exact_recipient_tests {
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
-            .insert(result_id, vec![hand, redirect, foreign]);
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::ZoneChanges(vec![
+                    hand, redirect, foreign,
+                ]),
+            );
         state.active_return_result_occurrence = Some(occurrence);
         let parsed = crate::parser::parse_oracle_text("Choose target creature you own. Return each chosen creature to your hand. At the beginning of the next upkeep, create a 4/4 white Bird Soldier creature token with flying for each creature returned to your hand this way.", "Labelled Eagles instruction excerpt", &[], &["Instant".into()], &[]);
         let reader = std::iter::successors(Some(&parsed.abilities[0]), |node| {
@@ -1888,5 +1923,21 @@ mod sought_exact_recipient_tests {
         // A Seek reader on the other key independently retains all completed
         // moved cards; it does not acquire the old delayed-return predicate.
         assert!(state.return_result_frames[&occurrence].len() >= 2);
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::RevealedCards(
+                    crate::types::game_state::RevealedInstructionResult {
+                        revealed_cards: Vec::new(),
+                    },
+                ),
+            );
+        assert!(
+            super::super::delayed_trigger::resolve(&mut state, &delayed, &mut Vec::new()).is_err(),
+            "revealed members cannot become returned-card records"
+        );
     }
 }

@@ -302,6 +302,9 @@ pub fn resolve(
             .get(&occurrence)
             .and_then(|frame| frame.get(result_id))
             .ok_or_else(|| EffectError::MissingParam("settled return result".to_string()))?;
+        let records = records
+            .zone_changes()
+            .ok_or_else(|| EffectError::InvalidParam("return result kind".into()))?;
         if spec.recipient != crate::types::ability::ControllerRef::You {
             return Err(EffectError::InvalidParam(
                 "unsupported return recipient".to_string(),

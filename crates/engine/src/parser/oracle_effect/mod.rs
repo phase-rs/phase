@@ -41283,6 +41283,25 @@ fn parse_effect_chain_ir_body(
         builder.set_pending_leading_duration(chunk.leading_duration.clone());
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
         if is_all_revealed_result_consumer(chunk.text.trim()) {
+            if let Some((condition, _, body)) =
+                conditions::parse_all_revealed_condition(chunk.text.trim(), ctx)
+            {
+                if let Some(effect) = sequence::parse_all_revealed_move(body) {
+                    builder
+                        .clause(
+                            chunk.text.trim(),
+                            parsed_clause(effect),
+                            chunk.boundary_after,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .condition(Some(condition))
+                        .push();
+                    continue;
+                }
+            }
             unimplemented_clause(
                 &mut builder,
                 "all_revealed_result_consumer",

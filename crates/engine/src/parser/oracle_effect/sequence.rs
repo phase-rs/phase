@@ -45,6 +45,84 @@ use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+/// CR 108.3 + CR 110.2a: the entire named set enters under individual owners.
+pub(crate) fn parse_all_revealed_move(text: &str) -> Option<Effect> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = (
+            opt(tag::<_, _, OracleError<'_>>("then ")),
+            alt((tag("put "), tag("puts "))),
+            alt((
+                tag("those cards"),
+                tag("all cards revealed this way"),
+                tag("all cards revealed in this way"),
+                tag("the revealed cards"),
+            )),
+        )
+            .parse(input)?;
+        let (input, _) =
+            alt((tag(" onto the battlefield"), tag(" on the battlefield"))).parse(input)?;
+        let (input, _) = opt((
+            tag(" under "),
+            alt((tag("their owners'"), tag("their owners’"))),
+            tag(" control"),
+        ))
+        .parse(input)?;
+        let (input, _) = (opt(tag(".")), eof).parse(input)?;
+        Ok((input, ()))
+    })?;
+    Some(Effect::ChangeZone {
+        origin: Some(Zone::Library),
+        destination: Zone::Battlefield,
+        target: TargetFilter::None,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: Vec::new(),
+        face_down_profile: None,
+        enters_modified_if: None,
+    })
+}
+
+/// Complete fixed own-library producer grammar for a named instruction result.
+pub(crate) fn fixed_revealed_producer_count(text: &str) -> Option<u32> {
+    nom_on_lower(text, &text.to_lowercase(), |input| {
+        let (input, _) = opt(tag::<_, _, OracleError<'_>>("then ")).parse(input)?;
+        let (input, _) = alt((
+            tag("reveal "),
+            tag("you reveal "),
+            preceded(
+                alt((tag("each player "), tag("each opponent "))),
+                tag("reveals "),
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = tag("the top ").parse(input)?;
+        let (input, count) = alt((
+            value(1, tag("card")),
+            terminated(nom_primitives::parse_number, tag(" cards")),
+        ))
+        .parse(input)?;
+        let (input, _) = (
+            tag(" of "),
+            alt((
+                tag("your library"),
+                tag("their library"),
+                tag("their own library"),
+            )),
+            opt(tag(".")),
+            eof,
+        )
+            .parse(input)?;
+        Ok((input, count))
+    })
+    .map(|(count, _)| count)
+}
+
 /// CR 303.4f: Parse the host of "put it onto the battlefield attached to X"
 /// inside a library-search compound.
 fn parse_search_attach_host_ref(input: &str) -> OracleResult<'_, TargetFilter> {
