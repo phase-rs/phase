@@ -3899,6 +3899,40 @@ pub fn matches_target_filter(
     filter_inner(state, object_id, filter, ctx)
 }
 
+/// Live population membership during announcement. Ordinary permission and
+/// recorded-object readers deliberately retain their own origin authorities.
+pub(crate) fn matches_target_filter_in_population(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let Some(entry) = super::casting::announced_spell_entry(state, object_id) else {
+        return matches_target_filter(state, object_id, filter, ctx);
+    };
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if object.is_phased_out() {
+        return false;
+    }
+    // CR 601.2a + CR 108.3: the announced caster controls this spell; its
+    // original owner is unchanged. Project only this supplied live object.
+    let mut projected = object.clone();
+    projected.zone = Zone::Stack;
+    projected.controller = entry.controller;
+    if let StackEntryKind::Spell {
+        casting_variant, ..
+    } = &entry.kind
+    {
+        // CR 202.3d + CR 702.102b: only the exact selected Fuse entry supplies
+        // the combined-characteristics hint before final payment persists it.
+        projected.fused_split_spell =
+            *casting_variant == crate::types::game_state::CastingVariant::Fuse;
+    }
+    matches_target_filter_on_object(state, &projected, filter, ctx)
+}
+
 /// Evaluate a live card whose zone-change record says it departed `from`: the player axis reads
 /// the card as a resident of that zone (CR 603.10a for a graveyard, CR 400.1 as the format
 /// modifies it for a library), while every other property reads the live card.

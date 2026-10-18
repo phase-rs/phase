@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_on_attack_declaration_record,
+    matches_target_filter, matches_target_filter_in_population,
+    matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
     matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
     shared_quality_characteristic_reads, spell_record_matches_filter,
@@ -4179,11 +4180,16 @@ fn filter_names_cards(filter: &TargetFilter) -> bool {
 /// exile is a copy of a card, not a card — CR 108.2 + CR 109.1), else every
 /// object there.
 fn zone_population_ids(state: &GameState, zone: Zone, filter: &TargetFilter) -> Vec<ObjectId> {
-    if filter_names_cards(filter) {
+    let ids = if filter_names_cards(filter) {
         crate::game::targeting::zone_card_ids(state, zone)
     } else {
         crate::game::targeting::zone_object_ids(state, zone)
-    }
+    };
+    // CR 601.2a: an announced spell is resident only on Stack, even while
+    // casting retains its physical origin for permission and cancellation.
+    ids.into_iter()
+        .filter(|id| zone == Zone::Stack || !super::casting::is_spell_being_cast(state, *id))
+        .collect()
 }
 
 fn filter_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
@@ -4321,8 +4327,10 @@ fn target_filter_matches_population_semantics(
         // candidate universe is already established by its surrounding
         // conjunction. Negate the predicate directly on this candidate rather
         // than giving the inner filter a new battlefield-default population.
-        TargetFilter::Not { .. } => matches_target_filter(state, id, filter, filter_ctx),
-        _ => matches_target_filter(state, id, filter, filter_ctx),
+        TargetFilter::Not { .. } => {
+            matches_target_filter_in_population(state, id, filter, filter_ctx)
+        }
+        _ => matches_target_filter_in_population(state, id, filter, filter_ctx),
     }
 }
 
@@ -4357,7 +4365,7 @@ fn filter_population_anchor_ids(
         // manufacture results outside the domain the effect actually named.
         TargetFilter::TrackedSetFiltered { id, .. } => tracked_set_object_ids(state, *id)
             .into_iter()
-            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .filter(|id| matches_target_filter_in_population(state, *id, filter, filter_ctx))
             .collect(),
         TargetFilter::Not { .. } | TargetFilter::Or { .. } | TargetFilter::And { .. } => {
             return None;
@@ -4465,7 +4473,7 @@ fn matching_object_ids_in_filter_universe(
     if let TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } = filter {
         return tracked_set_object_ids(state, *id)
             .into_iter()
-            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .filter(|id| matches_target_filter_in_population(state, *id, filter, filter_ctx))
             .collect();
     }
 
@@ -4556,7 +4564,9 @@ pub(crate) fn object_count_matching_candidate_ids(
     let mut seen = HashSet::new();
     let mut ids: Vec<ObjectId> = candidate_ids
         .into_iter()
-        .filter(|id| seen.insert(*id) && matches_target_filter(state, *id, filter, filter_ctx))
+        .filter(|id| {
+            seen.insert(*id) && matches_target_filter_in_population(state, *id, filter, filter_ctx)
+        })
         .collect();
     // Drop the triggering object for an "other than" filter (Valakut's "five
     // other Mountains" — the newly-entered Mountain matches the per-object filter

@@ -39,7 +39,6 @@ fn coordinated_static_honesty() {
         "card you own in exile and in unknown",
         "card you own in exile and in",
         "card you own in exile and in your graveyard that's an instant card and",
-        "card you own in exile and in your graveyard and each artifact you control",
         "card you own in exile and in your graveyard that's a card that has an adventures",
     ] {
         assert!(
@@ -39855,4 +39854,48 @@ fn sab_sunen_parity_gate_stays_unrecognized() {
         "{:?}",
         restrictions[0].condition
     );
+}
+
+#[test]
+fn repeated_static_disjoint_admission_and_overlap_refusal() {
+    // SHAPE; actual full-card casts and overlapping expression execution live
+    // in integration::jev_cost_populations.
+    for body in [
+        "artifact you control and each artifact card in your hand",
+        "cave you control and each cave card in your graveyard",
+        "card you own in exile and in your graveyard and each artifact you control",
+    ] {
+        let def = parse_static_line(&format!(
+            "This spell costs {{1}} less to cast for each {body}."
+        ))
+        .unwrap();
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.active_zones,
+            crate::types::zones::self_spell_cost_mod_active_zones()
+        );
+        assert!(matches!(
+            def.mode,
+            StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::ObjectCount {
+                    filter: TargetFilter::Or { .. }
+                }),
+                ..
+            }
+        ));
+    }
+    for body in [
+        "artifact you control and each creature you control",
+        "artifact you control and each artifact you control",
+        "artifact you control and each",
+        "artifact you control and each mystery in your hand",
+    ] {
+        assert!(
+            parse_static_line(&format!(
+                "This spell costs {{1}} less to cast for each {body}."
+            ))
+            .is_none(),
+            "{body}"
+        );
+    }
 }

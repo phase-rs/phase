@@ -151,6 +151,13 @@ pub(crate) fn parse_quantity_ref_with_context(
 ) -> Option<QuantityRef> {
     let trimmed = text.trim().trim_end_matches('.');
 
+    match nom_quantity::parse_repeated_object_population_with_context(&trimmed.to_lowercase(), ctx)
+    {
+        Ok(("", qty)) => return Some(canonicalize_quantity_ref(qty)),
+        Err(nom::Err::Failure(_)) => return None,
+        _ => {}
+    }
+
     match nom_quantity::parse_coordinated_card_population_with_context(&trimmed.to_lowercase(), ctx)
     {
         Ok(("", qty)) => return Some(canonicalize_quantity_ref(qty)),
@@ -2717,11 +2724,6 @@ fn parse_for_each_clause_expr_with_parser(
     clause: &str,
     parse_clause: impl Fn(&str) -> Option<QuantityRef> + Copy,
 ) -> Option<QuantityExpr> {
-    use nom::branch::alt;
-    use nom::bytes::complete::{tag, take_until};
-    use nom::combinator::rest;
-    use nom::multi::separated_list1;
-
     let clause = clause.trim().trim_end_matches('.');
 
     if let Some(expr) = parse_other_spells_cast_this_turn_for_each(clause) {
@@ -2744,14 +2746,13 @@ fn parse_for_each_clause_expr_with_parser(
         return Some(expr);
     }
 
-    fn segment(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
-        alt((take_until(" and each "), rest)).parse(i)
-    }
-    let mut split = separated_list1(tag::<_, _, OracleError<'_>>(" and each "), segment);
-    let segments: Vec<&str> = split
-        .parse(clause)
-        .map(|(_, v)| v)
-        .unwrap_or_else(|_| vec![clause]);
+    // Independent quantifiers add before the scalar ObjectCount adapter can
+    // refuse overlapping domains. Preserve each receiver's supplied callback.
+    let segments = match nom_quantity::parse_repeated_population_segments(clause) {
+        Ok(("", segments)) => segments,
+        Err(nom::Err::Failure(_)) => return None,
+        _ => vec![clause],
+    };
 
     let refs: Option<Vec<QuantityRef>> = segments.iter().map(|s| parse_clause(s.trim())).collect();
     let mut exprs: Vec<QuantityExpr> = refs?
@@ -2762,6 +2763,44 @@ fn parse_for_each_clause_expr_with_parser(
         return exprs.pop();
     }
     Some(QuantityExpr::Sum { exprs })
+}
+
+#[cfg(test)]
+mod repeated_expression_receiver_tests {
+    use super::*;
+
+    #[test]
+    fn independent_members_add_at_all_three_receivers() {
+        for second in ["creature", "artifact"] {
+            let text = format!("artifact you control and each {second} you control");
+            let ctx = ParseContext::default();
+            for expression in [
+                parse_for_each_clause_expr(&text),
+                parse_for_each_clause_expr_deferred(&text),
+                parse_for_each_clause_expr_with_context(&text, &ctx),
+            ] {
+                assert!(
+                    matches!(expression, Some(QuantityExpr::Sum { exprs }) if exprs.len() == 2),
+                    "{text}"
+                );
+            }
+            assert!(
+                parse_for_each_clause(&text).is_none(),
+                "overlap cannot become scalar union"
+            );
+        }
+        for malformed in [
+            "artifact you control and each",
+            "artifact you control and each mystery you control",
+        ] {
+            assert!(parse_for_each_clause_expr(malformed).is_none());
+            assert!(parse_for_each_clause_expr_deferred(malformed).is_none());
+            assert!(
+                parse_for_each_clause_expr_with_context(malformed, &ParseContext::default())
+                    .is_none()
+            );
+        }
+    }
 }
 
 /// CR 702.23a + CR 107.1b: "for each [object] beyond the first" composes a
@@ -3402,6 +3441,15 @@ fn parse_for_each_clause_with_they_controller(
     ctx: &ParseContext,
 ) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
+
+    match nom_quantity::parse_repeated_object_population_with_context(
+        &clause.to_lowercase(),
+        &for_each_anaphor_context(ctx, &antecedents),
+    ) {
+        Ok(("", qty)) => return Some(qty),
+        Err(nom::Err::Failure(_)) => return None,
+        _ => {}
+    }
 
     match nom_quantity::parse_coordinated_card_population_with_context(
         &clause.to_lowercase(),

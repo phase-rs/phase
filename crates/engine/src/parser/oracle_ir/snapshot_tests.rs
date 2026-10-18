@@ -19,6 +19,25 @@ use crate::types::game_state::DistributionUnit;
 use crate::types::mana::{ManaCost, ManaCostShard};
 
 #[test]
+fn repeated_population_full_card_ir() {
+    let (ir, lowered) = parse_two_layer("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.\nCounter target noncreature spell.", "Machinist's Dismissal", &["Instant"], &[]);
+    assert_eq!(lowered.statics.len(), 1);
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(lowered.parse_warnings.is_empty());
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    insta::assert_json_snapshot!("repeated_population_dismissal_ir", &ir);
+    insta::assert_json_snapshot!("repeated_population_dismissal_lowered", &lowered);
+    let (ir, lowered) = parse_two_layer_with_keywords("This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard.\nLifelink", "Gargantuan Leech", &["Lifelink"], &["Creature"], &["Leech"]);
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered
+        .extracted_keywords
+        .contains(&crate::types::keywords::Keyword::Lifelink));
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("repeated_population_leech_ir", &ir);
+    insta::assert_json_snapshot!("repeated_population_leech_lowered", &lowered);
+}
+
+#[test]
 fn coordinated_population_candlekeep() {
     let (ir, lowered) = parse_two_layer(
         "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.",

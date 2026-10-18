@@ -8,9 +8,13 @@ use engine::types::ability::{
     AbilityCost, ContinuousModification, ControllerRef, Duration, Effect, FilterProp, QuantityExpr,
     QuantityRef, TargetFilter, TypeFilter, TypedFilter,
 };
+use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::{CostModifyMode, StaticMode};
@@ -79,6 +83,32 @@ fn sailors_population_cost() {
         let (mut runner, spell) = sailors_board(populated, pool);
         assert_eq!(runner.state().objects[&spell].static_definitions.len(), 1);
         assert!(runner.state().objects[&spell].parse_warnings.is_empty());
+        let parsed = engine::parser::parse_oracle_text(
+            SAILORS,
+            "Sailors' Bane",
+            &["Ward".into()],
+            &["Creature".into()],
+            &["Dragon".into(), "Turtle".into()],
+        );
+        let StaticMode::ModifyCost {
+            dynamic_count: Some(quantity),
+            ..
+        } = &parsed.statics[0].mode
+        else {
+            panic!("full public coordinated population");
+        };
+        assert_eq!(
+            resolve_quantity(
+                runner.state(),
+                &QuantityExpr::Ref {
+                    qty: quantity.clone()
+                },
+                P0,
+                spell
+            ),
+            if populated { 3 } else { 0 },
+            "instant plus Adventure is one shared-population member"
+        );
         let outcome = runner.cast(spell).resolve();
         outcome.assert_zone(&[spell], Zone::Battlefield);
         // CR 118.7a + CR 601.2f: three qualifying cards remove three generic
@@ -704,4 +734,1192 @@ fn coordinated_population_export_string_loader() {
             );
         }
     }
+}
+
+const DISMISSAL: &str = "This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.\nCounter target noncreature spell.";
+const REPEATED: &str = "This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.";
+const LEECH: &str = "This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard.\nLifelink";
+#[test]
+fn dismissal_population_and_counter() {
+    for (populated, short) in [(true, false), (false, false), (true, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(
+            &mut scenario,
+            if short {
+                2
+            } else if populated {
+                3
+            } else {
+                5
+            },
+        );
+        let selected = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic selected noncreature",
+                true,
+                "You gain 1 life.",
+            )
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let other = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic other noncreature",
+                true,
+                "You gain 2 life.",
+            )
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let dismissal = scenario
+            .add_spell_to_hand_from_oracle(P0, "Machinist's Dismissal", true, DISMISSAL)
+            .with_mana_cost(blue_cost(4, 1))
+            .id();
+        if populated {
+            // CR 109.4 + CR 109.5: the controlled leg follows controller, not owner.
+            scenario
+                .add_artifact_from_oracle(P1, "Stolen artifact", "")
+                .controlled_by(P0);
+            scenario.add_artifact_to_hand_from_oracle(P0, "Own hand artifact", "");
+            scenario.add_artifact_from_oracle(P1, "Opponent artifact", "");
+            scenario
+                .add_artifact_from_oracle(P0, "Owned uncontrolled artifact", "")
+                .controlled_by(P1);
+            scenario.add_artifact_to_hand_from_oracle(P1, "Opponent hand artifact", "");
+            scenario
+                .add_creature_to_graveyard(P0, "Graveyard artifact", 1, 1)
+                .as_artifact_creature();
+            scenario.add_creature_to_hand(P0, "Hand nonartifact", 1, 1);
+        }
+        let mut runner = scenario.build();
+        let mut first = runner.cast(selected).commit();
+        let mut second = first.cast(other).commit();
+        if short {
+            assert!(second
+                .cast(dismissal)
+                .target_object(selected)
+                .try_resolve()
+                .is_err());
+            continue;
+        }
+        let outcome = second.cast(dismissal).target_object(selected).resolve();
+        outcome.assert_zone(&[selected, dismissal, other], Zone::Graveyard);
+        // CR 601.2f: both scoped members reduce {4}U to {2}U.
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+        // CR 608.2b: only the declared noncreature target is countered. The
+        // other eligible spell resolves; the selected spell never gains life.
+        outcome.assert_life_delta(P0, 2);
+        assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::SpellCountered { object_id, countered_by, .. } if *object_id == selected && *countered_by == dismissal)));
+        assert!(!outcome.events().iter().any(|event| matches!(event, GameEvent::SpellCountered { object_id, .. } if *object_id == other)));
+    }
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, 5);
+    let creature = scenario
+        .add_creature_to_hand(P0, "Synthetic illegal creature spell target", 1, 1)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let dismissal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Machinist's Dismissal", true, DISMISSAL)
+        .with_mana_cost(blue_cost(4, 1))
+        .id();
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(creature).commit();
+    assert!(committed.cast(dismissal).try_resolve().is_err());
+}
+
+fn artifact_in(zone: Zone) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Artifact).properties(vec![FilterProp::InZone { zone }]),
+    )
+}
+
+fn count(state: &GameState, source: ObjectId, filter: TargetFilter) -> i32 {
+    resolve_quantity(
+        state,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        P0,
+        source,
+    )
+}
+
+#[test]
+fn pending_artifact_population() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, 2);
+    let spell = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Synthetic pending population spell", REPEATED)
+        .with_keyword(Keyword::Flash)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Battlefield member", "");
+    let hand = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Ordinary hand member", "")
+        .id();
+    let unrelated = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Unrelated nonartifact stack object",
+            true,
+            "You gain 1 life.",
+        )
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    let _committed = runner.cast(unrelated).commit();
+    let completed_state = runner.state().clone();
+    let union = TargetFilter::Or {
+        filters: vec![artifact_in(Zone::Battlefield), artifact_in(Zone::Hand)],
+    };
+    assert_eq!(count(runner.state(), spell, union.clone()), 3);
+    let origin_snapshot = runner.state().objects[&spell].clone();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: origin_snapshot.card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .unwrap();
+    assert!(runner.state().objects[&spell].spell_announcement.is_some());
+    assert!(runner.state().stack.iter().any(|entry| entry.id == spell));
+    assert_eq!(
+        runner.state().pending_cast.as_ref().unwrap().object_id,
+        spell
+    );
+    // CR 601.2a + CR 601.2f: pending is Stack, not Hand, when cost locks.
+    assert_eq!(
+        runner.state().pending_cast.as_ref().unwrap().cost,
+        ManaCost::generic(2)
+    );
+    assert_eq!(count(runner.state(), spell, union.clone()), 2);
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Hand)), 1);
+    assert_eq!(
+        count(
+            runner.state(),
+            spell,
+            TargetFilter::And {
+                filters: vec![
+                    artifact_in(Zone::Hand),
+                    TargetFilter::SpecificObject { id: spell }
+                ]
+            }
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            runner.state(),
+            spell,
+            TargetFilter::And {
+                filters: vec![
+                    artifact_in(Zone::Hand),
+                    TargetFilter::SpecificObject { id: hand }
+                ]
+            }
+        ),
+        1
+    );
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 1);
+    assert_eq!(
+        count(
+            runner.state(),
+            spell,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Stack]
+                }
+            ]))
+        ),
+        2
+    );
+    let nested = TargetFilter::And {
+        filters: vec![
+            TargetFilter::Or {
+                filters: vec![artifact_in(Zone::Hand), artifact_in(Zone::Stack)],
+            },
+            TargetFilter::Not {
+                filter: Box::new(artifact_in(Zone::Hand)),
+            },
+        ],
+    };
+    assert_eq!(count(runner.state(), spell, nested), 1);
+    assert_eq!(runner.state().objects[&hand].zone, Zone::Hand);
+    runner.act(GameAction::CancelCast).unwrap();
+    assert_eq!(count(runner.state(), spell, union), 3);
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 0);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let mut completed = GameRunner::from_state(completed_state);
+    let committed = completed.cast(spell).commit();
+    assert_eq!(count(committed.state(), spell, artifact_in(Zone::Stack)), 1);
+    let outcome = committed.resolve();
+    outcome.assert_zone(&[spell], Zone::Battlefield);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+}
+
+#[test]
+fn leech_population_cost() {
+    for (populated, colorless, short) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            (0..if short {
+                5
+            } else if populated {
+                6
+            } else {
+                8
+            })
+                .map(|_| {
+                    ManaUnit::new(
+                        if colorless {
+                            ManaType::Colorless
+                        } else {
+                            ManaType::Black
+                        },
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let spell = scenario
+            .add_creature_to_hand(P0, "Gargantuan Leech", 5, 5)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 7,
+                shards: vec![ManaCostShard::Black],
+            })
+            .from_oracle_text_with_keywords(&["Lifelink"], LEECH)
+            .id();
+        let mut off_zone = None;
+        if populated {
+            scenario
+                .add_land_from_oracle(P1, "Controlled foreign Cave", "")
+                .with_subtypes(vec!["Cave"])
+                .controlled_by(P0);
+            off_zone = Some(
+                scenario
+                    .add_land_to_graveyard(P0, "Own graveyard Cave")
+                    .with_subtypes(vec!["Cave"])
+                    .id(),
+            );
+            scenario
+                .add_land_to_graveyard(P1, "Opponent Cave")
+                .with_subtypes(vec!["Cave"]);
+            scenario
+                .add_land_from_oracle(P0, "Owned uncontrolled Cave", "")
+                .with_subtypes(vec!["Cave"])
+                .controlled_by(P1);
+            scenario
+                .add_land_to_hand(P0, "Hand Cave")
+                .with_subtypes(vec!["Cave"]);
+            scenario.add_land_to_graveyard(P0, "Ordinary land");
+        }
+        let mut runner = scenario.build();
+        if let Some(id) = off_zone {
+            runner.state_mut().objects.get_mut(&id).unwrap().controller = P1;
+        }
+        assert_eq!(runner.state().objects[&spell].static_definitions.len(), 1);
+        if colorless || short {
+            assert!(runner.cast(spell).try_resolve().is_err());
+            continue;
+        }
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_zone(&[spell], Zone::Battlefield);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+        assert!(outcome.state().objects[&spell]
+            .keywords
+            .contains(&Keyword::Lifelink));
+    }
+}
+
+#[test]
+fn independent_repeated_population_overlap() {
+    // Synthetic expression witnesses: one object satisfies two independent each clauses.
+    for second in ["creature", "artifact"] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let member = scenario
+            .add_creature(P0, "Artifact Creature", 2, 3)
+            .as_artifact_creature()
+            .id();
+        let oracle =
+            format!("Draw a card for each artifact you control and each {second} you control.");
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic independent Draw", false, &oracle)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        for i in 0..5 {
+            scenario.add_spell_to_library_top(P0, &format!("Draw member {i}"), true);
+        }
+        let mut runner = scenario.build();
+        let parsed = engine::parser::parse_oracle_text(
+            &oracle,
+            "Synthetic independent Draw",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_hand_drawn(P0, 2);
+        assert_eq!(outcome.state().objects[&member].power, Some(2));
+    }
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let member = scenario
+        .add_creature(P0, "Anthem Artifact Creature", 2, 3)
+        .as_artifact_creature()
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Synthetic independent anthem", "Creatures you control get +1/+1 for each artifact you control and each creature you control.");
+    let marker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic flush", false, "You gain 1 life.")
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .cast(marker)
+        .resolve()
+        .assert_power_toughness(member, 4, 5);
+}
+
+#[test]
+fn repeated_population_full_source_honesty() {
+    for (text, name, types, keywords) in [
+        (
+            DISMISSAL,
+            "Machinist's Dismissal",
+            vec!["Instant".into()],
+            vec![],
+        ),
+        (
+            LEECH,
+            "Gargantuan Leech",
+            vec!["Creature".into()],
+            vec!["Lifelink".into()],
+        ),
+    ] {
+        let parsed = engine::parser::parse_oracle_text(text, name, &keywords, &types, &[]);
+        assert_eq!(parsed.statics.len(), 1, "{parsed:#?}");
+        assert!(
+            matches!(&parsed.statics[0].mode, StaticMode::ModifyCost { dynamic_count: Some(QuantityRef::ObjectCount { filter: TargetFilter::Or { filters } }), .. } if filters.len() == 2)
+        );
+        assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+        if name == "Machinist's Dismissal" {
+            assert_eq!(parsed.abilities.len(), 1);
+        } else {
+            assert!(parsed.extracted_keywords.contains(&Keyword::Lifelink));
+        }
+    }
+    for body in [
+        "artifact you control and each creature you control",
+        "artifact you control and each artifact you control",
+        "artifact you control and each mystery in your hand",
+        "artifact you control and each artifact card in your hand and each",
+        "artifact you control and each artifact card in your hand with unknown frosting",
+        "card in exile and in your graveyard and each mystery you control",
+        "artifact you control and eachness artifact card in your hand",
+    ] {
+        let text = format!("This spell costs {{1}} less to cast for each {body}.");
+        let parsed = engine::parser::parse_oracle_text(
+            &text,
+            "Synthetic unsupported scalar",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(
+            parsed.statics.is_empty(),
+            "must not admit a partial/fixed discount: {body}: {parsed:#?}"
+        );
+        assert!(parsed.abilities.iter().any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "static_structure" && ability.description.as_deref() == Some(text.as_str()))), "full source must remain visible: {parsed:#?}");
+    }
+}
+
+#[test]
+fn repeated_population_generalized_zone_families() {
+    for (body, generic, expected) in [
+        ("artifact card in your hand and each artifact you control", 4, 2),
+        ("creature your opponents control and each creature card in your graveyard and each artifact card in your hand", 5, 2),
+        ("card you own in exile and in your graveyard and each artifact you control", 5, 2),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        mana(&mut scenario, expected);
+        let text = format!("This spell costs {{1}} less to cast for each {body}.\nYou gain 1 life.");
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic disjoint family", false, &text).with_mana_cost(ManaCost::generic(generic)).id();
+        scenario.add_artifact_from_oracle(P0, "Family battlefield artifact", "");
+        scenario.add_artifact_to_hand_from_oracle(P0, "Family hand artifact", "");
+        scenario.add_creature(P1, "Family opponent creature", 1, 1);
+        scenario.add_creature_to_graveyard(P0, "Family graveyard creature", 1, 1);
+        scenario.add_spell_to_exile(P0, "Family exiled instant", true);
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&spell].parse_warnings.is_empty());
+        let outcome = runner.cast(spell).resolve();
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+        outcome.assert_life_delta(P0, 1);
+    }
+}
+
+fn begin_manual(runner: &mut GameRunner, spell: ObjectId) {
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: runner.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .unwrap();
+    assert!(runner.state().objects[&spell].spell_announcement.is_some());
+    assert!(runner.state().stack.iter().any(|entry| entry.id == spell));
+}
+
+#[test]
+fn pending_population_lock_payment_and_cancel() {
+    for real_ability in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let text = if real_ability {
+            format!("{REPEATED}\nYou gain 1 life.")
+        } else {
+            REPEATED.into()
+        };
+        let spell = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Synthetic locked artifact", &text)
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        let source = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Synthetic sacrificial mana artifact",
+                "Sacrifice this artifact: Add {C}{C}.",
+            )
+            .id();
+        scenario.add_artifact_to_hand_from_oracle(P0, "Remaining hand artifact", "");
+        let mut runner = scenario.build();
+        assert_eq!(
+            runner.state().objects[&spell].abilities.is_empty(),
+            !real_ability
+        );
+        begin_manual(&mut runner, spell);
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            ManaCost::generic(2)
+        );
+        assert!(
+            runner.act(GameAction::PassPriority).is_err(),
+            "manual payment cannot partially spend an empty pool"
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            ManaCost::generic(2)
+        );
+        runner.act(GameAction::CancelCast).unwrap();
+        assert_eq!(count(runner.state(), spell, artifact_in(Zone::Hand)), 2);
+        assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 0);
+        begin_manual(&mut runner, spell);
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            ManaCost::generic(2)
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+        assert_eq!(
+            count(runner.state(), spell, artifact_in(Zone::Battlefield)),
+            0
+        );
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            ManaCost::generic(2)
+        );
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(runner.state().pending_cast.is_none());
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+    }
+}
+
+fn population_modifier(dynamic: bool) -> engine::types::ability::StaticDefinition {
+    let parsed = engine::parser::parse_oracle_text(
+        REPEATED,
+        "Synthetic population source",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    let mut definition = parsed
+        .statics
+        .into_iter()
+        .next()
+        .expect("complete population static");
+    definition.affected = Some(TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::You),
+    ));
+    if !dynamic {
+        let StaticMode::ModifyCost { dynamic_count, .. } = &mut definition.mode else {
+            unreachable!()
+        };
+        *dynamic_count = None;
+    }
+    definition
+}
+
+#[test]
+fn pending_population_transient_grant_lock() {
+    use engine::types::statics::StaticModeKind;
+    for mode in ["dynamic", "fixed", "expired", "wrong caster", "wrong spell"] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Synthetic transient-only artifact", "")
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        let source = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Synthetic temporary grant source",
+                "Sacrifice this artifact: Add {C}{C}.",
+            )
+            .id();
+        scenario.add_artifact_to_hand_from_oracle(P0, "Transient hand member", "");
+        let mut runner = scenario.build();
+        let mut definition = population_modifier(mode != "fixed");
+        if mode == "wrong spell" {
+            let StaticMode::ModifyCost { spell_filter, .. } = &mut definition.mode else {
+                unreachable!()
+            };
+            *spell_filter = Some(TargetFilter::Typed(TypedFilter::creature()));
+        }
+        let controller = if mode == "wrong caster" { P1 } else { P0 };
+        let effect_id = runner
+            .state_mut()
+            .add_transient_continuous_effect(
+                source,
+                controller,
+                Duration::UntilHostLeavesPlay,
+                TargetFilter::SpecificPlayer { id: controller },
+                vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(definition),
+                }],
+                None,
+            )
+            .unwrap();
+        assert!(runner.state().transient_continuous_effects.iter().any(|effect| effect.id == effect_id && matches!(effect.affected, TargetFilter::SpecificPlayer { id } if id == controller)));
+        assert!(!runner
+            .state()
+            .static_mode_presence
+            .contains(StaticModeKind::ModifyCost));
+        assert!(runner.state().objects[&spell].static_definitions.is_empty());
+        assert!(runner.state().objects[&source]
+            .static_definitions
+            .is_empty());
+        if mode == "expired" {
+            // The producer installed a real live effect. Retain its lapsed
+            // entry to exercise liveness before the ordinary pruning sweep.
+            runner.state_mut().objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+        }
+        let expected = match mode {
+            "dynamic" => 2,
+            "fixed" => 3,
+            _ => 4,
+        };
+        if mode != "dynamic" {
+            runner.state_mut().players[0].mana_pool = (0..expected)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect();
+        }
+        begin_manual(&mut runner, spell);
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            ManaCost::generic(expected)
+        );
+        if mode == "dynamic" {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .unwrap();
+            assert_eq!(
+                count(runner.state(), spell, artifact_in(Zone::Battlefield)),
+                0
+            );
+            assert_eq!(
+                runner.state().pending_cast.as_ref().unwrap().cost,
+                ManaCost::generic(2)
+            );
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(runner.state().pending_cast.is_none());
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+    }
+}
+
+#[test]
+fn pending_population_functioning_modifier_sources() {
+    use engine::types::ability::StaticDefinition;
+    for source_kind in ["battlefield", "command", "object grant"] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Synthetic functioning-source artifact", "")
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        let mana_source = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Functioning-source mana artifact",
+                "Sacrifice this artifact: Add {C}{C}.",
+            )
+            .id();
+        scenario.add_artifact_to_hand_from_oracle(P0, "Functioning-source hand member", "");
+        let mut definition = population_modifier(true);
+        if source_kind == "command" {
+            definition.active_zones = vec![Zone::Command];
+        }
+        let host = if source_kind == "object grant" {
+            scenario
+                .add_enchantment_from_oracle(P0, "Synthetic modifier host", "")
+                .id()
+        } else {
+            scenario
+                .add_enchantment_from_oracle(P0, "Synthetic modifier host", "")
+                .with_static_definition(definition.clone())
+                .id()
+        };
+        if source_kind == "object grant" {
+            scenario
+                .add_enchantment_from_oracle(P0, "Synthetic object-bound granter", "")
+                .with_static_definition(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SpecificObject { id: host })
+                        .modifications(vec![ContinuousModification::GrantStaticAbility {
+                            definition: Box::new(definition),
+                        }]),
+                );
+        }
+        let mut runner = scenario.build();
+        if source_kind == "command" {
+            engine::game::zones::move_to_zone(
+                runner.state_mut(),
+                host,
+                Zone::Command,
+                &mut Vec::new(),
+            );
+        }
+        begin_manual(&mut runner, spell);
+        assert!(runner.state().objects[&spell].static_definitions.is_empty());
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            ManaCost::generic(2),
+            "{source_kind}"
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: mana_source,
+                ability_index: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            runner.state().pending_cast.as_ref().unwrap().cost,
+            ManaCost::generic(2)
+        );
+        runner.act(GameAction::PassPriority).unwrap();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+    }
+}
+
+#[test]
+fn pending_population_modifier_order() {
+    use engine::types::ability::StaticDefinition;
+    use engine::types::statics::CostReductionReach;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, 5);
+    let spell = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Synthetic floor artifact", REPEATED)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Floor battlefield member", "");
+    scenario.add_artifact_to_hand_from_oracle(P0, "Floor hand member", "");
+    for (mode, amount) in [(CostModifyMode::Raise, 2), (CostModifyMode::Minimum, 5)] {
+        scenario
+            .add_enchantment_from_oracle(P0, "Synthetic cost modifier", "")
+            .with_static_definition(StaticDefinition::new(StaticMode::ModifyCost {
+                mode,
+                amount: ManaCost::generic(amount),
+                spell_filter: None,
+                dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
+            }));
+    }
+    let mut runner = scenario.build();
+    begin_manual(&mut runner, spell);
+    assert_eq!(
+        runner.state().pending_cast.as_ref().unwrap().cost,
+        ManaCost::generic(5)
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+}
+
+fn alternative_permission(
+    granted_to: engine::types::player::PlayerId,
+    base: u32,
+    rider: u32,
+) -> engine::types::ability::CastingPermission {
+    use engine::types::ability::{CastCostModifier, CastingPermission, ExileGrantCostProvenance};
+    CastingPermission::ExileWithAltCost {
+        cost: ManaCost::generic(base),
+        cost_provenance: ExileGrantCostProvenance::Alternative,
+        cast_transformed: false,
+        constraint: None,
+        granted_to: Some(granted_to),
+        resolution_cleanup: None,
+        duration: None,
+        source_id: None,
+        graveyard_replacement: None,
+        enters_with_counter: None,
+        enters_with_modifications: Vec::new(),
+        mana_spend_permission: None,
+        cast_cost_modifier: Some(CastCostModifier::reduce(ManaCost::generic(rider))),
+    }
+}
+
+fn assert_pending_reader_authorities(
+    runner: &GameRunner,
+    spell: ObjectId,
+    origin: Zone,
+    record: &engine::types::game_state::ZoneChangeRecord,
+) {
+    use engine::game::filter::{
+        matches_target_filter, matches_target_filter_on_zone_change_record, FilterContext,
+    };
+    let ctx = FilterContext::from_source_with_controller(spell, P0);
+    assert_eq!(runner.state().objects[&spell].owner, P1);
+    assert_eq!(
+        runner.state().objects[&spell].controller,
+        P1,
+        "retained origin still has its original facts"
+    );
+    let exact = |filter| TargetFilter::And {
+        filters: vec![TargetFilter::SpecificObject { id: spell }, filter],
+    };
+    assert_eq!(
+        count(runner.state(), spell, exact(artifact_in(Zone::Stack))),
+        1
+    );
+    assert_eq!(count(runner.state(), spell, exact(artifact_in(origin))), 0);
+    assert!(matches_target_filter(
+        runner.state(),
+        spell,
+        &artifact_in(origin),
+        &ctx
+    ));
+    assert!(!matches_target_filter(
+        runner.state(),
+        spell,
+        &artifact_in(Zone::Stack),
+        &ctx
+    ));
+    assert!(matches_target_filter_on_zone_change_record(
+        runner.state(),
+        record,
+        &artifact_in(origin),
+        &ctx
+    ));
+    assert!(!matches_target_filter_on_zone_change_record(
+        runner.state(),
+        record,
+        &artifact_in(Zone::Stack),
+        &ctx
+    ));
+    let stack_scope = |controller| {
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact)
+                .controller(controller)
+                .properties(vec![FilterProp::InZone { zone: Zone::Stack }]),
+        )
+    };
+    assert_eq!(
+        count(
+            runner.state(),
+            spell,
+            exact(stack_scope(ControllerRef::You))
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            runner.state(),
+            spell,
+            exact(stack_scope(ControllerRef::Opponent))
+        ),
+        0
+    );
+    let owner = TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+        controller: ControllerRef::Opponent,
+    }]));
+    assert_eq!(
+        count(
+            runner.state(),
+            spell,
+            exact(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![stack_scope(ControllerRef::You), artifact_in(origin)]
+                    },
+                    TargetFilter::Not {
+                        filter: Box::new(stack_scope(ControllerRef::Opponent))
+                    },
+                    owner,
+                ]
+            })
+        ),
+        1
+    );
+}
+
+#[test]
+fn pending_population_selected_permission_cost() {
+    use engine::types::ability::{CastingPermission, TargetRef};
+    use engine::types::game_state::CastingPermissionIndex;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, 3);
+    let text = format!("{REPEATED}\nTarget player gains 1 life.");
+    let spell = scenario
+        .add_creature_to_exile(P1, "Synthetic foreign permission artifact", 2, 2)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(9))
+        .from_oracle_text(&text)
+        .with_keyword(Keyword::Flash)
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Permission battlefield member", "");
+    scenario.add_artifact_to_hand_from_oracle(P0, "Permission hand member", "");
+    let unrelated = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic unrelated spell", true, "You gain 2 life.")
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let ability_source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Synthetic unrelated activation",
+            1,
+            1,
+            "{0}: You gain 1 life.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(unrelated).commit();
+    runner
+        .state_mut()
+        .stack
+        .iter_mut()
+        .find(|entry| entry.id == unrelated)
+        .unwrap()
+        .controller = P1;
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ability_source,
+            ability_index: 0,
+        })
+        .unwrap();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions = vec![
+        alternative_permission(P1, 1, 0),
+        alternative_permission(P0, 6, 1),
+    ];
+    let record = runner.state().objects[&spell].snapshot_for_zone_change(
+        spell,
+        Some(Zone::Exile),
+        Zone::Stack,
+    );
+    let before = runner.state().stack.len();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: runner.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .unwrap();
+    assert_eq!(
+        runner
+            .state()
+            .pending_cast
+            .as_ref()
+            .unwrap()
+            .casting_permission_index,
+        Some(CastingPermissionIndex(1))
+    );
+    let CastingPermission::ExileWithAltCost { granted_to, .. } = &mut runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions[0]
+    else {
+        unreachable!()
+    };
+    *granted_to = Some(P0);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: TargetRef::Player(P0),
+        })
+        .unwrap();
+    assert_eq!(
+        runner.state().pending_cast.as_ref().unwrap().base_cost,
+        Some(ManaCost::generic(6))
+    );
+    assert_eq!(
+        runner.state().pending_cast.as_ref().unwrap().cost,
+        ManaCost::generic(3)
+    );
+    assert_pending_reader_authorities(&runner, spell, Zone::Exile, &record);
+    runner.act(GameAction::CancelCast).unwrap();
+    assert_eq!(runner.state().stack.len(), before);
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.id == unrelated && entry.controller == P1));
+    assert_eq!(
+        count(
+            runner.state(),
+            spell,
+            TargetFilter::And {
+                filters: vec![
+                    artifact_in(Zone::Stack),
+                    TargetFilter::SpecificObject { id: spell }
+                ]
+            }
+        ),
+        0
+    );
+    assert_eq!(runner.state().objects[&spell].owner, P1);
+    // Restore the original eligibility and cast anew through the fluent driver.
+    let CastingPermission::ExileWithAltCost { granted_to, .. } = &mut runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions[0]
+    else {
+        unreachable!()
+    };
+    *granted_to = Some(P1);
+    let outcome = runner.cast(spell).target_player(P0).resolve();
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+    outcome.assert_zone(&[spell], Zone::Battlefield);
+}
+
+#[test]
+fn pending_foreign_spell_controller() {
+    use engine::types::ability::{CardPlayMode, StaticDefinition};
+    use engine::types::statics::{CastFrequency, GraveyardPermissionPool};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, 2);
+    let spell = scenario
+        .add_creature_to_graveyard(P1, "Synthetic foreign graveyard artifact", 2, 2)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(4))
+        .from_oracle_text(REPEATED)
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Graveyard battlefield member", "");
+    scenario.add_artifact_to_hand_from_oracle(P0, "Graveyard hand member", "");
+    scenario
+        .add_enchantment_from_oracle(P0, "Synthetic any-graveyard permission", "")
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                required_cast_keyword: None,
+                pool: GraveyardPermissionPool::AnyGraveyard,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::creature())),
+        );
+    let mut runner = scenario.build();
+    let record = runner.state().objects[&spell].snapshot_for_zone_change(
+        spell,
+        Some(Zone::Graveyard),
+        Zone::Stack,
+    );
+    begin_manual(&mut runner, spell);
+    assert_eq!(
+        runner.state().pending_cast.as_ref().unwrap().cost,
+        ManaCost::generic(2)
+    );
+    assert_pending_reader_authorities(&runner, spell, Zone::Graveyard, &record);
+    runner.act(GameAction::CancelCast).unwrap();
+    assert_eq!(runner.state().objects[&spell].owner, P1);
+    let outcome = runner.cast(spell).resolve();
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+    outcome.assert_zone(&[spell], Zone::Battlefield);
+}
+
+#[test]
+fn pending_population_reader_authorities() {
+    use engine::game::filter::{
+        matches_target_filter, matches_target_filter_on_zone_change_record, FilterContext,
+    };
+    use engine::types::ability::Comparator;
+    use engine::types::game_state::{CastingVariant, StackEntryKind};
+    use engine::types::mana::ManaColor;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    mana(&mut scenario, 4);
+    let spell = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Synthetic characteristic carrier", "")
+        .with_keyword(Keyword::Flash)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let other = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic competing spell", true, "You gain 1 life.")
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(other).commit();
+    let other_index = runner
+        .state()
+        .stack
+        .iter()
+        .position(|entry| entry.id == other)
+        .unwrap();
+    let unrelated_ability = runner.state().stack[other_index].ability().unwrap().clone();
+    if let StackEntryKind::Spell {
+        casting_variant, ..
+    } = &mut runner.state_mut().stack[other_index].kind
+    {
+        *casting_variant = CastingVariant::Fuse;
+    }
+    let record = runner.state().objects[&spell].snapshot_for_zone_change(
+        spell,
+        Some(Zone::Hand),
+        Zone::Stack,
+    );
+    begin_manual(&mut runner, spell);
+    let index = runner
+        .state()
+        .stack
+        .iter()
+        .position(|entry| entry.id == spell)
+        .unwrap();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .back_face = Some(BackFaceData {
+        name: "Synthetic other Split half".into(),
+        layout_kind: Some(LayoutKind::Split),
+        mana_cost: ManaCost::generic(3),
+        color: vec![ManaColor::Red],
+        ..Default::default()
+    });
+    let characteristic_filter = TargetFilter::And {
+        filters: vec![
+            artifact_in(Zone::Stack),
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 5 },
+                },
+                FilterProp::HasColor {
+                    color: ManaColor::Red,
+                },
+            ])),
+        ],
+    };
+    // The unrelated Fuse entry cannot supply this spell's characteristics.
+    assert_eq!(
+        count(runner.state(), spell, characteristic_filter.clone()),
+        0
+    );
+    if let StackEntryKind::Spell {
+        casting_variant, ..
+    } = &mut runner.state_mut().stack[index].kind
+    {
+        *casting_variant = CastingVariant::Fuse;
+    }
+    assert_eq!(count(runner.state(), spell, characteristic_filter), 1);
+    assert!(
+        !runner.state().objects[&spell].fused_split_spell,
+        "projection never persists the hint early"
+    );
+    let ctx = FilterContext::from_source_with_controller(spell, P0);
+    assert!(matches_target_filter(
+        runner.state(),
+        spell,
+        &artifact_in(Zone::Hand),
+        &ctx
+    ));
+    assert!(matches_target_filter_on_zone_change_record(
+        runner.state(),
+        &record,
+        &artifact_in(Zone::Hand),
+        &ctx
+    ));
+    assert!(!matches_target_filter_on_zone_change_record(
+        runner.state(),
+        &record,
+        &artifact_in(Zone::Stack),
+        &ctx
+    ));
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 1);
+    let announcement = runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .spell_announcement
+        .take();
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 0);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .spell_announcement = announcement;
+    runner.state_mut().stack[index].kind = StackEntryKind::ActivatedAbility {
+        source_id: spell,
+        ability: Box::new(unrelated_ability),
+    };
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 0);
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Hand)), 1);
 }

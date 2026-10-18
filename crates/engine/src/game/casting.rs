@@ -11202,7 +11202,12 @@ pub(super) fn lock_in_total_cost(
     // second round of modifier collection. Behaviour-neutral: with no reduction
     // to snapshot the analyzer would return zero outcomes and this same
     // untouched cost.
-    if extra.is_empty() && election.is_none() && !cast_can_have_cost_modifiers(state, pending) {
+    let preview_is_stable = spell_cost_preview_is_cast_stable(state, player, pending);
+    if extra.is_empty()
+        && election.is_none()
+        && preview_is_stable
+        && !cast_can_have_cost_modifiers(state, pending)
+    {
         return CostLockOutcome::Locked(pending.cost.clone());
     }
 
@@ -11225,7 +11230,7 @@ pub(super) fn lock_in_total_cost(
         };
     }
 
-    if ctx.extra.is_empty() {
+    if ctx.extra.is_empty() && preview_is_stable {
         // Nothing new to fold in and no choice to make — leave the announced
         // total exactly as the ordinary pipeline computed it.
         return CostLockOutcome::Locked(pending.cost.clone());
@@ -11276,6 +11281,101 @@ fn cast_can_have_cost_modifiers(state: &GameState, pending: &PendingCast) -> boo
             .iter_all()
             .any(|def| matches!(def.mode, StaticMode::ModifyCost { .. }))
     })
+}
+
+/// CR 601.2a + CR 601.2f: a preview may survive announcement only when
+/// every possibly applicable dynamic multiplier is proven cast-stable. This
+/// proof enumerates the collector's source classes without collecting costs.
+fn spell_cost_preview_is_cast_stable(
+    state: &GameState,
+    caster: PlayerId,
+    pending: &PendingCast,
+) -> bool {
+    let stable = |definition: &StaticDefinition| match &definition.mode {
+        StaticMode::ModifyCost {
+            dynamic_count: Some(quantity),
+            ..
+        } => super::quantity::quantity_ref_is_cast_stable_for_pre_cast(quantity),
+        _ => true,
+    };
+    let variant = Some(pending.casting_variant);
+    let fused = variant == Some(CastingVariant::Fuse);
+    if let Some(spell) = state.objects.get(&pending.object_id) {
+        if spell.static_definitions.iter_all().any(|definition| {
+            self_spell_cost_modifier_applies_before_targets(
+                state,
+                caster,
+                pending.object_id,
+                definition,
+                variant,
+            ) && !stable(definition)
+        }) {
+            return false;
+        }
+    }
+    if static_kind_present(state, StaticModeKind::ModifyCost)
+        && super::functioning_abilities::game_functioning_statics(state).any(
+            |(source, definition)| {
+                battlefield_cost_modifier_applies_before_targets(
+                    state,
+                    caster,
+                    pending.object_id,
+                    source,
+                    definition,
+                    fused,
+                    variant,
+                ) && !stable(definition)
+            },
+        )
+    {
+        return false;
+    }
+    if transient_modify_cost_present(state) {
+        for effect in &state.transient_continuous_effects {
+            if !super::layers::transient_effect_is_live(state, effect)
+                || !matches!(effect.affected, TargetFilter::SpecificPlayer { .. })
+                || !super::layers::transient_gate_conditions(effect).all(|condition| {
+                    super::layers::evaluate_condition(
+                        state,
+                        condition,
+                        effect.controller,
+                        effect.source_id,
+                    )
+                })
+            {
+                continue;
+            }
+            for modification in &effect.modifications {
+                let ContinuousModification::GrantStaticAbility { definition } = modification else {
+                    continue;
+                };
+                let Some(modifier) = definition.board_wide_cost_modifier() else {
+                    continue;
+                };
+                if !modifier.caster_scope.admits(caster, effect.controller) {
+                    continue;
+                }
+                if definition.condition.as_ref().is_some_and(|condition| {
+                    !evaluate_cost_mod_static_condition(
+                        state,
+                        condition,
+                        caster,
+                        effect.controller,
+                        effect.source_id,
+                        variant,
+                    )
+                }) {
+                    continue;
+                }
+                // Unknown/target-dependent filters remain possibly applicable;
+                // refusing reuse is safe and the ordinary collector owns truth.
+                if !stable(definition) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 fn reduction_entry_to_mod(entry: CostReductionEntry) -> CostModification {
@@ -24257,14 +24357,19 @@ pub(super) fn find_targeted_remove_counter_cost(
 /// incarnation as a spell) and the stack entry that announcement pushed.
 ///
 /// The single authority every hand/graveyard cost-fodder enumeration consults.
-pub(crate) fn is_spell_being_cast(state: &GameState, object_id: ObjectId) -> bool {
+pub(crate) fn announced_spell_entry(state: &GameState, object_id: ObjectId) -> Option<&StackEntry> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone == Zone::Stack || obj.spell_announcement.is_none() {
+        return None;
+    }
     state
-        .objects
-        .get(&object_id)
-        .is_some_and(|obj| obj.zone != Zone::Stack && obj.spell_announcement.is_some())
-        && state.stack.iter().any(|entry| {
-            entry.id == object_id && matches!(entry.kind, StackEntryKind::Spell { .. })
-        })
+        .stack
+        .iter()
+        .find(|entry| entry.id == object_id && matches!(entry.kind, StackEntryKind::Spell { .. }))
+}
+
+pub(crate) fn is_spell_being_cast(state: &GameState, object_id: ObjectId) -> bool {
+    announced_spell_entry(state, object_id).is_some()
 }
 
 /// Shared eligibility helper for hand-card cost payments — returns every card

@@ -7,6 +7,18 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn repeated_population_dismissal() {
+    let def = parse_static_line("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.").unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
+fn repeated_population_leech() {
+    let def = parse_static_line("This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard.").unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
 fn coordinated_population_sailors() {
     let def = parse_static_line("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.").unwrap();
     insta::assert_json_snapshot!(def);

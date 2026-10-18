@@ -290,7 +290,6 @@ fn coordinated_population_unknown_tail_is_honest() {
         "card you own in exile and in",
         "card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an unknown adventure",
         "card you own in exile and in your graveyard that's an instant card and",
-        "card you own in exile and in your graveyard and each artifact you control",
     ] {
         let oracle = format!("This spell costs {{1}} less to cast for each {count}.");
         let parsed = parse_oracle_text(&oracle, "Synthetic hostile cost", &[], &["Creature".into()], &[]);
@@ -34250,4 +34249,21 @@ fn ir_facade_demotes_a_refused_granter_name() {
         &*def.effect,
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
+}
+
+#[test]
+fn repeated_full_card_preserves_independent_instructions() {
+    // SHAPE: public full-source routing, paired with production cast tests.
+    let dismissal = parse_oracle_text("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.\nCounter target noncreature spell.", "Machinist's Dismissal", &[], &["Instant".into()], &[]);
+    assert_eq!(dismissal.statics.len(), 1);
+    assert_eq!(dismissal.abilities.len(), 1);
+    assert!(dismissal.parse_warnings.is_empty());
+    assert!(dismissal.abilities.iter().all(|a| !has_unimplemented(a)));
+    let leech = parse_oracle_text("This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard.\nLifelink", "Gargantuan Leech", &["Lifelink".into()], &["Creature".into()], &["Leech".into()]);
+    assert_eq!(leech.statics.len(), 1);
+    assert!(leech.extracted_keywords.contains(&Keyword::Lifelink));
+    assert!(leech.parse_warnings.is_empty());
+    let coordinated = parse_oracle_text("This spell costs {1} less to cast for each card you own in exile and in your graveyard and each artifact you control.", "Synthetic coordinated and repeated", &[], &["Artifact".into()], &[]);
+    assert_eq!(coordinated.statics.len(), 1);
+    assert!(coordinated.parse_warnings.is_empty());
 }
