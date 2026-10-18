@@ -1065,17 +1065,17 @@ fn negated_prepared_activation_blink_returned_prepared_still_dispatches() {
 
 // ---------------------------------------------------------------------------
 // Self-sacrifice cohort: the activation's own cost moves the source, so the
-// announcement-captured incarnation (before payment) is the only surviving
-// source epoch — the exit LKI of the sacrificed permanent, never the graveyard
-// object a placement-time stamp would have named.
+// announced incarnation (before payment) is the epoch the condition gate must
+// read — the exit LKI of the sacrificed permanent, never the graveyard object
+// the placement stamp names in `source_incarnation`.
 // ---------------------------------------------------------------------------
 
 /// CR 602.2a + CR 113.7a + CR 608.2h: the activation's own cost sacrifices the
 /// source, so the storage incarnation advances before stack placement. The
 /// announced incarnation's exit last-known information must answer the
 /// condition: the exit was prepared, so the draw dispatches even though the
-/// live graveyard card reads unprepared — a placement-time stamp would name
-/// the graveyard incarnation and suppress.
+/// live graveyard card reads unprepared — reading the placement epoch instead
+/// would name the graveyard incarnation and suppress.
 #[test]
 fn prepared_activation_self_sacrifice_dispatches_after_prepared_exit() {
     let (mut runner, witness) =
@@ -1098,6 +1098,28 @@ fn prepared_activation_self_sacrifice_dispatches_after_prepared_exit() {
     assert!(
         runner.state().objects[&witness].prepared.is_none(),
         "the departed graveyard card's live designation is cleared — the exit snapshot is the only surviving record"
+    );
+
+    // Field split contract: the announcement epoch names the pre-cost object,
+    // while the placement stamp names the post-cost object the
+    // source-reconstruction consumers (copy sources, host references, craft
+    // returns) read — and it must NOT be the epoch the condition gate reads.
+    let placed = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == witness)
+        .and_then(|entry| entry.ability())
+        .expect("the activated ability must wait on the stack");
+    assert_eq!(
+        placed.announced_source_incarnation,
+        Some(incarnation_before),
+        "the announcement epoch must name the pre-cost object"
+    );
+    assert_eq!(
+        placed.source_incarnation,
+        Some(runner.state().objects[&witness].incarnation),
+        "the placement epoch must name the sacrificed object the reconstruction consumers read"
     );
 
     let baseline = hand_size(runner.state(), P0);

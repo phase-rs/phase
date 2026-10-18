@@ -188,7 +188,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      by a v149 peer.
 // +80: v151 carries populated Bestow restoration payloads.
 // +81: v152 adds `FilterProp::Prepared` (CR 722.3a), the prepared-designation
-//      leaf for source-context trigger conditions in `GameState`.
+//      leaf for source-context trigger conditions in `GameState`, and
+//      `ResolvedAbility.announced_source_incarnation` (CR 400.7 + CR 602.2a),
+//      the source epoch captured when an activation is announced.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 81;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
@@ -295,7 +297,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 //      payload reshape (the permission's `enters_with_modifications` object and the
 //      effect's `rider` key).
 // +79: wire 133 moves with full-game v151 for populated Bestow payloads.
-// +80: wire 134 moves with full-game v152 for the FilterProp Prepared tag.
+// +80: wire 134 moves with full-game v152 for the FilterProp Prepared tag
+//      and the announced activation source epoch.
 const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 80;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an

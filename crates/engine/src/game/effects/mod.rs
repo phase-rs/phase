@@ -5325,6 +5325,7 @@ fn instruction_outlives_declined_gate(
         source_id: _,
         cast_occurrence: _,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -21058,20 +21059,25 @@ pub(crate) fn evaluate_condition(
         // captured incarnation — the live object only while it is still that
         // incarnation in its expected zone, otherwise the incarnation's exit
         // last-known information. An activated ability reads the incarnation
-        // captured when its activation reached the stack (CR 400.7 + CR 602.2)
-        // the same way: destroying or blinking the source in response must not
-        // rebind the condition to the later object at the same storage id. A
+        // captured at its announcement (CR 400.7 + CR 602.2a), before any
+        // self-moving cost was paid (CR 601.2h), the same way: the cost moving
+        // the source, destroying it, or blinking it in response must not rebind
+        // the condition to the later object at the same storage id. A
         // designation gained before departure, or one held only by a same-id
         // blink return, is therefore never mistaken for a live one (CR 400.7).
-        // Abilities with no captured epoch — spells, mana abilities (CR 605.3b),
-        // and pre-activation decision aids asking about the current board —
-        // keep the live read (CR 602.2: activation already required the source
-        // to be legal).
+        // An ability with neither captured epoch — a delayed ability keeps the
+        // `source_incarnation` its creation captured — falls back the same
+        // way; spells, mana abilities (CR 605.3b), and pre-activation decision
+        // aids asking about the current board keep the live read (CR 602.2:
+        // activation already required the source to be legal).
         AbilityCondition::SourceMatchesFilter { filter } => match ability.trigger_source.as_ref() {
             Some(source) => {
                 crate::game::filter::source_subject_matches_filter(state, source, filter)
             }
-            None => match ability.source_incarnation {
+            None => match ability
+                .announced_source_incarnation
+                .or(ability.source_incarnation)
+            {
                 Some(incarnation) => crate::game::filter::source_incarnation_matches_filter(
                     state,
                     ability.source_id,
