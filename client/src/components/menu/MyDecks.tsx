@@ -1272,23 +1272,17 @@ export function MyDecks({
   }, [useLegalPreview, aiCatalog, randomBaseCandidates]);
   // Complete toggleable universe for folder toggles: the display base above
   // is narrowed by search/source/set filters, but a toggle clears overrides
-  // for every true group member. Saved-duplicate precons stay deduped (the
-  // saved copy owns them); every other display filter is ignored here.
+  // for every true group member — including saved-duplicate precons, whose
+  // catalog id still draws and still holds explicit overrides even though
+  // the tiles show the saved copy. Every display filter is ignored here.
   const poolCompleteItems = useMemo(() => {
     if (mode !== "select") return [];
-    const saved = new Set(deckNames);
     return withCatalogSavedNames(
-      catalogCandidates.flatMap((candidate) => {
+      catalogCandidates.map((candidate) => {
         const deckName = candidate.source.type === "precon"
           ? PRECON_PREFIX + candidate.name
           : candidate.name;
-        if (
-          candidate.source.type === "precon"
-          && (saved.has(deckName) || saved.has(candidate.name))
-        ) {
-          return [];
-        }
-        return [{
+        return {
           id: candidate.id,
           name: deckName,
           deckName,
@@ -1296,30 +1290,26 @@ export function MyDecks({
           knownFormat: candidate.knownFormat,
           compatibility: compatibilities[deckName] ?? null,
           bracket: legalBrackets.get(candidate.id) ?? null,
-        }];
+        };
       }),
     );
-  }, [legalBrackets, catalogCandidates, compatibilities, deckNames, mode]);
+  }, [legalBrackets, catalogCandidates, compatibilities, mode]);
   // Raw toggleable universe for folder toggles in deferred mode: group
   // membership comes from the complete catalog (every saved, feed, and
   // precon deck regardless of format or legality), so an override on a
-  // currently-unlisted deck cannot survive a folder-wide unselect. Display,
-  // counts, and the draw itself stay on the legal `poolTreeItems` universe.
+  // currently-unlisted deck cannot survive a folder-wide unselect — with no
+  // display-only deduplication: a saved-duplicate precon keeps its catalog
+  // id here because the tree still lists it and the draw still serves it.
+  // Display, counts, and the draw itself stay on the legal `poolTreeItems`
+  // universe.
   const poolToggleItems = useMemo(() => {
     if (!useLegalPreview || !aiCatalog) return poolCompleteItems;
-    const saved = new Set(deckNames);
     return withCatalogSavedNames(
-      aiCatalog.allCandidates.flatMap((candidate) => {
+      aiCatalog.allCandidates.map((candidate) => {
         const deckName = candidate.source.type === "precon"
           ? PRECON_PREFIX + candidate.name
           : candidate.name;
-        if (
-          candidate.source.type === "precon"
-          && (saved.has(deckName) || saved.has(candidate.name))
-        ) {
-          return [];
-        }
-        return [{
+        return {
           id: candidate.id,
           name: deckName,
           deckName,
@@ -1327,10 +1317,10 @@ export function MyDecks({
           knownFormat: candidate.knownFormat,
           compatibility: compatibilities[deckName] ?? null,
           bracket: legalBrackets.get(candidate.id) ?? null,
-        }];
+        };
       }),
     );
-  }, [useLegalPreview, aiCatalog, poolCompleteItems, deckNames, compatibilities, legalBrackets]);
+  }, [useLegalPreview, aiCatalog, poolCompleteItems, compatibilities, legalBrackets]);
   const poolBaseIds = useMemo(
     () =>
       useLegalPreview

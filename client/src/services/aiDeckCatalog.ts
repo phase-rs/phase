@@ -60,6 +60,22 @@ export interface AiDeckCatalogResult {
 export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
   loading: boolean;
   error: string | null;
+  /**
+   * Key of the format/match request that produced `candidates`
+   * (`catalogRequestKey`), or null before the first scan settles. Survives
+   * loading transitions: while a new request scans, the previous production
+   * (and its key) is still the visible value, so retained-snapshot consumers
+   * must compare this against the key they are currently showing.
+   */
+  requestKey: string | null;
+}
+
+/** Identity of one legal-catalog scan: the format/match request it answers. */
+export function catalogRequestKey(
+  selectedFormat?: GameFormat | null,
+  selectedMatchType?: MatchType | null,
+): string {
+  return `${selectedFormat ?? ""}::${selectedMatchType ?? ""}`;
 }
 
 /**
@@ -203,6 +219,7 @@ export function useAiDeckCatalog({
     allCandidates: [],
     loading: enabled,
     error: null,
+    requestKey: null,
   });
   // Library inventory revision: importing, deleting, adopting, or refreshing
   // decks (here, in another tab, or via cloud sync) rescans the catalog so
@@ -239,11 +256,12 @@ export function useAiDeckCatalog({
 
   useEffect(() => {
     if (!enabled) return;
+    const key = catalogRequestKey(selectedFormat, selectedMatchType);
     let cancelled = false;
     setResult((current) => ({ ...current, loading: true, error: null }));
     buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType })
       .then((catalog) => {
-        if (!cancelled) setResult({ ...catalog, loading: false, error: null });
+        if (!cancelled) setResult({ ...catalog, loading: false, error: null, requestKey: key });
       })
       .catch((error) => {
         if (!cancelled) {
@@ -252,6 +270,7 @@ export function useAiDeckCatalog({
             allCandidates: [],
             loading: false,
             error: error instanceof Error ? error.message : String(error),
+            requestKey: key,
           });
         }
       });
@@ -261,4 +280,95 @@ export function useAiDeckCatalog({
   }, [selectedFormat, selectedMatchType, enabled, libraryRevision]);
 
   return result;
+}
+
+/**
+ * Grouping-relevant source equality: `poolGroupForCandidate` routes saved
+ * feed mirrors by `feedId` and feed decks by `feedId`, so a provenance-only
+ * refresh (adopt a mirror, same id/bracket) must compare as changed.
+ * Precon `releaseDate` is display metadata, not grouping, and is ignored.
+ */
+function sameCatalogSource(a: AiDeckSource, b: AiDeckSource): boolean {
+  switch (a.type) {
+    case "saved":
+      return b.type === "saved" && (a.feedId ?? null) === (b.feedId ?? null);
+    case "feed":
+      return b.type === "feed" && a.feedId === b.feedId;
+    case "precon":
+      return b.type === "precon" && a.deckId === b.deckId && a.code === b.code;
+  }
+}
+
+/**
+ * Semantic equality for settled legal candidates: every preview/draw-visible
+ * field. The settle bailout must be sensitive, not just stable — dropping a
+ * refresh whose ids repeat but whose bracket or provenance changed serves a
+ * stale legal universe, while a false "changed" only rebuilds one snapshot.
+ */
+function sameCatalogCandidates(a: readonly AiDeckCandidate[], b: readonly AiDeckCandidate[]): boolean {
+  return (
+    a.length === b.length
+    && a.every(
+      (candidate, index) =>
+        candidate.id === b[index].id
+        && candidate.bracket === b[index].bracket
+        && (candidate.knownFormat ?? null) === (b[index].knownFormat ?? null)
+        && (candidate.coveragePct ?? null) === (b[index].coveragePct ?? null)
+        && sameCatalogSource(candidate.source, b[index].source),
+    )
+  );
+}
+
+/** Semantic equality for the raw toggle universe: membership plus grouping. */
+function sameRawCandidates(a: readonly AiDeckCandidate[], b: readonly AiDeckCandidate[]): boolean {
+  return (
+    a.length === b.length
+    && a.every(
+      (candidate, index) =>
+        candidate.id === b[index].id
+        && candidate.bracket === b[index].bracket
+        && sameCatalogSource(candidate.source, b[index].source),
+    )
+  );
+}
+
+/**
+ * Last settled catalog for the human pool, bound to the request that produced
+ * it. A library-inventory rescan flips `loading` back on, and the deferred
+ * preview must keep showing the previous legal universe until the fresh one
+ * lands (not flash back to the display universe) — but only within the same
+ * format/match request. After the parameters change, the previous production
+ * (or a failed new request) must never surface as the current legal snapshot,
+ * so the settled value is exposed only while its producing key matches
+ * `currentRequestKey`. Updates bail out on equal content rather than identity:
+ * callers may pass a freshly-built result object every render, and an
+ * unconditional set would loop against that.
+ */
+export function useSettledAiCatalog(
+  catalog: UseAiDeckCatalogResult,
+  currentRequestKey: string,
+): AiDeckCatalogResult | undefined {
+  const [settled, setSettled] = useState<{ key: string; result: AiDeckCatalogResult } | undefined>(
+    undefined,
+  );
+  useEffect(() => {
+    if (catalog.loading || catalog.error !== null || catalog.requestKey == null) return;
+    const producedKey = catalog.requestKey;
+    const produced: AiDeckCatalogResult = {
+      candidates: catalog.candidates,
+      allCandidates: catalog.allCandidates,
+    };
+    setSettled((prev) => {
+      if (
+        prev !== undefined
+        && prev.key === producedKey
+        && sameCatalogCandidates(prev.result.candidates, produced.candidates)
+        && sameRawCandidates(prev.result.allCandidates, produced.allCandidates)
+      ) {
+        return prev;
+      }
+      return { key: producedKey, result: produced };
+    });
+  }, [catalog]);
+  return settled !== undefined && settled.key === currentRequestKey ? settled.result : undefined;
 }

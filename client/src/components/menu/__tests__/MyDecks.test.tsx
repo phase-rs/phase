@@ -36,6 +36,7 @@ import { useAppNotificationStore } from "../../../stores/appToastStore";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../../../stores/preferencesStore";
 import { savedDeckCatalogId } from "../../../services/deckCatalog";
 import {
+  PRECON_POOL_GROUP,
   UNFILED_POOL_GROUP,
   emptyPoolSelection,
   feedPoolGroup,
@@ -121,6 +122,19 @@ function legalCandidate(name: string, bracket: CommanderBracket | null): AiDeckC
     coveragePct: null,
     archetype: null,
     bracket,
+  };
+}
+
+function preconCandidate(deckId: string, name: string): AiDeckCandidate {
+  return {
+    id: `precon:${deckId}`,
+    name,
+    source: { type: "precon", deckId, code: "TST" },
+    deck: { main: [], sideboard: [] } as ParsedDeck,
+    coveragePct: null,
+    archetype: null,
+    bracket: null,
+    knownFormat: "Commander",
   };
 }
 
@@ -1559,6 +1573,115 @@ describe("MyDecks", () => {
       const selection = usePreferencesStore.getState().humanPoolSelection;
       expect(selection.excludedGroups).toContain(UNFILED_POOL_GROUP);
       expect(selection.excludedDecks).not.toContain(commanderId);
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("moves an adopted feed mirror from its feed group into its folder on catalog refresh", async () => {
+    saveDeck("Mirror Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("User C", { main: [{ name: "Plains", count: 60 }], sideboard: [] });
+    const folder = createFolder(testSavedDeckTxn, "F");
+    expect(folder).not.toBeNull();
+    setDeckFolder(testSavedDeckTxn, "Mirror Deck", folder!.id);
+    const folderGroup = folderPoolGroup(folder!.id);
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        // Feed group included, folder F excluded: the mirror's grouping
+        // decides its eligibility.
+        humanPoolSelection: { ...emptyPoolSelection(), excludedGroups: [folderGroup] },
+      });
+    });
+    // Adopting removes the origin without renaming: same id and bracket,
+    // only the source provenance changes.
+    const feedOwned: AiDeckCandidate = {
+      ...legalCandidate("Mirror Deck", null),
+      source: { type: "saved", feedId: "mtggoldfish-standard" },
+    };
+    const adopted = legalCandidate("Mirror Deck", null);
+    const deckC = legalCandidate("User C", null);
+    const renderDecks = (mirror: AiDeckCandidate) => (
+      <MyDecks
+        mode="select"
+        selectedFormat="Standard"
+        activeDeckName={null}
+        onSelectDeck={vi.fn()}
+        randomSelectionMode="defer"
+        aiCatalog={{ candidates: [mirror, deckC], allCandidates: [mirror, deckC] }}
+      />
+    );
+    try {
+      const { rerender } = render(renderDecks(feedOwned));
+
+      // Feed-owned: the mirror sits in its feed group, included …
+      await screen.findByText("Mirror Deck");
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      expect(screen.getByRole("checkbox", { name: "Standard Meta" })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /Standard Meta/ }));
+      expect(screen.getByRole("checkbox", { name: "Mirror Deck" })).toBeChecked();
+
+      // … adopting it regroups the same id into excluded folder F.
+      rerender(renderDecks(adopted));
+      expect(screen.queryByRole("checkbox", { name: "Standard Meta" })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /F 0 of 1/ }));
+      expect(screen.getByRole("checkbox", { name: "Mirror Deck" })).not.toBeChecked();
+      expect(screen.getByRole("button", { name: /Your random pool 1 of 2/ })).toBeInTheDocument();
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("clears a saved-duplicate precon's explicit include when the Precons group is unselected", async () => {
+    saveDeck("[Pre-built] P", { main: [{ name: "Island", count: 99 }], sideboard: [] });
+    saveDeck("User C", { main: [{ name: "Plains", count: 60 }], sideboard: [] });
+    const preconP = preconCandidate("P", "P");
+    const preconQ = preconCandidate("Q", "Q");
+    const savedCopy = legalCandidate("[Pre-built] P", null);
+    const deckC = legalCandidate("User C", null);
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(emptyPoolSelection(), preconP.id, true),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Commander"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiCatalog={{
+            candidates: [preconP, preconQ, savedCopy, deckC],
+            allCandidates: [preconP, preconQ, savedCopy, deckC],
+          }}
+        />,
+      );
+
+      await screen.findByText("User C");
+      expect(screen.getByRole("button", { name: /Your random pool 4 of 4/ })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      // The catalog precon is listed even though its saved copy exists …
+      await userEvent.click(screen.getByRole("button", { name: /Precons 2 of 2/ }));
+      expect(screen.getByRole("checkbox", { name: "P" })).toBeInTheDocument();
+
+      // … and unselecting the group clears its explicit include.
+      await userEvent.click(screen.getByRole("checkbox", { name: "Precons" }));
+      const selection = usePreferencesStore.getState().humanPoolSelection;
+      expect(selection.excludedGroups).toContain(PRECON_POOL_GROUP);
+      expect(selection.includedDecks).not.toContain(preconP.id);
+      // P is no longer eligible; C keeps the pool non-empty so fallback
+      // cannot explain the count.
+      expect(screen.getByRole("checkbox", { name: "P" })).not.toBeChecked();
+      expect(screen.getByRole("button", { name: /Your random pool 2 of 4/ })).toBeInTheDocument();
     } finally {
       act(() => {
         usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
