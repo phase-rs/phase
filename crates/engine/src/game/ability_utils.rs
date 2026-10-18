@@ -24140,17 +24140,23 @@ mod tests {
         ]));
         assert!(filter_references_target_creature_quantity(&shares_quality));
 
+        // MED1 admits no threshold-nested target read through `new` (the
+        // parked path cannot evaluate it), so the walker test builds an
+        // admitting aggregate and swaps in the refused shape it must find —
+        // the source kind stays `Objects`, per `source_mut`'s contract.
+        let mut aggregate_inner = crate::types::ability::PropertyAggregate::new(
+            AggregateFunction::Max,
+            ObjectProperty::ManaValue,
+            crate::types::ability::CardTypeSetSource::Objects {
+                filter: fixed_filter(),
+            },
+        )
+        .expect("statically valid property aggregate");
+        *aggregate_inner.source_mut() = crate::types::ability::CardTypeSetSource::Objects {
+            filter: target_power_filter(),
+        };
         let aggregate = QuantityExpr::Ref {
-            qty: QuantityRef::PropertyAggregate(
-                crate::types::ability::PropertyAggregate::new(
-                    AggregateFunction::Max,
-                    ObjectProperty::ManaValue,
-                    crate::types::ability::CardTypeSetSource::Objects {
-                        filter: target_power_filter(),
-                    },
-                )
-                .expect("statically valid property aggregate"),
-            ),
+            qty: QuantityRef::PropertyAggregate(aggregate_inner),
         };
         assert!(quantity_expr_references_target_creature(&aggregate));
 

@@ -9423,11 +9423,15 @@ impl CardTypeSetSource {
     /// Shared source admission: a member filter on a triggering-batch leaf
     /// has no agreed-upon reading (the batch is an event population while
     /// `filter` speaks of members), so no source admits the combination —
-    /// for every head that embeds a source, at any union depth. Decoding
-    /// routes through here; resolution keeps a fail-closed skip behind it
-    /// for hand-built in-memory values only.
+    /// for every head that embeds a source, at any union depth. Likewise a
+    /// member filter that references selected targets through a shape the
+    /// suspension-resume quantity path cannot evaluate (MED1) is refused
+    /// here rather than diverging live-vs-resumed. Decoding routes through
+    /// here; resolution keeps a fail-closed skip behind it for hand-built
+    /// in-memory values only.
     pub(crate) fn validate_admission(&self) -> Result<(), CardTypeSetSourceError> {
         let mut invalid_batch_filter = false;
+        let mut dependent_member_filter = false;
         let complete = self.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
             if matches!(
                 leaf,
@@ -9439,6 +9443,26 @@ impl CardTypeSetSource {
             ) {
                 invalid_batch_filter = true;
             }
+            match leaf {
+                CardTypeSetSource::TrackedSet {
+                    filter: Some(filter),
+                    ..
+                }
+                | CardTypeSetSource::Objects { filter } => {
+                    if member_filter_has_unsupported_selected_ref(filter) {
+                        dependent_member_filter = true;
+                    }
+                }
+                CardTypeSetSource::TrackedSet { filter: None, .. }
+                | CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TargetedObjects { .. }
+                | CardTypeSetSource::AnyOf { .. }
+                // The journal matches spell-cast snapshots without an
+                // ability in scope either way, so its filter cannot
+                // diverge across a suspension.
+                | CardTypeSetSource::TurnJournal { .. } => {}
+            }
         });
         if !complete {
             return Err(CardTypeSetSourceError::SourceDepthExceeded);
@@ -9446,7 +9470,592 @@ impl CardTypeSetSource {
         if invalid_batch_filter {
             return Err(CardTypeSetSourceError::FilteredTriggeringBatch);
         }
+        if dependent_member_filter {
+            return Err(CardTypeSetSourceError::DependentMemberFilter);
+        }
         Ok(())
+    }
+}
+
+/// MED1: whether a chain-set member filter (or `Objects` whole-filter)
+/// references selected targets through a shape the suspension-resume
+/// quantity path cannot evaluate.
+///
+/// Member filters evaluate per member with the quantity context: live with
+/// the resolving ability in scope, resumed with only the parked slot
+/// channel. Shapes with a parked backstop stay admitted — direct
+/// `ParentTarget` / `ParentTargetSlot` nodes (R1), a direct
+/// `SharesQuality` reference to `ParentTarget` (R2), and the
+/// target-derived controller axis (`TargetPlayer` / `TargetOpponent`,
+/// which reads the parked declared-player twin) — while shapes that
+/// read `ability.targets` (or other ability-carried records: chosen
+/// players, declared views, cost stamps) with no parked equivalent refuse.
+/// Every match below is exhaustive over its syntax enum (no wildcard) so
+/// a future variant fails compilation here instead of silently admitting.
+pub(crate) fn member_filter_has_unsupported_selected_ref(filter: &TargetFilter) -> bool {
+    target_filter_has_unsupported_selected_ref(filter, false)
+}
+
+/// `nested` selects the evaluation context: `false` is the member-evaluation
+/// context (ability live, parked channel resumed — the R1/R2 backstops
+/// apply); `true` is a nested reference/scan context (the `DistinctFrom`
+/// event route, the `SharesQuality` nested scan, `CanEnchant` hosts,
+/// stack-entry checks, name scans, thresholds, player scopes), where no
+/// parked channel is threaded and every selected node refuses.
+fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: bool) -> bool {
+    match filter {
+        // R1: direct selected nodes read the parked channel on resume.
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => nested,
+        // Ability-only twins with no parked backstop: the player-axis
+        // resolver reads `ability` concretely, and cost/army stamps live
+        // on the ability.
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::EventTargetController
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy => true,
+        TargetFilter::Typed(typed) => {
+            typed
+                .controller
+                .as_ref()
+                .is_some_and(controller_ref_is_selected_dependent)
+                || typed
+                    .properties
+                    .iter()
+                    .any(|prop| filter_prop_has_unsupported_selected_ref(prop, nested))
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|member| target_filter_has_unsupported_selected_ref(member, nested)),
+        TargetFilter::Not { filter } => target_filter_has_unsupported_selected_ref(filter, nested),
+        // Same evaluation context as the member walk (ability and parked
+        // channel both threaded), so the mode carries through.
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, nested)
+        }
+        TargetFilter::ChosenDamageSource { filter } => filter
+            .as_deref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        TargetFilter::PlayerMatching { player } => {
+            player_filter_has_unsupported_selected_ref(player)
+        }
+        // Event, ledger, zone, identity, and data leaves evaluate without
+        // an ability in scope either way.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> bool {
+    match prop {
+        // Reference positions evaluated without the parked channel: the
+        // `DistinctFrom` event route, `CanEnchant` hosts, stack-entry
+        // checks, and name scans.
+        FilterProp::DistinctFrom { reference } => {
+            target_filter_has_unsupported_selected_ref(reference, true)
+        }
+        FilterProp::CanEnchant { target } => {
+            target_filter_has_unsupported_selected_ref(target, true)
+        }
+        FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        FilterProp::DifferentNameFrom { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        // R2: a direct `ParentTarget` reference reads the parked channel;
+        // any other selected reference runs the nested scan, which drops
+        // the parked channel.
+        FilterProp::SharesQuality { reference, .. } => match reference.as_deref() {
+            None => false,
+            Some(TargetFilter::ParentTarget) => nested,
+            Some(other) => target_filter_has_unsupported_selected_ref(other, true),
+        },
+        FilterProp::Not { prop } => filter_prop_has_unsupported_selected_ref(prop, nested),
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|member| filter_prop_has_unsupported_selected_ref(member, nested)),
+        FilterProp::ControllerMatches { player } => {
+            player_filter_has_unsupported_selected_ref(player)
+        }
+        FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
+            .as_ref()
+            .is_some_and(player_filter_has_unsupported_selected_ref),
+        // Inherently selected: the resolving ability's first object
+        // target, with no parked equivalent.
+        FilterProp::SameNameAsParentTarget => true,
+        // Both subjects read ability-carried records (selected target,
+        // ability capture) with no parked equivalent.
+        FilterProp::CombatRelation { .. } => true,
+        FilterProp::AttachedTo { to } => match to {
+            AttachmentReferent::DeclaredTarget { .. } => true,
+            AttachmentReferent::Player { player } => controller_ref_is_selected_dependent(player),
+            AttachmentReferent::Source | AttachmentReferent::Recipient => false,
+        },
+        FilterProp::ProtectorMatches { controller }
+        | FilterProp::Owned { controller }
+        | FilterProp::MostPrevalentCreatureTypeIn { scope: controller, .. } => {
+            controller_ref_is_selected_dependent(controller)
+        }
+        FilterProp::Attacking { defender, .. }
+        | FilterProp::AttackedThisTurn { defender, .. }
+        | FilterProp::HasAttachment {
+            controller: defender,
+            ..
+        }
+        | FilterProp::HasAnyAttachmentOf {
+            controller: defender,
+            ..
+        }
+        | FilterProp::NameMatchesAnyPermanent {
+            controller: defender,
+            ..
+        } => defender
+            .as_ref()
+            .is_some_and(controller_ref_is_selected_dependent),
+        FilterProp::Counters { count, .. } => quantity_expr_has_unsupported_selected_ref(count),
+        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
+            quantity_expr_has_unsupported_selected_ref(value)
+        }
+        // Board, zone, name, keyword, counter (fixed), type-line, and
+        // ledger leaves evaluate without an ability in scope either way.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// Player filters appear nested under `ControllerMatches`,
+/// `DealtDamageThisTurn`, `PlayerMatching`, and count/possession checks,
+/// whose evaluators thread no ability and no parked channel: every
+/// selected node inside refuses, and nested filters walk nested.
+fn player_filter_has_unsupported_selected_ref(player: &PlayerFilter) -> bool {
+    match player {
+        PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::ChosenPlayer { .. } => true,
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+                || quantity_expr_has_unsupported_selected_ref(count)
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(player_filter_has_unsupported_selected_ref),
+        PlayerFilter::AllExcept { exclude } => player_filter_has_unsupported_selected_ref(exclude),
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_has_unsupported_selected_ref(attr)
+                || quantity_expr_has_unsupported_selected_ref(value)
+        }
+        // Event, combat, vote, ledger, and controller-context leaves.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::GrantingObjectCaster => false,
+    }
+}
+
+/// Target-, choice-, and view-derived controller axes read the resolving
+/// ability with no parked equivalent; source, event, combat, and
+/// turn-state axes evaluate identically either way.
+fn controller_ref_is_selected_dependent(reference: &ControllerRef) -> bool {
+    match reference {
+        // MED1 carve-out: the target-derived controller axis reads the
+        // declared player target, which the parked quantity path carries
+        // through the declared-player twin of `declared_target_player`
+        // (stamp-honoring, event-blind) — so it is suspension-safe.
+        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => false,
+        ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::ChosenPlayer { .. } => true,
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::ScopedPlayer
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. } => false,
+    }
+}
+
+/// `Target` and the target-derived controllers read `ability.targets`;
+/// recipient-or-nothing falls back to them when the context binds no
+/// recipient. Aggregates, combat, event, and data scopes are context-only.
+fn player_scope_is_selected_dependent(scope: &PlayerScope) -> bool {
+    match scope {
+        PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::ParentObjectTargetController => true,
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => false,
+    }
+}
+
+/// Object scopes over ability-carried records (targets, recipient-or-target
+/// fallback, cost stamps, anaphoric context, amassed army, carried chains)
+/// diverge once the ability is gone; source, event, batch-context, and
+/// concrete scopes do not.
+fn object_scope_is_selected_dependent(scope: &ObjectScope) -> bool {
+    match scope {
+        ObjectScope::Target
+        | ObjectScope::Recipient
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject => true,
+        ObjectScope::Source
+        | ObjectScope::EventSource
+        | ObjectScope::EventTarget
+        | ObjectScope::BatchSource
+        | ObjectScope::SpecificObject { .. } => false,
+    }
+}
+
+fn cast_mana_object_scope_is_selected_dependent(scope: &CastManaObjectScope) -> bool {
+    match scope {
+        CastManaObjectScope::AbilityTarget => true,
+        CastManaObjectScope::SelfObject | CastManaObjectScope::TriggeringSpell => false,
+    }
+}
+
+fn cast_mana_spent_metric_has_unsupported_selected_ref(metric: &CastManaSpentMetric) -> bool {
+    match metric {
+        CastManaSpentMetric::FromSource { source_filter } => {
+            target_filter_has_unsupported_selected_ref(source_filter, true)
+        }
+        CastManaSpentMetric::Total
+        | CastManaSpentMetric::DistinctColors
+        | CastManaSpentMetric::OfColor { .. } => false,
+    }
+}
+
+/// Threshold quantities evaluate with the bare threshold context (no
+/// ability, no parked channel), so every nested selected reference —
+/// including direct selected nodes — refuses.
+fn quantity_expr_has_unsupported_selected_ref(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_has_unsupported_selected_ref(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner, .. }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_has_unsupported_selected_ref(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_has_unsupported_selected_ref)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_has_unsupported_selected_ref(left)
+                || quantity_expr_has_unsupported_selected_ref(right)
+        }
+    }
+}
+
+fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
+    match qty {
+        // Chosen X reads `None` here (bare threshold context) but the
+        // announced value live; the event amount and cost-X fallbacks
+        // likewise consult ability-carried records.
+        QuantityRef::Variable { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::CostXPaid => true,
+        QuantityRef::PropertyAggregate(aggregate) => {
+            source_has_unsupported_selected_ref_nested(&aggregate.source)
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source, .. } => {
+            source_has_unsupported_selected_ref_nested(source)
+        }
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::StartingLifeTotal { player, .. }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player }
+        | QuantityRef::LifeGainedThisTurn { player }
+        | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+        | QuantityRef::CardsDiscardedThisTurn { player }
+        | QuantityRef::PlayerChosenNumber { player }
+        | QuantityRef::PlayerActionsThisTurn { player, .. }
+        | QuantityRef::LandsPlayedThisTurn { player, .. } => {
+            player_scope_is_selected_dependent(player)
+        }
+        QuantityRef::SacrificedThisTurn { player, filter }
+        | QuantityRef::BattlefieldEntriesThisTurn { player, filter }
+        | QuantityRef::TokensCreatedThisTurn { player, filter } => {
+            player_scope_is_selected_dependent(player)
+                || target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::TargetObjectManaValue { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter }
+        | QuantityRef::ControlledByEachPlayer { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            target_filter_has_unsupported_selected_ref(source, true)
+                || target_filter_has_unsupported_selected_ref(target, true)
+        }
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_has_unsupported_selected_ref(filter)
+        }
+        QuantityRef::TargetZoneCardCount { scope, .. }
+        | QuantityRef::BasicLandTypeCount { controller: scope }
+        | QuantityRef::CommanderManaValue { owner: scope } => {
+            controller_ref_is_selected_dependent(scope)
+        }
+        QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
+            .as_ref()
+            .is_some_and(controller_ref_is_selected_dependent),
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+            object_scope_is_selected_dependent(scope)
+        }
+        QuantityRef::ManaSpentToCast { scope, metric } => {
+            cast_mana_object_scope_is_selected_dependent(scope)
+                || cast_mana_spent_metric_has_unsupported_selected_ref(metric)
+        }
+        // State, ledger, event, counter, tally, and data leaves evaluate
+        // without an ability in scope either way.
+        QuantityRef::LifeAboveStarting
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::VoteCount { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen => false,
+    }
+}
+
+/// Sources nested under a threshold quantity evaluate with the bare
+/// threshold context, so their member filters walk nested — and
+/// `TargetedObjects` itself reads `ability.targets` there.
+fn source_has_unsupported_selected_ref_nested(source: &CardTypeSetSource) -> bool {
+    match source {
+        CardTypeSetSource::TargetedObjects { .. } => true,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        CardTypeSetSource::Objects { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(source_has_unsupported_selected_ref_nested),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TurnJournal { .. } => false,
     }
 }
 
@@ -9454,6 +10063,10 @@ impl CardTypeSetSource {
 pub enum CardTypeSetSourceError {
     #[error("triggering-batch sources accept no member filter")]
     FilteredTriggeringBatch,
+    #[error(
+        "member filter references selected targets the suspension-resume path cannot evaluate"
+    )]
+    DependentMemberFilter,
     #[error("card-type-set source exceeds the supported union depth")]
     SourceDepthExceeded,
 }
@@ -9914,6 +10527,8 @@ pub enum PropertyAggregateError {
     UnsupportedTurnJournalProperty(ObjectProperty),
     #[error("triggering-batch property aggregates accept no member filter")]
     UnsupportedTriggeringBatchFilter,
+    #[error("property aggregates accept no selected-dependent member filter")]
+    UnsupportedDependentMemberFilter,
     #[error("property aggregate source exceeds the supported union depth")]
     SourceDepthExceeded,
 }
@@ -9931,6 +10546,9 @@ impl PropertyAggregate {
             Ok(()) => {}
             Err(CardTypeSetSourceError::FilteredTriggeringBatch) => {
                 return Err(PropertyAggregateError::UnsupportedTriggeringBatchFilter)
+            }
+            Err(CardTypeSetSourceError::DependentMemberFilter) => {
+                return Err(PropertyAggregateError::UnsupportedDependentMemberFilter)
             }
             Err(CardTypeSetSourceError::SourceDepthExceeded) => {
                 return Err(PropertyAggregateError::SourceDepthExceeded)
@@ -41942,6 +42560,256 @@ mod tests {
         assert!(
             serde_json::from_str::<QuantityExpr>(&wrap(&chained)).is_ok(),
             "a legitimately filtered chain set still decodes"
+        );
+    }
+
+    fn chain_set_with(filter: TargetFilter) -> CardTypeSetSource {
+        chain_set_with_option(Some(filter))
+    }
+
+    fn chain_set_with_option(filter: Option<TargetFilter>) -> CardTypeSetSource {
+        CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter,
+        }
+    }
+
+    /// MED1 — VERDICT (reject at shared admission). A chain-set member
+    /// filter reading selected targets through `DistinctFrom{ParentTarget}`
+    /// evaluates against `ability.targets` live but finds no ability on the
+    /// resumed quantity path, so it excludes nothing there (7 live vs 12
+    /// resumed on the R2-shaped fixture). The SHAPE is refused at the
+    /// shared `CardTypeSetSource` admission both directly and through
+    /// `PropertyAggregate::new`, for `TrackedSet` member filters and for
+    /// `Objects` whole-filters alike — both evaluate per member through
+    /// the suspendable quantity context.
+    #[test]
+    fn med1_admission_rejects_distinct_from_parent_target_member_filter() {
+        let typed = |properties: Vec<FilterProp>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties,
+            })
+        };
+        let distinct_from_parent = || {
+            typed(vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }])
+        };
+        let chain_set = chain_set_with(distinct_from_parent());
+        assert_eq!(
+            chain_set.validate_admission(),
+            Err(CardTypeSetSourceError::DependentMemberFilter),
+            "MED1 witness: DistinctFrom{{ParentTarget}} must refuse at admission"
+        );
+        assert_eq!(
+            PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Power,
+                chain_set_with(distinct_from_parent())
+            ),
+            Err(PropertyAggregateError::UnsupportedDependentMemberFilter),
+            "the aggregate constructor inherits the shared refusal"
+        );
+        let objects = CardTypeSetSource::Objects {
+            filter: distinct_from_parent(),
+        };
+        assert_eq!(
+            objects.validate_admission(),
+            Err(CardTypeSetSourceError::DependentMemberFilter),
+            "Objects whole-filters suspend through the same context"
+        );
+    }
+
+    /// MED1 — the refusal is recursive (combinators, union leaves, nested
+    /// references) and scoped: every review-enumerated unsupported route
+    /// refuses, while the R1/R2-supported shapes and plain filters still
+    /// admit.
+    #[test]
+    fn med1_dependent_member_refusal_is_recursive_and_scoped() {
+        let typed = |properties: Vec<FilterProp>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties,
+            })
+        };
+        let parent = || Box::new(TargetFilter::ParentTarget);
+        // Each unsupported route refuses, wherever it nests.
+        for (route, filter) in [
+            (
+                "DistinctFrom nested under a combinator",
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(vec![FilterProp::Token]),
+                        typed(vec![FilterProp::DistinctFrom {
+                            reference: parent(),
+                        }]),
+                    ],
+                },
+            ),
+            (
+                "CanEnchant over a selected reference",
+                typed(vec![FilterProp::CanEnchant { target: parent() }]),
+            ),
+            (
+                "SameNameAsParentTarget",
+                typed(vec![FilterProp::SameNameAsParentTarget]),
+            ),
+            (
+                "selected controller axis",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::ParentTargetController),
+                    properties: vec![],
+                }),
+            ),
+            (
+                "combat relation against the selected target",
+                typed(vec![FilterProp::CombatRelation {
+                    subject: CombatRelationSubject::ParentTarget,
+                    relation: CombatRelation::BlockingOrBlockedBy,
+                }]),
+            ),
+            (
+                "SharesQuality indexed reference (no parked slot authority in the nested scan)",
+                typed(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTargetSlot { index: 0 })),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            ),
+            (
+                "threshold over chosen X (bare threshold context reads X as 0)",
+                typed(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }]),
+            ),
+        ] {
+            assert_eq!(
+                chain_set_with(filter).validate_admission(),
+                Err(CardTypeSetSourceError::DependentMemberFilter),
+                "{route} must refuse at admission"
+            );
+        }
+        // A poisoned leaf nested in a union refuses too.
+        let union = CardTypeSetSource::any_of(vec![
+            CardTypeSetSource::Zone {
+                zone: ZoneRef::Exile,
+                scope: CountScope::Controller,
+            },
+            chain_set_with(typed(vec![FilterProp::DistinctFrom {
+                reference: parent(),
+            }])),
+        ])
+        .expect("test union constructs");
+        assert_eq!(
+            union.validate_admission(),
+            Err(CardTypeSetSourceError::DependentMemberFilter),
+            "a poisoned member filter nested in a union must refuse"
+        );
+        // Supported and plain shapes still admit.
+        for (shape, filter) in [
+            (
+                "R2 SharesQuality direct reference",
+                typed(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(parent()),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            ),
+            ("R1 direct selected node", TargetFilter::ParentTarget),
+            (
+                "R1 direct indexed node",
+                TargetFilter::ParentTargetSlot { index: 0 },
+            ),
+            (
+                "target-player controller axis (parked-supported)",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+            ),
+            (
+                "target-opponent controller axis (parked-supported)",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::TargetOpponent),
+                    properties: vec![],
+                }),
+            ),
+            ("plain token check", typed(vec![FilterProp::Token])),
+            (
+                "plain fixed threshold",
+                typed(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }]),
+            ),
+        ] {
+            assert_eq!(
+                chain_set_with(filter).validate_admission(),
+                Ok(()),
+                "{shape} must still admit"
+            );
+        }
+        assert_eq!(
+            chain_set_with_option(None).validate_admission(),
+            Ok(()),
+            "an unfiltered chain set still admits"
+        );
+    }
+
+    /// MED1 — decoding refuses the dependent shape at shared admission (the
+    /// repr route), while the R2-supported shape still decodes.
+    #[test]
+    fn med1_dependent_member_filter_refuses_at_decode() {
+        let aggregate_json = |source: &CardTypeSetSource| {
+            // Struct literal (not `new`): the decode route must refuse the
+            // value the constructor already rejected.
+            let aggregate = PropertyAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: source.clone(),
+            };
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            };
+            serde_json::to_string(&qty).expect("test value serializes")
+        };
+        let refused = aggregate_json(&chain_set_with(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }],
+        })));
+        let err = serde_json::from_str::<QuantityExpr>(&refused)
+            .expect_err("decoding a dependent member filter must fail");
+        assert!(
+            err.to_string().contains("suspension-resume path"),
+            "decoding must fail on the shared admission rejection, not a shape error: {err}"
+        );
+        let admitted = aggregate_json(&chain_set_with(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::SharesQuality {
+                quality: SharedQuality::CardType,
+                reference: Some(Box::new(TargetFilter::ParentTarget)),
+                relation: SharedQualityRelation::Shares,
+            }],
+        })));
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&admitted).is_ok(),
+            "the R2-supported shape still decodes"
         );
     }
 

@@ -12,8 +12,9 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, ChosenTargetSlots,
-    CountScope, DieResultBranch, DieRollIgnoreRule, DieRollModifier, Effect, ObjectProperty,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, ZoneRef,
+    ControllerRef, CountScope, DieResultBranch, DieRollIgnoreRule, DieRollModifier, Effect,
+    ObjectProperty, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -1450,6 +1451,172 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
         rolls,
         vec![12],
         "slot 1 names Brute through the player slot 0 (10 + 2)"
+    );
+}
+
+/// MED1-T1 — PAUSE. A Max aggregate over the Blot-Out axis ("each
+/// creature/planeswalker an opponent controls") parked mid-roll must resolve
+/// the TargetOpponent controller axis against the DECLARED player target:
+/// with P1 declared, the resumed read sees P1's Brute 5/5 (1 + 5 = 6).
+/// The inline anchor is the Imperial Edict family, which resolves the same
+/// axis live; a pin-blind resumed read sees no declared player and emits a
+/// non-6 total (or errors on the empty set).
+#[test]
+fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own Brute", 9, 9);
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let blot_out_axis = |type_filter| {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![type_filter],
+            controller: Some(ControllerRef::TargetOpponent),
+            properties: vec![],
+        })
+    };
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Max,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::Objects {
+                        filter: TargetFilter::Or {
+                            filters: vec![
+                                blot_out_axis(TypeFilter::Creature),
+                                blot_out_axis(TypeFilter::Planeswalker),
+                            ],
+                        },
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Player(P1)],
+        sides: 20,
+        results: vec![1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![TargetRef::Player(P1)],
+        declared_target_pins: vec![None],
+        declared_ahead: 0,
+        declared_targets_recorded: true,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![6],
+        "the resumed read measures the declared opponent's max power (1 + 5), not own 9"
+    );
+}
+
+/// MED1-T0 — PAUSE (false-red guard). The parked declared-player twin honors
+/// the CR 608.2b illegal stamp: with P1 declared but slot 0 stamped illegal,
+/// the resumed TargetOpponent axis matches NOTHING (1 + 0 = 1) — never the
+/// event player, never the stamped player. Ignoring the stamp would emit 6.
+#[test]
+fn parked_target_opponent_axis_ignores_illegal_declared_player() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let modifier = DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::Objects {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::TargetOpponent),
+                            properties: vec![],
+                        }),
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    };
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Player(P1)],
+        sides: 20,
+        results: vec![1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(modifier),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![0],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![TargetRef::Player(P1)],
+        declared_target_pins: vec![None],
+        declared_ahead: 0,
+        declared_targets_recorded: true,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    };
+    let mut events = Vec::new();
+    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+        .expect("resuming the parked roll must not error");
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![1],
+        "the stamped-illegal declared player contributes nothing (1 + 0); reading it would emit 6"
     );
 }
 

@@ -572,6 +572,15 @@ fn visit_characteristic_leaf<'s>(
         // the triggering-object exclusion. Property aggregates must enumerate
         // the exact same members as object-count quantities.
         CardTypeSetSource::Objects { filter } => {
+            // MED1: a member filter over selected references the resume
+            // path cannot evaluate is refused at shared source admission
+            // (`CardTypeSetSource::validate_admission`, enforced at decode
+            // for every head); this skip is defense-in-depth for hand-built
+            // in-memory values only, and its zero must never count as
+            // support.
+            if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
+                return;
+            }
             for obj_id in object_count_matching_ids(state, filter, filter_ctx, ctx.source) {
                 let view = characteristic_view_for_object(state, obj_id);
                 if let Some(view) = view {
@@ -647,6 +656,12 @@ fn visit_characteristic_leaf<'s>(
             caused_by,
             filter,
         } => {
+            // MED1: same defense-in-depth skip as the `Objects` arm above
+            // for hand-built in-memory values only.
+            if matches!(filter, Some(member) if crate::types::ability::member_filter_has_unsupported_selected_ref(member))
+            {
+                return;
+            }
             let tracked: Vec<(Option<crate::types::identifiers::TrackedSetId>, ObjectId)> =
                 match set {
                     TrackedAnaphorSource::ChainSet => state
@@ -6468,6 +6483,14 @@ fn resolve_ref(
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
         QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+            // MED1: `QuantityRef` deserialization is derived, so this peer
+            // of the `TrackedSet` member filter has no decode gate — the
+            // parser builds only selected-free shapes, and this fail-closed
+            // skip covers hand-built in-memory values. Its zero must never
+            // count as support.
+            if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
+                return 0;
+            }
             let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
             else {
                 return 0;
@@ -22786,6 +22809,62 @@ mod tests {
             rolls,
             vec![15],
             "the sharing member contributes 5 (10 + 5); dropping the parked authority emits 10"
+        );
+    }
+
+    /// MED1: hand-built refused shapes fail closed at resolution. A
+    /// `DistinctFrom{ParentTarget}` member filter over the R2 staged set
+    /// ([brute 5, bauble 7], ability targeting the brute) contributes
+    /// nothing through either the `TrackedSet` source arm or the
+    /// `FilteredTrackedSetSize` peer — even live, where the ability is in
+    /// scope — because the shape cannot exist past admission.
+    #[test]
+    fn med1_refused_member_filters_fail_closed_at_resolution() {
+        let (state, ability, _) = r2_shares_fixture();
+        let distinct = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }]),
+        );
+        let filter_ctx = crate::game::filter::FilterContext::from_ability(&ability);
+        let source = CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(distinct.clone()),
+        };
+        let mut members = 0;
+        visit_characteristic_leaf(
+            &state,
+            &source,
+            QuantityContext::new(ability.source_id),
+            &filter_ctx,
+            PlayerId(0),
+            &mut |_, _, _| {
+                members += 1;
+            },
+        );
+        assert_eq!(
+            members, 0,
+            "the refused TrackedSet member filter visits nothing"
+        );
+        let qty = QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(distinct),
+            caused_by: None,
+        };
+        assert_eq!(
+            resolve_ref(
+                &state,
+                &qty,
+                PlayerId(0),
+                QuantityContext::new(ability.source_id),
+                &ability.targets,
+                ability.chosen_x,
+                Some(&ability),
+                None,
+            ),
+            0,
+            "the refused FilteredTrackedSetSize peer counts nothing"
         );
     }
 
