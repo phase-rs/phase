@@ -22849,6 +22849,66 @@ fn gideon_the_oathless_full_oracle_shape() {
     )));
 }
 
+// CR 702.21a: a ward cost is paid in full or not at all, so a ward discard
+// whose text the grammar cannot fully read must fail closed — no Ward keyword
+// and an honest Unimplemented marker — never a free Ward {0} or a plain
+// one-card discard. Full pipeline, with the MTGJSON "Ward" keyword that
+// production passes (Titania, Rugged Rumbler: "Ward—Discard a card or pay {2}.").
+#[test]
+fn unmodeled_ward_discard_line_fails_closed_through_parse_oracle_text() {
+    use crate::types::keywords::WardCost;
+
+    let ward_keywords = |parsed: &crate::parser::oracle::ParsedAbilities| {
+        parsed
+            .extracted_keywords
+            .iter()
+            .filter(|kw| matches!(kw, Keyword::Ward(_)))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let creature = ["Creature".to_string()];
+    let mtgjson_keywords = ["Ward".to_string()];
+
+    // Positive reach guard: the same pipeline and MTGJSON keyword, with a
+    // modeled discard body, does yield the typed Ward.
+    let arna = parse_oracle_text(
+        "Ward—Discard a card.",
+        "Arna Kennerüd, Skycaptain",
+        &mtgjson_keywords,
+        &creature,
+        &["Human".to_string(), "Knight".to_string()],
+    );
+    assert_eq!(
+        ward_keywords(&arna),
+        vec![Keyword::Ward(WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+        })],
+        "the modeled discard ward is extracted: {arna:?}"
+    );
+    assert!(!arna.abilities.iter().any(has_unimplemented));
+
+    let titania = parse_oracle_text(
+        "Ward—Discard a card or pay {2}. (Whenever this creature becomes the target of a \
+         spell or ability an opponent controls, counter it unless that player discards a \
+         card or pays {2}.)",
+        "Titania, Rugged Rumbler",
+        &mtgjson_keywords,
+        &creature,
+        &["Human".to_string(), "Villain".to_string()],
+    );
+    assert_eq!(
+        ward_keywords(&titania),
+        Vec::<Keyword>::new(),
+        "an unmodeled ward discard yields no Ward keyword: {titania:?}"
+    );
+    assert!(
+        titania.abilities.iter().any(has_unimplemented),
+        "the unmodeled ward line stays an honest Unimplemented: {titania:?}"
+    );
+}
+
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
 
 /// CR 606.2: Ajani Unrelenting's unqualified form accepts every loyalty
