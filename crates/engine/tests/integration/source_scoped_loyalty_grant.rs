@@ -7,8 +7,8 @@
 //! on the printed class (the grant applies only to the permanent's normal loyalty
 //! ability) is not CR text.
 //!
-//! The Comet, Stellar Pup runtime rows (the verbatim face-6 roll) belong to the
-//! phase that parses the `[+N]` effect symbol and attaches the loyalty die table.
+//! The Comet, Stellar Pup runtime rows (the verbatim face-6 roll) are covered end
+//! to end in `comet_stellar_pup.rs`.
 
 use engine::game::planeswalker::can_activate_loyalty_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};

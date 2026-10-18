@@ -6,9 +6,10 @@
 //! is applied (CR 115.10 + CR 608.2d). The prompt is a choice, not a target, so
 //! hexproof, shroud and protection never restrict it (CR 115.10a).
 //!
-//! The toy planeswalkers below stand in for Comet, Stellar Pup, whose full die
-//! table belongs to a later phase; their rows run through the real activation
-//! pipeline. Wicked Guardian is the printed class member that resolves today.
+//! The toy planeswalkers below isolate the recipient chooser from Comet, Stellar
+//! Pup's die table (covered end to end in `comet_stellar_pup.rs`); their rows run
+//! through the real activation pipeline. Wicked Guardian is the printed class
+//! member that resolves today.
 
 use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::{apply, EngineError};
@@ -31,8 +32,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-/// Comet's face-4/5 body, with the prose removal clause the parser already
-/// supports standing in for the `[−2]` symbol (a later phase).
+/// Comet's face-4/5 body, with the prose removal clause standing in for the
+/// `[−2]` symbol (the symbol form is covered in `comet_stellar_pup.rs`).
 const PLAIN_WALKER: &str = "[0]: Probe Walker deals damage equal to the number of loyalty counters on him to a creature or player, then remove two loyalty counters from Probe Walker.";
 
 /// The same body as a full-range die row, so no RNG pinning is needed: the
