@@ -1769,9 +1769,9 @@ impl PeriodicDelta {
     /// enforced, in [`PeriodicDelta::elimination_cascade`], over whatever declaration it is
     /// handed.
     ///
-    /// THE WITNESS IS CHARGED, NEVER DRIVEN. It is an input to a ceiling; nothing resolves it
-    /// against a board, and whether a declaration of this shape is one the engine accepts at the
-    /// declaration ingress is a separate question with its own owner.
+    /// The witness bounds the ceiling, and it can also become the suggestion that is declared
+    /// and driven: `bounded_offer_tail` cuts it at the most repetitions the proposer survives
+    /// and publishes it only when it conforms at that count.
     pub(crate) fn piecewise_witness(
         &self,
         state: &GameState,
