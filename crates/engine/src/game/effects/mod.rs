@@ -24323,7 +24323,7 @@ mod tests {
         assert_eq!(state.objects[&departed].zone, Zone::Graveyard);
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::WithKeyword {
-                keyword: crate::types::keywords::Keyword::Flying,
+                value: crate::types::keywords::Keyword::Flying,
             },
         ]));
         let attr = QuantityRef::BattlefieldEntriesThisTurn {

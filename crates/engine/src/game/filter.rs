@@ -2428,15 +2428,13 @@ pub(crate) fn quantity_expr_contains_filter_prop(
     )
 }
 
+type RawReferencePredicate<'a> =
+    &'a dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>, Option<&PlayerFilter>) -> bool;
+
 pub(crate) fn filter_contains_scalar_input(
     filter: &TargetFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2456,12 +2454,7 @@ pub(crate) fn filter_contains_scalar_input(
 pub(crate) fn quantity_expr_contains_scalar_input(
     expr: &QuantityExpr,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2481,12 +2474,7 @@ pub(crate) fn quantity_expr_contains_scalar_input(
 pub(crate) fn player_filter_contains_scalar_input(
     filter: &PlayerFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2506,12 +2494,7 @@ pub(crate) fn player_filter_contains_scalar_input(
 fn filter_contains_input(
     filter: &TargetFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2630,12 +2613,7 @@ fn filter_contains_input(
 fn filter_prop_contains_input(
     prop: &FilterProp,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2851,12 +2829,7 @@ fn filter_prop_contains_input(
 fn player_filter_contains_input(
     filter: &PlayerFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     _object_information_available: bool,
@@ -2978,12 +2951,7 @@ fn player_filter_contains_input(
 fn quantity_expr_contains_input(
     expr: &QuantityExpr,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -3058,12 +3026,7 @@ fn quantity_expr_contains_input(
 fn quantity_ref_contains_input(
     qty: &QuantityRef,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -3274,12 +3237,7 @@ fn quantity_ref_contains_input(
 fn card_type_set_source_contains_input(
     source: &CardTypeSetSource,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(
-        &QuantityRef,
-        bool,
-        Option<&ResolvedAbility>,
-        Option<&PlayerFilter>,
-    ) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,

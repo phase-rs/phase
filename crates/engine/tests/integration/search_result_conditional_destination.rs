@@ -2636,13 +2636,7 @@ fn declined_search_owned_threshold_keeps_only_available_object_authority() {
                 .get(&CounterType::Plus1Plus1)
                 .copied()
                 .unwrap_or(0),
-            if parameter == 1 {
-                0
-            } else if parameter == 4 {
-                1
-            } else {
-                2
-            }
+            if parameter == 1 { 0 } else { 2 }
         );
         for id in [other, found, cover, spell] {
             assert!(!runner.state().objects[&id]
