@@ -13542,8 +13542,12 @@ mod tests {
             ObjectId(900),
             PlayerId(0),
         );
-        payer.unless_pay = Some(declared_target_payer(TargetFilter::Opponent));
+        payer.unless_pay = Some(declared_target_payer(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        )));
         assert_declaration_witnesses(&payer, true, &[TargetFilter::Player]);
+        payer.unless_pay = Some(declared_target_payer(TargetFilter::Opponent));
+        assert_declaration_witnesses(&payer, false, &[]);
         payer.unless_pay = Some(declared_target_payer(TargetFilter::Controller));
         assert_declaration_witnesses(&payer, false, &[]);
     }
