@@ -15,6 +15,432 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
+const ORDINARY_SPIRIT: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.";
+const FULL_BROKEN: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.";
+const FULL_CIRCADIAN: &str = "Vivid — Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+const FULL_WHITE_SUN: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This token can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)";
+const WHITE_SUN_SEMANTIC: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures.";
+const FULL_BROOD: &str = "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, create one of those tokens.";
+const NORMALIZED_BROOD: &str = "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice ~: Add {C}.\" Otherwise, create one of those tokens.";
+const CIRCADIAN_BODY: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+const CIRCADIAN_SEEK: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control";
+const CIRCADIAN_GRANT: &str = "For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+const BROKEN_CLEANUP: &str = "Sacrifice the token at the beginning of the next end step";
+
+fn scope_spell(text: &str) -> ParsedAbilities {
+    parse_oracle_text(text, "Synthetic outer scope", &[], &["Instant".into()], &[])
+}
+
+fn scope_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(Some(def), |d| d.sub_ability.as_deref()).collect()
+}
+
+fn assert_ordinary_spirit_shape(parsed: &ParsedAbilities, target_count: usize) {
+    // SHAPE; actual creation is exercised in integration::jev_token_followup.
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(parsed.statics.is_empty());
+    assert!(!has_unimplemented(&parsed.abilities[0]), "{parsed:#?}");
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    let chain = scope_chain(&parsed.abilities[0]);
+    assert_eq!(
+        chain
+            .iter()
+            .filter(
+                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+            )
+            .count(),
+        target_count
+    );
+    assert!(chain.iter().any(|d| matches!(
+        *d.effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    )));
+    let tokens: Vec<_> = chain
+        .iter()
+        .filter(|d| matches!(*d.effect, Effect::Token { .. }))
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    let token = tokens[0];
+    assert_eq!(token.target_reads, TargetReadOrigin::ParentAnnouncement);
+    let Effect::Token {
+        power, toughness, ..
+    } = token.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    // CR 111.3 + CR 115.10a: the separate defining sentence adds no target.
+    assert_eq!(
+        *power,
+        crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        })
+    );
+    assert_eq!(
+        *toughness,
+        crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        })
+    );
+}
+
+#[test]
+fn target_defined_token_ordinary_public_document() {
+    let parsed = scope_spell(ORDINARY_SPIRIT);
+    assert_ordinary_spirit_shape(&parsed, 1);
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some(ORDINARY_SPIRIT)
+    );
+}
+
+#[test]
+fn outer_spell_instruction_owns_nested_static_text() {
+    // SHAPE: full cards retain honest gaps until their named consumers land.
+    for (name, text) in [
+        ("Broken Visage", FULL_BROKEN),
+        ("Circadian Struggle", FULL_CIRCADIAN),
+    ] {
+        let mut ir = parse_oracle_ir(text, name, &[], &["Instant".into()], &[]);
+        assert_eq!(ir.source_text, text);
+        assert_eq!(ir.items.len(), 1, "{ir:#?}");
+        assert_eq!(ir.items[0].source.fragment(), Some(text));
+        let OracleNodeIr::Spell(body) = &ir.items[0].node else {
+            panic!("outer spell owner: {ir:#?}")
+        };
+        if name == "Broken Visage" {
+            assert_eq!(body.source_text, text);
+            assert!(body
+                .body
+                .clauses
+                .iter()
+                .any(|c| matches!(c.parsed.effect, Effect::Destroy { .. })));
+            let creator = body
+                .body
+                .clauses
+                .iter()
+                .find(|c| matches!(c.parsed.effect, Effect::Token { .. }))
+                .expect("Spirit creator");
+            assert!(body
+                .body
+                .clauses
+                .iter()
+                .any(|c| c.token_definition_owner == Some(creator.id)));
+        } else {
+            assert_eq!(body.source_text, CIRCADIAN_BODY);
+        }
+        let parsed = lower_oracle_ir(&mut ir);
+        assert!(parsed.statics.is_empty(), "{name}: {parsed:#?}");
+        assert_eq!(parsed.abilities.len(), 1);
+        assert_eq!(parsed.abilities[0].description.as_deref(), Some(text));
+        assert!(
+            has_unimplemented(&parsed.abilities[0]),
+            "unfinished full card must remain red: {name}"
+        );
+        let gaps: Vec<_> = scope_chain(&parsed.abilities[0])
+            .iter()
+            .filter_map(|d| match d.effect.as_ref() {
+                Effect::Unimplemented { description, .. } => description.as_deref(),
+                _ => None,
+            })
+            .collect();
+        if name == "Broken Visage" {
+            assert!(gaps.iter().any(|f| f.contains(BROKEN_CLEANUP)));
+        } else {
+            assert!(gaps.iter().any(|f| f.contains(CIRCADIAN_SEEK)));
+            assert!(gaps.iter().any(|f| f.contains(CIRCADIAN_GRANT)));
+        }
+    }
+}
+
+#[test]
+fn ordinary_tap_prefix_keeps_nearest_token_owner() {
+    for prefix in ["", "Draw a card.\n"] {
+        let source = format!("{prefix}Tap target creature. {ORDINARY_SPIRIT}");
+        let parsed = scope_spell(&source);
+        assert_ordinary_spirit_shape(&parsed, 2);
+        let chain = scope_chain(&parsed.abilities[0]);
+        assert!(chain.iter().any(|d| matches!(
+            *d.effect,
+            Effect::SetTapState {
+                state: TapStateChange::Tap,
+                ..
+            }
+        )));
+        if !prefix.is_empty() {
+            assert!(matches!(*chain[0].effect, Effect::Draw { .. }));
+        }
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some(source.as_str())
+        );
+    }
+}
+
+#[test]
+fn outer_instruction_continuation_keeps_unsupported_suffix_and_boundaries() {
+    for command in [
+        "Destroy target creature.",
+        "Destroy target creature. Dance with the moon.",
+    ] {
+        let source = format!("Draw a card.\n{command}");
+        let parsed = scope_spell(&source);
+        assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+        assert!(matches!(*parsed.abilities[0].effect, Effect::Draw { .. }));
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some(source.as_str())
+        );
+        assert_eq!(
+            has_unimplemented(&parsed.abilities[0]),
+            command != "Destroy target creature."
+        );
+        if command != "Destroy target creature." {
+            assert!(scope_chain(&parsed.abilities[0]).iter().any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.trim_end_matches('.') == "Dance with the moon")));
+        }
+    }
+    for boundary in [
+        "\nDestroy target creature.",
+        "Vivid — Destroy target creature.",
+        "When this spell is cast, draw a card.",
+        "{1}: Draw a card.",
+        "This spell costs {1} less to cast.",
+        "Flying",
+        "If a creature would die, exile it instead.",
+        "Choose one —\n• Draw a card.\n• Destroy target creature.",
+    ] {
+        let source = format!("Draw a card.\n{boundary}");
+        let parsed = scope_spell(&source);
+        assert!(
+            matches!(*parsed.abilities[0].effect, Effect::Draw { .. }),
+            "{source}: {parsed:#?}"
+        );
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some("Draw a card."),
+            "{source}"
+        );
+        assert!(
+            parsed.abilities.len() > 1
+                || !parsed.statics.is_empty()
+                || !parsed.triggers.is_empty()
+                || !parsed.replacements.is_empty()
+                || !parsed.extracted_keywords.is_empty(),
+            "boundary must have its own positive owner: {source}: {parsed:#?}"
+        );
+    }
+}
+
+#[test]
+fn outer_instruction_keeps_true_host_owners() {
+    // CR 113.3a/b/d + CR 207.2c: real host owners precede outer commands.
+    for cost in [
+        "This spell costs {1} less to cast.",
+        "Void — This spell costs {1} less to cast.",
+    ] {
+        let parsed = scope_spell(&format!("{cost}\n{ORDINARY_SPIRIT}"));
+        assert_eq!(parsed.statics.len(), 1, "{parsed:#?}");
+        assert!(
+            matches!(parsed.statics[0].mode, StaticMode::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, ref amount, .. } if amount == &ManaCost::generic(1))
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert!(!has_unimplemented(&parsed.abilities[0]));
+        assert!(scope_chain(&parsed.abilities[0])
+            .iter()
+            .any(|d| matches!(*d.effect, Effect::Token { .. })));
+    }
+    let cda = parse_oracle_text("Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.", "Tarmogoyf", &[], &["Creature".into()], &[]);
+    assert!(cda.statics.iter().any(|s| s
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::SetDynamicPower { .. }))));
+    for text in [
+        "Destroy target creature.",
+        "Vivid — DeStRoY target creature.",
+        "Create a 1/1 white Soldier creature token.",
+        "Counter target spell.",
+        "Exile target creature.",
+        "Tap target creature.",
+    ] {
+        let parsed = scope_spell(text);
+        assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+        assert!(!has_unimplemented(&parsed.abilities[0]), "{text}");
+        assert!(parsed.statics.is_empty());
+    }
+    for text in [
+        "Whenever this creature attacks, destroy target creature.",
+        "{T}: Destroy target creature.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic owner", &[], &["Creature".into()], &[]);
+        if text == "{T}: Destroy target creature." {
+            assert!(parsed
+                .abilities
+                .iter()
+                .any(|d| d.kind == AbilityKind::Activated
+                    && matches!(*d.effect, Effect::Destroy { .. })));
+        } else {
+            assert!(parsed.triggers.iter().any(|t| t
+                .execute
+                .as_ref()
+                .is_some_and(|d| matches!(*d.effect, Effect::Destroy { .. }))));
+        }
+    }
+}
+
+fn assert_white_sun_shape(parsed: &ParsedAbilities, draw: bool) {
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(parsed.statics.is_empty());
+    assert!(!has_unimplemented(&parsed.abilities[0]), "{parsed:#?}");
+    assert!(parsed.parse_warnings.is_empty());
+    let chain = scope_chain(&parsed.abilities[0]);
+    assert_eq!(matches!(*chain[0].effect, Effect::Draw { .. }), draw);
+    let x = QuantityExpr::Ref {
+        qty: QuantityRef::Variable { name: "X".into() },
+    };
+    assert!(chain
+        .iter()
+        .any(|d| matches!(d.effect.as_ref(), Effect::GainLife { amount, .. } if amount == &x)));
+    let token = chain
+        .iter()
+        .find(|d| matches!(*d.effect, Effect::Token { .. }))
+        .unwrap();
+    let Effect::Token {
+        power,
+        toughness,
+        count,
+        colors,
+        types,
+        keywords,
+        static_abilities,
+        ..
+    } = token.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    // CR 111.3 + CR 702.164 + CR 509.1b: all restrictions belong to the Mites.
+    assert_eq!(power, &crate::types::ability::PtValue::Fixed(1));
+    assert_eq!(toughness, &crate::types::ability::PtValue::Fixed(1));
+    assert_eq!(count, &x);
+    assert!(colors.is_empty());
+    for ty in ["Phyrexian", "Mite", "Artifact", "Creature"] {
+        assert!(
+            types.iter().any(|s| s.eq_ignore_ascii_case(ty)),
+            "{types:?}"
+        );
+    }
+    assert!(keywords.contains(&Keyword::Toxic(1)));
+    assert!(static_abilities
+        .iter()
+        .any(|s| s.mode == StaticMode::CantBlock && s.affected == TargetFilter::SelfRef));
+    let destroy = chain
+        .iter()
+        .find(|d| matches!(*d.effect, Effect::DestroyAll { .. }))
+        .expect("conditional wipe");
+    assert_eq!(
+        destroy.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        })
+    );
+    assert!(
+        matches!(destroy.effect.as_ref(), Effect::DestroyAll { target, .. } if crate::game::filter::filter_contains_filter_prop(target, &|prop| *prop == FilterProp::Another))
+    );
+}
+
+#[test]
+fn white_suns_twilight_public_document_keeps_token_restriction() {
+    for prefix in ["", "Draw a card.\n"] {
+        let text = format!("{prefix}{FULL_WHITE_SUN}");
+        let parsed = scope_spell(&text);
+        assert_white_sun_shape(&parsed, !prefix.is_empty());
+        let prepared = format!("{prefix}{WHITE_SUN_SEMANTIC}");
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some(prepared.as_str())
+        );
+    }
+}
+
+#[test]
+fn brood_birthing_keeps_noncategory_collection_boundary() {
+    // SHAPE: only the existing boundary is claimed, not complete Brood semantics.
+    // Both quote-view clients must retain the unquoted "They have" marker.
+    for (raw, normalized) in [(FULL_BROOD, NORMALIZED_BROOD), (FULL_WHITE_SUN, "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)")] {
+        let lower = normalized.to_lowercase();
+        assert!(parse_outer_spell_instruction_head(&lower).is_err());
+        assert!(is_static_pattern(&lower));
+        let view = crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower);
+        assert_eq!(is_static_pattern(&view), raw == FULL_BROOD);
+        let trace = crate::parser::parse_oracle_text_traced(raw, "Synthetic boundary", &[], &["Sorcery".into()], &[]);
+        assert_eq!(trace.original_source, raw);
+        assert_eq!(trace.normalized_source, normalized);
+        assert!(!trace.events.is_empty());
+        let ir = parse_oracle_ir(raw, "Synthetic boundary", &[], &["Sorcery".into()], &[]);
+        assert!(!ir.items.is_empty());
+        assert_eq!(ir.source_text, raw);
+        assert!(ir.items.iter().any(|item| item.source.fragment() == Some(normalized)));
+    }
+    let wrapped = format!("Draw a card.\n{FULL_BROOD}");
+    let trace = crate::parser::parse_oracle_text_traced(
+        &wrapped,
+        "Synthetic Brood wrapper",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(trace.original_source, wrapped);
+    assert_eq!(
+        trace.normalized_source,
+        format!("Draw a card.\n{NORMALIZED_BROOD}")
+    );
+    assert!(trace.events.iter().any(|event| event.span.first_line == 1));
+    let mut ir = parse_oracle_ir(
+        &wrapped,
+        "Synthetic Brood wrapper",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(ir.source_text, wrapped);
+    assert!(ir
+        .items
+        .iter()
+        .any(|item| item.source.span().first_line == 1
+            && item.source.fragment() == Some(NORMALIZED_BROOD)));
+    let parsed = lower_oracle_ir(&mut ir);
+    assert!(matches!(*parsed.abilities[0].effect, Effect::Draw { .. }));
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some("Draw a card.")
+    );
+}
+
+#[test]
+fn unquoted_cant_block_retains_static_owner() {
+    let parsed = parse_oracle_text(
+        "This creature can't block.",
+        "Synthetic restriction",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| s.mode == StaticMode::CantBlock && s.affected == TargetFilter::SelfRef));
+    assert_white_sun_shape(&scope_spell(FULL_WHITE_SUN), false);
+}
+
 #[test]
 fn target_defined_token_duration_public_document() {
     // SHAPE: synthetic full document with two printed targets, no delayed clause.

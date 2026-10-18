@@ -197,7 +197,33 @@ pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
     scan_contains(lower, "damage") && scan_contains(lower, "can't be prevented")
 }
 
+/// CR 113.3a + CR 608.2c: an anchored resolving command owns its later
+/// definitions and grants even when their semantics are not yet supported.
+pub(crate) fn parse_outer_spell_instruction_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("destroy "),
+            tag("create "),
+            tag("seek "),
+            tag("counter "),
+            tag("exile "),
+            tag("tap "),
+        )),
+    )
+    .parse(input)
+}
+
 pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
+    // CR 601.2f + CR 207.2c: genuine host costs retain their static owner,
+    // including when an ability word or a duration appears in the statement.
+    if is_self_spell_cost_modification(lower) {
+        return false;
+    }
+    let ability_word_body = super::oracle_modal::strip_ability_word(lower);
+    if parse_outer_spell_instruction_head(ability_word_body.as_deref().unwrap_or(lower)).is_ok() {
+        return true;
+    }
     // CR 114.1: An emblem-granting instant/sorcery ("You get an emblem with
     // \"…\"") whose quoted body contains static text (Gideon of the Trials'
     // can't-lose/win locks) matches `is_static_pattern` on the unmasked view, so
@@ -247,10 +273,6 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
     // Reckoning) keeps its current routing.
     if super::oracle_effect::is_keeper_dispose_head(lower) {
         return true;
-    }
-
-    if is_self_spell_cost_modification(lower) {
-        return false;
     }
 
     if is_spell_resolution_cast_from_hand_free(lower) {
@@ -1341,6 +1363,47 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
 mod tests {
     use super::nom_primitives::strip_double_quoted_spans;
     use super::*;
+
+    #[test]
+    fn outer_instruction_head_is_anchored_and_completion_independent() {
+        for head in ["destroy", "create", "seek", "counter", "exile", "tap"] {
+            let text = format!("{head} deliberately unsupported suffix");
+            assert_eq!(
+                parse_outer_spell_instruction_head(&text),
+                Ok(("deliberately unsupported suffix", ()))
+            );
+            assert!(should_defer_spell_to_effect(&text));
+            assert!(should_defer_spell_to_effect(&format!("vivid — {text}")));
+        }
+        for text in [
+            "",
+            "\"tap target creature\"",
+            "destroyer ",
+            "creator ",
+            "seeker ",
+            "counterspell ",
+            "exiled ",
+            "tapped ",
+            "this creature has tap target creature",
+            "you gain life",
+            "if you control a creature, create a token",
+            "each player sacrifices a creature",
+            "you may create a token",
+            "for each creature, create a token",
+        ] {
+            assert!(parse_outer_spell_instruction_head(text).is_err(), "{text}");
+        }
+        for text in [
+            "this spell costs {1} less to cast this turn.",
+            "void — this spell costs {1} less to cast this turn.",
+        ] {
+            assert!(!should_defer_spell_to_effect(text), "{text}");
+        }
+        let white = "you gain x life. create x 1/1 colorless phyrexian mite artifact creature tokens with toxic 1 and \"this token can't block.\" if x is 5 or more, destroy all other creatures.";
+        assert!(parse_outer_spell_instruction_head(white).is_err());
+        assert!(is_static_pattern(white));
+        assert!(!is_static_pattern(&strip_double_quoted_spans(white)));
+    }
 
     #[test]
     fn masked_white_suns_twilight_is_not_static() {

@@ -63,8 +63,9 @@ use super::oracle_classifier::{
     is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
     is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
     is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
-    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
-    split_flashback_trailing_self_spell_cost_reduction, strip_entry_this_way_riders,
+    is_vehicle_tier_line, lower_starts_with, parse_outer_spell_instruction_head,
+    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
+    strip_entry_this_way_riders,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
@@ -3640,19 +3641,15 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    // CR 111.3 + CR 111.4: mask double-quoted spans (a created token/permanent's
-    // defined inline ability text) before spell-line static classification, so a
-    // token's quoted "can't block" etc. doesn't mark this resolution line static.
-    // This function is already spell-scoped (caller is inside `if is_spell {`).
-    // The adjacent is_replacement_pattern check below stays on the UNMASKED text.
-    //
-    // Gate the mask on a token/permanent-creation verb being present: only then is
-    // a quoted span an inline ability *of the created object* ("create ... with
-    // \"…\""). On a line with no creation verb the quote is instead a granted-
-    // ability payload ("…perpetually gain \"This spell costs {1} less\""), whose
-    // inner static shape is load-bearing for routing — masking it there misroutes
-    // the grant (coverage regression: Circadian Struggle, Absorb Energy).
-    let static_view = if scan_contains(&effect_lower, "create") {
+    let owns_outer_instruction = parse_outer_spell_instruction_head(&effect_lower).is_ok();
+    // CR 113.3a + CR 111.3: an anchored command retains its unmasked scope.
+    // For other creation lines, keep the compatibility quote view protecting
+    // token-owned abilities (including White Sun's "You gain" instruction).
+    // This view only feeds static classification; grants still reach the
+    // semantic parser in the original text and belong to their recipients.
+    let static_view = if owns_outer_instruction {
+        std::borrow::Cow::Borrowed(effect_lower.as_str())
+    } else if scan_contains(&effect_lower, "create") {
         crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&effect_lower)
     } else {
         std::borrow::Cow::Borrowed(effect_lower.as_str())
@@ -3738,6 +3735,12 @@ fn is_spell_resolution_instruction_line(
         .is_ok()
     {
         return false;
+    }
+
+    // CR 113.3a + CR 608.2c: structural owners above take precedence; the
+    // command's ownership does not depend on completing its later semantics.
+    if owns_outer_instruction {
+        return true;
     }
 
     let snapshot = ctx.diagnostics.len();
@@ -5467,6 +5470,8 @@ fn parse_normalized_oracle_ir(
     // `normalize_card_name_refs` on this pre-normalized text; strategies 1-4
     // find nothing to replace and strategy 5 is short-circuited by its
     // `!result.contains('~')` guard, making re-entry an idempotent no-op.
+    // Item geometry uses these normalized physical lines. The document retains
+    // original Oracle separately; item byte offsets cannot index that raw buffer.
     let lines: Vec<&str> = normalized_oracle_text.split('\n').collect();
 
     // u4-c2 source-order emission: the document builder, wrapped in the emitter
@@ -7096,26 +7101,26 @@ fn parse_normalized_oracle_ir(
         // effect parser at Priority 9. Damage-verb lines are also deferred because
         // parse_effect_chain handles embedded statics via split_clause_sequence.
         //
-        // CR 111.3 + CR 111.4: a double-quoted span is an inline granted ability of
-        // a created token/permanent (the token's defined "text"), not the host
-        // line's own static clause; mask it before spell-line static classification
-        // so e.g. a token's "This token can't block." doesn't route the whole
-        // sorcery to the static parser. Spell-scoped only — the masked view feeds
-        // the gate predicate exclusively; every replacement gate below and the
-        // static_line passed to parse_static_line* stay on the UNMASKED text.
-        //
-        // Gate on a creation verb: only "create ... with \"…\"" makes the quote an
-        // inline ability of the created object. Without one, the quote is a granted-
-        // ability payload ("…perpetually gain \"This spell costs {1} less\"") whose
-        // inner static shape is load-bearing for routing — masking it there
-        // misroutes the grant (coverage regression: Circadian Struggle, Absorb
-        // Energy). Non-creation lines therefore keep the UNMASKED baseline view.
+        // CR 113.3a + CR 608.2c: decide outer ownership from the prepared,
+        // unmasked instruction before any consuming static branch. Genuine
+        // host costs remain static through the shared self-cost-first guard.
+        let is_ability_word_trigger = strip_ability_word(&line)
+            .is_some_and(|stripped| has_trigger_prefix(&stripped.to_lowercase()));
+        let defer_to_effect_parser = is_ability_word_trigger
+            || (is_spell
+                && prepare_spell_resolution_line(&line).is_some_and(|prepared| {
+                    should_defer_spell_to_effect(&prepared.effect_text.to_lowercase())
+                }));
+        // CR 111.3 + CR 111.4: retain the compatibility quote view for creation
+        // lines outside the owned command category (including White Sun's
+        // "You gain" head). It feeds only static classification; the original
+        // text still reaches semantic parsing with recipient grants intact.
         let static_classify_view = if is_spell && scan_contains(&lower, "create") {
             crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower)
         } else {
             std::borrow::Cow::Borrowed(lower.as_str())
         };
-        if is_static_pattern(&static_classify_view) {
+        if !defer_to_effect_parser && is_static_pattern(&static_classify_view) {
             if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
                 i += 1;
                 continue;
@@ -7230,15 +7235,6 @@ fn parse_normalized_oracle_ir(
                     continue;
                 }
             }
-            // Guard: ability-word-prefixed trigger lines (e.g., "Flurry — Whenever...")
-            // handled above at Priority 6b. The check below is kept as a defensive
-            // guard for any edge cases that reach Priority 7.
-            let is_ability_word_trigger = strip_ability_word(&line).is_some_and(|stripped| {
-                let sl = stripped.to_lowercase();
-                has_trigger_prefix(&sl)
-            });
-            let defer_to_effect_parser =
-                is_ability_word_trigger || (is_spell && should_defer_spell_to_effect(&lower));
             if !defer_to_effect_parser {
                 // B7: Ability-word-prefixed static lines — strip prefix and attach condition.
                 // Must happen here (Priority 7) because Priority 9 (spell catch-all) would
@@ -8238,6 +8234,8 @@ fn parse_normalized_oracle_ir(
                     ResidualConditionPolicy::Clear,
                 );
             }
+            // The item anchors the normalized head line; AbilityIr and its root
+            // description retain the complete prepared body and collected lines.
             emitter.ability_ir_at(item_line, ability_ir);
             continue;
         }

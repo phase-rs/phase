@@ -456,7 +456,10 @@ pub(crate) struct DieResultBranchIr {
 /// "lower the chain, then finalize it, then anchor it, then apply the shell".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct AbilityIr {
-    /// The verbatim text this ability was parsed from.
+    /// Verbatim to the supplied chain-parser buffer, which may already be
+    /// normalized, reminder-stripped and joined from prepared effect lines with
+    /// spaces. This is the complete semantic body, not raw document bytes or the
+    /// normalized document item's physical head-line anchor.
     ///
     /// **Not an `OracleUnitSource`, on purpose.** `OracleUnitSource`'s fields are
     /// private and its only constructor is `UnitAllocator::allocate_with_span`,
@@ -513,7 +516,9 @@ pub(crate) struct ModalModeIr {
 pub(crate) enum AbilityRootTransform {
     /// CR 601.2b: stamp the announced-X floor from this printed ability.
     SetMinXValue(u32),
-    /// Preserve the complete printed source text for this multi-line ability.
+    /// Preserve the complete prepared normalized description, including newline
+    /// joins between collected lines. Reminders have already been stripped;
+    /// byte-exact original Oracle remains in the document's source_text.
     SetDescription(String),
     /// CR 614.6 + CR 614.15: replace an unbindable self-replacement's final
     /// lowered root with the explicit honest-failure floor.
@@ -900,8 +905,9 @@ pub(crate) struct ClauseIr {
     /// The prior return instruction whose actual results a delayed clause names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_return_result: Option<(ClauseId, ReturnResultReadSpec)>,
-    /// Honest chain-relative source (`SpanPrecision::ChainRelative`): exact byte
-    /// range within this chain + verbatim fragment. Replaces the former
+    /// Chain-local source (`SpanPrecision::ChainRelative`) and complete chunk
+    /// fragment. The chunk may already be normalized/derived; `locate` retains
+    /// a zero-width cursor anchor if it is absent from the chain. Replaces the former
     /// unaddressed `source_text` string (Plan 01 §5, line 341). Upgrades to a
     /// card-absolute `OracleUnitSource` in the allocator-threading unit; the
     /// verbatim fragment is retained so that upgrade can re-locate it.

@@ -222,8 +222,8 @@ pub(crate) struct AuditUnit<'a> {
     ///
     /// Sliced from the document's raw `source_text` rather than read off
     /// `item.fragment()` — fragments under-report what an item consumed (see above)
-    /// and are normalized (the card's own name is rewritten to `~`), while the
-    /// detectors' marker phrases and the emitted `description` are raw-text concepts.
+    /// and are normalized (self-references may become `~`). Expectations use raw
+    /// text; item evidence and lowered descriptions may use prepared normalized text.
     pub(crate) text: String,
     /// The line this unit's diagnostics are attributed to.
     pub(crate) first_line: usize,
@@ -266,9 +266,10 @@ pub(crate) fn audit_units<'a>(
         return Vec::new();
     }
 
-    // Byte offset of the start of each line, mirroring `DocEmitter::line_start` (one
-    // '\n' per prior line). A unit's span must live in the SAME coordinate system as the
-    // item spans it owns, or a consumer cannot relate the two.
+    // Audit-unit byte offsets index the raw source_text passed here. Document item
+    // byte offsets index normalized parser text; this function associates items by
+    // physical starting line and recomputes raw byte geometry rather than reusing
+    // their offsets.
     let mut line_start: Vec<usize> = Vec::with_capacity(lines.len());
     let mut acc = 0usize;
     for line in &lines {
