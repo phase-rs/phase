@@ -1391,6 +1391,231 @@ fn synthetic_optional_search(mut sibling: AbilityDefinition) -> AbilityDefinitio
 }
 
 #[test]
+fn declined_search_damage_all_keeps_independent_player_audience() {
+    let empty_objects =
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            }]),
+        );
+    let live_objects = TargetFilter::Typed(TypedFilter::creature());
+    let missing_amount = QuantityExpr::Ref {
+        qty: QuantityRef::TrackedSetSize,
+    };
+    let missing_players = PlayerFilter::ControlsCount {
+        relation: PlayerRelation::All,
+        filter: live_objects.clone(),
+        comparator: Comparator::GE,
+        count: Box::new(missing_amount.clone()),
+    };
+    for (label, target, player_filter, amount, object_damage, player_damage) in [
+        (
+            "empty tracked membership",
+            empty_objects.clone(),
+            Some(PlayerFilter::All),
+            QuantityExpr::Fixed { value: 1 },
+            0,
+            1,
+        ),
+        (
+            "literal empty object audience",
+            TargetFilter::None,
+            Some(PlayerFilter::All),
+            QuantityExpr::Fixed { value: 1 },
+            0,
+            1,
+        ),
+        (
+            "live object and player audiences",
+            live_objects.clone(),
+            Some(PlayerFilter::All),
+            QuantityExpr::Fixed { value: 1 },
+            1,
+            1,
+        ),
+        (
+            "empty objects without players",
+            empty_objects.clone(),
+            None,
+            QuantityExpr::Fixed { value: 1 },
+            0,
+            0,
+        ),
+        (
+            "missing required amount",
+            live_objects.clone(),
+            Some(PlayerFilter::All),
+            missing_amount.clone(),
+            0,
+            0,
+        ),
+        (
+            "missing required player threshold",
+            live_objects.clone(),
+            Some(missing_players),
+            QuantityExpr::Fixed { value: 1 },
+            0,
+            0,
+        ),
+        (
+            "missing required object threshold",
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: missing_amount,
+            }])),
+            Some(PlayerFilter::All),
+            QuantityExpr::Fixed { value: 1 },
+            0,
+            0,
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P0, "First live creature", 3, 3).id();
+        let second = scenario.add_creature(P1, "Second live creature", 3, 3).id();
+        let found = scenario
+            .add_spell_to_library_top(P0, "Unchosen creature", false)
+            .as_creature()
+            .id();
+        let cover = scenario
+            .add_spell_to_library_top(P0, "Hidden cover", false)
+            .id();
+        let mut tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        let damage = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+                damage_source: None,
+            },
+        )
+        .sub_ability(tail);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic search and simultaneous damage", false)
+            .with_ability_definition(synthetic_optional_search(damage))
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        fund(&mut scenario, 1, &[]);
+        let mut runner = scenario.build();
+        assert_library_order(&runner, &[cover, found]);
+        assert!(runner.state().last_revealed_ids.is_empty());
+        runner.cast(spell).commit();
+        assert!(runner.state().players[0].mana_pool.is_empty());
+        let mut events = Vec::new();
+        let _ = pass_to_pause(&mut runner, &mut events);
+        assert_optional_prompt(&runner);
+        assert_eq!(runner.state().players[0].life, 20);
+        assert_eq!(runner.state().players[1].life, 20);
+        let last = runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap()
+            .events;
+        // CR 120.3a + CR 608.2c: apply each player's damage, then the independent +3.
+        assert_eq!(
+            runner.state().players[0].life,
+            23 - player_damage,
+            "{label}"
+        );
+        assert_eq!(
+            runner.state().players[1].life,
+            20 - player_damage,
+            "{label}"
+        );
+        for id in [first, second] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&id].damage_marked,
+                object_damage,
+                "{label}"
+            );
+        }
+        let damage: Vec<_> = last
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    ..
+                } => {
+                    assert_eq!(*source_id, spell);
+                    assert_eq!(*amount, 1);
+                    assert!(!is_combat);
+                    Some(target.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for id in [first, second] {
+            assert_eq!(
+                damage.contains(&TargetRef::Object(id)),
+                object_damage == 1,
+                "{label}"
+            );
+        }
+        for player in [P0, P1] {
+            assert_eq!(
+                damage.contains(&TargetRef::Player(player)),
+                player_damage == 1,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            damage.len(),
+            (2 * object_damage + 2 * player_damage as u32) as usize,
+            "{label}"
+        );
+        if player_damage == 1 {
+            // CR 608.2f: both audiences belong to one simultaneous instruction.
+            assert_eq!(
+                last.iter()
+                    .filter(|event| matches!(event,
+                        GameEvent::EffectResolved { kind: EffectKind::DamageAll, source_id, .. }
+                            if *source_id == spell
+                    ))
+                    .count(),
+                1,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            last.iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::LifeChanged {
+                        player_id: P0,
+                        amount: 3,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "{label}"
+        );
+        assert!(!last.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { .. }
+                | GameEvent::ZoneChanged {
+                    from: Some(Zone::Library),
+                    ..
+                }
+        )));
+        assert_library_order(&runner, &[cover, found]);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_settled(&runner);
+    }
+}
+
+#[test]
 fn declined_search_keeps_described_counter_survivors() {
     for typed in [false, true] {
         for accept in [false, true] {

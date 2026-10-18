@@ -5789,6 +5789,15 @@ fn prepare_declined_search_node_with_input<'a>(
         }
     } else {
         let mut impossible = false;
+        // CR 608.2f: DamageAll's independently checked player audience shares
+        // the same simultaneous action even when its object population is empty.
+        let has_player_population = matches!(
+            &ability.effect,
+            Effect::DamageAll {
+                player_filter: Some(_),
+                ..
+            }
+        );
         let mut bind = |filter: &mut TargetFilter| {
             if declined_search_scalar_filter_dependency(state, filter, information, context) {
                 impossible = true;
@@ -5800,7 +5809,8 @@ fn prepare_declined_search_node_with_input<'a>(
                 context,
                 &retain_reference,
             ) {
-                Some(Some(false)) | None => impossible = true,
+                Some(Some(false)) => impossible |= !has_player_population,
+                None => impossible = true,
                 Some(_) => {
                     impossible |=
                         declined_search_filter_dependency(state, filter, information, context)
