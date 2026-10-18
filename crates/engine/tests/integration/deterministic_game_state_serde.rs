@@ -17,9 +17,9 @@ use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     AbilityActivationRecord, ActivationTargetFact, AutoPassMode, DepartedStackSpell,
-    LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot, PendingConniveReentry,
-    PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind,
-    StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki, LinkedExileSnapshot,
+    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
+    StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
     WaitingFor,
 };
@@ -42,10 +42,9 @@ const OPTION_HASH_MAP: &str =
 const VEC_HASH_MAP: &str = "serialize_with=\"crate::types::deterministic_serde::vec_hash_map\"";
 const HASH_MAP_OF_HASH_SET: &str =
     "serialize_with=\"crate::types::deterministic_serde::hash_map_of_hash_set\"";
-const HASH_MAP_OF_HASH_MAP: &str =
-    "serialize_with=\"crate::types::deterministic_serde::hash_map_of_hash_map\"";
 const IM_HASH_SET: &str = "serialize_with=\"crate::types::deterministic_serde::im_hash_set\"";
 const IM_HASH_MAP: &str = "serialize_with=\"crate::types::deterministic_serde::im_hash_map\"";
+const OBJECT_MAP: &str = "serialize_with=\"crate::types::object_map::serialize_sorted\"";
 const IM_HASH_MAP_OF_IM_HASH_MAP: &str =
     "serialize_with=\"crate::types::deterministic_serde::im_hash_map_of_im_hash_map\"";
 const NUMERIC_HASH_MAP_DESERIALIZER: &str =
@@ -130,6 +129,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_stack_spells", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::linked_exile_lki", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_level", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -183,6 +183,9 @@ fn add_spec(
     );
 }
 
+/// The hand-maintained census of every serialized hash-backed owner and the
+/// adapter each one must name; the census test compares it against the owners
+/// discovered in the source files.
 fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     let mut specs = BTreeMap::new();
     let game_state = "src/types/game_state.rs";
@@ -193,8 +196,10 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "triggers_fired_this_turn",
         "triggers_fired_this_turn_per_opponent",
         "triggers_fired_this_game",
+        "triggered_abilities_added_mana_this_turn",
         "crew_activated_this_turn",
         "crew_resolved_this_turn",
+        "crew_history_this_turn",
         "exerted_this_turn",
         "graveyard_cast_permissions_used",
         "graveyard_cast_permissions_used_per_type",
@@ -213,7 +218,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "players_who_created_token_this_turn",
         "players_who_discarded_card_this_turn",
         "players_who_sacrificed_artifact_this_turn",
-        "batched_zone_change_trigger_fired",
         "assassin_or_commander_dealt_combat_damage_this_turn",
         "modal_modes_chosen_this_turn",
         "modal_modes_chosen_this_game",
@@ -267,11 +271,19 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "im::HashSet",
         Classification::Canonical(IM_HASH_SET),
     );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "batched_zone_change_trigger_fired",
+        "im::HashSet",
+        Classification::Canonical(IM_HASH_SET),
+    );
 
     for field in [
         "stack_paid_facts",
         "liminal_entries",
-        "tracked_object_sets",
         "tracked_set_participants",
         "commander_cast_count",
         "commander_cast_owners",
@@ -329,8 +341,8 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "GameState",
         None,
         "tracked_set_member_causes",
-        "HashMap<HashMap>",
-        Classification::Canonical(HASH_MAP_OF_HASH_MAP),
+        "im::HashMap<im::HashMap>",
+        Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
     );
     add_spec(
         &mut specs,
@@ -364,7 +376,16 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "Box<HashMap<HashSet>>",
         Classification::Canonical(HASH_MAP_OF_HASH_SET),
     );
-    for field in ["objects", "attribution", "lki_cache"] {
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "objects",
+        "ObjectMap",
+        Classification::Canonical(OBJECT_MAP),
+    );
+    for field in ["attribution", "lki_cache", "tracked_object_sets"] {
         add_spec(
             &mut specs,
             game_state,
@@ -389,6 +410,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         game_state,
         "GameState",
         None,
+        "lki_copiable_values_by_incarnation",
+        "im::HashMap<im::HashMap>",
+        Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
         "departed_stack_spells",
         "im::HashMap<im::HashMap>",
         Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
@@ -402,10 +432,22 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "HashMap",
         Classification::Canonical(HASH_MAP_ENTRIES),
     );
-    for (field, adapter) in [
-        ("activated_abilities_this_turn", "with=\"tuple_key_map\""),
-        ("activated_abilities_this_game", "with=\"tuple_key_map\""),
-        ("ability_resolutions_this_turn", "with=\"tuple_key_map\""),
+    for (field, shape, adapter) in [
+        (
+            "activated_abilities_this_turn",
+            "im::HashMap",
+            "with=\"tuple_key_map\"",
+        ),
+        (
+            "activated_abilities_this_game",
+            "HashMap",
+            "with=\"tuple_key_map\"",
+        ),
+        (
+            "ability_resolutions_this_turn",
+            "im::HashMap",
+            "with=\"tuple_key_map\"",
+        ),
     ] {
         add_spec(
             &mut specs,
@@ -413,7 +455,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "GameState",
             None,
             field,
-            "HashMap",
+            shape,
             Classification::Canonical(adapter),
         );
     }
@@ -574,6 +616,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ("PostReplacementDrain", None, "applied", "HashSet", HASH_SET),
         ("PendingDrawDelivery", None, "applied", "HashSet", HASH_SET),
         ("DrawSequenceFrame", None, "applied", "HashSet", HASH_SET),
+        ("DrawDealerSeat", None, "applied", "HashSet", HASH_SET),
     ] {
         add_spec(
             &mut specs,
@@ -915,6 +958,8 @@ fn type_label(ty: &Type) -> String {
     }
 }
 
+/// The key type labels of every unordered map nested in `ty`, outermost first,
+/// looking through `Option`, `Vec`, `Arc` and `Box` and into map values.
 fn unordered_map_key_types(ty: &Type) -> Vec<String> {
     let Type::Path(path) = ty else {
         return Vec::new();
@@ -937,10 +982,13 @@ fn unordered_map_key_types(ty: &Type) -> Vec<String> {
             keys
         }
         "SpecializeFaceMap" => vec!["ManaColor".to_string()],
+        "ObjectMap" => vec!["ObjectId".to_string()],
         _ => Vec::new(),
     }
 }
 
+/// The hash-backed container shape of `ty` as the census labels it, or `None`
+/// when `ty` holds no hash-backed container (such fields are not census owners).
 fn hash_shape(ty: &Type) -> Option<String> {
     let Type::Path(path) = ty else {
         return None;
@@ -970,6 +1018,7 @@ fn hash_shape(ty: &Type) -> Option<String> {
             })
         }
         "SpecializeFaceMap" => Some("HashMap".to_string()),
+        "ObjectMap" => Some("ObjectMap".to_string()),
         _ => None,
     }
 }
@@ -1207,7 +1256,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        56,
+        57,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1519,21 +1568,21 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (ObjectId(1), ObjectAttribution::default()),
         (ObjectId(2), ObjectAttribution::default()),
     ]);
-    state.tracked_object_sets = HashMap::from([
+    state.tracked_object_sets = im::HashMap::from_iter([
         (TrackedSetId(1), vec![ObjectId(11)]),
         (TrackedSetId(2), vec![ObjectId(22), ObjectId(23)]),
     ]);
-    state.tracked_set_member_causes = HashMap::from([
+    state.tracked_set_member_causes = im::HashMap::from_iter([
         (
             TrackedSetId(1),
-            HashMap::from([
+            im::HashMap::from_iter([
                 (ObjectId(11), ThisWayCause::Exiled),
                 (ObjectId(12), ThisWayCause::Sacrificed),
             ]),
         ),
         (
             TrackedSetId(2),
-            HashMap::from([
+            im::HashMap::from_iter([
                 (ObjectId(21), ThisWayCause::Destroyed),
                 (ObjectId(22), ThisWayCause::Milled),
             ]),
@@ -1714,6 +1763,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 activator: PlayerId(0),
                 source: ObjectId(1),
                 source_lki: first_lki.clone(),
+                source_zone: engine::types::zones::Zone::Battlefield,
                 ability_tag: None,
                 is_loyalty_ability: false,
                 targets: vec![ActivationTargetFact::Object {
@@ -1728,6 +1778,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 activator: PlayerId(1),
                 source: ObjectId(2),
                 source_lki: second_lki.clone(),
+                source_zone: engine::types::zones::Zone::Battlefield,
                 ability_tag: None,
                 is_loyalty_ability: true,
                 targets: vec![ActivationTargetFact::Player(PlayerId(0))],
@@ -1746,6 +1797,22 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             im::HashMap::from_iter([(1, second_lki.clone()), (2, first_lki.clone())]),
+        ),
+    ]);
+    state.lki_copiable_values_by_incarnation = im::HashMap::from_iter([
+        (
+            ObjectId(1),
+            im::HashMap::from_iter([
+                (1, intrinsic_copiable_values(&first)),
+                (2, intrinsic_copiable_values(&second)),
+            ]),
+        ),
+        (
+            ObjectId(2),
+            im::HashMap::from_iter([
+                (1, intrinsic_copiable_values(&second)),
+                (2, intrinsic_copiable_values(&first)),
+            ]),
         ),
     ]);
     let departed_spell =
@@ -1785,19 +1852,41 @@ fn build_all_direct_numeric_maps_state() -> GameState {
     state.linked_exile_lki = HashMap::from([
         (
             ObjectId(1),
-            vec![LinkedExileSnapshot {
-                exiled_id: ObjectId(11),
-                owner: PlayerId(0),
-                mana_value: 1,
+            vec![LinkedExileLki {
+                departed: 3,
+                successor: 4,
+                snapshot: vec![LinkedExileSnapshot {
+                    exiled_id: ObjectId(11),
+                    owner: PlayerId(0),
+                    mana_value: 1,
+                    incarnation: 2,
+                }],
             }],
         ),
         (
             ObjectId(2),
-            vec![LinkedExileSnapshot {
-                exiled_id: ObjectId(22),
-                owner: PlayerId(1),
-                mana_value: 2,
-            }],
+            vec![
+                LinkedExileLki {
+                    departed: 5,
+                    successor: 6,
+                    snapshot: vec![LinkedExileSnapshot {
+                        exiled_id: ObjectId(22),
+                        owner: PlayerId(1),
+                        mana_value: 2,
+                        incarnation: 5,
+                    }],
+                },
+                LinkedExileLki {
+                    departed: 7,
+                    successor: 8,
+                    snapshot: vec![LinkedExileSnapshot {
+                        exiled_id: ObjectId(23),
+                        owner: PlayerId(0),
+                        mana_value: 3,
+                        incarnation: 9,
+                    }],
+                },
+            ],
         ),
     ]);
     state.ring_level = HashMap::from([(PlayerId(0), 1), (PlayerId(1), 2)]);
@@ -1874,6 +1963,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "lki_cache",
         "lki_copiable_values",
         "lki_by_incarnation",
+        "lki_copiable_values_by_incarnation",
         "departed_stack_spells",
         "linked_exile_lki",
         "ring_level",
@@ -1883,7 +1973,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        43,
+        44,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -1901,6 +1991,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     for field in [
         "tracked_set_member_causes",
         "lki_by_incarnation",
+        "lki_copiable_values_by_incarnation",
         "departed_stack_spells",
     ] {
         for (outer_key, inner) in before[field].as_object().unwrap() {

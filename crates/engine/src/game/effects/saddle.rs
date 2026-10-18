@@ -84,7 +84,7 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     }
     // CR 608.2c: the printed-name anaphor always resolves to the source.
     if matches!(target, TargetFilter::SelfRef) {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
     // CR 608.2c: a triggered "it becomes saddled" binds "it" to a context ref
     // (`TriggeringSource`) that resolves from the trigger event — not from an

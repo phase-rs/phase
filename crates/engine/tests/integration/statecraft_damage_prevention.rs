@@ -22,13 +22,13 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    CombatDamageScope, ControllerRef, Effect, QuantityExpr, ResolvedAbility, ShieldKind,
-    TargetFilter, TargetRef, TypedFilter,
+    ChosenAttribute, CombatDamageScope, ControllerRef, Effect, FilterProp, QuantityExpr,
+    ResolvedAbility, ShieldKind, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -60,9 +60,7 @@ const CANDLETRAP_TEXT: &str = "Enchant creature\nEnchanted creature has defender
 const DEFANG_TEXT: &str =
     "Enchant creature\nPrevent all damage that would be dealt by enchanted creature.";
 
-/// Verbatim Charm School — its source clause ("sources of the chosen color")
-/// is explicitly OUT OF SCOPE for this fix (needs a new qualifier arm this
-/// plan does not add); only its recipient ("dealt to you") half is claimed.
+/// Verbatim Charm School.
 const CHARM_SCHOOL_TEXT: &str = "As this enchantment enters, choose a color and balance this enchantment on your head.\nPrevent all damage that would be dealt to you by sources of the chosen color.\nWhen this enchantment falls off your head, sacrifice this enchantment.";
 
 /// A free mana cost so casting tests don't need to stage a mana pool — the
@@ -637,12 +635,10 @@ fn candletrap_real_cast_prevents_enchanted_creatures_combat_damage() {
 
 /// CR 614.1a: Gap A's passive-voice fix is a general anchor change, not
 /// specific to Candletrap — parser-shape sibling coverage for Defang (same
-/// shape, different card) and Charm School (recipient half already correct;
-/// its source half — "sources of the chosen color" — stays `None` on
-/// purpose, since that qualifier grammar is explicitly out of scope for this
-/// fix; asserted here as a non-regression negative, paired with the positive
-/// reach-guard that the replacement itself still parses and the recipient
-/// half is still populated).
+/// shape, different card) and Charm School, whose recipient ("dealt to you")
+/// and source ("by sources of the chosen color", CR 607.2d) halves are both
+/// scoped. Runtime coverage for the source half is
+/// `charm_school_prevents_only_sources_of_the_chosen_color`.
 #[test]
 fn defang_and_charm_school_parser_shape() {
     let parsed_defang = engine::parser::oracle::parse_oracle_text(
@@ -678,21 +674,62 @@ fn defang_and_charm_school_parser_shape() {
         .replacements
         .iter()
         .find(|r| matches!(r.shield_kind, ShieldKind::Prevention { .. }))
-        .expect(
-            "reach-guard: Charm School's prevention replacement must still parse \
-             at all before asserting its source-side non-fix below",
-        );
+        .expect("Charm School's prevention line must parse to a Prevention replacement");
     assert!(
         prevention.damage_target_filter.is_some() || prevention.valid_card.is_some(),
         "Charm School's recipient ('dealt to you') half must remain correctly \
          scoped — this fix must not regress it"
     );
-    assert!(
-        prevention.damage_source_filter.is_none(),
-        "Charm School's source clause ('sources of the chosen color') is \
-         explicitly OUT OF SCOPE for this fix (needs a new qualifier arm this \
-         PR does not add) — damage_source_filter must stay None, not silently \
-         mis-scope to 'matches everything' or crash"
+    assert_eq!(
+        prevention.damage_source_filter,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::IsChosenColor])
+        )),
+        "Charm School's source clause ('sources of the chosen color') must scope \
+         the shield to the linked chosen color — an unscoped shield prevents \
+         damage from every source"
+    );
+}
+
+/// CR 615.1a + CR 607.2d: Charm School prevents damage dealt to its controller
+/// only from sources of the color chosen as it entered. A red Bolt is prevented
+/// when red was chosen and is not when green was chosen. Returns P0's life
+/// change after P0's own Bolt resolves at P0.
+fn charm_school_bolt_life_delta(chosen: ManaColor) -> i32 {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let charm_school = scenario
+        .add_enchantment_from_oracle(P0, "Charm School", CHARM_SCHOOL_TEXT)
+        .id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let bolt_obj = state.objects.get_mut(&bolt).unwrap();
+        bolt_obj.color = vec![ManaColor::Red];
+        bolt_obj.base_color = vec![ManaColor::Red];
+        // The "As this enchantment enters, choose a color" choice, made earlier.
+        state
+            .objects
+            .get_mut(&charm_school)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(chosen));
+    }
+    runner.cast(bolt).target_player(P0).resolve().life_delta(P0)
+}
+
+#[test]
+fn charm_school_prevents_only_sources_of_the_chosen_color() {
+    assert_eq!(
+        charm_school_bolt_life_delta(ManaColor::Red),
+        0,
+        "a red source is of the chosen color (red) — its damage is prevented"
+    );
+    assert_eq!(
+        charm_school_bolt_life_delta(ManaColor::Green),
+        -3,
+        "a red source is not of the chosen color (green) — its damage is dealt"
     );
 }
 

@@ -26,9 +26,9 @@
 //! new targets" is an optional permission whose default — keeping the original
 //! (still-legal) targets — is itself a legal choice.
 
-use crate::game::effects::copy_spell::{open_copy_retarget_choice, set_resolved_source_recursive};
+use crate::game::effects::copy_spell::set_resolved_source_recursive;
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, EffectKind, ResolvedAbility,
+    DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -96,6 +96,7 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
         // Synthesized fresh each upkeep; the one-shot flag is irrelevant because
         // it is never stored — `epic_effects` is the persistent generator.
         one_shot: true,
+        kind: DelayedTriggerKind::Ordinary,
         provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     }
 }
@@ -183,17 +184,14 @@ pub(crate) fn resolve(
     // CR 702.50a + CR 707.10c: Epic grants "you may choose new targets for the
     // copy." Reuse the same CopyRetarget choice path as other spell-copy
     // effects so the player may keep the old targets or choose legal new ones.
-    let copy_targets = copy_ability.targets.clone();
-    if !copy_targets.is_empty() {
-        open_copy_retarget_choice(
-            state,
-            controller,
-            copy_id,
-            &copy_targets,
-            &copy_ability,
-            EffectKind::EpicCopy,
-            ability.source_id,
-        );
+    // B5: the chain census decides whether there is anything to choose.
+    if crate::game::effects::copy_choice::open_copy_retarget_walk(
+        state,
+        controller,
+        copy_id,
+        EffectKind::EpicCopy,
+        ability.source_id,
+    ) {
         // EffectResolved is deferred until the retarget choice completes.
         return Ok(());
     }

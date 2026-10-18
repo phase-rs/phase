@@ -379,7 +379,8 @@ mod tests {
         use crate::game::turns::execute_cleanup;
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
-            DelayedTriggerLifetime, Duration, StaticCondition, TriggerDefinition,
+            DelayedTriggerKind, DelayedTriggerLifetime, Duration, StaticCondition,
+            TriggerDefinition,
         };
         use crate::types::game_state::DelayedTrigger;
         use crate::types::statics::StaticMode;
@@ -461,6 +462,7 @@ mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         });
         assert_eq!(state.delayed_triggers.len(), 2);

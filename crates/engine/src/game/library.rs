@@ -2,6 +2,7 @@
 
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     validate_library_shuffle_receipt, ResolvedLibraryShuffleCommand,
@@ -18,17 +19,12 @@ pub fn resolve_and_apply_library_shuffle(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), ResolvedLibraryShuffleReplayInvariantError> {
-    let precondition_order: Vec<_> = state
-        .players
-        .iter()
-        .find(|candidate| candidate.id == player)
-        .ok_or(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
+    if !state.players.iter().any(|candidate| candidate.id == player) {
+        return Err(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
             player,
-        ))?
-        .library
-        .iter()
-        .copied()
-        .collect();
+        ));
+    }
+    let precondition_order: Vec<_> = state.library_of(player).iter().copied().collect();
 
     // Existing random consumers may have advanced the live stream before their
     // own P2 authority is factored. Synchronize the persisted high-water through
@@ -37,7 +33,10 @@ pub fn resolve_and_apply_library_shuffle(
     let pre_word_pos = state.rng_word_pos;
     let mut receipt_rng = state.rng.clone();
     let mut resulting_order = im::Vector::from(precondition_order.clone());
-    crate::util::im_ext::shuffle_vector(&mut resulting_order, &mut receipt_rng);
+    crate::util::im_ext::shuffle_vector(
+        &mut resulting_order,
+        receipt_rng.draw(RandomDraw::Placement),
+    );
     let command = ResolvedLibraryShuffleCommand {
         player,
         precondition_order,
@@ -63,18 +62,16 @@ pub fn apply_resolved_library_shuffle(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), ResolvedLibraryShuffleReplayInvariantError> {
     validate_library_shuffle_receipt(command)?;
-    let player_index = state
+    if !state
         .players
         .iter()
-        .position(|candidate| candidate.id == command.player)
-        .ok_or(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
+        .any(|candidate| candidate.id == command.player)
+    {
+        return Err(ResolvedLibraryShuffleReplayInvariantError::UnknownPlayer(
             command.player,
-        ))?;
-    let current_order: Vec<_> = state.players[player_index]
-        .library
-        .iter()
-        .copied()
-        .collect();
+        ));
+    }
+    let current_order: Vec<_> = state.library_of(command.player).iter().copied().collect();
     if current_order != command.precondition_order {
         return Err(ResolvedLibraryShuffleReplayInvariantError::LibraryOrderPreconditionMismatch);
     }
@@ -99,7 +96,8 @@ pub fn apply_resolved_library_shuffle(
     // CR 701.24a: Install the already-randomized order once. The applier never
     // calls `shuffle_vector`, so retained-prefix replay cannot consume entropy
     // or choose a different permutation.
-    state.players[player_index].library = im::Vector::from(command.resulting_order.clone());
+    // allow-raw-zone: permutation install, not a zone event (CR 701.24a).
+    *state.library_of_mut(command.player) = im::Vector::from(command.resulting_order.clone());
     state.advance_library_knowledge_epoch(command.player);
     state
         .advance_rng_high_water(command.post_word_pos)
@@ -123,8 +121,6 @@ pub fn apply_resolved_library_shuffle(
 
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
 
     use super::*;
     use crate::game::zones::create_object;
@@ -163,7 +159,10 @@ mod tests {
         let mut state = state_with_library(0x733);
         let mut expected_order = state.players[0].library.clone();
         let mut expected_rng = state.rng.clone();
-        crate::util::im_ext::shuffle_vector(&mut expected_order, &mut expected_rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut expected_order,
+            expected_rng.draw(crate::types::game_state::RandomDraw::Placement),
+        );
         let mut events = Vec::new();
 
         crate::game::effects::change_zone::shuffle_library(&mut state, PlayerId(0), &mut events);
@@ -198,7 +197,7 @@ mod tests {
         let mut replay = pre_state;
         // A different stream seed proves the applier cannot recreate the order
         // by shuffling. Its stream position still satisfies the receipt.
-        replay.rng = ChaCha20Rng::seed_from_u64(0x0BAD_5EED);
+        replay.rng = crate::types::game_state::GameRng::seed_from_u64(0x0BAD_5EED);
         replay.rng_word_pos = command.pre_word_pos;
         let mut replay_events = Vec::new();
         apply_resolved_library_shuffle(&mut replay, &command, &mut replay_events).unwrap();

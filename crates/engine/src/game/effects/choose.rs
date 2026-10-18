@@ -1,8 +1,9 @@
+use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
 use crate::game::players;
 use crate::types::ability::{
-    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind,
+    ChoiceType, ChoiceValue, ChosenAttribute, ChosenSubtypeKind, Effect, EffectError, EffectKind,
     PlayerChoiceDistinctness, ResolvedAbility, SeatDirection, TargetSelectionMode,
 };
 use crate::types::events::GameEvent;
@@ -62,7 +63,7 @@ pub fn resolve(
     // impossible (only `CardName` has a wired free-text supply path today;
     // `Word` / `Artist` are a separate known frontend gap — see
     // `options_supplied_by_player`).
-    if options.is_empty() && !choice_type.options_supplied_by_player() {
+    if !named_choice_is_possible(&choice_type, &options) {
         state.cost_payment_failed_flag = true;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
@@ -159,7 +160,10 @@ pub(crate) fn resolve_random_in_chain(
     }
 
     // CR 608.2d (override): the game selects uniformly at random.
-    let index = state.rng.random_range(0..options.len());
+    let index = state
+        .rng
+        .draw(RandomDraw::Outcome)
+        .random_range(0..options.len());
     let chosen = options[index].clone();
 
     let (mut source, persist_player) =
@@ -244,6 +248,12 @@ pub(crate) fn bind_named_choice(
                 ChoiceValue::Counter(kind) => Some(kind),
                 _ => None,
             });
+    }
+    // CR 105.4 + CR 608.2c: "that color" later in this resolution names this
+    // answer, whether or not the chooser persists it and whatever other kind
+    // of choice comes between (`named_color_this_resolution`).
+    if let Some(ChoiceValue::Color(color)) = ChoiceValue::from_choice(choice_type, choice) {
+        state.named_color_this_resolution = Some(color);
     }
     let updated_context = source.as_deref_mut().and_then(|source| {
         let context = source.context.as_mut()?;
@@ -380,6 +390,50 @@ pub(crate) fn resolution_chosen_color(
     })
 }
 
+/// CR 608.2d then CR 607.2d, in that order: the subtype (creature type or basic
+/// land type, per `kind`) a type change created by THIS resolution must use.
+///
+/// The resolution slot answers "what did the effect being applied announce"; the
+/// fallback answers "what did this object's linked supplier choose". The
+/// "becomes the creature type / basic land type of your choice" choosers are
+/// `persist: false`, so their answer never reaches the source's
+/// `chosen_attributes` — it lives only in `state.last_named_choice`, which stays
+/// set while the chooser's continuation (the type-changing `GenericEffect`)
+/// drains. A grant whose own chain announced no subtype falls through to the
+/// source's linked answer.
+pub(crate) fn resolution_chosen_subtype(
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+    kind: &ChosenSubtypeKind,
+) -> Option<String> {
+    match kind {
+        ChosenSubtypeKind::CreatureType => match &state.last_named_choice {
+            Some(ChoiceValue::CreatureType(creature_type)) => Some(creature_type.clone()),
+            _ => state.objects.get(&source_id)?.chosen_subtype_str(kind),
+        },
+        // `resolution_chosen_basic_land_type` already falls back to the source's
+        // linked answer, so no second fallback here.
+        ChosenSubtypeKind::BasicLandType => {
+            let land_type = resolution_chosen_basic_land_type(state, source_id)?;
+            Some(land_type.as_subtype_str().to_string())
+        }
+    }
+}
+
+/// CR 608.2d then CR 607.2d, in that order: the basic land type a land-type
+/// change created by THIS resolution must use — this resolution's
+/// `persist: false` answer in `state.last_named_choice`, else the source's linked
+/// `ChosenAttribute::BasicLandType`.
+pub(crate) fn resolution_chosen_basic_land_type(
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+) -> Option<crate::types::ability::BasicLandType> {
+    match &state.last_named_choice {
+        Some(ChoiceValue::BasicLandType(land_type)) => Some(*land_type),
+        _ => state.objects.get(&source_id)?.chosen_basic_land_type(),
+    }
+}
+
 pub(crate) fn named_choice_authority(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -497,7 +551,10 @@ fn register_exact_named_choice_source(state: &mut GameState, source: Option<&Nam
     ability.set_trigger_source_recursive(context);
 }
 
-fn chosen_attributes_for_choice(choice_type: &ChoiceType, choice: &str) -> Vec<ChosenAttribute> {
+pub(crate) fn chosen_attributes_for_choice(
+    choice_type: &ChoiceType,
+    choice: &str,
+) -> Vec<ChosenAttribute> {
     match choice_type {
         ChoiceType::Keyword { options, count } if *count > 1 => choice
             .split(',')
@@ -643,6 +700,26 @@ const LAND_TYPES: &[&str] = &[
 ];
 
 /// Compute the valid options for a given choice type.
+/// CR 609.3: a choice with no legal option does nothing — unless its value is
+/// supplied by the player (`CardName` free text), where an empty engine list is
+/// expected. The single authority shared by `Effect::Choose` and the CR 614.12a
+/// pre-entry as-enters prompt (`replacement::as_enters_named_choice`).
+pub(crate) fn named_choice_is_possible(choice_type: &ChoiceType, options: &[String]) -> bool {
+    !options.is_empty() || choice_type.options_supplied_by_player()
+}
+
+/// CR 614.12a: the options an as-enters `Effect::Choose` offers, read before the
+/// permanent enters. `None` when the choice is impossible (CR 609.3).
+pub(crate) fn as_enters_choice_options(
+    state: &GameState,
+    choice_type: &ChoiceType,
+    controller: PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+) -> Option<Vec<String>> {
+    let options = compute_options(state, choice_type, controller, source_id, &[]);
+    named_choice_is_possible(choice_type, &options).then_some(options)
+}
+
 /// CR 700.2: The controller of a modal spell or ability chooses options as part of
 /// casting or resolution. If an option would be illegal, it can't be chosen.
 ///
@@ -914,6 +991,7 @@ fn keyword_choice_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::BasicLandType;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -1039,6 +1117,70 @@ mod tests {
             kept,
             vec![ChosenAttribute::Color(ManaColor::White)],
             "an empty answer set must leave the destination untouched"
+        );
+    }
+
+    fn chosen_subtype_source(state: &mut GameState, attributes: Vec<ChosenAttribute>) -> ObjectId {
+        let object_id = ObjectId(510);
+        let mut object = crate::game::game_object::GameObject::new(
+            object_id,
+            crate::types::identifiers::CardId(510),
+            PlayerId(0),
+            "Shapeshifter".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        object.chosen_attributes = attributes;
+        state.objects.insert(object_id, object);
+        object_id
+    }
+
+    /// CR 608.2d then CR 607.2d: THIS resolution's `persist: false` creature-type
+    /// answer (`last_named_choice`) wins over the source's linked answer, and the
+    /// linked answer is the fallback when the resolution announced none.
+    #[test]
+    fn resolution_chosen_subtype_prefers_this_resolution_then_falls_back_to_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = chosen_subtype_source(
+            &mut state,
+            vec![ChosenAttribute::CreatureType("Zombie".to_string())],
+        );
+
+        // (a) this resolution announced Elf → Elf, not the source's Zombie.
+        state.last_named_choice = Some(ChoiceValue::CreatureType("Elf".to_string()));
+        assert_eq!(
+            resolution_chosen_subtype(&state, source, &ChosenSubtypeKind::CreatureType),
+            Some("Elf".to_string()),
+        );
+
+        // (b) no resolution answer → the source's linked Zombie.
+        state.last_named_choice = None;
+        assert_eq!(
+            resolution_chosen_subtype(&state, source, &ChosenSubtypeKind::CreatureType),
+            Some("Zombie".to_string()),
+        );
+    }
+
+    /// A resolution answer of the OTHER subtype kind is not read as this kind,
+    /// and a land-type answer is projected for both land readers.
+    #[test]
+    fn resolution_chosen_subtype_reads_only_the_matching_kind() {
+        let mut state = GameState::new_two_player(42);
+        let source = chosen_subtype_source(&mut state, Vec::new());
+        state.last_named_choice = Some(ChoiceValue::BasicLandType(BasicLandType::Island));
+
+        // (c) a basic-land-type answer is not a creature type; empty source → None.
+        assert_eq!(
+            resolution_chosen_subtype(&state, source, &ChosenSubtypeKind::CreatureType),
+            None,
+        );
+        // (d) the land readers project the answer.
+        assert_eq!(
+            resolution_chosen_basic_land_type(&state, source),
+            Some(BasicLandType::Island),
+        );
+        assert_eq!(
+            resolution_chosen_subtype(&state, source, &ChosenSubtypeKind::BasicLandType),
+            Some("Island".to_string()),
         );
     }
 

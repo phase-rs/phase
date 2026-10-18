@@ -16,17 +16,29 @@ describe("animationStore", () => {
   describe("enqueueSteps", () => {
     it("promotes first step to activeStep when idle", () => {
       const steps = [makeStep(300), makeStep(400)];
-      useAnimationStore.getState().enqueueSteps(steps);
+      useAnimationStore.getState().enqueueSteps(steps, 1);
 
       const state = useAnimationStore.getState();
-      expect(state.activeStep).toEqual(steps[0]);
+      expect(state.activeStep).toEqual(expect.objectContaining(steps[0]));
       expect(state.queue).toHaveLength(1);
       expect(state.isPlaying).toBe(true);
     });
 
+    it("stamps each step with the snapshot it animates", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()], 3);
+      useAnimationStore.getState().enqueueSteps([makeStep()], 4);
+
+      const seqs = [useAnimationStore.getState().activeStep?.snapshotSeq];
+      useAnimationStore.getState().advanceStep();
+      seqs.push(useAnimationStore.getState().activeStep?.snapshotSeq);
+      useAnimationStore.getState().advanceStep();
+      seqs.push(useAnimationStore.getState().activeStep?.snapshotSeq);
+      expect(seqs).toEqual([3, 3, 4]);
+    });
+
     it("appends to queue when already playing", () => {
-      useAnimationStore.getState().enqueueSteps([makeStep()]);
-      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
+      useAnimationStore.getState().enqueueSteps([makeStep()], 1);
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()], 1);
 
       const state = useAnimationStore.getState();
       expect(state.activeStep).toBeTruthy();
@@ -36,7 +48,7 @@ describe("animationStore", () => {
 
   describe("veilObjects", () => {
     it("hides objects only for the step that veiled them", () => {
-      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()], 1);
       useAnimationStore.getState().veilObjects([10, 11]);
       expect([...useAnimationStore.getState().veiledObjectIds]).toEqual([10, 11]);
 
@@ -45,14 +57,61 @@ describe("animationStore", () => {
     });
 
     it("never outlives the queue", () => {
-      useAnimationStore.getState().enqueueSteps([makeStep()]);
+      useAnimationStore.getState().enqueueSteps([makeStep()], 1);
       useAnimationStore.getState().veilObjects([10]);
       useAnimationStore.getState().advanceStep();
       expect(useAnimationStore.getState().veiledObjectIds.size).toBe(0);
 
-      useAnimationStore.getState().enqueueSteps([makeStep()]);
+      useAnimationStore.getState().enqueueSteps([makeStep()], 1);
       useAnimationStore.getState().veilObjects([12]);
       useAnimationStore.getState().clearQueue();
+      expect(useAnimationStore.getState().veiledObjectIds.size).toBe(0);
+    });
+  });
+
+  describe("flight veil", () => {
+    it("survives every step advance, including the one that empties the queue", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()], 1);
+      useAnimationStore.getState().veilFlight(7);
+
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().flightVeiledObjectIds.has(7)).toBe(true);
+
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().activeStep).toBeNull();
+      expect(useAnimationStore.getState().flightVeiledObjectIds.has(7)).toBe(true);
+    });
+
+    it("keeps the flight veil while a step advance clears the step veil", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()], 1);
+      useAnimationStore.getState().veilObjects([8]);
+      useAnimationStore.getState().veilFlight(7);
+
+      useAnimationStore.getState().advanceStep();
+
+      const state = useAnimationStore.getState();
+      expect(state.veiledObjectIds.size).toBe(0);
+      expect(state.flightVeiledObjectIds.has(7)).toBe(true);
+    });
+
+    it("releases only the unveiled object", () => {
+      useAnimationStore.getState().veilFlight(7);
+      useAnimationStore.getState().veilFlight(9);
+      useAnimationStore.getState().unveilFlight(7);
+
+      expect([...useAnimationStore.getState().flightVeiledObjectIds]).toEqual([9]);
+    });
+
+    it("is cleared by clearQueue", () => {
+      useAnimationStore.getState().veilFlight(7);
+      useAnimationStore.getState().clearQueue();
+
+      expect(useAnimationStore.getState().flightVeiledObjectIds.size).toBe(0);
+    });
+
+    it("does not touch the step veil", () => {
+      useAnimationStore.getState().veilFlight(7);
+
       expect(useAnimationStore.getState().veiledObjectIds.size).toBe(0);
     });
   });
@@ -61,13 +120,13 @@ describe("animationStore", () => {
     it("advances through steps in order", () => {
       const step1 = makeStep(100);
       const step2 = makeStep(200);
-      useAnimationStore.getState().enqueueSteps([step1, step2]);
+      useAnimationStore.getState().enqueueSteps([step1, step2], 1);
 
-      expect(useAnimationStore.getState().activeStep).toEqual(step1);
+      expect(useAnimationStore.getState().activeStep).toEqual(expect.objectContaining(step1));
       expect(useAnimationStore.getState().isPlaying).toBe(true);
 
       useAnimationStore.getState().advanceStep();
-      expect(useAnimationStore.getState().activeStep).toEqual(step2);
+      expect(useAnimationStore.getState().activeStep).toEqual(expect.objectContaining(step2));
       expect(useAnimationStore.getState().isPlaying).toBe(true);
 
       useAnimationStore.getState().advanceStep();
@@ -76,7 +135,7 @@ describe("animationStore", () => {
     });
 
     it("clears when queue is empty", () => {
-      useAnimationStore.getState().enqueueSteps([makeStep()]);
+      useAnimationStore.getState().enqueueSteps([makeStep()], 1);
       useAnimationStore.getState().advanceStep();
 
       const state = useAnimationStore.getState();
@@ -87,7 +146,7 @@ describe("animationStore", () => {
 
   describe("clearQueue", () => {
     it("resets all animation state", () => {
-      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()], 1);
       expect(useAnimationStore.getState().isPlaying).toBe(true);
 
       useAnimationStore.getState().clearQueue();

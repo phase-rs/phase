@@ -196,7 +196,7 @@ describe("pendingAbilityChoice reaches its DialogHost consumer", () => {
     vi.mocked(dispatchAction).mockReset();
     vi.mocked(dispatchAction).mockResolvedValue(undefined);
     vi.mocked(dispatchInteraction).mockReset();
-    vi.mocked(dispatchInteraction).mockResolvedValue(undefined);
+    vi.mocked(dispatchInteraction).mockResolvedValue({ status: "applied" });
   });
 
   afterEach(() => {

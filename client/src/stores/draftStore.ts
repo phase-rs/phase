@@ -10,17 +10,23 @@ import {
   withDraftEngineOperation,
   type CubeDraftSettings,
   type DraftPlayerView,
+  type LlmDraftResponsePayload,
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import {
   cancelLlmDraftRun,
-  collectLlmDraftResponses,
+  isLlmDraftDisabled,
   recordLlmDraftSubmission,
+  recordLlmDraftUsage,
   reportLlmDraftOutcomes,
   resetLlmDraftBreaker,
+  startLlmDraftRound,
+  type LlmDraftRound,
+  type LlmDrafterStatus,
 } from "../services/llm/draftLlm";
+import { loadProviderCatalog } from "../services/llm/catalog";
 import { draftProfile, useLlmStore } from "./llmStore";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
@@ -153,6 +159,13 @@ interface DraftStoreState {
   poolPanelOpen: boolean;
   runFormat: DraftRunFormat;
   runState: DraftRunState | null;
+  /**
+   * Each LLM drafter's progress on the pack in front of the pod. Empty when no
+   * LLM is drafting this step (not opted in, or every pick is forced).
+   */
+  llmDrafters: readonly LlmDrafterStatus[];
+  /** The player has picked and the pod is waiting on LLM drafters to finish. */
+  awaitingDrafters: boolean;
 }
 
 interface DraftStoreActions {
@@ -216,6 +229,8 @@ const initialState: DraftStoreState = {
   poolPanelOpen: true,
   runFormat: "run",
   runState: null,
+  llmDrafters: [],
+  awaitingDrafters: false,
 };
 
 export const DIFFICULTY_NAMES = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"] as const;
@@ -753,6 +768,52 @@ function pendingIntentFor(request: PickRequest): PendingDraftPickIntent {
   }
 }
 
+/**
+ * The LLM pick round for the pick step a view shows.
+ *
+ * Keyed by the VIEW OBJECT, not by pack and pick numbers: a new view is
+ * installed for every step, so a round can never outlive the step it was
+ * started for, and its replies are submitted at most once.
+ */
+let llmRound: {
+  view: DraftPlayerView;
+  lifecycle: number;
+  round: Promise<LlmDraftRound | null>;
+} | null = null;
+
+/**
+ * The round of LLM picks for `view`, started on first request.
+ *
+ * Called when a pack opens, so the pod's LLM drafters think while the player
+ * does, and again when the player picks, which then only waits on whatever is
+ * still in flight. LLM drafters are opt-in twice over: a profile must be
+ * configured AND drafting must be switched on for it. Anything else — including
+ * a pod with no bot seats, or a profile the session gave up on — yields no
+ * round, and the pick takes the ordinary engine-bot path.
+ */
+function ensureLlmDraftRound(view: DraftPlayerView): Promise<LlmDraftRound | null> {
+  // Not remembered while drafting is off, so switching it on mid-step starts
+  // this step's round when the player picks.
+  if (!useLlmStore.getState().draftEnabled) return Promise.resolve(null);
+  if (llmRound && llmRound.view === view && llmRound.lifecycle === lifecycleGeneration) {
+    return llmRound.round;
+  }
+  const lifecycle = lifecycleGeneration;
+  const isCurrent = (): boolean =>
+    lifecycle === lifecycleGeneration && useDraftStore.getState().view === view;
+  const round = (async (): Promise<LlmDraftRound | null> => {
+    const catalog = await loadProviderCatalog();
+    if (!isCurrent()) return null;
+    const profile = draftProfile(useLlmStore.getState(), catalog);
+    if (!profile || isLlmDraftDisabled(profile.id)) return null;
+    return startLlmDraftRound(profile, isCurrent, (llmDrafters) => {
+      useDraftStore.setState({ llmDrafters });
+    });
+  })();
+  llmRound = { view, lifecycle, round };
+  return round;
+}
+
 async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
   if (!validPickRequest(request)) return { status: "rejected", reason: "invalid-request" };
   if (request.kind === "draft-effect") {
@@ -790,24 +851,38 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     useDraftStore.setState({ pendingPickIntent: null, pickInteractionLocked: false });
   };
   try {
-    // LLM drafters are opt-in twice over: a profile must be configured AND
-    // drafting must be switched on for it. Anything else — including a pod with
-    // no bot seats — takes the ordinary engine-bot path.
+    // The LLM round was started when this pack opened (see the subscription
+    // below the store); if it was not — LLM drafting switched on mid-step —
+    // this starts it. `draftEnabled` is read synchronously first so a draft
+    // with no LLM drafting takes the ordinary path without yielding.
     //
-    // Collected BEFORE the submitting lease is taken. `collectLlmDraftResponses`
-    // builds its requests under a lease of its own and then performs the
-    // provider I/O with none held, so the singleton draft engine queue is never
-    // blocked across a network round trip. Each reply carries the pack
+    // The round's requests are built under a lease of their own and its
+    // provider I/O runs with none held, so the singleton draft engine queue is
+    // never blocked across a network round trip. Each reply carries the pack
     // fingerprint it was built from and the engine re-validates it against the
-    // live pack below, so a pack that moved on during the gap is refused per
-    // seat rather than mis-picked.
-    const llmProfile = request.kind === "pick" ? draftProfile(useLlmStore.getState()) : undefined;
-    const llmResponses = llmProfile
-      ? await collectLlmDraftResponses(llmProfile, isFresh)
-      : [];
+    // live pack below, so a pack that moved on is refused per seat rather than
+    // mis-picked.
+    const llmRoundForPick = request.kind === "pick" && useLlmStore.getState().draftEnabled
+      ? await ensureLlmDraftRound(view)
+      : null;
     if (!isFresh()) {
-      // The pick was superseded while the provider was answering. Cut the round
-      // loose rather than letting it run to its timeout holding sockets open.
+      return { status: "ignored", reason: "stale" };
+    }
+    let llmResponses: LlmDraftResponsePayload[] = [];
+    if (llmRoundForPick) {
+      // The player's pick is accepted now; the pack does not pass until every
+      // LLM drafter has picked too (or fallen back to the engine bot).
+      if (!llmRoundForPick.settled) useDraftStore.setState({ awaitingDrafters: true });
+      llmResponses = await llmRoundForPick.responses;
+      // Spent: replies are submitted at most once. A pick the engine does not
+      // acknowledge leaves the same view in place, and the next pick from it
+      // starts a fresh round rather than replaying these replies.
+      if (llmRound?.view === view) llmRound = null;
+      if (useDraftStore.getState().awaitingDrafters) useDraftStore.setState({ awaitingDrafters: false });
+    }
+    if (!isFresh()) {
+      // The pick was superseded while the providers were answering. Cut the
+      // round loose rather than letting it run to its timeout holding sockets.
       cancelLlmDraftRun();
       return { status: "ignored", reason: "stale" };
     }
@@ -818,13 +893,14 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
       }
       switch (request.kind) {
         case "pick": {
-          if (llmResponses.length > 0 && llmProfile) {
+          if (llmResponses.length > 0 && llmRoundForPick) {
             const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
             reportLlmDraftOutcomes(outcome.llmOutcomes);
+            recordLlmDraftUsage(llmRoundForPick, outcome.llmOutcomes);
             // The breaker counts the ENGINE's verdict, not the fact that bytes
             // arrived: a round of 401s or undecodable replies must count as a
             // failure, or a broken provider would reset the breaker forever.
-            recordLlmDraftSubmission(llmProfile.id, outcome.llmOutcomes);
+            recordLlmDraftSubmission(llmRoundForPick.profileId, outcome.llmOutcomes);
             return outcome.view;
           }
           return lease.submitPick(request.instanceId);
@@ -1934,3 +2010,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     beginLifecycle();
   },
 }));
+
+// When a pack opens, start that step's LLM picks at once rather than on the
+// player's click: the pod's LLM drafters think while the player does. A new
+// step also clears the previous step's drafter statuses, so a chip never
+// reports a pick for a pack that has already passed.
+useDraftStore.subscribe((state, previous) => {
+  if (state.view === previous.view) return;
+  if (state.llmDrafters.length > 0 || state.awaitingDrafters) {
+    useDraftStore.setState({ llmDrafters: [], awaitingDrafters: false });
+  }
+  const view = state.view;
+  if (!view || state.phase !== "drafting" || view.status !== "Drafting") return;
+  if (!view.current_pack || view.current_pack.length === 0) return;
+  void ensureLlmDraftRound(view);
+});

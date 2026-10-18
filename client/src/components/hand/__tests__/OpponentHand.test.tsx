@@ -1,6 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import {
@@ -177,5 +179,81 @@ describe("OpponentHand", () => {
     render(<OpponentHand playerId={2} />);
 
     expect(screen.queryByAltText("Explicit Opponent Card")).toBeNull();
+  });
+
+  describe("flight veil", () => {
+    const CARD = 11;
+    const cardSelector = `[data-opponent-hand-card="${CARD}"]`;
+
+    function cardNode(container: HTMLElement) {
+      return container.querySelector<HTMLElement>(cardSelector);
+    }
+
+    beforeEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    afterEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    it("mounts hidden with no entrance when its object is already flight-veiled", () => {
+      useAnimationStore.getState().veilFlight(CARD);
+
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      expect(cardNode(container)!.style.visibility).toBe("hidden");
+      expect(cardNode(container)!.style.opacity).toBe("1");
+      // A face-down card stays face down while veiled.
+      expect(screen.queryByAltText("Focused Opponent Card")).toBeNull();
+    });
+
+    it("keeps today's entrance when it mounts unveiled", () => {
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      expect(cardNode(container)!.style.opacity).toBe("0");
+      expect(cardNode(container)!.style.transform).toBe("translateY(-60px)");
+      expect(cardNode(container)!.style.visibility).toBe("");
+    });
+
+    it("shows without replaying the entrance once the flight releases it", () => {
+      useAnimationStore.getState().veilFlight(CARD);
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      act(() => useAnimationStore.getState().unveilFlight(CARD));
+
+      expect(cardNode(container)!.style.visibility).toBe("");
+      expect(cardNode(container)!.style.opacity).toBe("1");
+    });
+
+    it("stays hidden through an exit that began while veiled", () => {
+      useAnimationStore.getState().veilFlight(CARD);
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      const state = createGameState();
+      act(() => {
+        useGameStore.setState({
+          gameState: {
+            ...state,
+            players: state.players.map((player) =>
+              player.id === 1 ? { ...player, hand: [] } : player,
+            ),
+          },
+        });
+      });
+      act(() => useAnimationStore.getState().unveilFlight(CARD));
+
+      // Still mounted: the exit animation is running.
+      expect(cardNode(container)).not.toBeNull();
+      expect(cardNode(container)!.style.visibility).toBe("hidden");
+    });
+
+    it("addresses the card by a zone-scoped anchor, not an inspection attribute", () => {
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      const matches = container.querySelectorAll(cardSelector);
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).not.toHaveAttribute("data-object-id");
+    });
   });
 });

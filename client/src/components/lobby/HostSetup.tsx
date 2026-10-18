@@ -11,7 +11,7 @@ import type {
   MatchType,
 } from "../../adapter/types";
 import { AI_DIFFICULTIES } from "../../constants/ai";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { FORMAT_REGISTRY, formatSuppliesDeck } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
@@ -31,6 +31,16 @@ import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
+  candidatePassesFilters,
+  cedhSeatProblem,
+  pickAiSeatDecks,
+  type CedhSeatProblem,
+  restrictAiPoolByBracket,
+} from "../../services/aiRandomPool";
+import { CEDH_DIFFICULTY } from "../../services/cedhLock";
+import { AI_DECK_RANDOM, usePreferencesStore, type AiDeckSelection } from "../../stores/preferencesStore";
+import { bestOfThreeCeilingForFormat } from "../../services/engineRuntime";
+import {
   deleteSavedCustomFormat,
   loadSavedCustomFormats,
   saveCustomFormat,
@@ -39,7 +49,11 @@ import {
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
+import { bracketToEngineTier } from "../../types/bracketEstimate";
+import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { PileSourceChoice } from "../menu/PileSourceChoice";
+import { DEFAULT_PILE_CHOICE, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
 import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
 import { IntegerField } from "../ui/IntegerField";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
@@ -171,6 +185,12 @@ function hostRejection(listing: DirectorySource | null): string | null {
  * (`format.rs` `free_for_all`, max_players 6) rather than a transport limit. */
 const P2P_MAX_PEERS = 6;
 
+/** Status message per reason a cEDH table's AI seats cannot be served. */
+const CEDH_SEAT_PROBLEM_KEYS = {
+  NoCedhDeckForRandom: "menu:aiOpponent.cedhPoolEmpty",
+  PinnedDeckNotCedh: "menu:aiOpponent.cedhToggle.hint",
+} as const satisfies Record<CedhSeatProblem, string>;
+
 /** Uppercase field label + optional hint wrapper (mirrors the design mockup's
  *  Host-setup `Field`). Pure presentation. */
 function Field({
@@ -287,6 +307,37 @@ function BotGlyph({ className = "h-4 w-4" }: { className?: string }) {
       <path d="M12 2a1.5 1.5 0 0 1 1.5 1.5V5H17a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3h3.5V3.5A1.5 1.5 0 0 1 12 2ZM9 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM2 11h1.5v4H2a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Zm18.5 0H22a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-1.5v-4Z" />
     </svg>
   );
+}
+
+/**
+ * The engine's best-of-three ceiling for `format`, or `null` until it resolves
+ * for exactly this format. A failed lookup answers `"Bo1"` so Bo3 is never
+ * offered on an unknown ceiling.
+ */
+export function useBestOfThreeCeiling(format: GameFormat | null): MatchType | null {
+  const [answer, setAnswer] = useState<{ format: GameFormat; ceiling: MatchType } | null>(null);
+  useEffect(() => {
+    if (format === null) return;
+    let cancelled = false;
+    void (async () => {
+      let ceiling: MatchType;
+      try {
+        ceiling = await bestOfThreeCeilingForFormat(format);
+      } catch {
+        ceiling = "Bo1";
+      }
+      if (!cancelled) setAnswer({ format, ceiling });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [format]);
+  return format !== null && answer?.format === format ? answer.ceiling : null;
+}
+
+/** Bo3 is the one value the engine's answer admits; anything else plays Bo1. */
+export function cappedMatchType(selected: MatchType, ceiling: MatchType | null): MatchType {
+  return ceiling === "Bo3" ? selected : "Bo1";
 }
 
 export function HostSetup({
@@ -468,19 +519,65 @@ export function HostSetup({
   /** Monotonic token for format resolves. A resolve that finishes after a newer
    *  one started must not write its stale config into state. */
   const formatResolveSeq = useRef(0);
-  const effectiveMatchType = playerCount === 2 ? matchType : "Bo1";
+  const ceiling = useBestOfThreeCeiling(formatConfig.format);
+  const effectiveMatchType = playerCount === 2 ? cappedMatchType(matchType, ceiling) : "Bo1";
+  const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   const aiDeckCatalog = useAiDeckCatalog({
     selectedFormat: formatConfig.format,
     selectedMatchType: effectiveMatchType,
   });
-  const defaultAiDeck = aiDeckCatalog.candidates[0]
-    ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
-    : null;
+  // A supplied-deck format's AI seats submit nothing, so no catalog deck is
+  // needed and no per-seat deck picker is shown.
+  const suppliesDeck = formatSuppliesDeck(formatConfig.format);
+  // Random seats draw from the player's single-player pool preferences; Host Game
+  // shows no filter controls of its own.
+  const aiArchetypeFilter = usePreferencesStore((s) => s.aiArchetypeFilter);
+  const aiCoverageFloor = usePreferencesStore((s) => s.aiCoverageFloor);
+  const aiBracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
+  const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
+  // A pile is picked for one format; any format change returns to the default pile.
+  const [pileFormat, setPileFormat] = useState(formatConfig.format);
+  if (pileFormat !== formatConfig.format) {
+    setPileFormat(formatConfig.format);
+    setPile(DEFAULT_PILE_CHOICE);
+  }
   // No AI seats in a Discord game: its seats are promised to the Discord
   // players, and an all-AI table would never register the requested code.
   const aiSeatsSupported =
     seed === undefined && !formatConfig.team_based && formatConfig.format !== "Planechase";
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
+  // A remembered config can carry a CEDH seat; the table is then cEDH and its
+  // Random pool is restricted to bracket 5 (Commander formats only).
+  const hostCedh = effectiveAiSeats.some((s) => s.difficulty === CEDH_DIFFICULTY);
+  const aiRandomPool = useMemo(
+    () =>
+      restrictAiPoolByBracket(aiDeckCatalog.candidates, {
+        bracketFilter: aiBracketFilter,
+        cedhMode: hostCedh,
+        selectedFormat: formatConfig.format,
+      }).filter((d) => candidatePassesFilters(d, aiArchetypeFilter, aiCoverageFloor)),
+    [
+      aiDeckCatalog.candidates,
+      aiBracketFilter,
+      hostCedh,
+      formatConfig.format,
+      aiArchetypeFilter,
+      aiCoverageFloor,
+    ],
+  );
+  // A cEDH table with an AI seat no bracket-5 deck can serve (a Random seat over
+  // an empty bracket-5 pool, or a seat pinned to a non-bracket-5 deck) would be
+  // refused by the engine's bracket gate, so block hosting.
+  const cedhSeatProblemForHost: CedhSeatProblem | null =
+    effectiveAiSeats.length > 0 && !suppliesDeck && !aiDeckCatalog.loading
+      ? cedhSeatProblem({
+          catalog: aiDeckCatalog.candidates,
+          requestedDeckIds: effectiveAiSeats.map((s) => s.deckId ?? AI_DECK_RANDOM),
+          bracketFilter: aiBracketFilter,
+          cedhMode: hostCedh,
+          selectedFormat: formatConfig.format,
+        })
+      : null;
 
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
@@ -675,14 +772,46 @@ export function HostSetup({
       if (existing) {
         return prev.filter((s) => s.seatIndex !== seatIndex);
       }
-      return [...prev, { seatIndex, difficulty: "Medium", deckName: null }];
+      return [...prev, { seatIndex, difficulty: "Medium", deckName: null, deckId: AI_DECK_RANDOM }];
     });
+  };
+
+  const setAiDeckId = (seatIndex: number, deckId: AiDeckSelection) => {
+    setAiSeats((prev) =>
+      prev.map((s) => (s.seatIndex === seatIndex ? { ...s, deckId } : s)),
+    );
   };
 
   const setAiDifficulty = (seatIndex: number, difficulty: string) => {
     setAiSeats((prev) =>
       prev.map((s) => (s.seatIndex === seatIndex ? { ...s, difficulty } : s)),
     );
+  };
+
+  /** Each AI seat paired with a concrete catalog decklist: Random seats are drawn
+   *  from the single-player pool preferences, pinned seats keep their pick. The
+   *  seat's `deckId` stays the user's selection (Random remains Random) so the
+   *  all-AI local start can still apply its own Random draw and cEDH fail-fast. */
+  const resolveCatalogAiSeats = (): AiSeatConfig[] => {
+    const ordered = [...effectiveAiSeats].sort((a, b) => a.seatIndex - b.seatIndex);
+    const requestedDeckIds = ordered.map((seat) => seat.deckId ?? AI_DECK_RANDOM);
+    const picks = pickAiSeatDecks({
+      catalog: aiDeckCatalog.candidates,
+      requestedDeckIds,
+      archetypeFilter: aiArchetypeFilter,
+      coverageFloor: aiCoverageFloor,
+      bracketFilter: aiBracketFilter,
+      cedhMode: hostCedh,
+      selectedFormat: formatConfig.format,
+    });
+    return ordered.map((seat, i) => ({
+      ...seat,
+      deckId: requestedDeckIds[i],
+      deck: {
+        type: "DeckList" as const,
+        data: { ...expandParsedDeck(picks[i].deck), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+      },
+    }));
   };
 
   const handleHost = async () => {
@@ -699,6 +828,12 @@ export function HostSetup({
     // collapse the picker on re-entry. The live mirror effect above
     // keeps the store in sync with the format itself.
     const finalConfig = { ...formatConfig, max_players: playerCount };
+    // Resolve every seat to a concrete catalog deck here: the server's own
+    // Random draws from a different (starter-deck) pool, so Random must not
+    // reach it. Supplied-deck formats submit the empty supplied deck instead.
+    const submittedAiSeats: AiSeatConfig[] = suppliesDeck
+      ? effectiveAiSeats.map((seat) => ({ ...seat, deck: suppliedAiDeckChoice().choice }))
+      : resolveCatalogAiSeats();
     const trimmedRoomName = roomName.trim();
     // Default to the placeholder value when the field is blank so the
     // lobby title matches what the user was shown. Falls back to null
@@ -723,7 +858,7 @@ export function HostSetup({
         // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
         savedCustomFormatId,
         playerCount,
-        matchType: effectiveMatchType,
+        matchType,
         loopDetection,
         isPublic,
         startWhenFull,
@@ -743,13 +878,11 @@ export function HostSetup({
           formatConfig: finalConfig,
           matchType: effectiveMatchType,
           loopDetection,
-          aiSeats: effectiveAiSeats.map((seat) => ({
-            ...seat,
-            ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
-          })),
+          aiSeats: submittedAiSeats,
           startWhenFull,
           ranked: false,
           roomName: resolvedRoomName,
+          pile: pile.source,
           ...(seed ? { requestedCode: seed.code } : {}),
         },
         // `null` in P2P — this submit chose no server, and the parent then
@@ -867,7 +1000,11 @@ export function HostSetup({
     || isSubmitting
     || isResolvingFormat
     || hostingStatus !== "idle"
-    || (effectiveAiSeats.length > 0 && !defaultAiDeck);
+    || (effectiveAiSeats.length > 0
+      && !suppliesDeck
+      && (aiDeckCatalog.loading || aiDeckCatalog.candidates.length === 0))
+    || cedhSeatProblemForHost !== null
+    || !pile.legal;
 
   return (
     <form
@@ -967,6 +1104,14 @@ export function HostSetup({
               </p>
             )}
 
+            <div className="sm:col-span-2 empty:hidden">
+              <PileSourceChoice
+                format={formatConfig.format}
+                value={pile.source}
+                onChange={setPile}
+              />
+            </div>
+
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
               <IntegerField
                 id="host-setup-life"
@@ -1001,14 +1146,14 @@ export function HostSetup({
 
             <Field label={t("hostSetup.matchType")}>
               <div className={segWrap}>
-                <button type="button" onClick={() => setMatchType("Bo1")} className={seg(matchType === "Bo1")}>
+                <button type="button" onClick={() => setMatchType("Bo1")} className={seg(effectiveMatchType === "Bo1")}>
                   {t("hostSetup.bo1")}
                 </button>
                 <button
                   type="button"
                   onClick={() => setMatchType("Bo3")}
-                  disabled={playerCount !== 2}
-                  className={seg(matchType === "Bo3", playerCount !== 2 ? "cursor-not-allowed opacity-40" : "")}
+                  disabled={bo3Disabled}
+                  className={seg(effectiveMatchType === "Bo3", bo3Disabled ? "cursor-not-allowed opacity-40" : "")}
                 >
                   {t("hostSetup.bo3")}
                 </button>
@@ -1230,16 +1375,6 @@ export function HostSetup({
             onChange={(v) => setLocalFormatConfig((prev) => ({ ...prev, allow_debug_actions: v }))}
             accent={accentTone}
           />
-          {/* Experimental dungeons — capability flag, orthogonal to format;
-              offers Baldur's Gate Wilderness on ventures and initiative.
-              Off by default; immutable for the session. */}
-          <OptionRow
-            label={t("hostSetup.experimentalDungeons")}
-            desc={t("hostSetup.experimentalDungeonsHelp")}
-            on={formatConfig.allow_experimental_dungeons}
-            onChange={(v) => setLocalFormatConfig((prev) => ({ ...prev, allow_experimental_dungeons: v }))}
-            accent={accentTone}
-          />
           {!seed && (
             <div className="flex flex-col gap-2.5">
               <OptionRow
@@ -1286,43 +1421,60 @@ export function HostSetup({
                 {Array.from({ length: playerCount - 1 }, (_, i) => i + 1).map((seatIndex) => {
                   const aiSeat = effectiveAiSeats.find((s) => s.seatIndex === seatIndex);
                   return (
-                    <div key={seatIndex} className="flex items-center gap-2.5 rounded-[12px] border border-hairline bg-black/20 px-3 py-2">
-                      <span className="w-3.5 shrink-0 text-center font-mono text-[11px] text-fg-meta">{seatIndex + 1}</span>
-                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-hairline bg-white/5 text-fg-meta">
-                        {aiSeat ? <BotGlyph /> : <HumanGlyph />}
-                      </span>
-                      {aiSeatsSupported && (
-                        <button
-                          type="button"
-                          onClick={() => toggleAiSeat(seatIndex)}
-                          className={`shrink-0 whitespace-nowrap rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
-                            aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
-                          }`}
-                        >
-                          {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
-                        </button>
-                      )}
-                      {aiSeat ? (
-                        <MenuSelect
-                          ariaLabel={t("menu:aiDifficulty.label")}
-                          label={
-                            difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
-                            t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
-                          }
-                          selectedValue={aiSeat.difficulty}
-                          items={difficultyMenuItems}
-                          onSelect={(value) => setAiDifficulty(seatIndex, value)}
-                          menuLayout="dropdown"
-                          wrapperClassName="ml-auto min-w-0"
+                    <div key={seatIndex} className="flex flex-col gap-2 rounded-[12px] border border-hairline bg-black/20 px-3 py-2">
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-3.5 shrink-0 text-center font-mono text-[11px] text-fg-meta">{seatIndex + 1}</span>
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-hairline bg-white/5 text-fg-meta">
+                          {aiSeat ? <BotGlyph /> : <HumanGlyph />}
+                        </span>
+                        {aiSeatsSupported && (
+                          <button
+                            type="button"
+                            onClick={() => toggleAiSeat(seatIndex)}
+                            className={`shrink-0 whitespace-nowrap rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                              aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
+                            }`}
+                          >
+                            {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
+                          </button>
+                        )}
+                        {aiSeat ? (
+                          <MenuSelect
+                            ariaLabel={t("menu:aiDifficulty.label")}
+                            label={
+                              difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
+                              t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                            }
+                            selectedValue={aiSeat.difficulty}
+                            items={difficultyMenuItems}
+                            onSelect={(value) => setAiDifficulty(seatIndex, value)}
+                            menuLayout="dropdown"
+                            wrapperClassName="ml-auto min-w-0"
+                            className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] font-medium text-white"
+                          />
+                        ) : (
+                          <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
+                        )}
+                      </div>
+                      {aiSeat && !suppliesDeck && (
+                        <AiDeckPicker
+                          value={aiSeat.deckId ?? AI_DECK_RANDOM}
+                          candidates={aiDeckCatalog.candidates}
+                          randomPool={aiRandomPool}
+                          onChange={(deckId) => setAiDeckId(seatIndex, deckId)}
+                          wrapperClassName="w-full min-w-0"
                           className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] font-medium text-white"
                         />
-                      ) : (
-                        <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
                       )}
                     </div>
                   );
                 })}
               </div>
+              {cedhSeatProblemForHost !== null && (
+                <p role="status" className="mt-3 text-xs text-amber-300">
+                  {t(CEDH_SEAT_PROBLEM_KEYS[cedhSeatProblemForHost])}
+                </p>
+              )}
             </div>
           )}
 

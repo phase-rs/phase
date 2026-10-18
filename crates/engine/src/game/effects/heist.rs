@@ -36,6 +36,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{GameState, LookGrant, PendingContinuation, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::statics::CastFrequency;
@@ -81,12 +82,14 @@ pub fn resolve(
 
     // Collect the nonland cards in the opponent's library. Lands are skipped per
     // the reminder text ("random nonland cards").
-    let nonland: Vec<ObjectId> = state
+    let opponent_seat = state
         .players
         .iter()
         .find(|p| p.id == opponent)
         .ok_or(EffectError::PlayerNotFound)?
-        .library
+        .id;
+    let nonland: Vec<ObjectId> = state
+        .library_of(opponent_seat)
         .iter()
         .copied()
         .filter(|id| {
@@ -110,7 +113,7 @@ pub fn resolve(
     // cards using the seeded RNG. Clamp to [1, pool size].
     let look = (look_count.max(1) as usize).min(nonland.len());
     let candidates: Vec<ObjectId> = nonland
-        .choose_multiple(&mut state.rng, look)
+        .choose_multiple(state.rng.draw(RandomDraw::Outcome), look)
         .copied()
         .collect();
 
@@ -230,6 +233,7 @@ pub fn resolve_exile(
                         single_use: false,
                         cast_cost_modifier: None,
                         alt_ability_cost: None,
+                        without_paying_mana_cost: false,
                         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     });
             }

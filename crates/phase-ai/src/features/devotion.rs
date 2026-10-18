@@ -444,6 +444,7 @@ fn continuous_modification_quantity(
         | CM::SetBasicLandType { .. }
         | CM::SetChosenBasicLandType
         | CM::SetChosenName
+        | CM::SubstituteTextWord { .. }
         | CM::RetainPrintedTriggerFromSource { .. }
         | CM::RetainPrintedAbilityFromSource { .. }
         | CM::RetainAllOtherAbilitiesFromSource

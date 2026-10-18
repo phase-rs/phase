@@ -1,15 +1,46 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+
+/// CR 608.2d: Use the same private-zone candidates for optional feasibility
+/// and the resolution-time selection prompt.
+pub(super) fn private_zone_selection<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+    target: &'a TargetFilter,
+) -> Option<(PlayerId, Zone, impl Iterator<Item = ObjectId> + 'a)> {
+    let source_zone = target.extract_in_zone()?;
+    if !matches!(source_zone, Zone::Hand | Zone::Library) {
+        return None;
+    }
+    let choosing_player =
+        crate::game::effects::controller_for_relative_filter(state, ability, target);
+    let player = &state.players[choosing_player.0 as usize];
+    let candidates = match source_zone {
+        Zone::Hand => &player.hand,
+        Zone::Library => state.library_of(choosing_player),
+        Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => {
+            return None;
+        }
+    };
+    let ctx =
+        crate::game::filter::FilterContext::from_ability_with_controller(ability, choosing_player);
+    let eligible = candidates.iter().copied().filter(move |&id| {
+        crate::game::filter::matches_target_filter_for_zone(state, id, source_zone, target, &ctx)
+    });
+    Some((choosing_player, source_zone, eligible))
+}
 
 /// Place target card at a specific position in its owner's library. Unlike
 /// ChangeZone { destination: Library } which shuffles the destination library,
@@ -38,33 +69,25 @@ pub fn resolve(
         ),
     };
 
-    // CR 401.5 + CR 608.2c (issue #1365): This Dig-tail seam is the one place
-    // "put up to one of them on top … the rest on the bottom" can land with
-    // `target: ParentTarget` and no selection — when the Dig it follows looked
-    // at an empty library. There is nothing to place, and that must NOT fall
-    // back to `resolved_targets`'s generic self-fallback (below), which would
-    // otherwise move the Dig's own source (e.g. a reanimated Thassa's Oracle)
-    // into the library it just found empty, corrupting devotion and
-    // library-count reads for any trailing win condition.
+    // CR 608.2c + CR 609.3: A missing ParentTarget referent supplies nothing
+    // to place. For example, a Dig looking at an empty library must not move
+    // its own source through `resolved_targets`'s generic self-fallback.
     //
-    // `ability.parent_target_missing_reason` is a typed, per-ability signal
-    // stamped ONLY by `effects::apply_parent_chain_context` at the exact
-    // moment THIS ability is handed off as a Dig's immediate sub_ability —
-    // never copied to grandchildren and never read from raw global state
-    // here. That means every OTHER `ParentTarget` consumer (Avenging Angel's
-    // LTB self-return, etc.) keeps its ordinary self-fallback regardless of
-    // an unrelated Dig anywhere else in the same resolution, including a
-    // second, later `PutAtLibraryPosition` call.
-    let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
+    // The typed per-ability signal is stamped at a parent->child hand-off
+    // (see `ResolvedAbility::parent_target_missing_reason`) and travels through
+    // targetless hops. Ordinary search finalize overwrites it with that search's
+    // result. Fresh unrelated LTB self-returns retain None and their source
+    // fallback regardless of an unrelated producer's transient global relay.
+    let missing_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
         && ability.targets.is_empty()
-        && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
+        && ability.parent_target_missing_reason.is_some();
 
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
     // `None` / `ParentTarget` fall back to the source only when
     // `ability.targets` is empty (the LTB self-return shape — Avenging Angel).
     // This is the post-#323 SelfRef short-circuit applied uniformly.
-    let effective_targets = if dig_found_nothing_for_parent_target {
+    let effective_targets = if missing_parent_target {
         Vec::new()
     } else {
         crate::game::targeting::resolved_targets(ability, &target_filter, state)
@@ -87,8 +110,12 @@ pub fn resolve(
                 target_filter,
                 TargetFilter::None | TargetFilter::ParentTarget
             ));
+    // `resolved_targets` already returns EMPTY for a stale non-triggered
+    // `SelfRef` (`ResolvedAbility::self_ref_is_current`); the `[source]` shape is
+    // the triggered and `None`/`ParentTarget` fallbacks.
     if resolves_to_source
-        && effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)]
+        && (effective_targets.is_empty()
+            || effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)])
         && !source_is_current
     {
         events.push(GameEvent::EffectResolved {
@@ -119,20 +146,76 @@ pub fn resolve(
     // bare form (Chaos Wand's "put the rest on the bottom") or an `And`-composed
     // form (Jodah's "put the rest" = `And { ExiledBySource, DistinctFrom
     // { ParentTarget } }`, which excludes a declined-and-still-exiled hit) —
-    // scans the exile zone. `matches_target_filter` evaluates the full filter,
-    // so every `And` leg (`ExiledBySource` membership + `DistinctFrom` exclusion)
-    // is applied together.
+    // reads the exiled cards: the batch an exile-until loop handed down, or else
+    // a scan of the exile zone. With a batch, batch membership stands in for the
+    // `ExiledBySource` leg and the other legs are applied to it; the scan
+    // evaluates the full filter, every `And` leg together.
     if collected_targets.is_empty() && target_filter.references_exiled_by_source() {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        collected_targets = state
-            .objects
-            .iter()
-            .filter(|(id, obj)| {
-                obj.zone == Zone::Exile
-                    && crate::game::filter::matches_target_filter(state, **id, &target_filter, &ctx)
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        // CR 400.7j + CR 608.2c: after an "exile cards … until …" loop, "the
+        // other cards exiled this way" (Invasion of Alara) and "put the rest"
+        // (Jodah, the Unifier) are found among the exact batch that loop handed
+        // down (`SpellContext::exile_until_batch`), with the filter's other legs
+        // applied to it. A triggered ability's `ExiledBySource` would otherwise
+        // read the linked-exile snapshot taken when it triggered, before this
+        // resolution exiled anything. Without a batch the scan below is
+        // unchanged.
+        //
+        // CR 607.2a: Possibility Storm's "all cards exiled with this
+        // enchantment" is every card currently exiled with the source, which
+        // adds the spell its trigger exiled before the loop. The other bare
+        // form, "the exiled cards that weren't cast this way" (Gríma,
+        // Saruman's Footman; CR 608.2c), names this resolution's cards; with
+        // the engine's per-source link ledger that is the same set, because no
+        // card of these forms leaves a linked card in exile, unlike a found
+        // card the rest-forms keep.
+        let resolution_batch = (!ability.context.exile_until_batch.is_empty()).then(|| {
+            ability
+                .context
+                .exile_until_batch
+                .iter()
+                .filter(|pin| pin.is_current(state))
+                .map(|pin| pin.object_id)
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| object.zone == Zone::Exile)
+                })
+                .collect::<Vec<_>>()
+        });
+        collected_targets = match resolution_batch {
+            Some(mut batch) => match target_filter.without_exile_anaphor() {
+                None => {
+                    for id in cards_exiled_with_source_now(state, ability.source_id) {
+                        if !batch.contains(&id) {
+                            batch.push(id);
+                        }
+                    }
+                    batch
+                }
+                Some(residual) => batch
+                    .into_iter()
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(state, *id, &residual, &ctx)
+                    })
+                    .collect(),
+            },
+            None => state
+                .objects
+                .iter()
+                .filter(|(id, obj)| {
+                    obj.zone == Zone::Exile
+                        && crate::game::filter::matches_target_filter(
+                            state,
+                            **id,
+                            &target_filter,
+                            &ctx,
+                        )
+                })
+                .map(|(id, _)| *id)
+                .collect(),
+        };
         // CR 701.20e: Look-then-cast tails put uncast looked-at cards on the
         // bottom via `ExiledBySource`, but those cards remain in the library.
         if collected_targets.is_empty() && !state.last_revealed_ids.is_empty() {
@@ -267,7 +350,9 @@ pub fn resolve(
     };
 
     if collected_targets.is_empty() {
-        if expected == 0 {
+        // CR 608.2c + CR 609.3: An absent ParentTarget supplies no object to
+        // position, but this instruction still completes before the next one.
+        if expected == 0 || missing_parent_target {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
@@ -275,92 +360,52 @@ pub fn resolve(
             });
             return Ok(());
         }
-        if let Some(source_zone) = target_filter.extract_in_zone() {
-            if matches!(source_zone, Zone::Hand | Zone::Library) {
-                let choosing_player = crate::game::effects::controller_for_relative_filter(
-                    state,
-                    ability,
-                    &target_filter,
-                );
-                // CR 608.2d: a choice offered while an effect resolves is made
-                // while applying that effect. For "target opponent puts", the
-                // relative filter identifies that instructed opponent as the
-                // player who chooses their card.
-                let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
-                    ability,
-                    choosing_player,
-                );
-                let eligible: Vec<_> = match source_zone {
-                    Zone::Hand => state.players[choosing_player.0 as usize]
-                        .hand
-                        .iter()
-                        .copied()
-                        .filter(|&id| {
-                            crate::game::filter::matches_target_filter_for_zone(
-                                state,
-                                id,
-                                source_zone,
-                                &target_filter,
-                                &ctx,
-                            )
-                        })
-                        .collect(),
-                    Zone::Library => state.players[choosing_player.0 as usize]
-                        .library
-                        .iter()
-                        .copied()
-                        .filter(|&id| {
-                            crate::game::filter::matches_target_filter_for_zone(
-                                state,
-                                id,
-                                source_zone,
-                                &target_filter,
-                                &ctx,
-                            )
-                        })
-                        .collect(),
-                    _ => unreachable!(),
-                };
-                let eligible_count = eligible.len();
-                if eligible.is_empty() {
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::PutAtLibraryPosition,
-                        source_id: ability.source_id,
-                        subject: None,
-                    });
-                    return Ok(());
-                }
-                state.waiting_for = WaitingFor::EffectZoneChoice {
-                    player: choosing_player,
-                    cards: eligible,
-                    count: expected.min(eligible_count),
-                    min_count: 0,
-                    // load-bearing: the any-number placement prompt.
-                    up_to: count_is_up_to,
+        let private_selection = private_zone_selection(state, ability, &target_filter)
+            .map(|(player, zone, eligible)| (player, zone, eligible.collect::<Vec<_>>()));
+        if let Some((choosing_player, source_zone, eligible)) = private_selection {
+            let eligible_count = eligible.len();
+            if eligible.is_empty() {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::PutAtLibraryPosition,
                     source_id: ability.source_id,
-                    effect_kind: EffectKind::PutAtLibraryPosition,
-                    zone: source_zone,
-                    destination: None,
-                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                    enter_transformed: false,
-                    enters_under_player: None,
-                    enters_attacking: false,
-                    owner_library: false,
-                    track_exiled_by_source: false,
-                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
-                    // CR 708.2a: library-position selection is not a face-down entry.
-                    face_down_profile: None,
-                    enter_with_counters: vec![],
-                    conditional_enter_with_counters: vec![],
-                    count_param: 0,
-                    library_position: Some(position.clone()),
-                    mass_library_order: None,
-                    is_cost_payment: false,
-                    enters_modified_if: None,
-                    duration: None,
-                };
+                    subject: None,
+                });
                 return Ok(());
             }
+            state.waiting_for = WaitingFor::EffectZoneChoice {
+                player: choosing_player,
+                cards: eligible,
+                count: expected.min(eligible_count),
+                min_count: if count_is_up_to {
+                    0
+                } else {
+                    expected.min(eligible_count)
+                },
+                // load-bearing: the any-number placement prompt.
+                up_to: count_is_up_to,
+                source_id: ability.source_id,
+                effect_kind: EffectKind::PutAtLibraryPosition,
+                zone: source_zone,
+                destination: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_transformed: false,
+                enters_under_player: None,
+                enters_attacking: false,
+                owner_library: false,
+                track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                // CR 708.2a: library-position selection is not a face-down entry.
+                face_down_profile: None,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                count_param: 0,
+                library_position: Some(position.clone()),
+                mass_library_order: None,
+                is_cost_payment: false,
+                enters_modified_if: None,
+                duration: None,
+            };
+            return Ok(());
         }
         // CR 701.23b: A search/forward continuation that found nothing — fail to
         // find, or no instant/sorcery left in the library for a top-of-library
@@ -389,7 +434,7 @@ pub fn resolve(
             player: ability.controller,
             cards: collected_targets,
             count: expected,
-            min_count: 0,
+            min_count: if count_is_up_to { 0 } else { expected },
             // Set for parity with the eligible-pool prompt so the two constructions
             // cannot drift; no any-number placement reaches this prompt today.
             up_to: count_is_up_to,
@@ -463,7 +508,7 @@ pub fn resolve(
             && target_filter.references_exiled_by_source()
         {
             randomized_targets = collected_targets.clone();
-            randomized_targets.shuffle(&mut state.rng);
+            randomized_targets.shuffle(state.rng.draw(RandomDraw::Placement));
             randomized_targets.as_slice()
         } else {
             collected_targets.as_slice()
@@ -521,17 +566,155 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 607.2a: the cards in exile linked to `source_id` right now (the live
+/// ledger, not a trigger's snapshot). A bare exiled-cards cleanup after an
+/// exile-until loop adds these to the loop's batch, so the cards the ability
+/// exiled before its loop (Possibility Storm's "exiles it") are included; see
+/// the bare-form note in `resolve` for why that is safe for "this way".
+pub(super) fn cards_exiled_with_source_now(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    crate::game::players::linked_exile_cards_for_source(state, source_id)
+        .into_iter()
+        .map(|entry| entry.exiled_id)
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Exile)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        Effect, FilterProp, ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 608.2c + CR 609.3: Every missing producer result suppresses only
+    /// empty ParentTarget placement; explicit targets and SelfRef still move.
+    #[test]
+    fn missing_referent_placement_guards_only_empty_parent_target() {
+        for reason in [
+            ParentTargetMissingReason::Dig,
+            ParentTargetMissingReason::ChooseFromZone,
+            ParentTargetMissingReason::RevealHandChoice,
+            ParentTargetMissingReason::ExileTop,
+            ParentTargetMissingReason::RevealUntil,
+            ParentTargetMissingReason::SearchLibrary,
+        ] {
+            for (filter, own_target) in [
+                (TargetFilter::ParentTarget, false),
+                (TargetFilter::ParentTarget, true),
+                (TargetFilter::SelfRef, false),
+            ] {
+                let mut state = GameState::new_two_player(7);
+                let source = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(1),
+                    "Owner-relative source".into(),
+                    Zone::Graveyard,
+                );
+                let own = create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "Explicit target".into(),
+                    Zone::Exile,
+                );
+                let moves_source = filter == TargetFilter::SelfRef;
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutAtLibraryPosition {
+                        target: filter,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        position: LibraryPosition::Top,
+                    },
+                    if own_target {
+                        vec![TargetRef::Object(own)]
+                    } else {
+                        vec![]
+                    },
+                    source,
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = Some(reason);
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(
+                    state.objects[&source].zone,
+                    if moves_source {
+                        Zone::Library
+                    } else {
+                        Zone::Graveyard
+                    }
+                );
+                assert_eq!(
+                    state.objects[&own].zone,
+                    if own_target {
+                        Zone::Library
+                    } else {
+                        Zone::Exile
+                    }
+                );
+                if moves_source {
+                    assert_eq!(state.players[1].library.front(), Some(&source));
+                }
+                assert!(events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::PutAtLibraryPosition,
+                        ..
+                    }
+                )));
+            }
+        }
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Unrelated owner-relative return".into(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(ability.parent_target_missing_reason, None);
+        assert_eq!(state.objects[&source].owner, PlayerId(1));
+        assert_eq!(state.objects[&source].controller, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.objects[&source].zone, Zone::Library);
+        assert_eq!(state.players[1].library.front(), Some(&source));
+        assert!(state.players[0].library.is_empty());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id,
+                ..
+            } if *source_id == source
+        )));
+    }
 
     #[test]
     fn test_resolve_puts_card_on_top_of_library() {
@@ -888,8 +1071,8 @@ mod tests {
     }
 
     /// Issue #1365 follow-up: this resolver must consult
-    /// `ability.parent_target_missing_reason` (a typed field stamped ONLY by
-    /// `effects::apply_parent_chain_context` at a real Dig->child hand-off),
+    /// `ability.parent_target_missing_reason` (a typed field stamped at a
+    /// parent->child hand-off (see `ResolvedAbility::parent_target_missing_reason`)),
     /// never `state.last_parent_target_missing_reason` directly. A freshly
     /// built `ResolvedAbility` (as in any ordinary LTB self-return trigger)
     /// never goes through that hand-off, so its field stays `None` no matter

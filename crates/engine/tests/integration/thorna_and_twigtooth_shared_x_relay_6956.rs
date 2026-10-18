@@ -2,18 +2,17 @@
 //! group must not have its shared X redefined by a middle clause that produced
 //! zero.
 //!
-//! Oracle (Thorna and Twigtooth, verbatim from card data):
+//! Oracle (Thorna and Twigtooth; the fixture omits the unmodelled topmost-card
+//! perpetual conjunct, see THORNA_ORACLE):
 //!   "Thorna and Twigtooth enters with two -1/-1 counters on it.
 //!    Whenever Thorna and Twigtooth attacks, remove all counters from target
-//!    creature you control. Each opponent loses X life, you gain X life, and the
-//!    topmost creature card in your library perpetually gets +X/+X, where X is
-//!    the number of counters removed this way."
+//!    creature you control. Each opponent loses X life and you gain X life,
+//!    where X is the number of counters removed this way."
 //!
 //! The trigger lowers to a chain-relative
-//! `RemoveCounter -> LoseLife{PreviousEffectAmount} -> GainLife{PreviousEffectAmount}`
-//! (the perpetual +X/+X clause does not parse at all today), so every clause
-//! reads whatever the immediately preceding step left in `last_effect_amount`
-//! rather than the anchored X.
+//! `RemoveCounter -> LoseLife{PreviousEffectAmount} -> GainLife{PreviousEffectAmount}`,
+//! so every clause reads whatever the immediately preceding step left in
+//! `last_effect_amount` rather than the anchored X.
 //!
 //! #6956's first pass made a genuine zero overwrite that slot. That is right for
 //! a fresh producer, but the middle `LoseLife` here is a RELAY — its own amount
@@ -39,10 +38,11 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 
+// The "topmost creature card in your library perpetually gets +X/+X" clause is not modelled
+// (an honest perpetual gap); it is irrelevant to the X relay under test, so it is omitted.
 const THORNA_ORACLE: &str = "Thorna and Twigtooth enters with two -1/-1 counters on it.\n\
 Whenever Thorna and Twigtooth attacks, remove all counters from target creature you control. \
-Each opponent loses X life, you gain X life, and the topmost creature card in your library \
-perpetually gets +X/+X, where X is the number of counters removed this way.";
+Each opponent loses X life and you gain X life, where X is the number of counters removed this way.";
 
 const PLATINUM_EMPERION_ORACLE: &str = "Your life total can't change.";
 

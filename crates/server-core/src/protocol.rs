@@ -71,6 +71,27 @@ pub enum WireFormat {
     Unknown,
 }
 
+/// Optional timing hints for application JSON Ping/Pong diagnostics.
+/// These describe client JSON pings, not the native WebSocket Ping cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatContract {
+    pub ping_interval_ms: u64,
+    pub silence_budget_ms: u64,
+}
+
+/// Connection-scoped command ownership, never player authority or idempotency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandId(pub u64);
+
+/// Optional command-completion correlation supported by a native server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandCorrelation {
+    CommandIdV1,
+    #[serde(other)]
+    Unknown,
+}
+
 pub use engine::starter_decks::DeckData;
 
 /// AI seat configuration sent by the client when creating a game with AI opponents.
@@ -439,6 +460,16 @@ pub enum ClientMessage {
     Emote {
         emote: String,
     },
+    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries the
+    /// engine-authored identity of the contest it is for (so a frame delayed from an
+    /// earlier contest is dropped, never counted as activity in a later one) and a
+    /// per-contest sequence number (duplicate / reorder protection): the sender is
+    /// the authenticated seat and the instant is the server's own clock, so a client
+    /// can claim neither a win nor a timestamp.
+    ContestClick {
+        contest: u64,
+        seq: u32,
+    },
     SpectatorJoin {
         game_code: String,
     },
@@ -680,6 +711,12 @@ pub enum ServerMessage {
         /// Binary envelopes this server can negotiate after the text hello.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         wire_formats: Vec<WireFormat>,
+        /// Present when application Ping replies are independent of game CPU work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat: Option<HeartbeatContract>,
+        /// Completion ownership is optional transport-envelope metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_correlation: Option<CommandCorrelation>,
     },
     GameCreated {
         game_code: String,
@@ -973,6 +1010,15 @@ pub enum ServerMessage {
         from_player: PlayerId,
         emote: String,
     },
+    /// Live click counters of the running contest, sent between full state
+    /// transitions (display only — the counts never decide the winner).
+    ContestProgress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        /// The contest these counters belong to; a client ignores any other.
+        contest: u64,
+        clicks: Vec<(PlayerId, u32)>,
+    },
     TimerUpdate {
         player: PlayerId,
         remaining_seconds: u32,
@@ -1141,7 +1187,8 @@ mod tests {
     use engine::types::game_state::ProductionOverride;
     use engine::types::identifiers::ObjectIncarnationRef;
     use engine::types::mana::{
-        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaSourceSelection, ManaType,
+        TapsForManaSelection,
     };
     use serde_json::Value;
 
@@ -1239,6 +1286,33 @@ mod tests {
                 action: restored_action,
             } => assert_eq!(restored_action, generic),
             _ => panic!("wrong variant"),
+        }
+
+        let GameAction::ActivateManaSource { mut selection } = generic else {
+            unreachable!("fixture action is a generic mana-source selection");
+        };
+        selection.ability_index = Some(0);
+        selection.penalty = ManaSourcePenalty::Sacrifices;
+        selection.taps_for_mana.clear();
+        for quantity in [ManaSourceQuantity::Fixed(3), ManaSourceQuantity::Variable] {
+            selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+            selection.mana_type = ManaType::Colorless;
+            let msg = ClientMessage::Action {
+                action: GameAction::ActivateManaSource {
+                    selection: selection.clone(),
+                },
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+            let ClientMessage::Action { action } = parsed else {
+                panic!("wrong variant");
+            };
+            assert_eq!(
+                action,
+                GameAction::ActivateManaSource {
+                    selection: selection.clone()
+                }
+            );
         }
     }
 
@@ -2090,6 +2164,43 @@ mod tests {
         }
     }
 
+    /// `ContestClick` carries only a contest identity and a sequence number: no seat,
+    /// timestamp or count for a client to forge. The exact wire shape is pinned because the TypeScript adapter
+    /// (`ws-adapter.ts` `submitContestClick`) writes it by hand.
+    #[test]
+    fn client_message_contest_click_roundtrips_with_only_a_sequence() {
+        let json =
+            serde_json::to_string(&ClientMessage::ContestClick { contest: 3, seq: 7 }).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestClick","data":{"contest":3,"seq":7}}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::ContestClick { contest: 3, seq: 7 }
+        ));
+    }
+
+    #[test]
+    fn server_message_contest_progress_roundtrips() {
+        let msg = ServerMessage::ContestProgress {
+            full_key: None,
+            contest: 3,
+            clicks: vec![(PlayerId(0), 12), (PlayerId(1), 9)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestProgress","data":{"contest":3,"clicks":[[0,12],[1,9]]}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::ContestProgress { clicks, .. } => {
+                assert_eq!(clicks, vec![(PlayerId(0), 12), (PlayerId(1), 9)]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     #[test]
     fn server_message_timer_update_roundtrips() {
         let msg = ServerMessage::TimerUpdate {
@@ -2322,8 +2433,18 @@ mod tests {
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
             wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            heartbeat: Some(HeartbeatContract {
+                ping_interval_ms: 5_000,
+                silence_budget_ms: 45_000,
+            }),
+            command_correlation: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            wire["data"]["heartbeat"],
+            serde_json::json!({"ping_interval_ms": 5000, "silence_budget_ms": 45000})
+        );
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::ServerHello {
@@ -2334,6 +2455,8 @@ mod tests {
                 lobby_protocol_version,
                 public_url,
                 wire_formats,
+                heartbeat,
+                command_correlation: _,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -2342,6 +2465,13 @@ mod tests {
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
                 assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert_eq!(
+                    heartbeat,
+                    Some(HeartbeatContract {
+                        ping_interval_ms: 5_000,
+                        silence_budget_ms: 45_000,
+                    })
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2360,6 +2490,8 @@ mod tests {
             lobby_protocol_version: None,
             public_url: None,
             wire_formats: Vec::new(),
+            heartbeat: None,
+            command_correlation: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -2373,6 +2505,29 @@ mod tests {
             !json.contains("wire_formats"),
             "empty list must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn legacy_hello_does_not_advertise_compute_independent_heartbeats() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "0.109.0",
+                "build_commit": "legacy",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full"
+            }
+        });
+        let parsed: ServerMessage = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::ServerHello {
+                heartbeat: None,
+                ..
+            }
+        ));
+        let encoded = serde_json::to_value(parsed).unwrap();
+        assert!(encoded["data"].get("heartbeat").is_none());
     }
 
     #[test]
@@ -3318,6 +3473,214 @@ mod tests {
         }
     }
 
+    /// v151: populated Bestow form payloads require a versioned full-game peer.
+    /// v149: `GameState::deferred_spell_delivery` is gone and
+    /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
+    /// paused instant or sorcery still owes; a v148 peer drops the key and would
+    /// move the spell before its paused instructions finish, so it must be refused
+    /// before it receives v149 state.
+    /// v148: Timesifter's top-card exile contest — `Effect::ExileTopCardContest`
+    /// in serialized ability definitions and the parked
+    /// `BatchCompletion::TopCardContestRoundComplete`; a v147 peer cannot parse
+    /// either tag, so it must be refused before it receives v148 state.
+    /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
+    /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
+    /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
+    /// `ServerMessage::ContestProgress`; a v146 peer cannot parse the new tags, so
+    /// it must be refused before it receives v147 state.
+    /// v146: `ConfirmedPeriod` gains `counted_by` (CR 732.2a counted loop offers) and `performance`,
+    /// and a loop offer's `win_kind` becomes optional; a v145 peer drops the field
+    /// or cannot parse the offer, so it must be refused before it receives v146 state.
+    /// v145: `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
+    /// serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
+    /// peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
+    /// messages unchanged.
+    ///
+    /// v144: one-time boons (#7495) add `Effect::CreateBoon`, `Effect::NoteNumber`,
+    /// the `HasBoon` conditions, and `WaitingFor::ChooseTokenHost` tags, and
+    /// retype the perpetual P/T edit's `power_delta`/`toughness_delta` to
+    /// required `QuantityExpr` `power`/`toughness`. A v143 peer cannot parse
+    /// the new shapes, so it must be refused before it receives v144 state.
+    ///
+    /// v143: `GameState::modal_modes_chosen_this_turn` / `_this_game` retype to
+    /// `(ObjectIncarnationRef, usize)` (CR 400.7 incarnation-keyed modal
+    /// history); a v142 peer cannot decode the object-shaped key, so it must be
+    /// refused before it receives v143 state.
+    ///
+    /// v142: `LinkedExileSnapshot` gains `incarnation` (CR 400.7), carried in
+    /// `GameState::linked_exile_lki` and the trigger and zone-change linked-exile
+    /// snapshots; a v141 peer re-encoding state drops it, so it must be refused
+    /// before it receives v142 state.
+    ///
+    /// v141: `ExileLinkKind` gains `CastCost` (CR 607.2q cast-cost exile links),
+    /// carried in `GameState::exile_links`; a v140 peer cannot parse the tag, so
+    /// it must be refused before it receives v141 state.
+    ///
+    /// v140: `AttackSubject` gains `EventAttackers` (the players a trigger's
+    /// attack event's attackers attacked), carried in a resolving or pending
+    /// ability's `player_scope` inside `GameState`; a v139 peer cannot parse the
+    /// tag, so it must be refused before it receives v140 state.
+    ///
+    /// v139: CR 702.122c per-turn crew relation —
+    /// `GameState::crew_history_this_turn` and `FilterProp::CrewedThisTurn`, both
+    /// inside `GameState`; a v138 peer cannot parse the new filter tag, so it
+    /// must be refused before it receives v139 state.
+    ///
+    /// v134: `GameEvent::AbilityActivated` gains
+    /// `stack_entry`, the stack object a stack-using activation created, carried
+    /// in `GameState`'s trigger events; an older peer drops it silently and
+    /// resolves an activation trigger's "copy that ability" differently, so it
+    /// must be refused before it receives v134 state.
+    ///
+    /// v133: CR 614.12a pre-entry as-enters choices —
+    /// `NamedChoiceSourceBinding::PendingEntry`, `ProposedEvent::ZoneChange`'s
+    /// `enter_with_choices` and `PendingReplacement::delivery_boundary`, all
+    /// inside `GameState`; a v132 peer cannot parse the new binding tag, so it
+    /// must be refused before it receives v133 state.
+    ///
+    /// v132: `GameObject::exile_from_stack_linked_source`
+    /// carries the stamping incarnation (`ObjectIncarnationRef`, CR 400.7); a
+    /// v131 peer cannot decode a set rider, so it must be refused before it
+    /// receives v132 state.
+    ///
+    /// v131: `PlayerFilter` gains `AnyOf { filters }` and
+    /// `TargetPlayer`, carried in a resolving or pending ability's `player_scope`
+    /// inside `GameState`; a v130 peer cannot parse either tag, so it must be
+    /// refused before it receives v131 state.
+    ///
+    /// v130: `GameState::linked_exile_lki` holds one incarnation-bounded
+    /// `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
+    /// non-empty map, so it must be refused before it receives v130 state.
+    ///
+    /// v129: `WaitingFor::LoopShortcut` and
+    /// `ShortcutProposal` gained a required `road: OfferRoad`. A v128 peer drops
+    /// the key from every frame it re-encodes, so the handshake refuses the
+    /// pairing rather than leave the road to the legacy-offer migration's
+    /// inference.
+    ///
+    /// The resolved-rules journal admits a land-play `rebound_from` on a
+    /// `ResolvedZoneChangeCommand` (Library/Graveyard/Exile -> Battlefield); a v123
+    /// peer rejects that `GameState.resolved_rules_journal`, so it must be refused
+    /// before it receives v124 state.
+    /// `MulliganDecisionEntry` and `MulliganDeclaration` gain `free_reveals_taken`; a
+    /// v124 peer drops the count, so it must be refused before it receives v125 state.
+    /// `ZoneChangeRecord` gains `arrival`; a v125 peer rejects the journal when the
+    /// departure owner differs from the command owner, so it must be refused before it
+    /// receives v126 state.
+    /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
+    /// (CR 608.2c + CR 115.1a); a v127 peer cannot deserialize it, so it must be
+    /// refused before it receives v128 state. `SpellContext` also gains
+    /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
+    /// creating chain named by group, omitted when empty; amended in place, not
+    /// bumped.
+    /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
+    /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
+    /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
+    /// and `GameObject::copied_prepare_face` are new in serialized full-game
+    /// state; a v122 peer cannot parse the new `FilterProp` tag and would read a
+    /// mass prepare as a single-target one, so it must be refused before it
+    /// receives v123 state.
+    /// `PermissionGrantee` gains `TriggeringSourceController` (a cast grant bound to
+    /// the triggering object's controller, CR 603.2 + CR 109.4), and damage events
+    /// carry the source incarnation (CR 400.7); a v121 peer cannot deserialize
+    /// the tag, so it must be refused before it receives v122 state.
+    /// The successful-mana-history ledger now stores the actual receiving
+    /// player with each trigger definition. A v120 peer cannot decode a
+    /// nonempty pair ledger, so it must be refused before v121 state.
+    /// `FilterProp`'s attachment-referent siblings are one parameterized
+    /// `FilterProp::AttachedTo { to: AttachmentReferent }` (CR 701.3a + CR
+    /// 303.4b); a v126 peer cannot parse the `"AttachedTo"` tag carried in
+    /// `GameState` ability definitions, so it must be refused before it
+    /// receives v127 state. v127 also carries the positional retarget wire
+    /// (`RetargetSpell` `null` keeps, engine-derived copy-walk keep
+    /// permissions), which a v126 peer cannot parse or render.
+    /// (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
+    /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
+    /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
+    /// a v119 peer cannot decode v120 state, so it must be refused before state
+    /// delivery. (v119 is reserved for the Legends of Jidoor PR.)
+    /// `ManaColorSpent` on `AbilityCondition` and `TriggerCondition` retypes `color`
+    /// to `SpentColor` (word versus symbol provenance, CR 612.2); a v117 peer cannot
+    /// deserialize the tagged color, so it must be refused before it receives v118
+    /// state.
+    /// `DerivedViews` gains `shared_piles` (the seat storing a shared library and
+    /// graveyard); a v116 peer drops the key and renders per-seat piles for a
+    /// state whose other seat's containers are empty, so it must be refused before
+    /// it receives v117 state.
+    /// `DrawSequenceFrame` gains `dealer` (the in-game simultaneous-draw dealer),
+    /// serialized in the resolution frames behind `RESOLUTION_STATE_WIRE_VERSION`
+    /// 5; a v115 peer refuses that resolution state, so it must be refused before it
+    /// receives v116 state.
+    /// `MulliganChoice` gains `FreeReveal` and `MulliganDeclaration` gains `kind`
+    /// (the Dandân free reveal mulligan); a v114 peer cannot deserialize the
+    /// choice and would carry out a held free reveal as a regular mulligan, so it
+    /// must be refused before it receives v115 state.
+    /// `WaitingFor::MulliganDecision` gains `declared` (CR 103.5 declare round),
+    /// serialized in `GameState.waiting_for`; a v113 peer would drop it silently,
+    /// so it must be refused before it receives v114 state.
+    /// `ResolvedZoneChangeCommand` gains `rebound_from` (CR 108.3 as modified by
+    /// the Dandân hand-entry rebind), serialized inside
+    /// `GameState.resolved_rules_journal`; a v112 peer would drop it silently,
+    /// so it must be refused before it receives v113 state.
+    /// `ContinuousModification` gains `SubstituteTextWord` (CR 612.1), serialized
+    /// inside `GameState`'s transient continuous effects; a v111 peer cannot parse
+    /// the tag, so it must be refused before it receives v112 state.
+    /// `GameFormat` gains `Dandan`, which serializes as its `Display` string and
+    /// deserializes through `FromStr`; a v110 peer cannot parse a `GameState`
+    /// whose format names it, so it must be refused before it receives v111
+    /// state.
+    /// `GameState.deferred_spell_delivery` (CR 608.2n + CR 608.2g) is new in
+    /// serialized state. A v109 peer would leave a spell paused on its own
+    /// free-cast window on the stack in no zone, so the handshake must refuse
+    /// the mismatch before it receives v110 state. The same version adds
+    /// `WaitingFor::SpellCopyOrderChoice` and
+    /// `PendingRepeatIteration.copy_order_fixed` (CR 405.3).
+    /// The CR 201.5a granter binding adds `ObjectScope::GrantingObject` /
+    /// `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
+    /// `PlayerFilter::GrantingObjectCaster` and the `granting_object` stamp; v108 state
+    /// cannot decode as v109 state, so it must be refused before state delivery.
+    /// `IllegalTargetsDisposition::StillResolves` is serialized on the root
+    /// ability. A v107 peer would silently apply ordinary non-resolution
+    /// after target invalidation, so the handshake must refuse the mismatch
+    /// before it receives v108 state.
+    /// `UntilCondition::NextMatches.count` (CR 608.2c), the paused loop's `hits`,
+    /// `ZoneChoiceCandidateSource::ParentTargets` and
+    /// `SpellContext.exile_until_batch` are new in serialized
+    /// full-game state; a v106 peer would run a counted loop as a one-card loop,
+    /// so it must be refused before it receives v107 state.
+    /// `PendingCast` gains `delved_cards` and the pending cost-move resume swaps
+    /// `DelveManaPayment` for `FinalizeDelvedCast` (#9400); a v103 peer cannot
+    /// parse the parked delve commit, so it must be refused before it receives
+    /// v104 state.
+    /// `GameEvent::AbilityActivated` now carries `kind: "Mana"` for mana-ability
+    /// activations and an optional `departed_source_lki`; a v100 peer cannot
+    /// parse the `Mana` kind, so it must be refused before it receives v101 state.
+    /// `Effect::AdditionalPhase` now carries a `TurnSegment` in place of its
+    /// `phase` field and an `ExtraPhaseRecipient` in place of its `target`
+    /// field; a v99 peer cannot parse it, so it must be refused before it
+    /// receives v100 state.
+    /// `GraveyardCastPermission.pool` (CR 404.1 + CR 601.3) is new in serialized
+    /// full-game state; a v98 peer would default it to the own graveyard and
+    /// refuse a cast from any graveyard the permission allows, so it must be
+    /// refused before it receives v99 state.
+    /// `ZoneOpponentChooserPurpose::PerPlayerChoiceOrder` (CR 101.4c) and
+    /// `SubstituteChooser` (CR 800.4g), the per-player frame's `current` and
+    /// `nominee` fields, and `PerPlayerScope::Opponents` (CR 102.2 + CR 102.3)
+    /// are serialized; a v97 peer cannot deserialize them, so it must be
+    /// refused before it receives v98 state.
+    /// `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
+    /// (`TargetReadOrigin`, CR 115.1 + CR 608.2c) are serialized; a v96 peer
+    /// would default the field and rebuild a target slot the rules do not
+    /// announce, so it must be refused before it receives v97 state.
+    /// `FilterProp::Unblocked` is reshaped to `FilterProp::BlockStatus { status:
+    /// AttackerBlockStatus }` (CR 509.1h); a v94 peer cannot parse the new
+    /// `"BlockStatus"` tag carried in `GameState` ability definitions, so it must
+    /// be refused before it receives v95 state.
+    /// `SpellContext.creation_lookback_event` and `TriggerSourceContext.mana_cost`
+    /// are new in serialized full-game state (CR 603.7 + CR 603.10a + CR 608.2h,
+    /// CR 707.2); a v93 peer would drop both and resolve a phase-delayed
+    /// departure look-back differently, so it must be refused before it
+    /// receives v94 state.
     /// `ReductionProvenance` gains `SacrificedForCost`, the reduction an Emerge
     /// or Offering sacrifice earns before a deferred target declaration; v92
     /// state cannot decode a v93 provenance, so it must be refused before
@@ -3351,8 +3714,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_93_for_sacrifice_cost_reduction_provenance() {
-        assert_eq!(PROTOCOL_VERSION, 93);
+    fn protocol_version_is_151_for_populated_bestow_payloads() {
+        assert_eq!(PROTOCOL_VERSION, 151);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3363,7 +3726,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_93_for_sacrifice_cost_reduction_provenance` stays
+    /// `protocol_version_is_151_for_populated_bestow_payloads` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -3637,6 +4000,40 @@ mod tests {
         assert!(
             !json.contains("resolved_by"),
             "None must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn optional_command_correlation_hello_preserves_old_server_fallback() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "test",
+                "build_commit": "test",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full",
+            },
+        });
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(legacy.clone()).unwrap(),
+            ServerMessage::ServerHello {
+                command_correlation: None,
+                ..
+            }
+        ));
+        let mut negotiated = legacy;
+        negotiated["data"]["command_correlation"] = serde_json::json!("CommandIdV1");
+        let hello: ServerMessage = serde_json::from_value(negotiated.clone()).unwrap();
+        assert!(matches!(
+            &hello,
+            ServerMessage::ServerHello {
+                command_correlation: Some(CommandCorrelation::CommandIdV1),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(hello).unwrap()["data"]["command_correlation"],
+            "CommandIdV1"
         );
     }
 }

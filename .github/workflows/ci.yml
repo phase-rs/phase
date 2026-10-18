@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
     # retain a bounded job while leaving room for the remaining lint gates.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,6 +93,20 @@ jobs:
         # parser source tree: documented paths/symbols exist and the §3
         # priority table mirrors the `// Priority` slots in oracle.rs.
         run: ./scripts/check-skill-doc.sh
+
+      - name: CR citation anchor gate
+        # A CR citation is anchored by its rule number. A line coordinate into
+        # docs/MagicCompRules.txt is not an anchor: that file is gitignored,
+        # every checkout fetches its own copy, and the offsets move with every
+        # fetch -- so a committed coordinate is stale on arrival and points at
+        # an unrelated rule, which is worse than no annotation (#8515).
+        #
+        # Whole-tree, not diff-based, so a coordinate cannot survive by living
+        # in a file the PR does not touch. The script self-checks its own
+        # detector against planted text on every run and reports what it
+        # declined, so a PASS states what it matched rather than claiming the
+        # tree is clean of every possible coordinate form.
+        run: ./scripts/check-cr-citation-anchors.sh
 
       - name: Engine authority gate
         # (A) Diff-based: new engine code must use single-authority helpers
@@ -289,7 +303,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
 
@@ -331,7 +345,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/4 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
+        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/5 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
@@ -994,7 +1008,8 @@ jobs:
   lobby-worker-test:
     name: Lobby worker (pnpm test)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Cache-hit npm ci runs have exceeded five minutes; leave room for the measured slow tail.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -391,6 +392,43 @@ pub fn momir_fixed_deck_names() -> Vec<String> {
     names
 }
 
+/// The Dandân default decklist as printed name and copy count: the 80-card
+/// pile a game loads as its one shared library when the host submits none.
+const DANDAN_DEFAULT_PILE: [(&str, usize); 23] = [
+    ("Dandân", 10),
+    ("Island", 20),
+    ("Memory Lapse", 8),
+    ("Accumulated Knowledge", 4),
+    ("Magical Hack", 2),
+    ("Mystic Sanctuary", 2),
+    ("Brainstorm", 2),
+    ("Capture of Jingzhou", 2),
+    ("Chart a Course", 2),
+    ("Control Magic", 2),
+    ("Crystal Spray", 2),
+    ("Day's Undoing", 2),
+    ("Mental Note", 2),
+    ("Metamorphose", 2),
+    ("Predict", 2),
+    ("Telling Time", 2),
+    ("Unsubstantiate", 2),
+    ("Halimar Depths", 2),
+    ("Haunted Fengraf", 2),
+    ("Lonely Sandbar", 2),
+    ("Remote Isle", 2),
+    ("The Surgical Bay", 2),
+    ("Svyelunite Temple", 2),
+];
+
+/// The Dandân default decklist as a flat name list (80 cards). Single source
+/// for the default pile across every transport.
+pub fn dandan_default_pile_names() -> Vec<String> {
+    DANDAN_DEFAULT_PILE
+        .iter()
+        .flat_map(|&(name, copies)| std::iter::repeat_n(name.to_string(), copies))
+        .collect()
+}
+
 pub const DEFAULT_PLANAR_DECK_NAMES: [&str; 40] = [
     "Academy at Tolaria West",
     "Agyrem",
@@ -475,14 +513,10 @@ pub fn default_scheme_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
         .collect()
 }
 
-/// Build the auto-supplied Momir's Madness `DeckPayload`: every seat (player,
-/// opponent, and each AI seat) receives the identical fixed 60-card snow-basic
-/// deck. Momir admits exactly one legal deck, so the submitted payload's deck
-/// *contents* are ignored; only its seat structure (AI seat count and per-seat
-/// difficulties) is preserved so the correct number of players is created.
-fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckPayload {
-    let fixed_seat = || PlayerDeckPayload {
-        main_deck: resolve_names(db, &momir_fixed_deck_names()),
+/// One seat's payload holding exactly this main deck and nothing else.
+fn main_deck_only_payload(main_deck: Vec<DeckEntry>) -> PlayerDeckPayload {
+    PlayerDeckPayload {
+        main_deck,
         sideboard: Vec::new(),
         commander: Vec::new(),
         companion: Vec::new(),
@@ -493,7 +527,50 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
+    }
+}
+
+/// Build the Dandân `DeckPayload`: the one 80-card pile on `pile_seat`, the
+/// seat that holds the shared library, and an empty payload for every other
+/// seat. Of the submission only the pile seat's main deck and the seat
+/// structure are kept.
+fn dandan_pile_payload(
+    db: &CardDatabase,
+    submitted: &DeckPayload,
+    pile_seat: PlayerId,
+) -> DeckPayload {
+    // CR 103.3: the pile seat's submitted main deck, else the default list, becomes the shared library.
+    let submitted_pile = &payload_for_player(submitted, pile_seat).main_deck;
+    let pile = if submitted_pile.is_empty() {
+        resolve_names(db, &dandan_default_pile_names())
+    } else {
+        submitted_pile.clone()
     };
+    let seat_payload = |seat: PlayerId| {
+        if seat == pile_seat {
+            main_deck_only_payload(pile.clone())
+        } else {
+            PlayerDeckPayload::default()
+        }
+    };
+    DeckPayload {
+        player: seat_payload(PlayerId(0)),
+        opponent: seat_payload(PlayerId(1)),
+        ai_decks: (0..submitted.ai_decks.len())
+            .map(|i| seat_payload(PlayerId((2 + i) as u8)))
+            .collect(),
+        ai_difficulties: submitted.ai_difficulties.clone(),
+        booster_pack_pool: submitted.booster_pack_pool.clone(),
+    }
+}
+
+/// Build the auto-supplied Momir's Madness `DeckPayload`: every seat (player,
+/// opponent, and each AI seat) receives the identical fixed 60-card snow-basic
+/// deck. Momir admits exactly one legal deck, so the submitted payload's deck
+/// *contents* are ignored; only its seat structure (AI seat count and per-seat
+/// difficulties) is preserved so the correct number of players is created.
+fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckPayload {
+    let fixed_seat = || main_deck_only_payload(resolve_names(db, &momir_fixed_deck_names()));
     DeckPayload {
         player: fixed_seat(),
         opponent: fixed_seat(),
@@ -969,20 +1046,38 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             });
     }
 
+    // CR 400.1: a seat whose library is stored in another seat's container gets
+    // no pool and loads no cards; the holder's pool backs the shared pile.
+    let library_holders: Vec<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|&seat| state.zone_storage_seat(Zone::Library, seat) == seat)
+        .collect();
+    state
+        .deck_pools
+        .retain(|pool| library_holders.contains(&pool.player));
+
     // CR 903.5a: load the command-zone-netted list, not the submitted one, so
     // the library holds exactly the copies the command zone did not claim. The
     // registered pools above were built from the same `main_deck_for` output,
     // so library and pool cannot disagree about the 100.
     let p0_library = main_deck_for(&payload.player);
     let p1_library = main_deck_for(&payload.opponent);
-    load_player_library(state, &p0_library, PlayerId(0));
-    load_player_library(state, &p1_library, PlayerId(1));
+    if library_holders.contains(&PlayerId(0)) {
+        load_player_library(state, &p0_library, PlayerId(0));
+    }
+    if library_holders.contains(&PlayerId(1)) {
+        load_player_library(state, &p1_library, PlayerId(1));
+    }
 
     // Load additional AI decks into PlayerId(2), PlayerId(3), etc.
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
-        let library = main_deck_for(ai_deck);
-        load_player_library(state, &library, player_id);
+        if library_holders.contains(&player_id) {
+            let library = main_deck_for(ai_deck);
+            load_player_library(state, &library, player_id);
+        }
     }
 
     // CR 903.6 + CR 408.1: Place commanders in the command zone at game start.
@@ -1150,18 +1245,30 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.all_creature_types = sorted;
 
     if !state.planar_deck.is_empty() {
-        crate::util::im_ext::shuffle_vector(&mut state.planar_deck, &mut state.rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut state.planar_deck,
+            state.rng.draw(RandomDraw::Placement),
+        );
     }
     if !state.scheme_deck.is_empty() {
-        crate::util::im_ext::shuffle_vector(&mut state.scheme_deck, &mut state.rng);
+        crate::util::im_ext::shuffle_vector(
+            &mut state.scheme_deck,
+            state.rng.draw(RandomDraw::Placement),
+        );
     }
 
     // Shuffle each player's library and supplementary decks.
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
-        crate::util::im_ext::shuffle_vector(&mut player.attraction_deck, rng);
-        crate::util::im_ext::shuffle_vector(&mut player.contraption_deck, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng.draw(RandomDraw::Placement));
+        crate::util::im_ext::shuffle_vector(
+            &mut player.attraction_deck,
+            rng.draw(RandomDraw::Placement),
+        );
+        crate::util::im_ext::shuffle_vector(
+            &mut player.contraption_deck,
+            rng.draw(RandomDraw::Placement),
+        );
     }
 }
 
@@ -1185,7 +1292,7 @@ fn shuffled_entry_faces<'a>(state: &mut GameState, entries: &'a [DeckEntry]) -> 
         .iter()
         .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
         .collect::<Vec<_>>();
-    faces.shuffle(&mut state.rng);
+    faces.shuffle(state.rng.draw(RandomDraw::Placement));
     faces
 }
 
@@ -1220,6 +1327,21 @@ pub fn load_and_hydrate_decks(
             Some(card_db) => {
                 momir_payload = momir_fixed_deck_payload(card_db, payload);
                 &momir_payload
+            }
+            None => payload,
+        }
+    } else {
+        payload
+    };
+    // Dandân loads its one pile (the submitted one, else the default) into the
+    // shared library's holder seat; with no db we fall back to whatever was
+    // submitted, as Momir does.
+    let dandan_payload;
+    let payload = if state.format_config.format == crate::types::format::GameFormat::Dandan {
+        match db {
+            Some(card_db) => {
+                dandan_payload = dandan_pile_payload(card_db, payload, state.canonical_seat());
+                &dandan_payload
             }
             None => payload,
         }

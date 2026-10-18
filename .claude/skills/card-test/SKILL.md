@@ -17,6 +17,15 @@ Reference ports that demonstrate the pattern:
 
 ## The recipe
 
+To inspect an optional resolution choice, use
+`runner.cast(spell).commit().stop_at_optional().resolve()` or
+`runner.activate(source, index).stop_at_optional().resolve()`, then assert
+`final_waiting_for()` and answer through `runner.act(GameAction::...)`.
+The spell setter is post-commit: it does not stop additional-cost announcement.
+This leaves optional effect, tribute, and optional-cost prompts unanswered;
+other default answers, such as scry, are unchanged. The returned outcome is
+still a snapshot, not proof of completion.
+
 ```rust
 use engine::game::scenario::{GameScenario, GameRunner};
 // ... typed imports for the effect under test ...

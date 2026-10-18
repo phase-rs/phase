@@ -4,8 +4,8 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    ControlWindow, DelayedTriggerCondition, EffectKind, ReplacementDefinition, RestrictionExpiry,
-    TargetFilter,
+    ControlWindow, DelayedTriggerCondition, EffectKind, GameRestriction, ReplacementDefinition,
+    RestrictionExpiry, TargetFilter, TurnGate, WheneverEventExpiry,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -16,7 +16,7 @@ use crate::types::game_state::{
     PendingEmptyPoolLifeLoss, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
-use crate::types::phase::{Phase, PhaseGroup};
+use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{HandSizeModification, StaticMode, StaticModeKind};
@@ -52,10 +52,40 @@ pub fn next_phase(phase: Phase) -> Phase {
 /// (`PhaseGroup::last_step`). Anchors an inserted whole phase "after this
 /// phase" (CR 500.8): the insert lands after the containing phase's last step,
 /// and the turn resumes at that phase's natural successor
-/// (`next_phase(last_step_of_phase(this_phase))`). Used by
-/// `additional_phase::anchor_step` for `ExtraPhaseAnchor::ThisPhase`.
-pub(crate) fn last_step_of_phase(phase: Phase) -> Phase {
+/// (`next_phase(last_step_of_phase(this_phase))`). The last step of one of the
+/// turn's own phases, for [`final_step_of_phase_in_progress`].
+fn last_step_of_phase(phase: Phase) -> Phase {
     phase.group().last_step()
+}
+
+/// CR 500.8 + CR 500.9 + CR 500.10: the last step of the phase in progress,
+/// which "after this phase" anchors at. The innermost added unit that is a
+/// phase decides it: a whole added phase ends with its segment's final step,
+/// and a phase created to hold one step ends with that step, because its
+/// other steps are skipped (CR 500.11). A step added to a phase is part of
+/// that phase (CR 500.9), so it is passed over. With no added phase open, the
+/// phase in progress is the turn's own phase that holds the step the outermost
+/// added step was added after, or, with no added step open either, the one
+/// that holds the current step.
+pub(crate) fn final_step_of_phase_in_progress(state: &GameState) -> Phase {
+    state
+        .extra_phase_resume
+        .iter()
+        .rev()
+        .find_map(|unit| match unit.segment {
+            TurnSegment::Step(_) => None,
+            segment @ (TurnSegment::Phase(_) | TurnSegment::CreatedPhase(_)) => {
+                Some(segment.final_step())
+            }
+        })
+        .unwrap_or_else(|| {
+            last_step_of_phase(
+                state
+                    .extra_phase_resume
+                    .first()
+                    .map_or(state.phase, |unit| unit.anchor),
+            )
+        })
 }
 
 /// CR 500.8 + CR 505.1a + CR 505.1b: whether the first phase of `group` this
@@ -83,12 +113,12 @@ pub(crate) fn first_phase_of_turn_has_ended(state: &GameState, group: PhaseGroup
 }
 
 /// CR 500.8 + CR 500.9 + CR 500.10: the successor of the step `leaving`.
-/// A phase or step queued after the step that just ended runs next, newest
-/// first, entered at its segment's first step. Every taken entry records its
-/// unit, together with the entry's identity (`ExtraPhase::id`); when the final
-/// step of the unit's segment ends, the turn continues as though the unit's
-/// anchor had just ended, so an insert queued for that same anchor runs next
-/// and nested units unwind LIFO.
+/// A step or phase queued after the step that just ended runs next, entered at
+/// its segment's first step: a queued step before a queued phase, each kind
+/// newest first. Every taken entry records its unit, together with the entry's
+/// identity (`ExtraPhase::id`); when the final step of the unit's segment
+/// ends, the turn continues as though the unit's anchor had just ended, so an
+/// insert queued for that same anchor runs next and nested units unwind LIFO.
 /// Otherwise the natural successor follows. An entry anchored at step X is
 /// therefore taken when the next step labelled X ends, including the final
 /// step of an enclosing unit (CR 505.1a: every added main phase is a
@@ -119,6 +149,15 @@ fn take_scheduled_successor(
     }
 }
 
+/// CR 500.8 + CR 500.9 + CR 500.10: whether the step in progress belongs to a
+/// phase or step an effect added to the turn. [`take_scheduled_successor`]
+/// records an added unit when it is taken and drops the record when the unit's
+/// final step ends, and the turn boundary (`start_next_turn`) clears every
+/// record, so none is open at a step of the turn's own phases.
+fn in_added_unit(state: &GameState) -> bool {
+    !state.extra_phase_resume.is_empty()
+}
+
 /// The successor of the step `leaving`, read without committing it (see
 /// [`take_scheduled_successor`], which commits it).
 #[derive(Clone, Copy)]
@@ -136,7 +175,21 @@ impl ScheduledSuccessor {
         let mut units = state.extra_phase_resume.iter().rev();
         let mut unwound = 0;
         loop {
-            if let Some(index) = state.extra_phases.iter().rposition(|ep| ep.anchor == ended) {
+            // CR 500.9 + CR 500.8: a step added after `ended` is part of the
+            // phase in progress, and a phase added after that phase comes
+            // after all of its steps, so a queued step is taken before a
+            // queued phase. Within each kind the most recently created occurs
+            // first.
+            let queued_step = state.extra_phases.iter().rposition(|ep| {
+                ep.anchor == ended
+                    && match ep.segment {
+                        TurnSegment::Step(_) => true,
+                        TurnSegment::Phase(_) | TurnSegment::CreatedPhase(_) => false,
+                    }
+            });
+            if let Some(index) =
+                queued_step.or_else(|| state.extra_phases.iter().rposition(|ep| ep.anchor == ended))
+            {
                 return Self::Insert { unwound, index };
             }
             match units.next() {
@@ -250,7 +303,8 @@ pub(in crate::game) fn advance_phase_once(
     // CR 500.8: Extra phases are inserted *directly after* their anchor phase
     // (e.g., Aurelia's "after this phase" extra combat is inserted after the
     // current combat phase ends — anchor = `EndCombat`), scanning from the end so
-    // the most recently created entry occurs first ("the most recently created
+    // the most recently created phase occurs first, after any step queued at the
+    // same anchor (CR 500.9) ("the most recently created
     // phase will occur first" per CR 500.8). Successor selection, including
     // CR 500.8 + CR 500.9 + CR 500.10 continuation after every inserted unit, is
     // `take_scheduled_successor`.
@@ -363,13 +417,30 @@ fn complete_end_combat_teardown(state: &mut GameState) {
     state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
     super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.replacement_definitions
-            .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
-    }
+    expire_live_replacement_definitions(state, |r| {
+        matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat))
+    });
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+}
+
+/// Removes, from every object's live `replacement_definitions`, each definition
+/// `expires` accepts. The base definitions are not touched. Called by
+/// `complete_end_combat_teardown` for the end-of-combat expiry and by
+/// `expire_next_turn_durations` for the "until that player's next turn" expiry.
+/// Objects holding no such definition are not written, so they stay shared with
+/// clones of the state.
+fn expire_live_replacement_definitions(
+    state: &mut GameState,
+    expires: impl Fn(&ReplacementDefinition) -> bool,
+) {
+    state.objects.update_where(
+        |_, obj| obj.replacement_definitions.iter_all().any(&expires),
+        |_, obj| {
+            obj.replacement_definitions.retain(|r| !expires(r));
+        },
+    );
 }
 
 /// CR 724.2d: End the current combat phase by removing everything from combat,
@@ -545,7 +616,7 @@ fn enter_phase(
 
 /// CR 732.2a: the APNAP-first player (turn order) who still holds a non-empty deferred
 /// persistent-axis materialization stash (one or more `PersistentAxisMaterialization`
-/// items — tokens, counters, life, or a drive sequence), or `None`. Filters
+/// items — tokens, counters or life), or `None`. Filters
 /// `players::apnap_order` — the same helper `enter_phase` uses to seed the mana-empty
 /// drain — so the collapse resolves in the same turn-based order and supports 2+ players
 /// (one prompt per drain iteration, each to its own controller). Guards on a NON-EMPTY
@@ -865,8 +936,8 @@ pub(super) fn drain_pending_phase_transition_progress(
             }
             // CR 732.2a: SECOND pass, after the CR 500.5 mana-empty APNAP drain
             // above — resolve any deferred persistent-axis materializations (one or
-            // more of tokens / beneficial counters / life gain / an observed-growth
-            // drive sequence) from accepted loop shortcuts, in APNAP turn order. A
+            // more of tokens / beneficial counters / life gain) from accepted loop
+            // shortcuts, in APNAP turn order. A
             // populated stash is present iff a materializable loop was accepted (§5);
             // prompt its controller for the finite count N.
             if let Some(controller) = next_apnap_player_with_pending_materialization(state) {
@@ -982,8 +1053,8 @@ pub(super) fn drain_pending_phase_transition_progress(
         // decision here would empty the very mana the card promises to keep.
         // Only `None`-expiry units flow into the pipeline as Drop-disposition
         // decisions. The `enumerate` runs over the full pool so `pool_index`
-        // stays aligned with the retained expiry units that remain in
-        // `mana_pool.mana`.
+        // stays aligned with the retained expiry units that remain in pool
+        // order (`ManaPool::units`).
         // CR 500.5: unspent mana empties as a step/phase ends. The ONLY exemption is the developer
         // `DebugAction::SetInfiniteMana` toggle (a documented debug departure). A loop-backed ∞-mana
         // axis is NOT exempt — it drains here and is de-realized in the queue-empty pass below. Gate
@@ -997,8 +1068,7 @@ pub(super) fn drain_pending_phase_transition_progress(
             .find(|p| p.id == player_id)
             .map(|p| {
                 p.mana_pool
-                    .mana
-                    .iter()
+                    .units()
                     .enumerate()
                     .filter(|(_, u)| u.expiry.is_none())
                     .map(|(idx, u)| crate::types::mana::UnitDecision {
@@ -1072,6 +1142,10 @@ pub(super) fn drain_pending_phase_transition_progress(
 /// caller keeps its own. The latch is dropped either way — a cleared cursor ends the debt whether
 /// or not the beat was eligible to go back through the interpreter, and `stack.rs`'s quiescence
 /// predicate requires it clear.
+///
+/// A transition the resumed run defers is settled and retried once here, as after an
+/// untap-choice answer. Only a carrier that cannot settle leaves the provisional
+/// `Priority { active }` window standing (see `engine::settle_deferred_phase_transition`).
 pub(crate) fn resume_deferred_step_triggers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -1082,8 +1156,13 @@ pub(crate) fn resume_deferred_step_triggers(
         return None;
     }
     let owed = state.deferred_step_trigger_resume.take().is_some();
-    (owed && matches!(state.waiting_for, WaitingFor::Priority { .. }))
-        .then(|| auto_advance(state, events))
+    (owed && matches!(state.waiting_for, WaitingFor::Priority { .. })).then(|| {
+        // CR 502.3 + CR 500.8: the entered step can be an added untap step whose leave ends
+        // the turn while a resolution is live, so the interpreter stops with the untap done
+        // and the window from before the run standing. CR 502.4: that is no window to hand
+        // a player in the untap step.
+        super::engine::auto_advance_settling_deferral(state, events)
+    })
 }
 
 /// CR 703.4q + CR 616.1 + CR 611.2b: Scan active step-end mana handlers for
@@ -1220,8 +1299,9 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.lki_cache.clear();
     state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
+    state.lki_copiable_values_by_incarnation.clear();
     state.departed_stack_spells.clear();
-    // CR 607.2b + CR 603.10e: linked-exile LKI is likewise step-scoped — it only
+    // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
     state.linked_exile_lki.clear();
 
@@ -1593,6 +1673,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 702.122a: the resolved-crew marker (the AI crew-repeat guard's
     // payoff-in-force authority) is per-turn state; reset it with the cadence set.
     state.crew_resolved_this_turn.clear();
+    // CR 702.122c: "crewed ... this turn" — the per-turn crew-payment relation.
+    state.crew_history_this_turn.clear();
     // Belt-and-suspenders: these transient replacement-continuation seeds are
     // normally nulled by the full-drain clear (effects/mod.rs) on the next
     // action, but EventContextAmount reads
@@ -1601,13 +1683,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // can shadow a later EventContextAmount read.
     state.post_replacement_token_substitution_count = None;
     state.post_replacement_token_choice_applied = None;
-    // CR 606.3: The "loyalty ability once per turn" limit is a property of the
-    // permanent ("no player has previously activated a loyalty ability of that
-    // permanent that turn"), not its controller. It resets at the start of every
-    // turn for every planeswalker regardless of who controls it.
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.loyalty_activations_this_turn = 0;
-    }
+    reset_loyalty_activation_counts(state);
     // CR 606.1 + CR 603.4: Per-player loyalty-activation history is a CR 603.4
     // "this turn" record. The cap-raising grant from
     // `Effect::GrantExtraLoyaltyActivations` (The Chain Veil class) is bounded
@@ -1621,6 +1697,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
     state.ability_resolutions_this_turn.clear();
+    // CR 603.4 + CR 607.1c: "added mana with this ability this turn" is a
+    // per-turn record; it resets with the other "this turn" trackers.
+    state.triggered_abilities_added_mana_this_turn.clear();
     state.graveyard_cast_permissions_used.clear();
     // CR 110.4 + CR 601.2a: Reset per-turn-per-permanent-type tracking (Muldrotha).
     state.graveyard_cast_permissions_used_per_type.clear();
@@ -1630,7 +1709,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // empty, prompts are settled, and mana pools drained at step end per
     // CR 106.4). Truncating here bounds journal growth to one turn until the
     // CR 733 settlement consumer defines the real retention window.
-    state.resolved_rules_journal = Default::default();
+    state.reset_resolved_rules_journal();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();
     // CR 118.9 + CR 601.2b + CR 400.7: Reset per-turn once-per-turn
@@ -1723,6 +1802,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // fresh each turn (mirrors the tap sibling).
     state.object_counter_placement_count_this_turn.clear();
     state.damage_dealt_this_turn.clear();
+    // CR 702.110b + CR 514: Clear the exploit ledger at cleanup.
+    state.creatures_exploited_this_turn.clear();
     // CR 702.173a + CR 514: Clear the Freerunning eligibility ledger at
     // cleanup. CR 702.173a's "was dealt combat damage this turn" predicate
     // is turn-scoped, so the ledger must reset on the turn boundary.
@@ -1806,16 +1887,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 302.6: At the start of a player's turn, any permanent they have
-    // controlled continuously since before this moment has now been under
-    // their control "since that player's most recent turn began" — clear
-    // summoning sickness.
     let active = state.active_player;
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        if obj.controller == active && obj.summoning_sick {
-            obj.summoning_sick = false;
-        }
-    }
+    clear_summoning_sickness_controlled_by(state, active);
 
     // CR 102.1 + CR 500.1: resolve each auto-pass boundary against the turn now
     // beginning. EndOfCurrentTurn clears at every turn start (its turn has
@@ -1839,6 +1912,38 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     });
 }
 
+/// CR 606.3: The "loyalty ability once per turn" limit is a property of the
+/// permanent ("no player has previously activated a loyalty ability of that
+/// permanent that turn"), not its controller. It resets at the start of every
+/// turn for every planeswalker regardless of who controls it.
+/// Objects whose count is already zero are not written, so they stay shared
+/// with clones of the state.
+fn reset_loyalty_activation_counts(state: &mut GameState) {
+    state.objects.update_where(
+        |_, obj| obj.loyalty_activations_this_turn != 0,
+        |_, obj| {
+            obj.loyalty_activations_this_turn = 0;
+        },
+    );
+}
+
+/// CR 302.6: At the start of a player's turn, any permanent they have
+/// controlled continuously since before this moment has now been under
+/// their control "since that player's most recent turn began" — clear
+/// summoning sickness.
+/// Objects the sweep does not change are not written, so they stay shared
+/// with clones of the state.
+fn clear_summoning_sickness_controlled_by(state: &mut GameState, active: PlayerId) {
+    state.objects.update_where(
+        |_, obj| obj.controller == active && obj.summoning_sick,
+        |_, obj| {
+            if obj.controller == active && obj.summoning_sick {
+                obj.summoning_sick = false;
+            }
+        },
+    );
+}
+
 /// CR 502.1 + CR 502.3: During the untap step, first the phasing turn-based
 /// action runs (CR 702.26a), then the active player untaps each permanent
 /// they control. CR 702.26m: If the untap step is skipped, phasing is also
@@ -1847,32 +1952,46 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
     execute_untap_with_choices(state, events, &HashSet::new());
 }
 
+/// CR 502.3 + CR 500.5: how completing the untap step ended, returned by
+/// [`begin_untap_or_subset_prompt`].
+#[derive(Debug)]
+pub enum UntapCompletion {
+    /// CR 502.3: a `MaxUntapPerType` cap is over its limit, so the active
+    /// player determines which permanents of the capped group untap. The untap
+    /// has not run.
+    ChooseSubset(Box<WaitingFor>),
+    /// The untap ran and the turn left the untap step.
+    Advanced,
+    /// The untap ran, but leaving the untap step ends the turn while a
+    /// resolution is live, so the leave waits for settlement (see
+    /// [`advance_phase_once`]). The step is still in progress; its untap must
+    /// not run again, and the leave is retried once the resolution settles.
+    LeaveDeferred,
+}
+
 /// CR 502.3: Bridge between the optional-decline prompt (`UntapChoice`) and the
 /// untap turn-based action. Given the permanents the player has chosen not to
 /// untap so far, this checks for a `MaxUntapPerType` cap whose eligible group
 /// still exceeds its limit. If one exists, it raises
 /// `WaitingFor::ChooseUntapSubset` so the active player directly determines
 /// which `max` permanents untap (CR 502.3); otherwise it performs the untap
-/// with the recorded declines and advances the phase. The caller continues
-/// `auto_advance` only when this returns `None` (no subset prompt raised).
-///
-/// Returns `Some(prompt)` if a bounded-subset selection is now pending, `None`
-/// if the untap already executed and the phase advanced.
+/// with the recorded declines and leaves the untap step, reporting whether the
+/// leave committed or was deferred (see [`UntapCompletion`]).
 pub fn begin_untap_or_subset_prompt(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     chosen_not_to_untap: HashSet<ObjectId>,
-) -> Option<WaitingFor> {
+) -> UntapCompletion {
     let active = state.active_player;
     if let Some((group, max)) = max_untap_subset_prompt(state, active, &chosen_not_to_untap) {
         // Persist the declines so the subset resolution can fold the unchosen
         // complement in alongside them when it finally executes the untap.
         state.pending_untap_declines = chosen_not_to_untap.into_iter().collect();
-        return Some(WaitingFor::ChooseUntapSubset {
+        return UntapCompletion::ChooseSubset(Box::new(WaitingFor::ChooseUntapSubset {
             player: active,
             group,
             max,
-        });
+        }));
     }
     execute_untap_with_choices(state, events, &chosen_not_to_untap);
     // CR 500.5: Untap completion owns one phase-entry hop. The production
@@ -1880,10 +1999,9 @@ pub fn begin_untap_or_subset_prompt(
     // skipped successor, so a bounded prospective unit cannot inherit that
     // loop authority through this helper.
     match advance_phase_once(state, events) {
-        AdvancePhaseOnce::Deferred => return None,
-        AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {}
+        AdvancePhaseOnce::Deferred => UntapCompletion::LeaveDeferred,
+        AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => UntapCompletion::Advanced,
     }
-    None
 }
 
 pub fn execute_untap_with_choices(
@@ -1891,11 +2009,19 @@ pub fn execute_untap_with_choices(
     events: &mut Vec<GameEvent>,
     chosen_not_to_untap: &HashSet<ObjectId>,
 ) {
-    // Phase any phased-out player back in at the start of their next turn.
-    // Player phasing is not formally governed by CR 702.26 (permanent-only);
-    // this mirrors the permanent behaviour so duration semantics line up
-    // with `Duration::UntilNextTurnOf` (also pruned at this step below).
-    super::phasing::execute_untap_step_player_phase_in(state, events);
+    // CR 500.8 + CR 500.9 + CR 500.10: an untap step an effect added — in an
+    // added beginning phase, directly after an untap step, or in a phase
+    // created to hold it — performs the untap step's turn-based actions, but
+    // no turn begins in it.
+    let begins_turn = !in_added_unit(state);
+
+    if begins_turn {
+        // Phase any phased-out player back in at the start of their next turn.
+        // Player phasing is not formally governed by CR 702.26 (permanent-only);
+        // this mirrors the permanent behaviour so duration semantics line up
+        // with `Duration::UntilNextTurnOf` (also pruned at this step below).
+        super::phasing::execute_untap_step_player_phase_in(state, events);
+    }
 
     // CR 502.1 + CR 702.26a: Phasing happens first, before any permanents
     // untap. Simultaneous phase-in + phase-out for the active player.
@@ -1903,90 +2029,13 @@ pub fn execute_untap_with_choices(
 
     let active = state.active_player;
 
-    // CR 514.2: Prune "until your next turn" transient effects for the active player.
-    super::layers::prune_until_next_turn_effects(state, active);
-    // CR 603.7b: A `WheneverEvent` delayed trigger with a stated "until your next
-    // turn" duration ends at the START of its controller's next turn (the untap
-    // step, CR 502.4 — before priority), not at cleanup (CR 514.2). This boundary
-    // coincides with the goad window it was designed around (CR 701.15a: "until the
-    // next turn of the controller"). It survived the creating turn's cleanup via
-    // the retain disjunct in `execute_cleanup`; remove it now that the controller's
-    // next turn has begun (`turn_number` strictly past the stamped creation floor).
-    {
-        use crate::types::ability::{
-            DelayedTriggerCondition as Cond, TurnGate, WheneverEventExpiry,
-        };
-        let turn_number = state.turn_number;
-        let mut survivors = Vec::new();
-        let mut expired = Vec::new();
-        for trigger in std::mem::take(&mut state.delayed_triggers) {
-            if matches!(
-                &trigger.condition,
-                Cond::WheneverEvent {
-                    expiry: WheneverEventExpiry::UntilControllersNextTurn {
-                        after: TurnGate::After(floor),
-                    },
-                    ..
-                } if trigger.controller == active && turn_number > *floor
-            ) {
-                expired.push(trigger);
-            } else {
-                survivors.push(trigger);
-            }
-        }
-        state.delayed_triggers = survivors;
-        for trigger in expired {
-            super::lifecycle::record_delayed_terminal(
-                trigger.provenance.firing(),
-                super::lifecycle::DelayedTerminalDisposition::CleanupExpired,
-            );
-        }
+    if begins_turn {
+        expire_next_turn_durations(state, active);
+    } else {
+        // CR 500.4: a duration that lasts until the untap step still ends in
+        // an added one; a turn deadline does not.
+        super::layers::prune_added_untap_step_casting_permissions(state, active);
     }
-    // CR 500.4 + CR 514.2: the untap-step seam for casting permissions — arms
-    // "until the end of your next turn" grants and expires both untap-step
-    // shapes ("until your next turn" and "until [its controller's] next untap
-    // step"). See `layers::prune_untap_step_casting_permissions`.
-    super::layers::prune_untap_step_casting_permissions(state, active);
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.replacement_definitions.retain(|r| {
-            !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
-        });
-    }
-    state.pending_damage_replacements.retain(|r| {
-        !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
-    });
-    // CR 514.2 + CR 500.7: Arm "until the end of the player's next turn"
-    // restrictions (Kang's power-up prohibition) when that player's next turn
-    // begins — convert to `EndOfTurn` so the cleanup-step prune (`execute_cleanup`)
-    // ends them at THIS turn's cleanup, persisting through the whole turn.
-    // Mirrors `prune_until_next_turn_effects` (layers.rs). NOTE: if the granted
-    // turn is SKIPPED/PREVENTED before its untap step, this conversion never runs
-    // and the restriction is never armed/pruned — a documented narrow edge shared
-    // with the analogous `Duration::UntilEndOfNextTurnOf` arming.
-    {
-        use crate::types::ability::GameRestriction;
-        for restriction in state.restrictions.iter_mut() {
-            if let GameRestriction::ProhibitActivity { expiry, .. } = restriction {
-                if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { player } if *player == active)
-                {
-                    *expiry = RestrictionExpiry::EndOfTurn;
-                }
-            }
-        }
-    }
-    state.restrictions.retain(|restriction| {
-        use crate::types::ability::GameRestriction;
-
-        match restriction {
-            GameRestriction::ProhibitActivity { expiry, .. } => {
-                !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { player } if *player == active)
-            }
-            // Not untap-anchored — CantEnterBattlefieldFrom expires at cleanup
-            // (CR 514.2), handled in the end-of-turn retain below.
-            GameRestriction::DamagePreventionDisabled { .. }
-            | GameRestriction::CantEnterBattlefieldFrom { .. } => true,
-        }
-    });
 
     // CR 502.3: Collect object IDs that have a CantUntap transient effect
     // (e.g., "doesn't untap during its controller's next untap step").
@@ -2166,6 +2215,89 @@ pub fn execute_untap_with_choices(
     // CR 502.3: Prune "until controller's next untap step" effects AFTER the untap
     // step has been processed, so the permanent skips exactly one untap.
     super::layers::prune_controller_untap_step_effects(state, active);
+}
+
+/// CR 611.2a: end or arm the durations whose deadline is the start of
+/// `active`'s turn, as that turn's untap step begins (with the untap-step
+/// casting-permission deadline, CR 500.4, which that seam also runs). An
+/// untap step an effect adds (CR 500.8 + CR 500.9 + CR 500.10) is not the
+/// start of a turn, so it runs none of these; it runs only
+/// `layers::prune_added_untap_step_casting_permissions`.
+fn expire_next_turn_durations(state: &mut GameState, active: PlayerId) {
+    // CR 611.2a: Prune "until your next turn" transient effects for the active player.
+    super::layers::prune_until_next_turn_effects(state, active);
+    // CR 603.7b: A `WheneverEvent` delayed trigger with a stated "until your next
+    // turn" duration ends at the START of its controller's next turn (the untap
+    // step, CR 502.4 — before priority), not at cleanup (CR 514.2). This boundary
+    // coincides with the goad window it was designed around (CR 701.15a: "until the
+    // next turn of the controller"). It survived the creating turn's cleanup via
+    // the retain disjunct in `execute_cleanup`; remove it now that the controller's
+    // next turn has begun (`turn_number` strictly past the stamped creation floor).
+    {
+        let turn_number = state.turn_number;
+        let mut survivors = Vec::new();
+        let mut expired = Vec::new();
+        for trigger in std::mem::take(&mut state.delayed_triggers) {
+            if matches!(
+                &trigger.condition,
+                DelayedTriggerCondition::WheneverEvent {
+                    expiry: WheneverEventExpiry::UntilControllersNextTurn {
+                        after: TurnGate::After(floor),
+                    },
+                    ..
+                } if trigger.controller == active && turn_number > *floor
+            ) {
+                expired.push(trigger);
+            } else {
+                survivors.push(trigger);
+            }
+        }
+        state.delayed_triggers = survivors;
+        for trigger in expired {
+            super::lifecycle::record_delayed_terminal(
+                trigger.provenance.firing(),
+                super::lifecycle::DelayedTerminalDisposition::CleanupExpired,
+            );
+        }
+    }
+    // CR 500.4 + CR 514.2 + CR 611.2a: the casting-permission seams of the
+    // untap step that begins a turn — arms "until the end of your next turn"
+    // grants, expires "until your next turn" (the turn start) and "until [its
+    // controller's] next untap step" (CR 500.4). See
+    // `layers::prune_untap_step_casting_permissions`.
+    super::layers::prune_untap_step_casting_permissions(state, active);
+    expire_live_replacement_definitions(
+        state,
+        |r| matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active),
+    );
+    state.pending_damage_replacements.retain(|r| {
+        !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
+    });
+    // CR 514.2 + CR 500.7: Arm "until the end of the player's next turn"
+    // restrictions (Kang's power-up prohibition) when that player's next turn
+    // begins — convert to `EndOfTurn` so the cleanup-step prune (`execute_cleanup`)
+    // ends them at THIS turn's cleanup, persisting through the whole turn.
+    // Mirrors `prune_until_next_turn_effects` (layers.rs). NOTE: if the granted
+    // turn is SKIPPED/PREVENTED before its untap step, this conversion never runs
+    // and the restriction is never armed/pruned — a documented narrow edge shared
+    // with the analogous `Duration::UntilEndOfNextTurnOf` arming.
+    for restriction in state.restrictions.iter_mut() {
+        if let GameRestriction::ProhibitActivity { expiry, .. } = restriction {
+            if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { player } if *player == active)
+            {
+                *expiry = RestrictionExpiry::EndOfTurn;
+            }
+        }
+    }
+    state.restrictions.retain(|restriction| match restriction {
+        GameRestriction::ProhibitActivity { expiry, .. } => {
+            !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { player } if *player == active)
+        }
+        // Not untap-anchored — CantEnterBattlefieldFrom expires at cleanup
+        // (CR 514.2), handled in the end-of-turn retain below.
+        GameRestriction::DamagePreventionDisabled { .. }
+        | GameRestriction::CantEnterBattlefieldFrom { .. } => true,
+    });
 }
 
 /// CR 502.3: Collect the active `MaxUntapPerType` restrictions (Smoke /
@@ -2676,16 +2808,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             Some(RestrictionExpiry::EndOfTurn | RestrictionExpiry::EndOfCombat)
         )
     };
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.replacement_definitions.retain(|r| !expires_at_eot(r));
-        // CR 514.2: Clean up turn-bound replacement definitions from the base
-        // definitions during the cleanup step so they do not persist. Turn-bound
-        // riders (the die-exile rider) are base-installed by
-        // `effects/add_target_replacement.rs`, so the base surface needs the same
-        // `expiry`-keyed prune; printed statics carry `expiry: None` and survive.
-        std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
-            .retain(|r| !expires_at_eot(r));
-    }
+    expire_end_of_turn_replacement_definitions(state, expires_at_eot);
     state
         .pending_damage_replacements
         .retain(|r| !expires_at_eot(r));
@@ -2843,19 +2966,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 514.1 + CR 402.2: Only the *active* player discards down to maximum hand size.
     // Non-active players keep their cards regardless of hand size until their own cleanup.
-    // If the active player has "no maximum hand size" (CR 402.2), skip the discard check.
-    let has_no_max = super::static_abilities::check_static_ability(
-        state,
-        StaticMode::NoMaximumHandSize,
-        &super::static_abilities::StaticCheckContext {
-            player_id: Some(active),
-            ..Default::default()
-        },
-    );
-
-    if !has_no_max {
-        let max_hand_size = compute_maximum_hand_size(state, active);
-
+    if let Some(max_hand_size) = maximum_hand_size(state, active) {
         let player = state
             .players
             .iter()
@@ -2879,16 +2990,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // deferred discard path so the protection holds regardless of discard).
     clear_cleanup_damage(state, events);
 
-    // CR 702.171b: "Once a permanent has become saddled, it stays saddled until
-    // the end of the turn or it leaves the battlefield." Clear the designation
-    // at cleanup (CR 514).
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        if obj.is_saddled {
-            // CR 702.171b: the designation (and the saddling-creature record) ends at end of turn.
-            obj.is_saddled = false;
-            obj.saddled_by.clear();
-        }
-    }
+    clear_saddled_designations(state);
 
     // CR 514.3a: "At this point, the game checks to see if any state-based
     // actions would be performed and/or ANY TRIGGERED ABILITIES ARE WAITING TO
@@ -3001,6 +3103,68 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     }
 
     None
+}
+
+/// Removes, from every object's live `replacement_definitions` and from its
+/// `base_replacement_definitions`, each definition `expires_at_eot` accepts.
+/// Called by `execute_cleanup` with its end-of-turn expiry predicate. Objects
+/// holding no such definition on either surface are not written, and a base
+/// list with nothing to remove is not reallocated, so both stay shared with
+/// clones of the state.
+fn expire_end_of_turn_replacement_definitions(
+    state: &mut GameState,
+    expires_at_eot: impl Fn(&ReplacementDefinition) -> bool,
+) {
+    state.objects.update_where(
+        |_, obj| {
+            obj.replacement_definitions.iter_all().any(&expires_at_eot)
+                || obj.base_replacement_definitions.iter().any(&expires_at_eot)
+        },
+        |_, obj| {
+            obj.replacement_definitions.retain(|r| !expires_at_eot(r));
+            // CR 514.2: Clean up turn-bound replacement definitions from the base
+            // definitions during the cleanup step so they do not persist. Turn-bound
+            // riders (the die-exile rider) are base-installed by
+            // `effects/add_target_replacement.rs`, so the base surface needs the same
+            // `expiry`-keyed prune; printed statics carry `expiry: None` and survive.
+            if obj.base_replacement_definitions.iter().any(&expires_at_eot) {
+                std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+                    .retain(|r| !expires_at_eot(r));
+            }
+        },
+    );
+}
+
+/// CR 702.171b: "Once a permanent has become saddled, it stays saddled until
+/// the end of the turn or it leaves the battlefield." Clear the designation
+/// at cleanup (CR 514).
+/// Objects that are not saddled are not written, so they stay shared with
+/// clones of the state.
+fn clear_saddled_designations(state: &mut GameState) {
+    state.objects.update_where(
+        |_, obj| obj.is_saddled,
+        |_, obj| {
+            if obj.is_saddled {
+                // CR 702.171b: the designation (and the saddling-creature record) ends at end of turn.
+                obj.is_saddled = false;
+                obj.saddled_by.clear();
+            }
+        },
+    );
+}
+
+/// CR 402.2 + CR 514.1: `player`'s maximum hand size, or `None` when they have no maximum hand
+/// size.
+pub(crate) fn maximum_hand_size(state: &GameState, player: PlayerId) -> Option<usize> {
+    let has_no_max = super::static_abilities::check_static_ability(
+        state,
+        StaticMode::NoMaximumHandSize,
+        &super::static_abilities::StaticCheckContext {
+            player_id: Some(player),
+            ..Default::default()
+        },
+    );
+    (!has_no_max).then(|| compute_maximum_hand_size(state, player))
 }
 
 /// CR 402.2 + CR 514.1: Compute the effective maximum hand size for a player.
@@ -3209,9 +3373,7 @@ fn step_skip(state: &GameState, step: Phase) -> Option<StepSkip> {
         // CR 614.10a + CR 614.1b: the static and one-shot "skip your draw step"
         // checks below are intentionally NOT exempted — those skip every draw.
         Phase::Draw => {
-            state.turn_number == 1
-                && first_player_skips_first_draw(state)
-                && state.extra_phase_resume.is_empty()
+            state.turn_number == 1 && first_player_skips_first_draw(state) && !in_added_unit(state)
         }
         Phase::Untap | Phase::Upkeep => false,
         Phase::PreCombatMain
@@ -3565,13 +3727,14 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 // CR 502.3: With no optional-decline candidates, either
                 // surface a required bounded `ChooseUntapSubset` prompt (a
                 // MaxUntapPerType cap is over its limit) or untap + advance.
-                // `begin_untap_or_subset_prompt` advances the phase itself
-                // when it untaps, so only fall through to `advance_phase`
-                // below when no subset prompt is raised.
-                if let Some(prompt) = begin_untap_or_subset_prompt(state, events, HashSet::new()) {
-                    return AutoAdvanceStep::waiting(prompt);
-                }
-                return AutoAdvanceStep::Continue;
+                // `begin_untap_or_subset_prompt` leaves the step itself when
+                // it untaps. A deferred leave stops the interpreter with the
+                // untap done: repeating this arm would run the untap again.
+                return match begin_untap_or_subset_prompt(state, events, HashSet::new()) {
+                    UntapCompletion::ChooseSubset(prompt) => AutoAdvanceStep::Waiting(prompt),
+                    UntapCompletion::Advanced => AutoAdvanceStep::Continue,
+                    UntapCompletion::LeaveDeferred => AutoAdvanceStep::Deferred,
+                };
             }
             // CR 502.4 / CR 117.3a: No player receives priority during the untap step.
             match advance_phase_once(state, events) {
@@ -3858,20 +4021,25 @@ mod tests {
     use crate::game::triggers::trigger_source_context_for_latch;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
-        DelayedTriggerLifetime, Duration, Effect, QuantityExpr, ResolvedAbility, TriggerDefinition,
+        AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChooseOneOfKind,
+        ContinuousModification, DelayedTriggerCondition, DelayedTriggerLifetime, Duration, Effect,
+        PlayFromExileProvenance, PlayerScope, ProhibitedActivity, QuantityExpr, ResolvedAbility,
+        RestrictionPlayerScope, TriggerDefinition,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::game_state::{
-        CastOccurrence, DelayedTrigger, PendingContinuation, SpellCastRecord, StackEntry,
-        StackEntryKind, StackResolutionPolicy, StepTally,
+        CastOccurrence, DelayedTrigger, PendingContinuation, PendingResolutionCompletion,
+        PersistentAxisMaterialization, SpellCastRecord, StackEntry, StackEntryKind,
+        StackResolutionPolicy, StepTally,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
     use crate::types::phase::{PhaseStop, PhaseStopScope, TurnSegment};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
-    use crate::types::zones::Zone;
+    use crate::types::zones::{EtbTapState, Zone};
     use crate::types::AbilityContinuationFrame;
     use std::sync::Arc;
 
@@ -3897,20 +4065,22 @@ mod tests {
         };
         use crate::types::counter::CounterMatch;
         let controller = state.objects[&object_id].controller;
-        state.add_transient_continuous_effect(
-            object_id,
-            controller,
-            Duration::ForAsLongAs {
-                condition: StaticCondition::RecipientHasCounters {
-                    counters: CounterMatch::OfType(CounterType::Stun),
-                    minimum: 1,
-                    maximum: None,
+        state
+            .add_transient_continuous_effect(
+                object_id,
+                controller,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientHasCounters {
+                        counters: CounterMatch::OfType(CounterType::Stun),
+                        minimum: 1,
+                        maximum: None,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: object_id },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-        )
+                TargetFilter::SpecificObject { id: object_id },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     #[test]
@@ -4137,9 +4307,10 @@ mod tests {
         state.turn_number = 2;
         state.steps_to_skip[PlayerId(0).0 as usize].insert(Phase::Upkeep, 1);
 
-        assert!(
-            begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new()).is_none()
-        );
+        assert!(matches!(
+            begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new()),
+            UntapCompletion::Advanced
+        ));
         assert_eq!(
             state.phase,
             Phase::Upkeep,
@@ -5244,7 +5415,7 @@ card into your hand at the beginning of your next end step.";
         // ordinary cleanup-exit boundary then empties the now-unretained mana.
         execute_cleanup(&mut state, &mut Vec::new());
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
-        assert_eq!(state.players[0].mana_pool.mana[0].expiry, None);
+        assert_eq!(state.players[0].mana_pool.unit_at(0).unwrap().expiry, None);
         advance_phase(&mut state, &mut Vec::new());
         assert_eq!(state.phase, Phase::Untap);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
@@ -5906,8 +6077,7 @@ card into your hand at the beginning of your next end step.";
             // the other), the unit's final color is the survivor.
             state.players[0]
                 .mana_pool
-                .mana
-                .first()
+                .unit_at(0)
                 .map(|u| u.color)
                 .expect("unit survived")
         }
@@ -7085,8 +7255,11 @@ card into your hand at the beginning of your next end step.";
         let creature_b = create_tapped_creature(&mut state, 3, "Bear B");
 
         let prompt = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new());
-        match prompt {
-            Some(WaitingFor::ChooseUntapSubset { player, group, max }) => {
+        let UntapCompletion::ChooseSubset(prompt) = prompt else {
+            panic!("expected ChooseUntapSubset prompt, got {prompt:?}");
+        };
+        match *prompt {
+            WaitingFor::ChooseUntapSubset { player, group, max } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(max, 1);
                 let mut g = group;
@@ -7135,7 +7308,7 @@ card into your hand at the beginning of your next end step.";
         }
         let resumed = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), skipped);
         assert!(
-            resumed.is_none(),
+            matches!(resumed, UntapCompletion::Advanced),
             "after the subset is resolved, untap executes and no further prompt is raised"
         );
 
@@ -7382,7 +7555,7 @@ card into your hand at the beginning of your next end step.";
         skipped.insert(creature_b);
         let resumed = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), skipped);
         assert!(
-            resumed.is_none(),
+            matches!(resumed, UntapCompletion::Advanced),
             "an empty untap subset resolves the step — no further prompt is raised"
         );
 
@@ -9276,7 +9449,10 @@ card into your hand at the beginning of your next end step.";
             "reach guard: the created phase is the unit in progress"
         );
 
-        assert!(begin_untap_or_subset_prompt(&mut state, &mut events, HashSet::new()).is_none());
+        assert!(matches!(
+            begin_untap_or_subset_prompt(&mut state, &mut events, HashSet::new()),
+            UntapCompletion::Advanced
+        ));
         assert!(
             !state.objects[&land].tapped,
             "CR 502.3: the untap step untaps"
@@ -9728,6 +9904,1097 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(state.active_player, PlayerId(0));
         assert_eq!(state.extra_phase_resume.len(), 1, "the unit is still open");
         assert!(events.is_empty());
+    }
+
+    /// CR 500.8 + CR 500.9 + CR 500.10: an untap step begins a turn exactly
+    /// when no added unit is open. A turn's own untap step has none, including
+    /// the first one after a turn whose cleanup step was followed by an added
+    /// unit and the one after an eliminated player's skipped turn (CR 800.4);
+    /// every added untap step has one.
+    #[test]
+    fn an_untap_step_begins_a_turn_exactly_when_no_added_unit_is_open() {
+        let untap_at = |state: &mut GameState| {
+            advance_phase_once(state, &mut Vec::new());
+            assert_eq!(
+                state.phase,
+                Phase::Untap,
+                "reach guard: an untap step began"
+            );
+        };
+        let at = |phase: Phase| {
+            let mut state = setup();
+            state.turn_number = 2;
+            state.phase = phase;
+            state
+        };
+
+        let mut natural = at(Phase::Cleanup);
+        untap_at(&mut natural);
+        assert!(!in_added_unit(&natural), "a turn's own untap step");
+
+        for segment in [
+            TurnSegment::CreatedPhase(Phase::Untap),
+            TurnSegment::Phase(PhaseGroup::Beginning),
+        ] {
+            let mut state = at(Phase::Cleanup);
+            state.extra_phases = vec![scheduled(Phase::Cleanup, segment)];
+            untap_at(&mut state);
+            assert!(
+                in_added_unit(&state),
+                "{segment:?} added after the cleanup step"
+            );
+            while state.turn_number == 2 {
+                advance_phase_once(&mut state, &mut Vec::new());
+            }
+            assert_eq!(
+                state.phase,
+                Phase::Untap,
+                "reach guard: the next turn began"
+            );
+            assert!(!in_added_unit(&state), "the turn after {segment:?}");
+        }
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1);
+        state.phase = Phase::PreCombatMain;
+        state.extra_phases = vec![scheduled(
+            Phase::PreCombatMain,
+            TurnSegment::CreatedPhase(Phase::Untap),
+        )];
+        untap_at(&mut state);
+        assert!(
+            in_added_unit(&state),
+            "reach guard: the skip starts inside a unit"
+        );
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+        skip_eliminated_active_turn(&mut state, &mut Vec::new());
+        assert_eq!(
+            (state.phase, state.active_player),
+            (Phase::Untap, PlayerId(2)),
+            "reach guard: the next player's turn began"
+        );
+        assert!(!in_added_unit(&state), "the turn after a skipped turn");
+
+        for (anchor, segment) in [
+            (
+                Phase::PreCombatMain,
+                TurnSegment::CreatedPhase(Phase::Untap),
+            ),
+            (
+                Phase::PostCombatMain,
+                TurnSegment::Phase(PhaseGroup::Beginning),
+            ),
+            (Phase::Untap, TurnSegment::Step(Phase::Untap)),
+        ] {
+            let mut state = at(anchor);
+            state.extra_phases = vec![scheduled(anchor, segment)];
+            untap_at(&mut state);
+            assert!(in_added_unit(&state), "{segment:?} added after {anchor:?}");
+        }
+    }
+
+    /// What P0's next turn beginning ends or arms, read off `state`.
+    #[derive(Debug, PartialEq)]
+    struct NextTurnDurations {
+        until_next_turn_effects: usize,
+        end_of_next_turn_effect: Duration,
+        goaded: bool,
+        detained: bool,
+        delayed_triggers: usize,
+        replacements: usize,
+        damage_replacements: usize,
+        next_turn_restrictions: usize,
+        end_of_next_turn_restriction: RestrictionExpiry,
+        phased_out: bool,
+        permissions: Vec<Option<Duration>>,
+    }
+
+    /// P0's untap step on turn 3, with one of each duration whose deadline is
+    /// P0's next turn in place, plus a play permission that lasts until the
+    /// next untap step. Returns the state and the objects to read.
+    fn next_turn_durations_board() -> (GameState, ObjectId, ObjectId) {
+        let mut state = setup();
+        state.turn_number = 3;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::Untap;
+        let foe = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Foe".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+        for duration in [
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ] {
+            state.add_transient_continuous_effect(
+                foe,
+                PlayerId(0),
+                duration,
+                TargetFilter::SpecificObject { id: foe },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            );
+        }
+        let obj = state.objects.get_mut(&foe).unwrap();
+        obj.goaded_by.insert(PlayerId(0));
+        obj.detained_by.insert(PlayerId(0));
+        // CR 603.7b: installed on P0's previous turn.
+        state.delayed_triggers.push(DelayedTrigger::new(
+            DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::DamageDone)),
+                expiry: WheneverEventExpiry::UntilControllersNextTurn {
+                    after: TurnGate::After(1),
+                },
+            },
+            Box::new(ResolvedAbility::new(Effect::NoOp, vec![], foe, PlayerId(0))),
+            PlayerId(0),
+            foe,
+            false,
+        ));
+        let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        shield.expiry = Some(RestrictionExpiry::UntilPlayerNextTurn {
+            player: PlayerId(0),
+        });
+        state
+            .objects
+            .get_mut(&foe)
+            .unwrap()
+            .replacement_definitions
+            .push(shield.clone());
+        state.pending_damage_replacements.push(shield);
+        for expiry in [
+            RestrictionExpiry::UntilPlayerNextTurn {
+                player: PlayerId(0),
+            },
+            RestrictionExpiry::UntilEndOfNextTurnOf {
+                player: PlayerId(0),
+            },
+        ] {
+            state.restrictions.push(GameRestriction::ProhibitActivity {
+                source: foe,
+                affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+                expiry,
+                activity: ProhibitedActivity::CastOnlyFromZones {
+                    allowed_zones: vec![Zone::Hand],
+                },
+            });
+        }
+        crate::game::phasing::phase_out_player(&mut state, PlayerId(0), &mut Vec::new());
+        for duration in [
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::AnyTurn,
+            },
+        ] {
+            state
+                .objects
+                .get_mut(&exiled)
+                .unwrap()
+                .casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    provenance: PlayFromExileProvenance::Impulse,
+                    mode: CardPlayMode::Play,
+                    duration,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    invalidation: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: None,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
+                    without_paying_mana_cost: false,
+                    land_enter_tapped: EtbTapState::Unspecified,
+                });
+        }
+        (state, foe, exiled)
+    }
+
+    fn next_turn_durations(
+        state: &GameState,
+        foe: ObjectId,
+        exiled: ObjectId,
+    ) -> NextTurnDurations {
+        let restriction_expiries: Vec<RestrictionExpiry> = state
+            .restrictions
+            .iter()
+            .filter_map(|restriction| match restriction {
+                GameRestriction::ProhibitActivity { expiry, .. } => Some(expiry.clone()),
+                GameRestriction::DamagePreventionDisabled { .. }
+                | GameRestriction::CantEnterBattlefieldFrom { .. } => None,
+            })
+            .collect();
+        let until_next_turn = |expiry: &Option<RestrictionExpiry>| {
+            matches!(expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { .. }))
+        };
+        NextTurnDurations {
+            until_next_turn_effects: state
+                .transient_continuous_effects
+                .iter()
+                .filter(|effect| matches!(effect.duration, Duration::UntilNextTurnOf { .. }))
+                .count(),
+            end_of_next_turn_effect: state
+                .transient_continuous_effects
+                .iter()
+                .map(|effect| effect.duration.clone())
+                .find(|duration| !matches!(duration, Duration::UntilNextTurnOf { .. }))
+                .expect("the end-of-next-turn effect is never removed at an untap step"),
+            goaded: state.objects[&foe].goaded_by.contains(&PlayerId(0)),
+            detained: state.objects[&foe].detained_by.contains(&PlayerId(0)),
+            delayed_triggers: state.delayed_triggers.len(),
+            replacements: state.objects[&foe]
+                .replacement_definitions
+                .as_slice()
+                .iter()
+                .filter(|r| until_next_turn(&r.expiry))
+                .count(),
+            damage_replacements: state
+                .pending_damage_replacements
+                .iter()
+                .filter(|r| until_next_turn(&r.expiry))
+                .count(),
+            next_turn_restrictions: restriction_expiries
+                .iter()
+                .filter(|expiry| matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { .. }))
+                .count(),
+            end_of_next_turn_restriction: restriction_expiries
+                .into_iter()
+                .find(|expiry| !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { .. }))
+                .expect("the end-of-next-turn restriction is never removed at an untap step"),
+            phased_out: state.players[0].is_phased_out(),
+            permissions: state.objects[&exiled]
+                .casting_permissions
+                .iter()
+                .map(|permission| permission.lifetime().duration.cloned())
+                .collect(),
+        }
+    }
+
+    /// CR 611.2a + CR 500.10: an untap step an effect added begins no turn, so
+    /// nothing whose deadline is P0's next turn ends or is armed in it — the
+    /// "until your next turn" effect, goad (CR 701.15a), detain (CR 701.35a),
+    /// the delayed trigger (CR 603.7b), the replacement and damage
+    /// replacement, the restriction, the player's phase-in, and the "until
+    /// your next turn" permission; the "until the end of your next turn"
+    /// effect, restriction and permission stay unarmed. CR 500.4: the
+    /// permission that lasts until the next untap step still ends there.
+    ///
+    /// Paired positive: the same board through the untap step that begins
+    /// P0's turn ends or arms every one of them.
+    #[test]
+    fn an_added_untap_step_ends_and_arms_no_next_turn_duration() {
+        let (mut added, foe, exiled) = next_turn_durations_board();
+        added.extra_phase_resume = vec![InsertedPhaseResume {
+            anchor: Phase::PreCombatMain,
+            segment: TurnSegment::CreatedPhase(Phase::Untap),
+            entry: ExtraPhaseId::default(),
+        }];
+        execute_untap(&mut added, &mut Vec::new());
+        assert_eq!(
+            next_turn_durations(&added, foe, exiled),
+            NextTurnDurations {
+                until_next_turn_effects: 1,
+                end_of_next_turn_effect: Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                goaded: true,
+                detained: true,
+                delayed_triggers: 1,
+                replacements: 1,
+                damage_replacements: 1,
+                next_turn_restrictions: 1,
+                end_of_next_turn_restriction: RestrictionExpiry::UntilEndOfNextTurnOf {
+                    player: PlayerId(0),
+                },
+                phased_out: true,
+                permissions: vec![
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }),
+                    Some(Duration::UntilEndOfNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }),
+                ],
+            }
+        );
+
+        let (mut natural, foe, exiled) = next_turn_durations_board();
+        execute_untap(&mut natural, &mut Vec::new());
+        assert_eq!(
+            next_turn_durations(&natural, foe, exiled),
+            NextTurnDurations {
+                until_next_turn_effects: 0,
+                end_of_next_turn_effect: Duration::UntilEndOfTurn,
+                goaded: false,
+                detained: false,
+                delayed_triggers: 0,
+                replacements: 0,
+                damage_replacements: 0,
+                next_turn_restrictions: 0,
+                end_of_next_turn_restriction: RestrictionExpiry::EndOfTurn,
+                phased_out: false,
+                permissions: vec![Some(Duration::UntilEndOfTurn)],
+            }
+        );
+    }
+
+    /// P0's untap step of a phase created after the cleanup step, so leaving it
+    /// ends the turn (CR 500.1 + CR 500.8), with a popped resolution carrier
+    /// live and a tapped permanent holding five stun counters (CR 122.1d: each
+    /// untap removes one instead of untapping it).
+    fn deferring_untap_board() -> (GameState, ObjectId) {
+        let mut state = setup();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::Untap;
+        state.extra_phase_resume = vec![InsertedPhaseResume {
+            anchor: Phase::Cleanup,
+            segment: TurnSegment::CreatedPhase(Phase::Untap),
+            entry: ExtraPhaseId::default(),
+        }];
+        let stunned = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stunned".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&stunned).unwrap();
+        obj.tapped = true;
+        obj.counters.insert(CounterType::Stun, 5);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: ObjectId(500),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(500),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    ObjectId(500),
+                    PlayerId(0),
+                )),
+            },
+        });
+        assert!(
+            phase_transition_requires_settlement(&state),
+            "reach guard: the carrier holds the turn boundary"
+        );
+        (state, stunned)
+    }
+
+    fn stun_counters(state: &GameState, id: ObjectId) -> u32 {
+        state.objects[&id]
+            .counters
+            .get(&CounterType::Stun)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// CR 502.3 + CR 500.5: completing an untap step whose leave defers reports
+    /// the deferral. The untap ran once, the step is still in progress, and the
+    /// settled retry leaves it without untapping again.
+    #[test]
+    fn an_untap_completion_whose_leave_defers_reports_the_deferral() {
+        let (mut state, stunned) = deferring_untap_board();
+
+        let completion = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new());
+
+        assert!(
+            matches!(completion, UntapCompletion::LeaveDeferred),
+            "got {completion:?}"
+        );
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!((state.phase, state.turn_number), (Phase::Untap, 2));
+
+        state.resolving_stack_entry = None;
+        assert!(matches!(
+            advance_phase_once(&mut state, &mut Vec::new()),
+            AdvancePhaseOnce::Entry(_)
+        ));
+        assert_eq!((state.turn_number, state.active_player), (3, PlayerId(1)));
+        assert_eq!(
+            stun_counters(&state, stunned),
+            4,
+            "the retry leaves the step"
+        );
+    }
+
+    /// CR 502.3 + CR 500.5: the turn interpreter stops at a deferred untap
+    /// leave and reports it, rather than repeating the untap step's actions.
+    /// One interpreter iteration is asserted directly, so a regression fails
+    /// here instead of looping in `auto_advance_reporting_deferral`.
+    #[test]
+    fn the_interpreter_stops_at_a_deferred_untap_leave() {
+        let (mut state, stunned) = deferring_untap_board();
+
+        let step = auto_advance_once(&mut state, &mut Vec::new());
+
+        assert!(matches!(step, AutoAdvanceStep::Deferred));
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!((state.phase, state.turn_number), (Phase::Untap, 2));
+    }
+
+    /// A tapped P0 permanent under a "may choose not to untap" static, so P0's
+    /// untap step raises the untap choice for it (CR 502.3).
+    fn optional_untap_permanent(state: &mut GameState) -> ObjectId {
+        let optional = create_object(
+            state,
+            CardId(2),
+            PlayerId(0),
+            "Optional".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&optional).unwrap().tapped = true;
+        install_may_choose_not_to_untap_static(state, optional);
+        optional
+    }
+
+    /// Raises P0's untap-choice prompt for `optional_untap_permanent` on
+    /// `state`, and answers it: `untap` says whether that permanent untaps.
+    /// The answer completes the untap step.
+    fn answer_untap_choice(state: &mut GameState, untap: bool) {
+        let optional = optional_untap_permanent(state);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::UntapChoice {
+            player: PlayerId(0),
+            candidates: vec![optional],
+            chosen_not_to_untap: Vec::new(),
+        };
+        apply(
+            state,
+            PlayerId(0),
+            GameAction::ChooseUntap {
+                object_id: optional,
+                untap,
+            },
+        )
+        .expect("the untap choice is accepted");
+    }
+
+    /// CR 502.3 + CR 608.2c + CR 502.4: an untap-choice answer whose leave
+    /// defers settles the finished carrier and retries the leave, so the turn
+    /// ends with no priority window in the untap step and without a second
+    /// untap.
+    #[test]
+    fn an_untap_choice_answer_whose_leave_defers_settles_and_leaves_the_step() {
+        let (mut state, stunned) = deferring_untap_board();
+
+        answer_untap_choice(&mut state, false);
+
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+        assert!(state.resolving_stack_entry.is_none(), "the carrier settled");
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+    }
+
+    /// CR 502.3 + CR 608.2g + CR 502.4: an untap-choice answer whose carrier's
+    /// resolution holds a completed Ripple marker retires the marker with its
+    /// carrier and retries the leave, so the turn ends with no priority window
+    /// in the untap step and without a second untap.
+    #[test]
+    fn an_untap_choice_answer_retires_a_completed_resolution_marker_and_leaves_the_step() {
+        let (mut state, stunned) = deferring_untap_board();
+        state.pending_resolution_completion = Some(PendingResolutionCompletion {
+            player: PlayerId(0),
+            source_id: ObjectId(500),
+            final_cast: None,
+        });
+
+        answer_untap_choice(&mut state, false);
+
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+        assert!(
+            state.pending_resolution_completion.is_none(),
+            "the marker retired"
+        );
+        assert!(state.resolving_stack_entry.is_none(), "the carrier settled");
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+    }
+
+    /// CR 502.3: an untap-choice answer whose leave defers while the carrier
+    /// cannot settle does not raise the choice again. Here the carrier's
+    /// resolution still has a parked continuation to run, so the retry is not
+    /// attempted and the answer leaves a provisional priority window (the
+    /// deferred cleanup-discard precedent), with the carrier still live. The
+    /// enclosing action's post-action pipeline runs at that window, and the
+    /// step is left, without untapping again, when the players next pass
+    /// priority.
+    #[test]
+    fn an_untap_choice_answer_whose_carrier_stays_live_keeps_a_provisional_window() {
+        let (mut state, stunned) = deferring_untap_board();
+        let continuation = PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(500),
+                PlayerId(0),
+            )),
+            &state,
+        );
+        state.park_ability_continuation(continuation);
+
+        answer_untap_choice(&mut state, false);
+
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+        assert_eq!((state.phase, state.turn_number), (Phase::Untap, 2));
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert!(
+            state.resolving_stack_entry.is_some() && state.active_ability_continuation().is_some(),
+            "the window is kept only while the carrier is live"
+        );
+
+        for seat in [PlayerId(0), PlayerId(1)] {
+            apply(&mut state, seat, GameAction::PassPriority).expect("pass priority");
+        }
+        assert_eq!((state.turn_number, state.active_player), (3, PlayerId(1)));
+        assert_eq!(
+            stun_counters(&state, stunned),
+            4,
+            "the step is left without a second untap"
+        );
+    }
+
+    /// CR 502.3 + CR 500.9: an untap-choice answer whose leave commits into
+    /// another added untap step, whose own leave ends the turn and defers,
+    /// settles that deferral too. Each untap step untaps once, and the answered
+    /// prompt is not offered again.
+    #[test]
+    fn an_untap_choice_answer_settles_a_later_untap_steps_deferred_leave() {
+        let (mut state, stunned) = deferring_untap_board();
+        state.extra_phases = vec![scheduled(Phase::Untap, TurnSegment::Step(Phase::Untap))];
+
+        answer_untap_choice(&mut state, true);
+
+        assert_eq!(
+            stun_counters(&state, stunned),
+            3,
+            "reach guard: both untap steps untapped"
+        );
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+        assert!(state.resolving_stack_entry.is_none(), "the carrier settled");
+    }
+
+    /// CR 502.3 + CR 514.1 + CR 514.2: an untap-choice answer in an untap step
+    /// added after the end step leaves it into the cleanup step, whose
+    /// transition defers while the carrier is live. The answer settles the
+    /// carrier and resumes the cleanup step, so its actions are performed
+    /// before the turn ends.
+    #[test]
+    fn an_untap_choice_answer_resumes_a_cleanup_step_its_run_deferred() {
+        let (mut state, stunned) = deferring_untap_board();
+        state.extra_phase_resume = vec![InsertedPhaseResume {
+            anchor: Phase::End,
+            segment: TurnSegment::Step(Phase::Untap),
+            entry: ExtraPhaseId::default(),
+        }];
+        let damaged = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Damaged".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&damaged).unwrap().damage_marked = 2;
+
+        answer_untap_choice(&mut state, false);
+
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+        assert_eq!(
+            state.objects[&damaged].damage_marked, 0,
+            "the cleanup step removed the damage"
+        );
+    }
+
+    /// CR 502.3 + CR 608.2c + CR 732.2a: the loop-collapse answer that
+    /// completes entry into an untap step added after the cleanup step, whose
+    /// leave ends the turn and defers while the carrier is live, settles the
+    /// carrier and retries the leave. The collapse applies once, the untap runs
+    /// once, and the spent collapse prompt is not handed back.
+    #[test]
+    fn a_loop_collapse_answer_settles_an_untap_steps_deferred_leave() {
+        let (mut state, stunned) = deferring_untap_board();
+        let life = state.players[0].life;
+        pause_created_untap_step_entry_on_a_collapse_prompt(&mut state);
+        assert!(phase_transition_requires_settlement(&state));
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the collapse count is accepted");
+
+        assert_eq!(state.players[0].life, life + 2, "the collapse applied");
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+        assert!(state.resolving_stack_entry.is_none(), "the carrier settled");
+    }
+
+    /// Moves a `deferring_untap_board` to P0's cleanup step of turn 2, with a
+    /// phase created for an untap step scheduled after it, so that step's
+    /// leave ends the turn (CR 500.1 + CR 500.8), and a `Life` loop-collapse
+    /// stash for P0. Then enters the untap step, whose entry pauses on P0's
+    /// collapse prompt (CR 732.2a).
+    fn pause_created_untap_step_entry_on_a_collapse_prompt(state: &mut GameState) {
+        schedule_created_untap_step_after_cleanup(state);
+        state.register_pending_materialization(
+            PlayerId(0),
+            PersistentAxisMaterialization::Life {
+                player: PlayerId(0),
+                per_cycle_delta: 1,
+            },
+        );
+        state.pending_materialization_count.insert(PlayerId(0), 3);
+        advance_phase_once(state, &mut Vec::new());
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::PayAmountChoice {
+                    resource: PayableResource::LoopCollapse { .. },
+                    ..
+                }
+            ),
+            "reach guard: the collapse prompt pauses entry into the untap step"
+        );
+        assert_eq!(state.phase, Phase::Untap);
+    }
+
+    /// Moves a `deferring_untap_board` to P0's cleanup step of turn 2, with a
+    /// phase created for an untap step scheduled after it, so that step's
+    /// leave ends the turn (CR 500.1 + CR 500.8).
+    fn schedule_created_untap_step_after_cleanup(state: &mut GameState) {
+        state.phase = Phase::Cleanup;
+        state.extra_phase_resume.clear();
+        state.extra_phases = vec![scheduled(
+            Phase::Cleanup,
+            TurnSegment::CreatedPhase(Phase::Untap),
+        )];
+    }
+
+    /// Enters the created untap step, whose entry pauses on the step-end
+    /// drain's prompt, then runs the turn interpreter once, as the action
+    /// pipeline does. That run records the turn-based actions and triggers the
+    /// completed entry will still owe (CR 117.3a).
+    fn pause_created_untap_step_entry_owing_its_resume(state: &mut GameState) {
+        advance_phase_once(state, &mut Vec::new());
+        let prompt = auto_advance(state, &mut Vec::new());
+        assert_eq!(prompt, state.waiting_for);
+        assert_eq!(state.phase, Phase::Untap);
+        assert!(
+            state.pending_phase_transition_progress.is_some(),
+            "reach guard: the step-end drain pauses entry into the untap step"
+        );
+        assert_eq!(
+            state.deferred_step_trigger_resume,
+            Some(Phase::Untap),
+            "reach guard: the paused entry owes its resume"
+        );
+    }
+
+    /// CR 616.1: two `Retain` handlers for P0, each matching one of P0's two
+    /// unspent units, so the step-end drain pauses on P0's ordering choice.
+    fn add_two_step_end_retention_handlers_for_p0(state: &mut GameState) {
+        for (card, color) in [
+            (61, crate::types::mana::ManaColor::Green),
+            (62, crate::types::mana::ManaColor::Blue),
+        ] {
+            let source = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Retention Source {card}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .static_definitions
+                .push(
+                    crate::types::ability::StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                        filter: Some(color),
+                        action: crate::types::mana::StepEndManaAction::Retain,
+                    })
+                    .affected(TargetFilter::Controller),
+                );
+        }
+        for (unit, mana) in [
+            (699, crate::types::mana::ManaType::Green),
+            (698, crate::types::mana::ManaType::Blue),
+        ] {
+            state.players[0]
+                .mana_pool
+                .add(crate::types::mana::ManaUnit::new(
+                    mana,
+                    ObjectId(unit),
+                    false,
+                    Vec::new(),
+                ));
+        }
+    }
+
+    /// Mana burn (Old School 93/94): P1's unspent mana burns as the ending
+    /// phase ends, and a P0 replacement doubles that loss and then runs a
+    /// branch prompt as its substitute, so the step-end drain waits on that
+    /// substitute (CR 614.6).
+    fn add_mana_burn_with_a_paused_substitute(state: &mut GameState) {
+        let gain = |value| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let mut substitute = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+            .quantity_modification(crate::types::ability::QuantityModification::DOUBLE)
+            .description("Double, then choose a gain".to_string())
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: crate::types::ability::PlayerFilter::Controller,
+                    branches: vec![gain(1), gain(2)],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ));
+        substitute.valid_player = Some(crate::types::ability::ReplacementPlayerScope::Opponent);
+        let host = create_object(
+            state,
+            CardId(63),
+            PlayerId(0),
+            "Burn Replacements".to_string(),
+            Zone::Battlefield,
+        );
+        let host = state.objects.get_mut(&host).unwrap();
+        host.replacement_definitions.push(substitute.clone());
+        Arc::make_mut(&mut host.base_replacement_definitions).push(substitute);
+        state.format_config = crate::types::format::FormatConfig::for_custom_rules(
+            &crate::types::custom_format::old_school_93_94().rules,
+        );
+        for unit in [690, 691] {
+            state.players[1]
+                .mana_pool
+                .add(crate::types::mana::ManaUnit::new(
+                    crate::types::mana::ManaType::Red,
+                    ObjectId(unit),
+                    false,
+                    Vec::new(),
+                ));
+        }
+    }
+
+    /// CR 502.3 + CR 608.2c + CR 616.1: the step-end mana choice that completes
+    /// entry into an untap step added after the cleanup step, whose leave ends
+    /// the turn and defers while the carrier is live, settles the carrier and
+    /// retries the leave. The untap runs once, and no priority window is left
+    /// in the untap step: the next turn's own untap step is entered, where the
+    /// same choice pauses its entry again.
+    #[test]
+    fn a_step_end_mana_choice_answer_settles_an_untap_steps_deferred_leave() {
+        let (mut state, stunned) = deferring_untap_board();
+        schedule_created_untap_step_after_cleanup(&mut state);
+        add_two_step_end_retention_handlers_for_p0(&mut state);
+        pause_created_untap_step_entry_owing_its_resume(&mut state);
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "reach guard: P0's step-end mana choice pauses the entry"
+        );
+        assert!(
+            state.resolving_stack_entry.is_some(),
+            "reach guard: the carrier is live"
+        );
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("the ordering choice is accepted");
+
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Untap)
+        );
+        assert!(state.resolving_stack_entry.is_none(), "the carrier settled");
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "the next turn's untap step pauses on the same choice"
+        );
+    }
+
+    /// CR 502.3 + CR 608.2c + CR 614.6: the answer to a mana-burn substitute's
+    /// prompt that completes entry into an untap step added after the cleanup
+    /// step, whose leave ends the turn and defers while the carrier is live,
+    /// settles the carrier and retries the leave. The substitute runs once, the
+    /// untap runs once, and no priority window is left in the untap step.
+    #[test]
+    fn a_mana_burn_substitute_answer_settles_an_untap_steps_deferred_leave() {
+        let (mut state, stunned) = deferring_untap_board();
+        schedule_created_untap_step_after_cleanup(&mut state);
+        add_mana_burn_with_a_paused_substitute(&mut state);
+        let life = state.players[0].life;
+        pause_created_untap_step_entry_owing_its_resume(&mut state);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "reach guard: the burn's substitute pauses the entry"
+        );
+        assert!(
+            state.resolving_stack_entry.is_some(),
+            "reach guard: the carrier is live"
+        );
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseBranch { index: 1 },
+        )
+        .expect("the branch is accepted");
+
+        assert_eq!(state.players[0].life, life + 2, "the substitute ran once");
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+        assert!(state.resolving_stack_entry.is_none(), "the carrier settled");
+    }
+
+    /// Reach guard: leaving the step in progress ends the turn (CR 500.1 +
+    /// CR 500.8), and nothing live holds the turn boundary, so the leave
+    /// commits and the next turn begins.
+    fn assert_the_leave_commits_and_ends_the_turn(state: &GameState) {
+        assert!(
+            ScheduledSuccessor::plan(state, state.phase).ends_turn(),
+            "reach guard: leaving the {:?} step ends the turn",
+            state.phase
+        );
+        assert!(
+            !phase_transition_requires_settlement(state),
+            "reach guard: nothing live holds the turn boundary"
+        );
+    }
+
+    /// Raises the untap step's prompt through the turn interpreter's untap
+    /// arm and installs it, as the action pipeline does.
+    fn raise_untap_step_prompt(state: &mut GameState) {
+        let prompt = auto_advance(state, &mut Vec::new());
+        crate::game::public_state::sync_waiting_for(state, &prompt);
+    }
+
+    /// CR 502.3 + CR 500.1 + CR 500.8: an untap-choice answer in an untap step
+    /// added after the cleanup step, whose leave ends the turn with nothing
+    /// live, commits the leave, and the next turn begins from a settled
+    /// Priority window rather than with the answered prompt standing. The
+    /// untap runs once.
+    #[test]
+    fn an_untap_choice_answer_whose_leave_ends_the_turn_begins_the_next_turn() {
+        let (mut state, stunned) = deferring_untap_board();
+        state.resolving_stack_entry = None;
+        let optional = optional_untap_permanent(&mut state);
+        raise_untap_step_prompt(&mut state);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::UntapChoice { .. }),
+            "reach guard: the untap choice is the waiting state, got {:?}",
+            state.waiting_for
+        );
+        assert_the_leave_commits_and_ends_the_turn(&state);
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseUntap {
+                object_id: optional,
+                untap: false,
+            },
+        )
+        .expect("the untap choice is accepted");
+
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+    }
+
+    /// CR 502.3 + CR 500.1 + CR 500.8: an untap-subset answer in an untap step
+    /// added after the cleanup step, whose leave ends the turn with nothing
+    /// live, commits the leave, and the next turn begins from a settled
+    /// Priority window rather than with the answered prompt standing. The
+    /// chosen creature untaps, the other stays tapped, and the untap runs
+    /// once.
+    #[test]
+    fn an_untap_subset_answer_whose_leave_ends_the_turn_begins_the_next_turn() {
+        let (mut state, stunned) = deferring_untap_board();
+        state.resolving_stack_entry = None;
+        let smoke = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Smoke".to_string(),
+            Zone::Battlefield,
+        );
+        install_max_untap_one_creature_static(&mut state, smoke);
+        let bear_a = create_tapped_creature(&mut state, 3, "Bear A");
+        let bear_b = create_tapped_creature(&mut state, 4, "Bear B");
+        raise_untap_step_prompt(&mut state);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseUntapSubset { .. }),
+            "reach guard: the untap subset choice is the waiting state, got {:?}",
+            state.waiting_for
+        );
+        assert_the_leave_commits_and_ends_the_turn(&state);
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![bear_b],
+            },
+        )
+        .expect("the untap subset is accepted");
+
+        assert!(!state.objects[&bear_b].tapped, "the chosen creature untaps");
+        assert!(state.objects[&bear_a].tapped, "the other stays tapped");
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+    }
+
+    /// CR 732.2a + CR 500.1 + CR 500.8: the loop-collapse answer that completes
+    /// entry into an untap step added after the cleanup step, whose leave ends
+    /// the turn with nothing live, commits the leave, and the next turn begins
+    /// from a settled Priority window rather than with the answered collapse
+    /// prompt standing. The collapse applies once, and the untap runs once.
+    #[test]
+    fn a_loop_collapse_answer_whose_untap_leave_ends_the_turn_begins_the_next_turn() {
+        let (mut state, stunned) = deferring_untap_board();
+        state.resolving_stack_entry = None;
+        let life = state.players[0].life;
+        pause_created_untap_step_entry_on_a_collapse_prompt(&mut state);
+        assert_the_leave_commits_and_ends_the_turn(&state);
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the collapse count is accepted");
+
+        assert_eq!(state.players[0].life, life + 2, "the collapse applied");
+        assert_eq!(stun_counters(&state, stunned), 4, "the untap ran once");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
+    }
+
+    /// CR 732.2a + CR 500.1: the sibling of the untap leave above. The
+    /// loop-collapse answer that completes entry into the cleanup step, whose
+    /// leave ends the turn with nothing live, commits the leave, and the next
+    /// turn begins from a settled Priority window rather than with the
+    /// answered collapse prompt standing.
+    #[test]
+    fn a_loop_collapse_answer_whose_cleanup_leave_ends_the_turn_begins_the_next_turn() {
+        let mut state = setup();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::End;
+        state.register_pending_materialization(
+            PlayerId(0),
+            PersistentAxisMaterialization::Life {
+                player: PlayerId(0),
+                per_cycle_delta: 1,
+            },
+        );
+        state.pending_materialization_count.insert(PlayerId(0), 3);
+        let life = state.players[0].life;
+        advance_phase_once(&mut state, &mut Vec::new());
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::PayAmountChoice {
+                    resource: PayableResource::LoopCollapse { .. },
+                    ..
+                }
+            ),
+            "reach guard: the collapse prompt pauses entry into the cleanup step"
+        );
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert_the_leave_commits_and_ends_the_turn(&state);
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the collapse count is accepted");
+
+        assert_eq!(state.players[0].life, life + 2, "the collapse applied");
+        assert_eq!(
+            (state.turn_number, state.active_player, state.phase),
+            (3, PlayerId(1), Phase::Upkeep)
+        );
     }
 
     /// CR 500.10 + CR 500.11: an end step added after a main phase creates an
@@ -12350,3 +13617,477 @@ card into your hand at the beginning of your next end step.";
 #[cfg(test)]
 #[path = "turns_declare_attackers_wedge_tests.rs"]
 mod declare_attackers_wedge_tests;
+
+/// Per-site tests for the guarded object sweeps in this file
+/// (`expire_live_replacement_definitions` for both of its call-site
+/// predicates, `reset_loyalty_activation_counts`,
+/// `clear_summoning_sickness_controlled_by`,
+/// `expire_end_of_turn_replacement_definitions`,
+/// `clear_saddled_designations`): a sharing witness, a targeted test and a
+/// reference-equality test against the BASE-shaped unguarded loop for each,
+/// plus the call-site pins for the helpers extracted from larger functions.
+#[cfg(test)]
+mod object_sweep_sharing_tests {
+    use super::*;
+    use crate::types::object_map::sweep_test_support::{
+        assert_sweep_keeps_store_shared, assert_sweep_matches_reference, object_mut,
+        run_sweep_targeting, state_with_objects,
+    };
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::zones::Zone;
+    use std::sync::Arc;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    /// Four battlefield permanents, two per player.
+    fn battlefield_fixture() -> (GameState, Vec<ObjectId>) {
+        state_with_objects(&[
+            (P0, Zone::Battlefield),
+            (P1, Zone::Battlefield),
+            (P0, Zone::Battlefield),
+            (P1, Zone::Battlefield),
+        ])
+    }
+
+    /// A replacement definition with the given expiry.
+    fn expiring(expiry: RestrictionExpiry) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved).expiry(expiry)
+    }
+
+    /// A replacement definition with no expiry (a printed static's shape).
+    fn permanent_definition() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+    }
+
+    /// Pushes `def` onto the live replacement definitions of `id`.
+    fn push_live(state: &mut GameState, id: ObjectId, def: ReplacementDefinition) {
+        object_mut(state, id).replacement_definitions.push(def);
+    }
+
+    /// Pushes `def` onto the base replacement definitions of `id`.
+    fn push_base(state: &mut GameState, id: ObjectId, def: ReplacementDefinition) {
+        Arc::make_mut(&mut object_mut(state, id).base_replacement_definitions).push(def);
+    }
+
+    // ---- S6: expire_live_replacement_definitions, end-of-combat predicate ----
+
+    /// The S6 call-site predicate from `complete_end_combat_teardown`.
+    fn end_of_combat_expires(r: &ReplacementDefinition) -> bool {
+        matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat))
+    }
+
+    /// BASE-shaped unguarded end-of-combat sweep.
+    fn reference_expire_end_of_combat(state: &mut GameState) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            obj.replacement_definitions
+                .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+        }
+    }
+
+    /// Sharing witness: definitions exist, but none expires at end of combat
+    /// on the live surface (one does on the base surface, which this helper
+    /// never reads).
+    #[test]
+    fn end_of_combat_expiry_without_live_expiring_definitions_keeps_store_shared() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], expiring(RestrictionExpiry::EndOfTurn));
+        push_base(&mut state, ids[1], expiring(RestrictionExpiry::EndOfCombat));
+        assert_sweep_keeps_store_shared(state, |state| {
+            expire_live_replacement_definitions(state, end_of_combat_expires)
+        });
+    }
+
+    /// Targeted test: only the holder of the expiring definition is copied.
+    #[test]
+    fn end_of_combat_expiry_copies_only_the_holder() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[2], expiring(RestrictionExpiry::EndOfCombat));
+        let (before, after) = run_sweep_targeting(state, ids[2], |state| {
+            expire_live_replacement_definitions(state, end_of_combat_expires)
+        });
+        assert_eq!(before.objects[&ids[2]].replacement_definitions.len(), 1);
+        assert!(after.objects[&ids[2]].replacement_definitions.is_empty());
+    }
+
+    /// Reference equality; the base-held expiring definition shows the base
+    /// surface is left alone by both.
+    #[test]
+    fn end_of_combat_expiry_matches_unguarded_sweep() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], expiring(RestrictionExpiry::EndOfCombat));
+        push_live(&mut state, ids[1], expiring(RestrictionExpiry::EndOfCombat));
+        push_live(&mut state, ids[1], expiring(RestrictionExpiry::EndOfTurn));
+        push_live(&mut state, ids[2], expiring(RestrictionExpiry::EndOfTurn));
+        push_base(&mut state, ids[3], expiring(RestrictionExpiry::EndOfCombat));
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| expire_live_replacement_definitions(state, end_of_combat_expires),
+            reference_expire_end_of_combat,
+        );
+    }
+
+    // ---- S7: expire_live_replacement_definitions, next-turn predicate ----
+
+    /// The S7 call-site predicate from `expire_next_turn_durations`.
+    fn next_turn_expires(active: PlayerId) -> impl Fn(&ReplacementDefinition) -> bool {
+        move |r| {
+            matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player })
+            if player == active)
+        }
+    }
+
+    /// BASE-shaped unguarded "until that player's next turn" sweep.
+    fn reference_expire_next_turn(state: &mut GameState, active: PlayerId) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            obj.replacement_definitions.retain(|r| {
+                !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player })
+                if player == active)
+            });
+        }
+    }
+
+    /// "Until `player`'s next turn".
+    fn until_next_turn_of(player: PlayerId) -> ReplacementDefinition {
+        expiring(RestrictionExpiry::UntilPlayerNextTurn { player })
+    }
+
+    /// Sharing witness: the only live next-turn definition is keyed to the
+    /// other player; a base-held one for the active player is never read.
+    #[test]
+    fn next_turn_expiry_without_live_expiring_definitions_keeps_store_shared() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], until_next_turn_of(P1));
+        push_base(&mut state, ids[1], until_next_turn_of(P0));
+        assert_sweep_keeps_store_shared(state, |state| {
+            expire_live_replacement_definitions(state, next_turn_expires(P0))
+        });
+    }
+
+    /// Targeted test: only the holder of the expiring definition is copied.
+    #[test]
+    fn next_turn_expiry_copies_only_the_holder() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[3], until_next_turn_of(P0));
+        let (before, after) = run_sweep_targeting(state, ids[3], |state| {
+            expire_live_replacement_definitions(state, next_turn_expires(P0))
+        });
+        assert_eq!(before.objects[&ids[3]].replacement_definitions.len(), 1);
+        assert!(after.objects[&ids[3]].replacement_definitions.is_empty());
+    }
+
+    /// Reference equality; the base-held expiring definition shows the base
+    /// surface is left alone by both.
+    #[test]
+    fn next_turn_expiry_matches_unguarded_sweep() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], until_next_turn_of(P0));
+        push_live(&mut state, ids[1], until_next_turn_of(P0));
+        push_live(&mut state, ids[1], until_next_turn_of(P1));
+        push_live(&mut state, ids[2], until_next_turn_of(P1));
+        push_base(&mut state, ids[3], until_next_turn_of(P0));
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| expire_live_replacement_definitions(state, next_turn_expires(P0)),
+            |state| reference_expire_next_turn(state, P0),
+        );
+    }
+
+    // ---- S8: reset_loyalty_activation_counts ----
+
+    /// BASE-shaped unguarded loyalty-count reset.
+    fn reference_reset_loyalty_activation_counts(state: &mut GameState) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            obj.loyalty_activations_this_turn = 0;
+        }
+    }
+
+    /// Sharing witness: every loyalty activation count is already zero.
+    #[test]
+    fn loyalty_reset_with_zero_counts_keeps_store_shared() {
+        let (state, ids) = battlefield_fixture();
+        assert!(ids
+            .iter()
+            .all(|id| state.objects[id].loyalty_activations_this_turn == 0));
+        assert_sweep_keeps_store_shared(state, reset_loyalty_activation_counts);
+    }
+
+    /// Targeted test: only the planeswalker that activated is copied.
+    #[test]
+    fn loyalty_reset_copies_only_the_activated_permanent() {
+        let (mut state, ids) = battlefield_fixture();
+        object_mut(&mut state, ids[1]).loyalty_activations_this_turn = 1;
+        let (before, after) = run_sweep_targeting(state, ids[1], reset_loyalty_activation_counts);
+        assert_eq!(before.objects[&ids[1]].loyalty_activations_this_turn, 1);
+        assert_eq!(after.objects[&ids[1]].loyalty_activations_this_turn, 0);
+    }
+
+    /// Reference equality, with permanents of both controllers reset.
+    #[test]
+    fn loyalty_reset_matches_unguarded_sweep() {
+        let (mut state, ids) = battlefield_fixture();
+        object_mut(&mut state, ids[0]).loyalty_activations_this_turn = 1;
+        object_mut(&mut state, ids[1]).loyalty_activations_this_turn = 2;
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            reset_loyalty_activation_counts,
+            reference_reset_loyalty_activation_counts,
+        );
+    }
+
+    // ---- S9: clear_summoning_sickness_controlled_by ----
+
+    /// BASE-shaped unguarded summoning-sickness clear.
+    fn reference_clear_summoning_sickness(state: &mut GameState, active: PlayerId) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            if obj.controller == active && obj.summoning_sick {
+                obj.summoning_sick = false;
+            }
+        }
+    }
+
+    /// Sets the summoning sickness of every object in `ids` to `sick`.
+    fn set_sick(state: &mut GameState, ids: &[ObjectId], sick: bool) {
+        for id in ids {
+            object_mut(state, *id).summoning_sick = sick;
+        }
+    }
+
+    /// Sharing witness: only the other player's permanents are sick.
+    #[test]
+    fn summoning_sickness_clear_without_sick_permanents_keeps_store_shared() {
+        let (mut state, ids) = battlefield_fixture();
+        set_sick(&mut state, &ids, false);
+        set_sick(&mut state, &[ids[1], ids[3]], true);
+        assert_sweep_keeps_store_shared(state, |state| {
+            clear_summoning_sickness_controlled_by(state, P0)
+        });
+    }
+
+    /// Targeted test: only the active player's sick permanent is copied.
+    #[test]
+    fn summoning_sickness_clear_copies_only_the_sick_permanent() {
+        let (mut state, ids) = battlefield_fixture();
+        set_sick(&mut state, &ids, false);
+        set_sick(&mut state, &[ids[2]], true);
+        let (before, after) = run_sweep_targeting(state, ids[2], |state| {
+            clear_summoning_sickness_controlled_by(state, P0)
+        });
+        assert!(before.objects[&ids[2]].summoning_sick);
+        assert!(!after.objects[&ids[2]].summoning_sick);
+    }
+
+    /// Reference equality, with the other player's sick permanents kept.
+    #[test]
+    fn summoning_sickness_clear_matches_unguarded_sweep() {
+        let (mut state, ids) = battlefield_fixture();
+        set_sick(&mut state, &ids, true);
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[2]],
+            |state| clear_summoning_sickness_controlled_by(state, P0),
+            |state| reference_clear_summoning_sickness(state, P0),
+        );
+    }
+
+    // ---- S10: clear_saddled_designations ----
+
+    /// BASE-shaped unguarded saddle clear.
+    fn reference_clear_saddled_designations(state: &mut GameState) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            if obj.is_saddled {
+                obj.is_saddled = false;
+                obj.saddled_by.clear();
+            }
+        }
+    }
+
+    /// Saddles `mount` with `rider`.
+    fn saddle(state: &mut GameState, mount: ObjectId, rider: ObjectId) {
+        let obj = object_mut(state, mount);
+        obj.is_saddled = true;
+        obj.saddled_by.push(rider);
+    }
+
+    /// Sharing witness: nothing is saddled.
+    #[test]
+    fn saddle_clear_without_saddled_permanents_keeps_store_shared() {
+        let (state, _) = battlefield_fixture();
+        assert_sweep_keeps_store_shared(state, clear_saddled_designations);
+    }
+
+    /// Targeted test: only the saddled permanent is copied.
+    #[test]
+    fn saddle_clear_copies_only_the_saddled_permanent() {
+        let (mut state, ids) = battlefield_fixture();
+        saddle(&mut state, ids[0], ids[2]);
+        let (before, after) = run_sweep_targeting(state, ids[0], clear_saddled_designations);
+        assert!(before.objects[&ids[0]].is_saddled);
+        assert!(!after.objects[&ids[0]].is_saddled);
+        assert!(after.objects[&ids[0]].saddled_by.is_empty());
+    }
+
+    /// Reference equality.
+    #[test]
+    fn saddle_clear_matches_unguarded_sweep() {
+        let (mut state, ids) = battlefield_fixture();
+        saddle(&mut state, ids[0], ids[2]);
+        saddle(&mut state, ids[1], ids[3]);
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            clear_saddled_designations,
+            reference_clear_saddled_designations,
+        );
+    }
+
+    // ---- S11: expire_end_of_turn_replacement_definitions ----
+
+    /// The S11 call-site predicate from `execute_cleanup`.
+    fn end_of_turn_expires(r: &ReplacementDefinition) -> bool {
+        matches!(
+            r.expiry,
+            Some(RestrictionExpiry::EndOfTurn | RestrictionExpiry::EndOfCombat)
+        )
+    }
+
+    /// BASE-shaped unguarded end-of-turn sweep, including the unconditional
+    /// base-list `make_mut`.
+    fn reference_expire_end_of_turn(state: &mut GameState) {
+        for obj in state.objects.iter_mut().map(|(_, v)| v) {
+            obj.replacement_definitions
+                .retain(|r| !end_of_turn_expires(r));
+            std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+                .retain(|r| !end_of_turn_expires(r));
+        }
+    }
+
+    /// Sharing witness: both surfaces hold definitions, none expiring.
+    #[test]
+    fn end_of_turn_expiry_without_expiring_definitions_keeps_store_shared() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], permanent_definition());
+        push_base(&mut state, ids[1], permanent_definition());
+        push_live(&mut state, ids[2], until_next_turn_of(P0));
+        assert_sweep_keeps_store_shared(state, |state| {
+            expire_end_of_turn_replacement_definitions(state, end_of_turn_expires)
+        });
+    }
+
+    /// Targeted test: only the holder of the expiring definition is copied.
+    #[test]
+    fn end_of_turn_expiry_copies_only_the_holder() {
+        let (mut state, ids) = battlefield_fixture();
+        push_base(&mut state, ids[1], expiring(RestrictionExpiry::EndOfTurn));
+        let (before, after) = run_sweep_targeting(state, ids[1], |state| {
+            expire_end_of_turn_replacement_definitions(state, end_of_turn_expires)
+        });
+        assert_eq!(
+            before.objects[&ids[1]].base_replacement_definitions.len(),
+            1
+        );
+        assert!(after.objects[&ids[1]]
+            .base_replacement_definitions
+            .is_empty());
+    }
+
+    /// Reference equality, with one object per disjunct of the guard
+    /// (expiring definition only on the live surface; only on the base
+    /// surface) and an object holding only non-expiring definitions.
+    #[test]
+    fn end_of_turn_expiry_matches_unguarded_sweep() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], expiring(RestrictionExpiry::EndOfTurn));
+        push_base(&mut state, ids[0], permanent_definition());
+        push_base(&mut state, ids[1], expiring(RestrictionExpiry::EndOfCombat));
+        push_live(&mut state, ids[1], permanent_definition());
+        push_live(&mut state, ids[2], permanent_definition());
+        push_base(&mut state, ids[2], permanent_definition());
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| expire_end_of_turn_replacement_definitions(state, end_of_turn_expires),
+            reference_expire_end_of_turn,
+        );
+    }
+
+    /// The inner guard: an object swept for its live definitions keeps its
+    /// base list shared when nothing in that list expires.
+    #[test]
+    fn end_of_turn_expiry_leaves_an_unaffected_base_list_shared() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], expiring(RestrictionExpiry::EndOfTurn));
+        push_base(&mut state, ids[0], permanent_definition());
+        let before = state.clone();
+        expire_end_of_turn_replacement_definitions(&mut state, end_of_turn_expires);
+        assert_eq!(before.objects[&ids[0]].replacement_definitions.len(), 1);
+        assert!(state.objects[&ids[0]].replacement_definitions.is_empty());
+        assert!(Arc::ptr_eq(
+            &state.objects[&ids[0]].base_replacement_definitions,
+            &before.objects[&ids[0]].base_replacement_definitions
+        ));
+    }
+
+    // ---- Call-site pins ----
+
+    /// Call-site pin (S6): ending combat still expires live end-of-combat
+    /// replacement definitions.
+    #[test]
+    fn end_combat_teardown_expires_end_of_combat_replacements() {
+        let (mut state, ids) = battlefield_fixture();
+        push_live(&mut state, ids[0], expiring(RestrictionExpiry::EndOfCombat));
+        complete_end_combat_teardown(&mut state);
+        assert!(state.objects[&ids[0]].replacement_definitions.is_empty());
+    }
+
+    /// Call-site pin (S7): the start of a player's turn still expires live
+    /// "until that player's next turn" replacement definitions.
+    #[test]
+    fn next_turn_duration_expiry_expires_until_next_turn_replacements() {
+        let (mut state, ids) = battlefield_fixture();
+        state.turn_number = 2;
+        push_live(&mut state, ids[0], until_next_turn_of(P0));
+        expire_next_turn_durations(&mut state, P0);
+        assert!(state.objects[&ids[0]].replacement_definitions.is_empty());
+    }
+
+    /// Call-site pins (S8, S9): starting a turn still resets loyalty
+    /// activation counts and clears the new active player's summoning
+    /// sickness.
+    #[test]
+    fn start_next_turn_resets_loyalty_counts_and_summoning_sickness() {
+        let (mut state, ids) = battlefield_fixture();
+        state.active_player = P0;
+        state.turn_number = 1;
+        object_mut(&mut state, ids[0]).loyalty_activations_this_turn = 1;
+        set_sick(&mut state, &[ids[1]], true);
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, P1);
+        assert_eq!(state.objects[&ids[0]].loyalty_activations_this_turn, 0);
+        assert!(!state.objects[&ids[1]].summoning_sick);
+    }
+
+    /// Call-site pins (S10, S11): the cleanup step still clears saddled
+    /// designations and expires end-of-turn replacement definitions on both
+    /// surfaces.
+    #[test]
+    fn execute_cleanup_clears_saddles_and_end_of_turn_replacements() {
+        let (mut state, ids) = battlefield_fixture();
+        state.active_player = P0;
+        state.turn_number = 1;
+        saddle(&mut state, ids[0], ids[2]);
+        push_live(&mut state, ids[1], expiring(RestrictionExpiry::EndOfTurn));
+        push_base(&mut state, ids[1], expiring(RestrictionExpiry::EndOfTurn));
+        let mut events = Vec::new();
+        let _ = execute_cleanup(&mut state, &mut events);
+        assert!(!state.objects[&ids[0]].is_saddled);
+        assert!(state.objects[&ids[1]].replacement_definitions.is_empty());
+        assert!(state.objects[&ids[1]]
+            .base_replacement_definitions
+            .is_empty());
+    }
+}

@@ -20,10 +20,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { deckSupplyForFormat } from "../../services/engineRuntime";
 import { GameSetupPage } from "../GameSetupPage";
 
 // ── Mock heavy sub-components and services ─────────────────────────────────
@@ -36,8 +37,10 @@ vi.mock("../../hooks/useCardImage", () => ({
   useCardImage: () => ({ src: null, isLoading: false }),
 }));
 
+const compat = vi.hoisted(() => ({ evaluateDeckCompatibility: vi.fn() }));
 vi.mock("../../services/deckCompatibility", () => ({
   evaluateDeckCompatibilityBatch: vi.fn().mockResolvedValue({}),
+  evaluateDeckCompatibility: compat.evaluateDeckCompatibility,
 }));
 
 vi.mock("../../hooks/useBracketEstimate", () => ({
@@ -46,6 +49,15 @@ vi.mock("../../hooks/useBracketEstimate", () => ({
 
 vi.mock("../../adapter/wasm-adapter", () => ({
   getSharedAdapter: () => ({ warmCardDatabase: () => Promise.resolve() }),
+}));
+
+vi.mock("../../services/engineRuntime", async () => ({
+  ...(await vi.importActual<typeof import("../../services/engineRuntime")>(
+    "../../services/engineRuntime",
+  )),
+  bestOfThreeCeilingForFormat: vi.fn(async (format: string) => (format === "Dandan" ? "Bo1" : "Bo3")),
+  deckSupplyForFormat: vi.fn(async (format: string) =>
+    format === "Dandan" ? "HostPile" : format === "Momir" ? "EngineFixed" : "PlayerBuilt"),
 }));
 
 vi.mock("../../audio/useAudioContext", () => ({
@@ -107,13 +119,18 @@ function setActiveDeck(deckName: string): void {
   localStorage.setItem(ACTIVE_DECK_KEY, deckName);
 }
 
+function LocationProbe() {
+  const { search } = useLocation();
+  return <div data-testid="game-route">{search}</div>;
+}
+
 function renderGameSetupPage(initialEntry = "/game-setup") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/game-setup" element={<GameSetupPage />} />
         <Route path="/" element={<div>Home</div>} />
-        <Route path="/game/:id" element={<div>Game</div>} />
+        <Route path="/game/:id" element={<LocationProbe />} />
         <Route path="/deck-builder" element={<div>Deck Builder</div>} />
       </Routes>
     </MemoryRouter>,
@@ -247,5 +264,120 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
 
     // No warning chip.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+  describe("best-of-three ceiling", () => {
+    async function startMatchAndReadSearch(): Promise<string> {
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("button", { name: /^Start Match/ }));
+      return (await screen.findByTestId("game-route")).textContent ?? "";
+    }
+
+    it("G1: Dandan disables Bo3, navigates match=bo1, and keeps the remembered Bo3", async () => {
+      act(() => {
+        usePreferencesStore.setState({ lastFormat: "Dandan", lastPlayerCount: 2, lastMatchType: "Bo3" });
+      });
+      renderGameSetupPage();
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "BO1" })).toHaveClass("bg-indigo-600"));
+      expect(screen.getByRole("button", { name: "BO3" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "BO3" })).not.toHaveClass("bg-indigo-600");
+
+      const search = await startMatchAndReadSearch();
+      expect(search).toContain("format=Dandan");
+      expect(search).toContain("match=bo1");
+      expect(usePreferencesStore.getState().lastMatchType).toBe("Bo3");
+    });
+
+    it("G2: a format whose ceiling admits Bo3 leaves it enabled and navigates match=bo3", async () => {
+      act(() => {
+        usePreferencesStore.setState({ lastFormat: "Momir", lastPlayerCount: 2, lastMatchType: "Bo3" });
+      });
+      renderGameSetupPage();
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "BO3" })).toBeEnabled());
+      expect(screen.getByRole("button", { name: "BO3" })).toHaveClass("bg-indigo-600");
+
+      const search = await startMatchAndReadSearch();
+      expect(search).toContain("format=Momir");
+      expect(search).toContain("match=bo3");
+    });
+  });
+
+  describe("host-supplied pile", () => {
+    async function start(): Promise<string> {
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("button", { name: /^Start Match/ }));
+      return (await screen.findByTestId("game-route")).textContent ?? "";
+    }
+
+    async function pickFormat(label: string) {
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: /Format/i, expanded: false }));
+      await user.click(await screen.findByRole("button", { name: new RegExp(`^${label}`) }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    }
+
+    beforeEach(() => {
+      compat.evaluateDeckCompatibility.mockReset();
+      seedDeck("Pile A");
+    });
+
+    it("the default pile starts Dandan with no saved deck and no pile on the URL", async () => {
+      localStorage.removeItem(STORAGE_KEY_PREFIX + "Pile A");
+      renderGameSetupPage("/game-setup?format=Dandan");
+      expect(await screen.findByRole("combobox", { name: "Pile" })).toHaveValue("");
+      expect(screen.getByRole("button", { name: /^Start Match/ })).toBeEnabled();
+      const search = await start();
+      expect(search).toContain("format=Dandan");
+      expect(search).not.toContain("pile=");
+    });
+
+    it("a named pile the engine refuses blocks Start", async () => {
+      compat.evaluateDeckCompatibility.mockResolvedValue({
+        selected_format_compatible: false,
+        selected_format_reasons: ["Dandân deck must have exactly 80 cards (found 100)"],
+      });
+      renderGameSetupPage("/game-setup?format=Dandan");
+      await userEvent.setup().selectOptions(await screen.findByRole("combobox", { name: "Pile" }), "Pile A");
+      expect(await screen.findByText(/exactly 80 cards/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^Start Match/ })).toBeDisabled();
+    });
+
+    it("a named pile the engine accepts rides the URL", async () => {
+      compat.evaluateDeckCompatibility.mockResolvedValue({ selected_format_compatible: true, selected_format_reasons: [] });
+      renderGameSetupPage("/game-setup?format=Dandan");
+      await userEvent.setup().selectOptions(await screen.findByRole("combobox", { name: "Pile" }), "Pile A");
+      await waitFor(() => expect(screen.getByRole("button", { name: /^Start Match/ })).toBeEnabled());
+      expect(await start()).toContain("pile=Pile%20A");
+    });
+
+    it("changing format drops a named pile", async () => {
+      compat.evaluateDeckCompatibility.mockResolvedValue({ selected_format_compatible: true, selected_format_reasons: [] });
+      renderGameSetupPage("/game-setup?format=Dandan");
+      await userEvent.setup().selectOptions(await screen.findByRole("combobox", { name: "Pile" }), "Pile A");
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "Pile" })).toHaveValue("Pile A"));
+      await pickFormat("Momir");
+      await pickFormat("Dand");
+      expect(await screen.findByRole("combobox", { name: "Pile" })).toHaveValue("");
+      expect(await start()).not.toContain("pile=");
+    });
+
+    it("Momir offers no pile and starts without one", async () => {
+      renderGameSetupPage("/game-setup?format=Momir");
+      await waitFor(() => expect(deckSupplyForFormat).toHaveBeenCalledWith("Momir"));
+      await act(async () => {});
+      expect(screen.queryByRole("combobox", { name: "Pile" })).toBeNull();
+      const search = await start();
+      expect(search).toContain("format=Momir");
+      expect(search).not.toContain("pile=");
+    });
+
+    it("Standard offers no pile", async () => {
+      setActiveDeck("Pile A");
+      renderGameSetupPage("/game-setup?format=Standard");
+      await waitFor(() => expect(deckSupplyForFormat).toHaveBeenCalledWith("Standard"));
+      await act(async () => {});
+      expect(screen.queryByRole("combobox", { name: "Pile" })).toBeNull();
+    });
   });
 });

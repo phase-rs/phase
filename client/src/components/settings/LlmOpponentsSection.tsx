@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useLlmStore } from "../../stores/llmStore";
-import { loadProviderCatalog } from "../../services/llm/catalog";
+import { isMissingApiKey, isProfileUsable, useLlmStore } from "../../stores/llmStore";
+import { useLlmProviderCatalog } from "../../hooks/useLlmProviderCatalog";
 import {
   useLlmConnectionTest,
   type LlmTestState,
@@ -38,19 +38,25 @@ const MENU_CLASS = `${TOUCH_TARGET} rounded-lg border border-white/10 bg-black/3
 const CUSTOM_MODEL = "__custom__";
 
 
+/** Menu value for "no default": unchosen seats stay on the built-in engine AI. */
+const DEFAULT_OPPONENT_ENGINE = "engine";
+
 export function LlmOpponentsSection() {
   const { t } = useTranslation("settings");
   const profiles = useLlmStore((s) => s.profiles);
   const addProfile = useLlmStore((s) => s.addProfile);
   const removeProfile = useLlmStore((s) => s.removeProfile);
   const updateProfile = useLlmStore((s) => s.updateProfile);
+  const defaultOpponentProfileId = useLlmStore((s) => s.defaultOpponentProfileId);
+  const setDefaultOpponentProfileId = useLlmStore((s) => s.setDefaultOpponentProfileId);
   const draftEnabled = useLlmStore((s) => s.draftEnabled);
   const setDraftEnabled = useLlmStore((s) => s.setDraftEnabled);
   const draftProfileId = useLlmStore((s) => s.draftProfileId);
   const setDraftProfileId = useLlmStore((s) => s.setDraftProfileId);
-  const catalog = useProviderCatalog();
+  const catalog = useLlmProviderCatalog();
 
-  const usableProfiles = profiles.filter((profile) => profile.enabled && profile.model.trim());
+  const usableProfiles = profiles.filter((profile) => isProfileUsable(profile, catalog));
+  const defaultOpponent = usableProfiles.find((profile) => profile.id === defaultOpponentProfileId);
 
   return (
     <div className="flex flex-col gap-4">
@@ -68,6 +74,8 @@ export function LlmOpponentsSection() {
             key={profile.id}
             profile={profile}
             catalog={catalog}
+            isDefaultOpponent={profile.id === defaultOpponentProfileId}
+            onMakeDefaultOpponent={() => setDefaultOpponentProfileId(profile.id)}
             onChange={(patch) => updateProfile(profile.id, patch)}
             onRemove={() => removeProfile(profile.id)}
           />
@@ -81,6 +89,37 @@ export function LlmOpponentsSection() {
       >
         {t("llm.addProvider")}
       </button>
+
+      <div className="flex flex-col gap-2 rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
+        <div className="flex min-w-0 flex-col">
+          <span className="text-xs font-semibold text-slate-200">{t("llm.defaultOpponent.label")}</span>
+          <span className="text-[10px] leading-relaxed text-slate-400">
+            {t("llm.defaultOpponent.hint")}
+          </span>
+        </div>
+        <MenuSelect
+          ariaLabel={t("llm.defaultOpponent.label")}
+          label={
+            defaultOpponent
+              ? profileLabel(defaultOpponent, t("llm.unnamed"))
+              : t("llm.defaultOpponent.engine")
+          }
+          selectedValue={defaultOpponent?.id ?? DEFAULT_OPPONENT_ENGINE}
+          items={[
+            { value: DEFAULT_OPPONENT_ENGINE, label: t("llm.defaultOpponent.engine") },
+            ...usableProfiles.map((profile) => ({
+              value: profile.id,
+              label: profileLabel(profile, t("llm.unnamed")),
+            })),
+          ]}
+          onSelect={(value) =>
+            setDefaultOpponentProfileId(value === DEFAULT_OPPONENT_ENGINE ? null : value)
+          }
+          menuLayout="dropdown"
+          fitContainer
+          className={MENU_CLASS}
+        />
+      </div>
 
       <div className="flex flex-col gap-2 rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
         <div className="flex items-center justify-between gap-3">
@@ -138,11 +177,15 @@ function profileLabel(profile: LlmProfile, fallback: string): string {
 function ProfileCard({
   profile,
   catalog,
+  isDefaultOpponent,
+  onMakeDefaultOpponent,
   onChange,
   onRemove,
 }: {
   profile: LlmProfile;
   catalog: LlmProviderCatalogEntry[];
+  isDefaultOpponent: boolean;
+  onMakeDefaultOpponent: () => void;
   onChange: (patch: Partial<LlmProfile>) => void;
   onRemove: () => void;
 }) {
@@ -181,7 +224,6 @@ function ProfileCard({
       model: nextEntry?.defaultModel ?? "",
       baseUrl: null,
       apiKey: "",
-      enabled: false,
     });
   };
 
@@ -273,7 +315,12 @@ function ProfileCard({
           type="url"
           inputMode="url"
           value={endpointDraft}
-          placeholder={entry?.defaultBaseUrl ?? t("llm.endpointPlaceholder")}
+          placeholder={
+            entry?.defaultBaseUrl
+            ?? (profile.provider === "Jev"
+              ? t("llm.jevEndpointPlaceholder")
+              : t("llm.endpointPlaceholder"))
+          }
           aria-label={t("llm.endpoint")}
           // Committed on blur (or Enter), never per keystroke. Changing the
           // endpoint clears the credential — it is scoped to the server it was
@@ -286,6 +333,11 @@ function ProfileCard({
           }}
           className={FIELD_CLASS}
         />
+        {profile.provider === "Jev" ? (
+          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+            {t("llm.jevEndpointHint")}
+          </p>
+        ) : null}
       </Field>
 
       <Field label={t("llm.apiKey")}>
@@ -299,6 +351,11 @@ function ProfileCard({
           onChange={(e) => onChange({ apiKey: e.target.value })}
           className={FIELD_CLASS}
         />
+        {profile.enabled && isMissingApiKey(profile, catalog) ? (
+          <p role="status" className="mt-1 text-[11px] leading-relaxed text-amber-300">
+            {t("llm.apiKeyMissing")}
+          </p>
+        ) : null}
         <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
           {t("llm.apiKeyStorage")}
           {entry?.apiKeyUrl ? (
@@ -342,25 +399,62 @@ function ProfileCard({
           <span className="min-w-0 text-[10px] text-slate-500">{t("llm.testHint")}</span>
         )}
       </div>
+
+      {isProfileUsable(profile, catalog) && (
+        <DefaultOpponentPrompt
+          connected={test.status === "ok"}
+          isDefault={isDefaultOpponent}
+          onMakeDefault={onMakeDefaultOpponent}
+        />
+      )}
     </div>
   );
 }
 
-/** The engine-owned provider catalog. */
-function useProviderCatalog(): LlmProviderCatalogEntry[] {
-  const [catalog, setCatalog] = useState<LlmProviderCatalogEntry[]>([]);
+/**
+ * The next step once a provider can be used: make it the opponent players get
+ * without having to hunt for the seat picker.
+ *
+ * Shown only for a usable profile, so it never invites the player to default to
+ * something the game would then ignore. Once chosen it collapses to a badge,
+ * which keeps the card from nagging about a decision already made.
+ */
+function DefaultOpponentPrompt({
+  connected,
+  isDefault,
+  onMakeDefault,
+}: {
+  connected: boolean;
+  isDefault: boolean;
+  onMakeDefault: () => void;
+}) {
+  const { t } = useTranslation("settings");
 
-  useEffect(() => {
-    let cancelled = false;
-    void loadProviderCatalog().then((rows) => {
-      if (!cancelled) setCatalog(rows);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  if (isDefault) {
+    return (
+      <p
+        role="status"
+        className="self-start rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-200"
+      >
+        {t("llm.defaultPrompt.badge")}
+      </p>
+    );
+  }
 
-  return useMemo(() => catalog, [catalog]);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-2.5">
+      <p className="min-w-0 text-xs leading-relaxed text-sky-100">
+        {connected ? t("llm.defaultPrompt.connected") : t("llm.defaultPrompt.ready")}
+      </p>
+      <button
+        type="button"
+        onClick={onMakeDefault}
+        className={`${TOUCH_TARGET} shrink-0 rounded-lg border border-sky-300/50 bg-sky-500/25 px-3 text-xs font-semibold text-sky-50 transition-colors hover:bg-sky-500/40`}
+      >
+        {t("llm.defaultPrompt.action")}
+      </button>
+    </div>
+  );
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

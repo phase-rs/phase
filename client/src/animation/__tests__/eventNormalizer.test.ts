@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameEvent } from "../../adapter/types";
+import type { GameEvent, StackEntry } from "../../adapter/types";
+import { buildStackEntry } from "../../test/factories/gameStateFactory";
 import type { AnimationStep } from "../types";
 import { normalizeEvents } from "../eventNormalizer";
 import {
@@ -89,6 +90,20 @@ describe("normalizeEvents", () => {
     ];
 
     expect(normalizeEvents(events)).toEqual([]);
+  });
+
+  // CR 605.3b: a mana ability's activation is presented like the mana it adds
+  // (non-visual, so no activation sound plays per land tap), while an ordinary
+  // activation keeps its step — the one the activation SFX is scheduled from.
+  it("skips mana-ability activations but keeps ordinary activations", () => {
+    const mana: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 1, kind: "Mana" } };
+    const normal: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 2, kind: "Normal" } };
+    const legacy: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 3 } };
+
+    expect(normalizeEvents([mana])).toEqual([]);
+    const steps = normalizeEvents([normal, legacy]);
+    const activations = steps.flatMap((step) => step.effects.map(({ event }) => event));
+    expect(activations).toEqual([normal, legacy]);
   });
 
   describe("Melded", () => {
@@ -232,15 +247,73 @@ describe("normalizeEvents", () => {
 
   it("consecutive CreatureDestroyed events group into one step (board wipe)", () => {
     const events: GameEvent[] = [
-      { type: "CreatureDestroyed", data: { object_id: 1 } },
-      { type: "CreatureDestroyed", data: { object_id: 2 } },
-      { type: "CreatureDestroyed", data: { object_id: 3 } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } },
     ];
 
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
     expect(steps[0].effects).toHaveLength(3);
     expect(steps[0].duration).toBe(400);
+  });
+
+  it("V15-4: a board wipe in the engine's order, each move before its destruction, plays as one step", () => {
+    const events: GameEvent[] = [1, 2, 3].flatMap((object_id): GameEvent[] => [
+      { type: "ZoneChanged", data: { object_id, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id, source_id: 9 } },
+    ]);
+
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects).toHaveLength(6);
+    expect(steps[0].duration).toBe(400);
+  });
+
+  it("V15-4: a destruction and its move do not join a step that holds anything else", () => {
+    const events: GameEvent[] = [
+      { type: "LifeChanged", data: { player_id: 0, amount: -2 } },
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps.map((step) => step.effects.map((effect) => effect.event.type))).toEqual([
+      ["LifeChanged"],
+      ["ZoneChanged", "CreatureDestroyed"],
+    ]);
+  });
+
+  it("V16-9: a destruction's move stays with it, across non-visual events, wherever a replacement sent it", () => {
+    const events: GameEvent[] = [
+      { type: "EffectResolved", data: { kind: "DealDamage", source_id: 9 } },
+      { type: "ZoneChanged", data: { object_id: 9, from: "Stack", to: "Graveyard" } },
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Exile" } },
+      { type: "ReplacementApplied", data: { source_id: 5, event_type: "ZoneChange" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+      { type: "ZoneChanged", data: { object_id: 2, from: "Battlefield", to: "Graveyard" } },
+      { type: "PermanentSacrificed", data: { object_id: 2, player_id: 0 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps.map((step) => step.effects.map((effect) => effect.event.type))).toEqual([
+      ["EffectResolved", "ZoneChanged"],
+      ["ZoneChanged", "CreatureDestroyed"],
+      ["ZoneChanged", "PermanentSacrificed"],
+    ]);
+  });
+
+  it("V17-5: a shuffle-back replacement stays in a run of destructions with its shuffle preserved", () => {
+    const events: GameEvent[] = [
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Library" } },
+      { type: "PlayerPerformedAction", data: { player_id: 0, action: "ShuffledLibrary" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: 9 } },
+      { type: "ZoneChanged", data: { object_id: 2, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: 9 } },
+    ];
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map(({ event }) => event)).toEqual(events);
   });
 
   it("ZoneChanged groups with preceding cause (SpellCast)", () => {
@@ -378,8 +451,8 @@ describe("normalizeEvents", () => {
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3, is_combat: false } },
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2, is_combat: false } },
       { type: "LifeChanged", data: { player_id: 1, amount: -5 } },
-      { type: "CreatureDestroyed", data: { object_id: 2 } },
-      { type: "CreatureDestroyed", data: { object_id: 3 } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } },
     ];
 
     const steps = normalizeEvents(events);
@@ -402,6 +475,33 @@ describe("normalizeEvents", () => {
     ];
 
     expect(normalizeEvents(events)).toEqual([]);
+  });
+
+  describe("spell announcements", () => {
+    const spell = buildStackEntry({ id: 7, source_id: 7 });
+    const ability = buildStackEntry({
+      id: 8,
+      source_id: 3,
+      kind: { type: "ActivatedAbility", data: { source_id: 3, ability: { targets: [] } } },
+    } as Partial<StackEntry>);
+    const pushed = (objectId: number): GameEvent => ({ type: "StackPushed", data: { object_id: objectId } });
+    const cast: GameEvent = { type: "SpellCast", data: { card_id: 7, controller: 0, object_id: 7 } };
+    const paused = { stack: [spell, ability], has_pending_cast: true };
+
+    it("V7-3: a spell whose cast pauses after its announcement gets a step of its own", () => {
+      const steps = normalizeEvents([pushed(7)], { announcementState: paused });
+
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event)).toEqual([pushed(7)]);
+    });
+
+    it("V7-3: an announcement is skipped once cast in the same batch, for an ability, with no pending cast, or without flights", () => {
+      expect(normalizeEvents([pushed(7), cast], { announcementState: paused }).flatMap((step) => step.effects))
+        .toEqual([expect.objectContaining({ event: cast })]);
+      expect(normalizeEvents([pushed(8)], { announcementState: paused })).toEqual([]);
+      expect(normalizeEvents([pushed(7)], { announcementState: { ...paused, has_pending_cast: false } })).toEqual([]);
+      expect(normalizeEvents([pushed(7)], { announcementState: null })).toEqual([]);
+    });
   });
 
   it("groups large aggregate combat damage with following LifeChanged pairs into one flurry step", () => {

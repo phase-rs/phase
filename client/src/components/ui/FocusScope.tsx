@@ -459,7 +459,6 @@ function createFocusScopeManager(): FocusScopeManager {
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (event.defaultPrevented) return;
     const target = event.target;
     const active = activeLayers();
     if (
@@ -471,19 +470,24 @@ function createFocusScopeManager(): FocusScopeManager {
     const top = topLayerFrom(active);
     if (!top) return;
 
+    // A modal owns keyboard events from every descendant, not only the keys
+    // used by focus management. Keep game-level shortcuts from seeing keys
+    // handled by controls inside the modal. This does not cancel native
+    // behavior, so typing and button activation continue to work.
+    event.stopPropagation();
+    if (event.defaultPrevented) return;
+
     if (event.key === "Escape") {
       if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
         return;
       }
       event.preventDefault();
-      event.stopPropagation();
       if (top.kind === "portal-branch") top.onDismiss();
       else top.onEscape();
       return;
     }
     if (event.key !== "Tab") return;
 
-    event.stopPropagation();
     if (top.kind === "portal-branch") {
       event.preventDefault();
       const parent = scopeLayer(top.parentScopeId);
@@ -593,8 +597,8 @@ interface FocusScopeProps {
 
 /**
  * Renderless keyboard/focus authority for a modal surface. Nested scopes share
- * one manager, so only the deepest active dialog owns Tab and Escape even when
- * React portals place its DOM outside the parent panel.
+ * one manager, so only the deepest active dialog owns keyboard events, Tab, and
+ * Escape even when React portals place its DOM outside the parent panel.
  */
 export function FocusScope({
   active,

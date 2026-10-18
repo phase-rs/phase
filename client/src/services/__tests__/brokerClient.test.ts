@@ -323,7 +323,7 @@ describe("lookupJoinTargetOver", () => {
     }
   });
 
-  it("rehydrates a legacy format_config missing the experimental flag as false", async () => {
+  it("keeps a format_config carrying the removed experimental flag", async () => {
     const ws = new MockWebSocket();
     const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123");
     ws.deliver(
@@ -335,8 +335,8 @@ describe("lookupJoinTargetOver", () => {
           player_count: 2,
           filled_seats: 1,
           match_config: { match_type: "Bo1" },
-          // Minted before the experimental-dungeons axis: every field of
-          // today's schema except `allow_experimental_dungeons`.
+          // Minted before the experimental-dungeons flag was removed: every
+          // field of today's schema plus the stale key.
           format_config: {
             format: "Commander",
             starting_life: 40,
@@ -353,6 +353,7 @@ describe("lookupJoinTargetOver", () => {
             sideboard_policy: { type: "Forbidden" },
             default_deck_copy_limit: { type: "UpTo", data: 1 },
             allow_debug_actions: false,
+            allow_experimental_dungeons: true,
           },
         },
       }),
@@ -360,11 +361,10 @@ describe("lookupJoinTargetOver", () => {
     const result = await promise;
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("unreachable: reach guard above");
-    // Kept (not dropped to null), with the engine's default filled in.
+    // Kept (not dropped to null) with the stale key ignored.
     expect(result.info.format_config).toEqual(
       expect.objectContaining({
         format: "Commander",
-        allow_experimental_dungeons: false,
       }),
     );
   });

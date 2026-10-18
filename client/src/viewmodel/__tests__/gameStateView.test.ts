@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type {
-  GameAction,
   GameObject,
   GameState,
   PlayerId,
@@ -21,6 +20,7 @@ import {
   buildPlayers,
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
+  chooseTokenHostWaitingForFactory,
   copyRetargetWaitingForFactory,
   retargetChoiceWaitingForFactory,
   returnAsAuraTargetWaitingForFactory,
@@ -33,19 +33,22 @@ import {
   canConfirmBoardChoice,
   getBattlefieldSacrificeChoice,
   getBoardChoiceView,
-  getCastableZoneViewerTarget,
   getAllOpponentIds,
   getOpponentIds,
+  getPlayerZoneIds,
   getSeatCount,
+  getSharedPileHolder,
   getVisibleBoardPlayerIds,
   getWaitingForClickTargetRefs,
   getWaitingForObjectChoiceIds,
   getWaitingForPlayerChoiceIds,
+  getZoneViewerPile,
   isFaceDownExileCardVisibleToViewer,
   isOneOnOne,
   isSplitBoardActive,
   resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
+  resolvePileSeat,
   shouldRenderFocusedOpponentTopRow,
 } from "../gameStateView";
 
@@ -485,6 +488,39 @@ describe("getBoardChoiceView", () => {
     });
   });
 
+  it("offers cancel on the SaddleMount board choice", () => {
+    const choice = getBoardChoiceView({
+      type: "SaddleMount",
+      data: {
+        player: 0,
+        mount_id: 40,
+        saddle_power: 2,
+        eligible_creatures: [10, 11],
+        contributions: [2, 3],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
+  });
+
+  it("offers cancel on the StationTarget board choice", () => {
+    const choice = getBoardChoiceView({
+      type: "StationTarget",
+      data: {
+        player: 0,
+        spacecraft_id: 30,
+        eligible_creatures: [10],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.intent).toBe("station");
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
+  });
+
   it("sums raw power for Slaughter keep sets so negative-power creatures lower the total", () => {
     const choice = getBoardChoiceView({
       type: "KeepWithinTotalPowerChoice",
@@ -777,102 +813,6 @@ describe("getBoardChoiceView", () => {
   });
 });
 
-describe("getCastableZoneViewerTarget", () => {
-  const castAction: GameAction = {
-    type: "CastSpell",
-    data: { object_id: 7, card_id: 700, targets: [] },
-  };
-  const activateAction: GameAction = {
-    type: "ActivateAbility",
-    data: { source_id: 7, ability_index: 0 },
-  };
-
-  function makeGraveyardObject(id: number): GameObject {
-    return buildGameObjectWithCoreTypes(["Instant"], {
-      id,
-      card_id: 700 + id,
-      zone: "Graveyard",
-      name: `Spell ${id}`,
-      mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
-      keywords: ["Retrace"],
-      color: ["Red"],
-      base_keywords: ["Retrace"],
-      base_color: ["Red"],
-      entered_battlefield_turn: null,
-    });
-  }
-
-  it("returns the graveyard pile when Priority surfaces cast actions there", () => {
-    const objects = buildObjectMap(makeGraveyardObject(7), makeGraveyardObject(8));
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        {
-          "7": [castAction],
-          "8": [{ ...castAction, data: { ...castAction.data, object_id: 8 } }],
-        },
-      ),
-    ).toEqual({ zone: "graveyard", playerId: 0, objectIds: [7, 8] });
-  });
-
-  it("returns stable object ids for castable pile identity", () => {
-    const objects = {
-      7: makeGraveyardObject(7),
-      8: makeGraveyardObject(8),
-    };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        {
-          "8": [{ ...castAction, data: { ...castAction.data, object_id: 8 } }],
-          "7": [castAction],
-        },
-      )?.objectIds,
-    ).toEqual([7, 8]);
-  });
-
-  it("returns null when castable cards span multiple zone piles", () => {
-    const objects = {
-      7: makeGraveyardObject(7),
-      9: { ...makeGraveyardObject(9), zone: "Exile" as const, owner: 0 },
-    };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        {
-          "7": [castAction],
-          "9": [{ ...castAction, data: { ...castAction.data, object_id: 9 } }],
-        },
-      ),
-    ).toBeNull();
-  });
-
-  it("returns null outside Priority", () => {
-    const objects = { 7: makeGraveyardObject(7) };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "CastingVariantChoice", data: { player: 0, object_id: 7, card_id: 700, options: [] } },
-        objects,
-        { "7": [castAction] },
-      ),
-    ).toBeNull();
-  });
-
-  it("ignores graveyard objects without play or cast actions", () => {
-    const objects = { 7: makeGraveyardObject(7) };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        { "7": [activateAction] },
-      ),
-    ).toBeNull();
-  });
-});
-
 describe("getOpponentIds", () => {
   it("rotates clockwise after a non-zero perspective player", () => {
     expect(getOpponentIds(makeState([0, 3, 1, 2]), 1)).toEqual([2, 0, 3]);
@@ -960,7 +900,7 @@ const MIXED_LEGAL: TargetRef[] = [{ Object: 7 }, { Player: 1 }];
  *
  * The `NO_TARGET_REF_LEGAL_SET` entries are SKIPPED at runtime — they exist
  * only for the compile-time gate. The map's size is not a runtime coverage
- * number; the 11 `PartitionFixture` entries are.
+ * number; the 12 `PartitionFixture` entries are.
  */
 const NO_TARGET_REF_LEGAL_SET = "no-TargetRef-legal-set" as const;
 
@@ -974,7 +914,7 @@ const PARTITION_FIXTURES: Record<
   WaitingFor["type"],
   PartitionFixture | typeof NO_TARGET_REF_LEGAL_SET
 > = {
-  // ── The 11 `TargetRef`-bearing variants ────────────────────────────────
+  // ── The 12 `TargetRef`-bearing variants ────────────────────────────────
   TargetSelection: {
     waitingFor: targetSelectionWaitingForFactory
       .withData({
@@ -1017,6 +957,13 @@ const PARTITION_FIXTURES: Record<
   },
   ReturnAsAuraTarget: {
     waitingFor: returnAsAuraTargetWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  ChooseTokenHost: {
+    waitingFor: chooseTokenHostWaitingForFactory
       .withData({ legal_targets: MIXED_LEGAL })
       .forPlayer(0)
       .build(),
@@ -1150,6 +1097,7 @@ const PARTITION_FIXTURES: Record<
   PayCost: NO_TARGET_REF_LEGAL_SET,
   BlightChoice: NO_TARGET_REF_LEGAL_SET,
   PayManaAbilityMana: NO_TARGET_REF_LEGAL_SET,
+  ManaAbilityManaPayment: NO_TARGET_REF_LEGAL_SET,
   ChooseManaColor: NO_TARGET_REF_LEGAL_SET,
   CollectEvidenceChoice: NO_TARGET_REF_LEGAL_SET,
   HarmonizeTapChoice: NO_TARGET_REF_LEGAL_SET,
@@ -1190,6 +1138,7 @@ const PARTITION_FIXTURES: Record<
   ChooseFromZoneChoice: NO_TARGET_REF_LEGAL_SET,
   BeholdChoice: NO_TARGET_REF_LEGAL_SET,
   EmpowerJaceChoice: NO_TARGET_REF_LEGAL_SET,
+  SpellCopyOrderChoice: NO_TARGET_REF_LEGAL_SET,
   EffectZoneChoice: NO_TARGET_REF_LEGAL_SET,
   DrawnThisTurnTopdeckChoice: NO_TARGET_REF_LEGAL_SET,
   AssistChoosePlayer: NO_TARGET_REF_LEGAL_SET,
@@ -1203,6 +1152,7 @@ const PARTITION_FIXTURES: Record<
   ChooseAnnouncingOpponent: NO_TARGET_REF_LEGAL_SET,
   ChooseGiftRecipient: NO_TARGET_REF_LEGAL_SET,
   ClashCardPlacement: NO_TARGET_REF_LEGAL_SET,
+  PhysicalContest: NO_TARGET_REF_LEGAL_SET,
   VoteChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeon: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeonRoom: NO_TARGET_REF_LEGAL_SET,
@@ -1274,6 +1224,18 @@ describe("getWaitingForPlayerChoiceIds", () => {
   // list genuinely mixes both axes in production.
   it("projects ReturnAsAuraTarget player refs", () => {
     const wf = returnAsAuraTargetWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
+  });
+
+  // Same cluster shape as ReturnAsAuraTarget: the host list mixes object
+  // entrants and players, and the two authorities must partition it.
+  it("projects ChooseTokenHost player refs", () => {
+    const wf = chooseTokenHostWaitingForFactory
       .withData({ legal_targets: MIXED_LEGAL })
       .forPlayer(0)
       .build();
@@ -1390,6 +1352,7 @@ describe("the two click-target authorities partition the engine's legal list", (
       [
         "ChooseObjectsSelection",
         "ChooseOneOfBranch",
+        "ChooseTokenHost",
         "CopyRetarget",
         "DistributeAmong",
         "EachPlayerCopyChosenSelection",
@@ -1428,5 +1391,65 @@ describe("the two click-target authorities partition the engine's legal list", (
     expect(players).toEqual(
       fixture.legal.flatMap((ref) => ("Player" in ref ? [ref.Player] : [])),
     );
+  });
+});
+
+describe("shared pile resolution", () => {
+  const shared = buildGameState({
+    players: buildPlayers([
+      { id: 0, graveyard: [101, 102], library: [11, 12] },
+      { id: 1, graveyard: [], library: [] },
+    ]),
+    derived: { shared_piles: { library: 0, graveyard: 0 } },
+  });
+  const perPlayer = buildGameState({
+    players: buildPlayers([
+      { id: 0, graveyard: [101], library: [11] },
+      { id: 1, graveyard: [201], library: [21] },
+    ]),
+  });
+
+  it("names the engine-published holder and resolves either seat to it", () => {
+    expect(getSharedPileHolder(shared, "graveyard")).toBe(0);
+    expect(getSharedPileHolder(shared, "library")).toBe(0);
+    expect(resolvePileSeat(shared, "graveyard", 1)).toBe(0);
+    expect(getPlayerZoneIds(shared, "graveyard", 1)).toEqual([101, 102]);
+    expect(getPlayerZoneIds(shared, "library", 1)).toEqual([11, 12]);
+  });
+
+  it("keeps each seat's own pile when the format publishes no holder", () => {
+    expect(getSharedPileHolder(perPlayer, "graveyard")).toBeNull();
+    expect(resolvePileSeat(perPlayer, "library", 1)).toBe(1);
+    expect(getPlayerZoneIds(perPlayer, "graveyard", 1)).toEqual([201]);
+    expect(getPlayerZoneIds(perPlayer, "library", 1)).toEqual([21]);
+  });
+
+  it("resolves a single shared zone independently of the other", () => {
+    const graveyardOnly = buildGameState({
+      players: perPlayer.players,
+      derived: { shared_piles: { graveyard: 0 } },
+    });
+    expect(resolvePileSeat(graveyardOnly, "graveyard", 1)).toBe(0);
+    expect(resolvePileSeat(graveyardOnly, "library", 1)).toBe(1);
+  });
+
+  it("groups a shared graveyard's cards of both owners into one zone-viewer pile", () => {
+    const p0Card = buildGameObject({ id: 101, zone: "Graveyard", owner: 0 });
+    const p1Card = buildGameObject({ id: 102, zone: "Graveyard", owner: 1 });
+    const piles = [p0Card, p1Card].map((obj) => getZoneViewerPile(shared, obj));
+    expect(piles).toEqual([
+      { zone: "graveyard", playerId: 0 },
+      { zone: "graveyard", playerId: 0 },
+    ]);
+    // Control: without a published holder the two owners stay two piles.
+    expect(
+      [p0Card, p1Card].map((obj) => getZoneViewerPile(perPlayer, obj)?.playerId),
+    ).toEqual([0, 1]);
+  });
+
+  it("keeps exile per seat and ignores other zones", () => {
+    const exiled = buildGameObject({ id: 301, zone: "Exile", owner: 1 });
+    expect(getZoneViewerPile(shared, exiled)).toEqual({ zone: "exile", playerId: 1 });
+    expect(getZoneViewerPile(shared, buildGameObject({ id: 1, zone: "Hand", owner: 1 }))).toBeNull();
   });
 });

@@ -35,10 +35,13 @@ expression: "&lowered"
           "kind": "Spell",
           "effect": {
             "type": "AdditionalPhase",
-            "target": {
-              "type": "None"
+            "recipient": {
+              "type": "NoPlayer"
             },
-            "phase": "BeginCombat",
+            "segment": {
+              "type": "Phase",
+              "data": "Combat"
+            },
             "after": {
               "type": "ThisPhase",
               "data": {

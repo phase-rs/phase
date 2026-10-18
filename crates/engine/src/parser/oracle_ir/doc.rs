@@ -21,7 +21,7 @@
 // `validate_child_span` that failed open). Each suppression below names the unit
 // that gives the item a production caller, and dies when that unit lands.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::diagnostic::OracleDiagnostic;
 use super::effect_chain::AbilityIr;
@@ -685,13 +685,14 @@ pub(crate) struct OracleDocIr {
     /// `lower_oracle_ir`. Empty for the vast majority of cards. See `relation`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) relations: Vec<DocumentRelationIr>,
+    /// CR 201.5a: the source lines where the masker left a quoted name as the host `~`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) granter_name_refusals: BTreeSet<usize>,
 }
 
 impl OracleDocIr {
     /// Look up an item by its stable id. Cross-item lowering binds through this,
     /// never by scanning category vectors for a matching shape.
-    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the source-context consumers in the Class-B bring-up (unit 3); retire this allow there.
-    #[allow(dead_code)]
     pub(crate) fn item(&self, id: OracleItemId) -> Option<&OracleItemIr> {
         self.items.iter().find(|item| item.id == id)
     }
@@ -1180,6 +1181,7 @@ impl OracleDocBuilder {
             // assembled (both the main path and the Class path converge there),
             // where the full source-ordered item list and card types are in hand.
             relations: Vec::new(),
+            granter_name_refusals: BTreeSet::new(),
         }
     }
 }
@@ -1272,7 +1274,7 @@ fn stamp_permission_printed_slot(
         CastingPermission::ExileWithAltCost {
             enters_with_modifications,
             ..
-        } => stamp_retained_mods(enters_with_modifications, slot, kind),
+        } => stamp_retained_mods(&mut enters_with_modifications.modifications, slot, kind),
         CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => {}
         CastingPermission::PlayFromExile { .. }
         | CastingPermission::ExileWithAltAbilityCost { .. }
@@ -1337,8 +1339,8 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
             ..
         } => stamp_retained_mods(additional_modifications, slot, kind),
         Effect::ReturnAsAura { grants, .. } => stamp_retained_mods(grants, slot, kind),
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            stamp_retained_mods(modifications, slot, kind)
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            stamp_retained_mods(&mut rider.modifications, slot, kind)
         }
         Effect::EachPlayerCopyChosen {
             copy_modifications, ..
@@ -1367,6 +1369,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
                 stamp_trigger_printed_slot(td, slot, kind);
             }
         }
+        Effect::CreateBoon { trigger, .. } => {
+            stamp_trigger_printed_slot(trigger, slot, kind);
+        }
         // ---- Nested AbilityDefinition payloads (mirror collect_effects) ------
         Effect::Vote {
             per_choice_effect,
@@ -1382,6 +1387,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
             {
                 stamp_retained_printed_slot(outcome_template, slot, kind);
             }
+        }
+        Effect::ExileTopCardContest { winner_effect } => {
+            stamp_retained_printed_slot(winner_effect, slot, kind);
         }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
@@ -1601,6 +1609,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ChooseFromZone { .. } => {}
         Effect::RememberCard { .. } => {}
         Effect::NoteManaSpent => {}
+        Effect::NoteNumber { .. } => {}
         Effect::ForEachCategory { .. } => {}
         Effect::ChooseObjectsIntoTrackedSet { .. } => {}
         Effect::ChooseAndSacrificeRest { .. } => {}
@@ -1611,6 +1620,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ExileFromTopUntil { .. } => {}
         Effect::RevealUntil { .. } => {}
         Effect::Discover { .. } => {}
+        Effect::PhysicalContest { .. } => {}
         Effect::Heist { .. } => {}
         Effect::HeistExile => {}
         Effect::Cascade => {}

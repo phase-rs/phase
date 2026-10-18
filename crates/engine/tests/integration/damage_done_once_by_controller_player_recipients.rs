@@ -273,6 +273,7 @@ fn the_thing_keeps_only_hero_damage_in_its_stored_event_context() {
                 player_id,
                 source_amounts,
                 total_damage,
+                ..
             }),
         ..
     } = &entry.kind

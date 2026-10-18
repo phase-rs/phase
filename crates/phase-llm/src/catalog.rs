@@ -142,6 +142,13 @@ const DEEPSEEK_MODELS: &[ModelOption] = &[
     },
 ];
 
+// Jev ships as an alias that always names TypeSafe's current flagship, so there
+// is nothing to pin.
+const JEV_MODELS: &[ModelOption] = &[ModelOption {
+    id: "jev-latest",
+    label: "Jev (latest)",
+}];
+
 /// No suggestions: a compatible endpoint's model ids are whatever the operator
 /// loaded. The UI shows the free-text field alone for this provider.
 const COMPATIBLE_MODELS: &[ModelOption] = &[];
@@ -196,6 +203,16 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: false,
         api_key_url: "",
         models: COMPATIBLE_MODELS,
+    },
+    ProviderCatalogEntry {
+        provider: LlmProvider::Jev,
+        value: "Jev",
+        display_name: "Jev (TypeSafe)",
+        default_base_url: None,
+        default_model: "jev-latest",
+        requires_api_key: true,
+        api_key_url: "https://docs.typesafe.ai/api",
+        models: JEV_MODELS,
     },
 ];
 

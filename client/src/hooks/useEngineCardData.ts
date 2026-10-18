@@ -6,6 +6,7 @@ import {
 } from "../services/engineRuntime";
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useLocalizedCardContent } from "./useLocalizedCardContent.ts";
 
 /**
  * Engine-parsed card face data returned from WASM.
@@ -101,28 +102,7 @@ export function useEngineCardData(cardName: string | null): EngineCardFace | nul
  * card name — the engine's identity key, which stays English everywhere.
  */
 export function useLocalizedCardName(name: string | null): string | null {
-  const language = usePreferencesStore((s) => s.language);
-  const [localized, setLocalized] = useState<string | null>(name);
-
-  useEffect(() => {
-    setLocalized(name);
-    if (!name || language === "en") return;
-
-    let cancelled = false;
-    ensureCardLocale(language)
-      .then((map) => {
-        if (cancelled) return;
-        const loc = map.get(name.toLowerCase());
-        if (loc?.name) setLocalized(loc.name);
-      })
-      .catch(() => {
-        /* keep English fallback */
-      });
-
-    return () => { cancelled = true; };
-  }, [name, language]);
-
-  return localized;
+  return useLocalizedCardContent(name)?.name || name;
 }
 
 /**

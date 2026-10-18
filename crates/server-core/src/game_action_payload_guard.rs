@@ -28,10 +28,9 @@ pub const MAX_ACTION_LIST_LEN: usize = 10_000;
 /// name.
 pub const MAX_CHOICE_LEN: usize = 256;
 
-/// Max serialized size for nested debug-only AST payloads that can contain
-/// strings, vectors, or filters. Debug actions are still client-supplied game
-/// actions, so they must not forward arbitrarily large nested payloads into the
-/// engine reducers.
+/// Max serialized size for nested AST payloads in debug bodies.
+/// Client-supplied strings, vectors, or filters must not
+/// forward arbitrarily large payloads into the engine reducers.
 pub const MAX_DEBUG_AST_JSON_LEN: usize = 16 * 1024;
 
 /// Max cumulative bytes accepted across all free-form strings in one semantic
@@ -434,6 +433,17 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
 /// listed explicitly so newly added variants must be classified at compile time.
 pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
     match action {
+        GameAction::SetReplacementAutoChoice { selector } => {
+            if let Some(id) = selector {
+                bound_string("SetReplacementAutoChoice.selector", &id.0)?;
+            }
+        }
+        GameAction::ChooseReplacementAndRemember { choice } => {
+            if let engine::types::actions::ReplacementAutoChoice::Order { order } = choice {
+                bound_list("ChooseReplacementAndRemember.order", order.len())?;
+            }
+        }
+
         GameAction::CastSpell { targets, .. } => {
             bound_list("CastSpell.targets", targets.len())?;
         }
@@ -786,8 +796,29 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
 mod tests {
     use super::*;
     use engine::game::combat::AttackTarget;
+    use engine::types::game_state::ReplacementAutoChoiceId;
     use engine::types::identifiers::ObjectId;
     use engine::types::mana::{ManaCost, ManaCostShard};
+
+    #[test]
+    fn replacement_removal_bounds_opaque_selector_strings() {
+        assert_eq!(
+            guard_game_action_payload(&GameAction::SetReplacementAutoChoice {
+                selector: Some(ReplacementAutoChoiceId("r".to_owned() + &"a".repeat(64)))
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            guard_game_action_payload(&GameAction::SetReplacementAutoChoice { selector: None }),
+            Ok(())
+        );
+        assert!(
+            guard_game_action_payload(&GameAction::SetReplacementAutoChoice {
+                selector: Some(ReplacementAutoChoiceId("x".repeat(MAX_CHOICE_LEN + 1)))
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn bounded_meld_actions_are_accepted() {

@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
 use crate::game::game_object::AttachTarget;
@@ -66,7 +67,7 @@ fn resolve_forward_result_search_attach_host(
     }
     let targets = forward_result_attach_host_targets(ability);
     match target {
-        TargetFilter::SelfRef => Some(AttachTarget::Object(ability.source_id)),
+        TargetFilter::SelfRef => ability.self_ref_binding(state).map(AttachTarget::Object),
         // CR 303.4b + CR 109.4: "attached to you" (Lynde, Cheerful Tormentor)
         // binds the Aura host to the resolving ability's controller.
         TargetFilter::Controller => Some(AttachTarget::Player(ability.controller)),
@@ -274,6 +275,10 @@ pub(crate) fn change_zone_all_player_scope_member_matches(
     origin_zones: &[Zone],
 ) -> bool {
     origin_zones.contains(&object.zone)
+        // CR 108.2 + CR 109.1: a player-scoped mass move ("all cards you own
+        // in exile") ranges over cards; the CR 722.3c retained prepare copy is
+        // not one. Battlefield tokens stay members (CR 110.1, CR 111.1).
+        && object.is_card_population_member()
         && if object.zone == Zone::Battlefield {
             object.controller == player
         } else {
@@ -445,7 +450,16 @@ fn resolution_zone_candidates(
         .filter(|(id, object)| {
             scan_zones.contains(&object.zone)
                 && !object.is_emblem
-                && crate::game::filter::matches_target_filter(state, **id, target_filter, &ctx)
+                // CR 108.2 + CR 109.1: a zone scan chooses among the cards in
+                // the zone; the CR 722.3c retained prepare copy is not one.
+                && object.is_card_population_member()
+                && crate::game::filter::matches_target_filter_for_zone(
+                    state,
+                    **id,
+                    object.zone,
+                    target_filter,
+                    &ctx,
+                )
         })
         .filter(|(id, object)| {
             destination != Zone::Exile
@@ -612,6 +626,37 @@ fn capture_devour_snapshot_before_single_entry(
 }
 
 /// Move target objects between zones.
+/// CR 610.3 + CR 610.3a + CR 610.3b: True when the "until" event bounding THIS
+/// node's own zone change (`ResolvedAbility::bounded_zone_change_event`) already
+/// occurred — latched on this node after the ability was put onto the stack
+/// (activated) or triggered (triggered), or emitted earlier in this same
+/// resolution. The initial one-shot move then does not happen. Shared by
+/// the single-object and mass resolvers so each bounded node refuses on its own
+/// latch.
+pub(crate) fn until_event_already_occurred(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    events: &[GameEvent],
+) -> bool {
+    let Some(duration_event) = ability.bounded_zone_change_event() else {
+        return false;
+    };
+    ability.context.duration_events.contains(&duration_event)
+        || events.iter().any(|event| {
+            crate::game::engine::duration_event_matches(
+                state,
+                ability.source_id,
+                ability
+                    .trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference),
+                ability.controller,
+                duration_event,
+                event,
+            )
+        })
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -694,37 +739,16 @@ pub fn resolve(
             .map(|cause| EffectResolutionResult { cause, count })
     };
 
-    // CR 610.3b: If the specified event occurred after this triggered ability
-    // triggered but before its initial one-shot zone change, the object does
-    // not move.
-    if let Some(duration_event) = ability
-        .duration
-        .as_ref()
-        .and_then(Duration::zone_change_event)
-    {
-        let occurred_before_this_resolution =
-            ability.context.duration_events.contains(&duration_event);
-        let occurred_earlier_this_resolution = events.iter().any(|event| {
-            crate::game::engine::duration_event_matches(
-                state,
-                ability.source_id,
-                ability
-                    .trigger_source
-                    .as_ref()
-                    .map(|source| source.identity.reference),
-                ability.controller,
-                duration_event,
-                event,
-            )
+    // CR 610.3a / CR 610.3b: If the specified event occurred after this ability
+    // was put onto the stack (activated) or triggered (triggered) but before its
+    // initial one-shot zone change, the object does not move.
+    if until_event_already_occurred(state, ability, events) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
         });
-        if occurred_before_this_resolution || occurred_earlier_this_resolution {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(completed_result(0));
-        }
+        return Ok(completed_result(0));
     }
 
     let mut origin = origin;
@@ -733,7 +757,7 @@ pub fn resolve(
         Effect::ChangeZone { target, .. } => target.clone(),
         _ => TargetFilter::Any,
     };
-    // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser
+    // CR 608.2c: Resolve the `TrackedSetId(0)` sentinel emitted by the parser
     // for "from among the milled cards" / "X cards revealed this way"
     // continuations to the most recent non-empty tracked set. Done up front so
     // every downstream path (interactive scan, `matches_target_filter`,
@@ -1043,7 +1067,10 @@ pub fn resolve(
             && !choice_up_to
             && choice_count == 1
         {
-            let index = state.rng.random_range(0..eligible.len());
+            let index = state
+                .rng
+                .draw(RandomDraw::Outcome)
+                .random_range(0..eligible.len());
             let chosen = eligible[index];
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
@@ -1918,6 +1945,21 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 610.3a / CR 610.3b: an "until" event that already occurred before this
+    // mass move's initial zone change means nothing moves and no return link is
+    // installed. That refusal is non-performance for this node's own "if you
+    // do" rider (CR 118.12); `resolve_ability_chain` derives it from this same
+    // predicate over the call's own event window, so no resolution-wide flag
+    // is written here.
+    if until_event_already_occurred(state, ability, events) {
+        state.last_effect_count = Some(0);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
     // CR 400.3 + CR 701.23: When the target filter encodes multiple zones via
     // `InAnyZone`, scan their union; otherwise fall back to the explicit `origin`
     // (or `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
@@ -2016,7 +2058,7 @@ pub fn resolve_all(
         crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
 
-    // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser for
+    // CR 608.2c: Resolve the `TrackedSetId(0)` sentinel emitted by the parser for
     // inline "the exiled card[s]" continuations (e.g., Sword of Hearth and Home's
     // chain: exile creature → search land → return the exiled card). The
     // delayed-trigger resolver performs the same binding at delayed-trigger
@@ -2110,7 +2152,15 @@ pub fn resolve_all(
             .objects
             .iter()
             .filter(|(_, obj)| {
-                change_zone_all_player_scope_member_matches(obj, player, &origin_zones)
+                // CR 108.3 + CR 400.1 as modified by a shared-zone format: a card
+                // in the scoped player's shared graveyard or library is theirs
+                // whichever seat owns it.
+                crate::game::filter::zone_axis_admits(
+                    state,
+                    (obj.zone != Zone::Battlefield).then_some(obj.zone),
+                    player,
+                    |seat| change_zone_all_player_scope_member_matches(obj, seat, &origin_zones),
+                )
             })
             .map(|(id, _)| *id)
             .collect()
@@ -2120,15 +2170,19 @@ pub fn resolve_all(
             .iter()
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
+                    // CR 108.2 + CR 109.1: a mass move out of exile moves
+                    // cards; the CR 722.3c retained prepare copy is not one.
+                    && obj.is_card_population_member()
                     && (!tracked_members_name_parent_object
                         || if delayed_exile_return {
                             target_pin_is_current_or_delayed_exile_successor(state, ability, id)
                         } else {
                             ability.target_pin_is_current(id, state)
                         })
-                    && crate::game::filter::matches_target_filter(
+                    && crate::game::filter::matches_target_filter_for_zone(
                         state,
                         id,
+                        obj.zone,
                         &effective_filter,
                         &ctx,
                     )
@@ -2243,7 +2297,7 @@ pub fn resolve_all(
     let mut matching = matching;
     if random_order {
         use rand::seq::SliceRandom;
-        matching.shuffle(&mut state.rng);
+        matching.shuffle(state.rng.draw(RandomDraw::Placement));
     }
 
     let mut moved_count: i32 = 0;
@@ -8371,7 +8425,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7 + CR 400.7: Sword of Hearth and Home's triggered ability chains
+    /// CR 608.2c + CR 400.7: Sword of Hearth and Home's triggered ability chains
     /// `ChangeZone` (exile target creature) → `SearchLibrary` → `ChangeZone`
     /// (land → battlefield) → `ChangeZoneAll { target: TrackedSet(0) }` (return
     /// the exiled creature). The final step uses the sentinel `TrackedSetId(0)`
@@ -8740,7 +8794,7 @@ mod tests {
         assert_eq!(state.objects[&creature].zone, Zone::Library);
     }
 
-    /// CR 603.7: `TrackedSetId(0)` must bind through `chain_tracked_set_id`
+    /// CR 608.2c: `TrackedSetId(0)` must bind through `chain_tracked_set_id`
     /// before falling back to the globally latest tracked set, matching the
     /// target-filter resolver used by `matches_target_filter`.
     #[test]
@@ -11016,5 +11070,276 @@ mod tests {
 
         assert_eq!(state.objects[&obj].zone, Zone::Battlefield);
         assert_eq!(state.objects[&obj].controller, PlayerId(2));
+    }
+
+    /// Resolves a `TrackedSetFiltered` creature-you-control move for P0 over the chosen members of
+    /// (P0 pile creature, P1 pile creature, P1 battlefield creature); returns every one's zone.
+    fn mixed_tracked_set_run(
+        format: crate::types::format::FormatConfig,
+        members: &[usize],
+    ) -> (Zone, Zone, Zone) {
+        let mut state = GameState::new(format, 2, 1);
+        let pile = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pile P0".to_string(),
+            Zone::Graveyard,
+        );
+        let pile1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Pile P1".to_string(),
+            Zone::Graveyard,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [pile, pile1, theirs] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        let all = [pile, pile1, theirs];
+        state
+            .tracked_object_sets
+            .insert(set_id, members.iter().map(|&i| all[i]).collect());
+        state.chain_tracked_set_id = Some(set_id);
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(crate::types::ability::ControllerRef::You),
+            properties: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(filter),
+                    caused_by: None,
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        (
+            state.objects[&pile].zone,
+            state.objects[&pile1].zone,
+            state.objects[&theirs].zone,
+        )
+    }
+
+    /// A tracked set spanning two zones is judged per member by the zone it is in.
+    #[test]
+    fn a_mixed_tracked_set_is_judged_per_member_zone() {
+        use crate::types::format::FormatConfig;
+        let all = [0, 1, 2];
+        assert_eq!(
+            mixed_tracked_set_run(FormatConfig::dandan(), &all),
+            (Zone::Hand, Zone::Hand, Zone::Battlefield)
+        );
+        assert_eq!(
+            mixed_tracked_set_run(FormatConfig::standard(), &all),
+            (Zone::Hand, Zone::Graveyard, Zone::Battlefield)
+        );
+        for format in [FormatConfig::dandan(), FormatConfig::standard()] {
+            assert_eq!(
+                mixed_tracked_set_run(format, &[0, 2]),
+                (Zone::Hand, Zone::Graveyard, Zone::Battlefield)
+            );
+        }
+    }
+}
+
+/// CR 108.2 + CR 109.1 + CR 722.3c: zone scans that choose or move CARDS out of
+/// exile range over the card population. Each row puts one real Instant card
+/// and one non-card copy of a card (the CR 722.3c retained prepare copy's
+/// shape: `is_copy`, not a token, an Instant owned by P0) in P0's exile.
+#[cfg(test)]
+mod exile_card_population_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::MultiTargetSpec;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+
+    const P0: PlayerId = PlayerId(0);
+    const SOURCE: ObjectId = ObjectId(100);
+
+    /// Returns `(state, card, copy)`.
+    fn board() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let mut exiled = Vec::new();
+        for (card, name) in [(10, "Exiled Instant"), (11, "Retained Prepare Copy")] {
+            let id = create_object(&mut state, CardId(card), P0, name.to_string(), Zone::Exile);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+            exiled.push(id);
+        }
+        let (card, copy) = (exiled[0], exiled[1]);
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+        // Reach guard: the copy is a non-card object in P0's exile.
+        assert!(state.exile.contains(&copy));
+        assert!(!state.objects[&copy].is_represented_by_a_card());
+        assert_eq!(state.objects[&copy].owner, P0);
+        (state, card, copy)
+    }
+
+    fn owned_exiled_instants() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::InZone { zone: Zone::Exile },
+        ]))
+    }
+
+    fn change_zone_all(origin: Zone, destination: Zone, target: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(origin),
+                destination,
+                target,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            SOURCE,
+            P0,
+        )
+    }
+
+    fn assert_card_moved_copy_stayed(state: &GameState, card: ObjectId, copy: ObjectId) {
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Hand,
+            "the real card moves (reach guard)"
+        );
+        assert!(state.players[0].hand.contains(&card));
+        assert_eq!(
+            state.objects[&copy].zone,
+            Zone::Exile,
+            "the non-card copy is not a card in exile and is not moved"
+        );
+        assert!(state.exile.contains(&copy));
+        assert!(!state.players[0].hand.contains(&copy));
+    }
+
+    /// "Return all instant cards you own from exile to your hand": the
+    /// filter-scoped mass scan moves the real card and leaves the copy.
+    #[test]
+    fn exile_card_population_filter_scoped_mass_move_leaves_the_copy() {
+        let (mut state, card, copy) = board();
+        let ability = change_zone_all(Zone::Exile, Zone::Hand, owned_exiled_instants());
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_card_moved_copy_stayed(&state, card, copy);
+    }
+
+    /// Player-scoped mass move ("all cards you own in exile"): the shared
+    /// per-object member authority admits the real card only.
+    #[test]
+    fn exile_card_population_player_scoped_mass_move_leaves_the_copy() {
+        let (mut state, card, copy) = board();
+        assert!(change_zone_all_player_scope_member_matches(
+            &state.objects[&card],
+            P0,
+            &[Zone::Exile]
+        ));
+        let ability = change_zone_all(Zone::Exile, Zone::Hand, TargetFilter::Controller);
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_card_moved_copy_stayed(&state, card, copy);
+    }
+
+    /// CR 110.1 + CR 111.1: the zone-aware population keeps battlefield
+    /// tokens — "exile all creatures you control" still moves a token.
+    #[test]
+    fn exile_card_population_battlefield_mass_move_still_moves_tokens() {
+        let mut state = GameState::new_two_player(42);
+        let token = create_object(
+            &mut state,
+            CardId(20),
+            P0,
+            "Creature Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+        let ability = change_zone_all(
+            Zone::Battlefield,
+            Zone::Exile,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        );
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            !state.battlefield.contains(&token),
+            "the battlefield token is a member of the creatures-you-control population"
+        );
+    }
+
+    /// CR 608.2d: a choice of an exiled card announced while the effect is
+    /// applied offers the real card only.
+    #[test]
+    fn exile_card_population_resolution_choice_offers_only_cards() {
+        let (mut state, card, copy) = board();
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: owned_exiled_instants(),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            SOURCE,
+            P0,
+        );
+        ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert_eq!(cards, &vec![card], "the copy {copy:?} is not offered");
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
     }
 }

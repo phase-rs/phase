@@ -124,6 +124,48 @@ class PrReviewTests(unittest.TestCase):
             "Waiting for a rules fix",
         )
 
+    def test_observation_does_not_replace_current_head_hold_or_review_label(self) -> None:
+        held = {
+            "event_type": "held",
+            "outcome": "held",
+            "pr": 52,
+            "head_sha": "current-head",
+            "timestamp": "2026-07-11T00:00:00Z",
+            "review_routing_label": "pr:approved-for-review",
+        }
+        observation = {
+            "event_type": "observation",
+            "pr": 52,
+            "head_sha": "current-head",
+            "timestamp": "2026-07-11T01:00:00Z",
+        }
+        current = pr_review.latest_events_by_pr_head([held, observation])
+        self.assertIs(current[(52, "current-head")], held)
+        self.assertIs(pr_review.latest_events_by_pr([held, observation])[52], observation)
+
+        recommendation = pr_review.recommend_from_packet(
+            {
+                "pr": {
+                    "number": 52,
+                    "state": "OPEN",
+                    "headRefOid": "current-head",
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "labels": ["pr:approved-for-review"],
+                },
+                "classification": {"hard_stop_paths": [], "surface": "backend"},
+                "ci": {"state": "failed"},
+                "parse_diff": {"state": "baseline_pending"},
+                "policy": {"labels": {"approved_for_review": "pr:approved-for-review"}},
+                "local_current_event": current[(52, "current-head")],
+            }
+        )
+        self.assertEqual(recommendation["advisory_action"], "hold_ci")
+
+        new_head = pr_review.latest_events_by_pr_head(
+            [held, {**observation, "head_sha": "new-head"}]
+        )
+        self.assertNotIn((52, "new-head"), new_head)
+
     def test_dashboard_terminal_sections_keep_old_closed_prs_in_archive(self) -> None:
         reference = datetime(2026, 7, 15, tzinfo=UTC)
         sections = pr_review.dashboard_terminal_sections(

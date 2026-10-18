@@ -717,6 +717,10 @@ fn instant_only_sources_do_not_inflate_x_limit_or_manual_capacity() {
         for (restricted, legal_sibling, land_source, expected_max) in [
             (true, false, true, 0),
             (true, false, false, 0),
+            // The real Lion's Eye Diamond is instant-only (the leg above); this
+            // leg strips that restriction, so it models an unrestricted
+            // "Discard your hand" mana cost paid mid-cast (CR 601.2a: the
+            // spell being cast is not in the hand it discards).
             (false, false, false, 3),
             (true, true, false, 1),
         ] {

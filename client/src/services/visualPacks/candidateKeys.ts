@@ -1,4 +1,7 @@
-import { candidateKey } from "./types.ts";
+import {
+  candidateKey,
+  isPackedContentLocale,
+} from "./types.ts";
 import type { CandidateKey, CandidateKind, VisualImageRung } from "./types.ts";
 
 export { decodeCandidateKey } from "./types.ts";
@@ -122,7 +125,21 @@ export interface CardCandidateIntent {
 export function cardCandidateGroups(intent: CardCandidateIntent): CandidateGroup[] {
   const visual = visualTuple(intent.faceIndex, intent.variant, intent.rung);
   const groups: CandidateGroup[] = [];
-  if (intent.language && intent.language !== "en" && intent.englishPrintingId) {
+  // Only build the localized group when packs can actually carry that locale.
+  // `encodeCandidateKey` VALIDATES against `PACKED_CONTENT_LOCALES`, so encoding
+  // an unsupported locale throws; callers catch that and degrade to no
+  // candidates at all, which loses the English/oracle groups that were perfectly
+  // resolvable. Selecting `zh` (a shipped UI locale with no pack content) while
+  // an English printing sits in a `printing/complete` pack was exactly that: one
+  // bad localized key discarded the installed English candidate. Omitting the
+  // group is the correct degradation — the later groups are what should serve
+  // this card.
+  if (
+    intent.language
+    && intent.language !== "en"
+    && intent.englishPrintingId
+    && isPackedContentLocale(intent.language)
+  ) {
     const keys = [
       encodeCandidateKey("localized_printing", [intent.language, intent.englishPrintingId, ...visual]),
       ...aliases(intent.localizedAliases).map((value) =>

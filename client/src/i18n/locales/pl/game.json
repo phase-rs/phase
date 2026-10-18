@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Wybierz źródło many",
     "description": "Ta zdolność many wymaga poświęcenia permanenta.",
+    "baseOutput_one": "Podstawowa ilość: {{count}} mana",
+    "baseOutput_other": "Podstawowa ilość: {{count}} many",
+    "baseOutputVariable": "Podstawowa ilość ustalana przy aktywacji",
     "sacrifice": "Poświęć",
     "back": "Wróć do płatności many",
     "unknownSource": "Źródło many"
@@ -102,6 +105,24 @@
     "subtitle": "Wszyscy gracze muszą zatwierdzić, zanim silnik rozpatrzy bezpieczny prefiks stosu.",
     "grant": "Zatwierdź",
     "decline": "Zachowaj priorytet"
+  },
+  "sandboxLifeCorrection": {
+    "open": "Koryguj życie",
+    "title": "Korekta życia w trybie piaskownicy",
+    "description": "Użyj zwykłych kontrolek ręki i stosu, aby rzucić i rozpatrzyć stwora. Ten panel wysyła piaskownicową akcję SetLife przez istniejący adapter gry.",
+    "scopeNote": "Korekta przechodzi przez ścieżkę edycji gracza w silniku; nie oznacza obrażeń ani efektu karty. Ten zakres nie obejmuje ujawniania ukrytej ręki, odrzucania zgodnie z regułami ani uzgodnionego wcześniej cofnięcia przed rzuceniem.",
+    "target": "Gracz",
+    "player": "{{name}} (gracz {{seat}})",
+    "you": "Ty",
+    "opponent": "Przeciwnik",
+    "currentLife": "Obecna liczba punktów życia",
+    "newLife": "Nowa liczba punktów życia",
+    "submit": "Zastosuj korektę",
+    "submitting": "Korekta została wysłana; zamknięcie tego panelu jej nie anuluje.",
+    "applied": "Potwierdzone aktualne życie gracza {{player}}: {{life}}.",
+    "notApplied": "Silnik nie potwierdził tej korekty. Przed ponowną próbą sprawdź bieżący snapshot.",
+    "failed": "Nie udało się wysłać korekty.",
+    "stale": "Stan gry zmienił się podczas edycji. Zamknij i otwórz ponownie panel, aby zacząć od bieżącego snapshotu."
   },
   "debugCreate": {
     "copies": "Kopie",
@@ -565,9 +586,6 @@
     "pendingCheaper": "Następny czar kosztuje {{amount}} mniej",
     "companion": "Towarzysz",
     "unboundedTooltip": "Nieograniczone: {{resource}} (∞)",
-    "unboundedScheduledTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; zostanie wybrana skończona liczba",
-    "unboundedScheduledYouTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; podasz liczbę",
-    "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; może pozostać nieograniczone",
     "unboundedConditionalYouTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; może pozostać nieograniczone, a jeśli nie — podasz liczbę",
     "unboundedMixedTooltip": "Nieograniczone: {{resource}} (∞) — część tej grupy ma oczekujące zwinięcie; część pozostaje nieograniczona",
@@ -650,6 +668,7 @@
     "libraryCount_one": "Biblioteka ({{count}} karta)",
     "libraryCount_other": "Biblioteka ({{count}} kart)",
     "playFromTop": "Zagraj {{name}} z wierzchu biblioteki",
+    "activateFromTop": "Aktywuj {{name}} z wierzchu biblioteki",
     "topOfLibrary": "wierzch biblioteki",
     "indicatorOpponentPrefix": "Przec ",
     "graveyardLower": "cmentarz",
@@ -657,6 +676,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Brak kart w strefie {{zone}}",
     "castFromZone": "Rzuć z {{zone}}: {{name}}",
+    "activateFromZone": "Aktywuj z {{zone}}: {{name}}",
     "viewCount": "Zobacz {{count}}",
     "castableCount": "{{zone}} — {{count}} możliwych do rzucenia"
   },
@@ -788,7 +808,16 @@
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stos",
     "collapsePanel": "Zwiń panel stosu",
     "expandPanel": "Rozwiń panel stosu",
@@ -842,8 +871,10 @@
     "chooseNewTarget": "Wybierz nowy cel czaru",
     "chooseNewTargetForSpell": "Wybierz nowy cel dla {{spell}}",
     "chooseCreatureToExplore": "Wybierz, który stwór eksploruje jako następny",
+    "chooseCreatureToEquip": "Wybierz stwora do wyposażenia",
     "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
+    "chooseTokenHost": "Wybierz gospodarza dla żetonu",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
@@ -877,6 +908,7 @@
     },
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
+    "keepCurrentTarget": "Zachowaj ten cel",
     "skip": "Pomiń",
     "opponentChoice": "(wybór przeciwnika)",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1131,6 +1163,8 @@
       "usePowder": "Użyj {{name}}",
       "powderDescription": "Wygnaj każdą kartę z ręki, dobierz tyle samo — to nie mulligan",
       "powderTooltip": "Wygnaj każdą kartę z ręki i dobierz tyle samo. To nie mulligan — liczba i karty na spodzie pozostają bez zmian.",
+      "freeReveal": "Pokaż i dobierz ponownie (za darmo)",
+      "freeRevealDescription": "Pokaż rękę, przetasuj ją i dobierz 7 — za darmo, bez kart na spód, to nie mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londyński",
       "eyebrowOpening": "Ręka startowa · Mulligan londyński",
       "reviewTitle": "Przejrzyj swoją rękę startową",
@@ -1348,8 +1382,6 @@
     },
     "config": {
       "startingLife": "Życie początkowe",
-      "experimentalDungeons": "Eksperymentalne lochy",
-      "experimentalDungeonsHelp": "Oferuj Baldur's Gate Wilderness w opcjach lochów i przy przejmowaniu inicjatywy. Eksperymentalne i nieoficjalne.",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {
@@ -1698,6 +1730,10 @@
       "title": "Wzmocnij Jace'a",
       "subtitle": "Wybierz kontrolowany przez siebie żeton Jace'a, aby zyskał +{{count}} lojalności"
     },
+    "spellCopyOrder": {
+      "title": "Ustal kolejność kopii",
+      "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
@@ -2008,7 +2044,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Wybierz przeciwnika",
-    "subtitle": "Wybierz, który przeciwnik dokonuje wyboru."
+    "subtitle": "Wybierz, który przeciwnik dokonuje wyboru.",
+    "orderTitle": "Wybierz następnego gracza",
+    "orderSubtitle": "Wybierz, dla kogo dokonać następnego wyboru.",
+    "substituteTitle": "Wybierz gracza",
+    "substituteSubtitle": "Wybierz, kto dokona tego wyboru."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2266,7 +2306,9 @@
     "accept": "Tak",
     "decline": "Nie",
     "sourceFallback": "Efekt",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Opcjonalne zdolności wyzwalane ({{count, number}})",
+    "replacementChoices": "Wybory zastępowania ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efekt",
@@ -2346,6 +2388,8 @@
     "confirm": "Potwierdź"
   },
   "replacement": {
+    "remember": "Zapamiętaj ten wybór w tej grze",
+    "savedChoice": "Zastąpienie: {{choice}}",
     "eyebrow": "Kolejność rozpatrywania",
     "title": "Efekty zastępujące",
     "orderSubtitle": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustalić kolejność — ostatni zastosowany efekt jest tym, który zadziała (CR 616.1).",
@@ -2372,7 +2416,8 @@
     "confirm": "Potwierdź",
     "badgeNewTarget": "Nowy cel",
     "slotLabel": "Cel {{index}}: {{current}} → {{chosen}}",
-    "unselected": "bez zmian"
+    "unselected": "bez zmian",
+    "keep": "Zachowaj"
   },
   "separatePiles": {
     "chooserName": "Gracz {{number}}",
@@ -2589,8 +2634,8 @@
     "close": "Zamknij nakładkę decyzji SI"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Twój priorytet",
+    "yourPriorityReason": "Twój priorytet — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2634,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Pojedynek na spojrzenia",
+      "breathHolding": "Zawody w wstrzymywaniu oddechu"
+    },
+    "versus": "{{first}} kontra {{second}}",
+    "instructions": "Klikaj, stukaj lub naciskaj spację tak długo, jak potrafisz. Pierwszy gracz, który przestanie na {{seconds}} s, przegrywa.",
+    "status": {
+      "pending": "Oczekiwanie na rozpoczęcie zawodów…",
+      "preparing": "Przygotuj się…",
+      "go": "START! Klikaj dalej!",
+      "paused": "Zawody wstrzymane, dopóki gracz się nie połączy ponownie…",
+      "spectating": "Oglądasz zawody…",
+      "resolving": "Ustalanie wyniku…"
+    },
+    "button": {
+      "wait": "Czekaj na START…",
+      "active": "Klikaj dalej!"
+    },
+    "you": "Ty",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "Wygrywasz zawody!",
+      "lost": "Przegrywasz zawody.",
+      "winner": "{{name}} wygrywa zawody.",
+      "tie": "Remis – nic się nie dzieje.",
+      "cancelled": "Zawody anulowano – nic się nie dzieje."
+    }
   }
 }

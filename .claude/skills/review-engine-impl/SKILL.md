@@ -7,6 +7,15 @@ description: Review an implementation in scope, such as an uncommitted diff, a j
 
 Review for gaps: things that are missing or wrong. Do not spend findings on style nits, CI-enforced formatting, or a diff recap.
 
+## Review the change
+
+This applies in every mode. Findings are defects in the change under review: what it introduces, the premises it rests on, and what it states it delivers but does not.
+
+- A defect is **pre-existing** when it reproduces at the change's base. The change **depends on** it when a test or acceptance row the change asserts cannot pass, or would have to be weakened, without fixing it. Run that one probe only when the answer changes what happens next.
+- A pre-existing defect the change depends on is a finding (`behavior`; in charter mode, a decision finding).
+- Any other pre-existing defect goes in a separate **Pre-existing** list after the findings, once, with its evidence. It is untagged, never blocks, and is not repeated in a later round.
+- Aim probes at the change's own claims. Do not hunt for pre-existing defects.
+
 ## Workflow
 
 1. Identify the changed surface from the diff, commit, or named files.
@@ -14,7 +23,7 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 3. Apply only the relevant lenses below.
 4. If the scope is a PR, fetch whatever external review comments exist (CodeRabbit, human reviewers) and confirm-or-refute each against the current head with code evidence, folding confirmed findings into your own. **Assume none exist by default** — Gemini Code Assist has been sunset, so no bot is guaranteed to have pre-screened this PR. Your own lenses are the complete review, not a supplement to a bot's; do not under-invest expecting a backstop. Where an external finding *does* exist, silently omitting it — or returning a verdict less severe than an open, unrefuted finding from another reviewer — is itself a defect. Review comments, checks, and uploaded/sticky artifacts count only when their evidence identifies the current PR head SHA; otherwise report the evidence as missing rather than attributing it to the current diff.
 5. If the scope is a PR touching engine/parser source, the parse-diff sticky comment (marker `<!-- coverage-parse-diff -->`) is required evidence: fetch its full body and confront the card-level diff against the PR's claimed scope. Unexplained gained/lost/changed cards are findings (unintended parser blast radius). A *Baseline pending* body means the diff is unavailable — flag it so the handler brings the branch current to regenerate it; an absent comment despite changed engine source, or a comment/artifact not bound to the current PR head SHA, means CI evidence is missing for the current head. This PR-head requirement does not apply to Engine-Implementer Checkpoint Mode: review the committed `BASE_SHA..CANDIDATE_SHA` diff instead.
-6. Report findings only. Silence means LGTM.
+6. Report findings, then the **Pre-existing** list when it has entries. Silence on both means LGTM.
 
 When `pr-contribution-handler` explicitly requests the manual quality gate, add `Quality Gate: PASS|FAIL` before findings. PASS requires all three current-PR facts: (1) claimed parse-impact count equals the measured parse-diff count and the normalized card sets are identical, using the full artifact when the sticky comment truncates examples; (2) the change is at an existing authority/right seam and reuses its vocabulary; and (3) a production-pipeline test is demonstrated to fail when the production change is reverted. On PASS, return the applicable existing praise tokens (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`) for the ordinary review/enqueue event. Never infer quality from Tier or standing and never create a `quality_recommended` event.
 
@@ -33,13 +42,13 @@ In this mode, emit these lines before findings:
 
 ```text
 Review Head: <CANDIDATE_SHA>
-Completion Gate: PASS|FAIL
+Completion Gate: PASS|DEFERRED|FAIL
 Maintainer-Simulation Gate: PASS|FAIL
 ```
 
 `Review Head` must be the supplied `CANDIDATE_SHA`, and the reviewed diff must reproduce from exactly `BASE_SHA..CANDIDATE_SHA`; otherwise report a blocking finding.
 
-`Completion Gate` passes when every check [engine-implementer Step 5](../engine-implementer/SKILL.md#step-5--verify-the-committed-candidate) calls for on the changed surface was run against the committed candidate and passed. Check the set against the candidate diff rather than against the plan, and re-run anything you doubt — you have the candidate SHA and a shell. A check run against uncommitted edits, or against a different tree, does not count. In all engine-implementer review modes, additional checks must address a concrete unresolved claim within the original task. Follow the orchestrator's [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); do not independently construct or repair verification machinery. Return missing evidence to the orchestrator without claiming completion, including when a proposed probe needs redesign before it can run. This does not waive required checks or current-candidate evidence.
+`Completion Gate` follows [engine-implementer Step 5](../engine-implementer/SKILL.md#step-5--verify-the-committed-candidate), including its verification timing. Emit `PASS` when all applicable checks passed with valid candidate evidence; `DEFERRED` when checks due now passed and remaining checks are explicitly scheduled for a later boundary under Step 5; `FAIL` for an observed failure or evidence missing when due. `DEFERRED` does not block phase acceptance or code review and is not a claim of completed verification. Check the set against the candidate diff rather than against the plan. Run an additional check only when it answers a concrete unresolved claim and its result is needed now under Step 5; otherwise defer it. A check run against uncommitted edits, or against a different tree, does not count unless Step 5 permits carrying forward unaffected evidence. In all engine-implementer review modes, additional checks must address a concrete unresolved claim within the original task. Follow the orchestrator's [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); do not independently construct or repair verification machinery. Return missing evidence to the orchestrator without claiming completion, including when a proposed probe needs redesign before it can run. This does not waive required checks or current-candidate evidence.
 
 ## Phase Mode (chartered runs)
 
@@ -48,7 +57,7 @@ Activated when the spawn inputs include a phase charter and **one phase's deferr
 - **Deferred ≠ gap; foreclosure = gap.** An item on the phase's deferral list is chartered to a named later phase: do not report it as missing, dropped, or incomplete. DO report any code that forecloses or contradicts a deferred item.
 - **Lens scoping:** the new-field-threading, sibling-coverage, claim-to-test, and serialized-surface lenses evaluate consumers against the charter's phase attribution — a consumer attributed to a later phase is deferred, not silently dropped. The class-vs-single-case lens is satisfied from the charter's class attribution — an infrastructure phase's class coverage lives in the charter and lands with its consumer phase.
 - **Maintainer-Simulation Gate carve-out:** a matrix row whose consuming function or hostile fixture is deferral-listed to a named later phase is recorded `DEFERRED(phase n)` and does not FAIL the gate; a row the phase's own code forecloses still FAILs. "FAIL when any row is missing" is otherwise unchanged.
-- **Checkpoint mode's gates are untouched** — phase mode scopes what counts as a finding, never what counts as a valid check. The supplied `BASE_SHA` is the phase base, and the reviewed span is that phase's `BASE_SHA..CANDIDATE_SHA`.
+- **Checkpoint mode's evidence rules still apply**, including Step 5's verification deferrals and the `DEFERRED` completion verdict. Deferring test execution does not require deferring the underlying feature or omitting its tests. The supplied `BASE_SHA` is the phase base, and the reviewed span is that phase's `BASE_SHA..CANDIDATE_SHA`.
 
 ## Integration Mode (chartered runs, final review)
 
@@ -58,6 +67,10 @@ Activated when the spawn inputs include a phase charter and the **run-span diff 
 2. **Charter completeness** — every deferral-list item either landed in its attributed phase or is reported unresolved.
 
 The universal-lens full sweep is NOT re-run over the cumulative diff — each phase's review already ran it phase-scoped, and re-running it over the whole span would recreate the oversized-review non-convergence this machinery exists to eliminate. Chain integrity is NOT this review's job — the orchestrator verifies it mechanically at run-level acceptance. This mode is findings-only.
+
+## Scout fact pack
+
+A scout fact pack may accompany the diff. Treat it as unverified leads: check anything you rely on, and look beyond it. A missing fact is not evidence of absence, and the pack never bounds a sweep: the new-field-threading and sibling-coverage greps are yours to run in full.
 
 ## Universal Lenses
 

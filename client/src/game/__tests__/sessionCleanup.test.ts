@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameAction, SubmitResult } from "../../adapter/types";
-import { abandonPendingDispatches, dispatchAction, isDispatchIdle } from "../dispatch";
+import type { EngineAdapter, EngineSnapshot, GameAction, InteractionSubmission, SubmitResult } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
+import { abandonPendingDispatches, dispatchAction, dispatchInteraction, isDispatchIdle } from "../dispatch";
 import { clearPromptOverlayState } from "../sessionCleanup";
-import { useGameStore } from "../../stores/gameStore";
+import { nextGameSessionGeneration, useGameStore } from "../../stores/gameStore";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useUiStore } from "../../stores/uiStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
-import { buildGameState, buildManaPaymentWaitingFor } from "../../test/factories/gameStateFactory";
+import { buildGameState, buildLegalActionsResult, buildManaPaymentWaitingFor } from "../../test/factories/gameStateFactory";
 
 describe("clearPromptOverlayState", () => {
   beforeEach(() => {
@@ -129,6 +131,10 @@ describe("clearPromptOverlayState", () => {
 describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
   const passPriority = { type: "PassPriority", data: {} } as unknown as GameAction;
   const concede = { type: "Concede", data: { player_id: 0 } } as unknown as GameAction;
+  const interactionSubmission: InteractionSubmission = {
+    interactionId: "interaction-1" as InteractionSubmission["interactionId"],
+    response: { type: "number", data: { value: 1 } },
+  };
 
   beforeEach(() => {
     useGameStore.getState().reset();
@@ -202,5 +208,211 @@ describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
     await uninterrupted;
 
     expect(useGameStore.getState().waitingFor).toEqual(state.waiting_for);
+  });
+
+  it("commits an uninterrupted interaction reply", async () => {
+    const beforeInteraction = buildGameState({ turn_number: 1 });
+    const afterInteraction = buildGameState({ turn_number: 2 });
+    const submitInteraction = vi.fn<NonNullable<EngineAdapter["submitInteraction"]>>()
+      .mockResolvedValue({ events: [] });
+    const adapter = buildEngineAdapterMock(beforeInteraction, {
+      submitInteraction,
+      getSnapshot: vi.fn(async () => ({
+        state: afterInteraction,
+        legalResult: buildLegalActionsResult(),
+        seq: nextSnapshotSeq(),
+      })),
+    });
+    useGameStore.setState({ adapter, gameState: beforeInteraction, gameMode: "ai" });
+
+    await expect(dispatchInteraction(interactionSubmission, 0)).resolves.toEqual({ status: "applied" });
+
+    expect(submitInteraction).toHaveBeenCalledOnce();
+    expect(useGameStore.getState().gameState).toEqual(afterInteraction);
+  });
+
+  it("does not commit a delayed interaction snapshot over a replacement session", async () => {
+    let releaseOldSubmit!: (result: SubmitResult) => void;
+    const oldState = buildGameState({ turn_number: 3 });
+    const replacementState = buildGameState({ turn_number: 8 });
+    const oldGetSnapshot = vi.fn(async () => ({
+      state: oldState,
+      legalResult: buildLegalActionsResult(),
+      seq: nextSnapshotSeq(),
+    }));
+    const oldSubmitInteraction = vi.fn<NonNullable<EngineAdapter["submitInteraction"]>>(
+      () => new Promise<SubmitResult>((resolve) => {
+        releaseOldSubmit = resolve;
+      }),
+    );
+    const oldAdapter = buildEngineAdapterMock(oldState, {
+      submitInteraction: oldSubmitInteraction,
+      getSnapshot: oldGetSnapshot,
+    });
+    useGameStore.setState({ adapter: oldAdapter, gameState: oldState, gameMode: "ai" });
+
+    const delayedInteraction = dispatchInteraction(interactionSubmission, 0);
+    expect(oldSubmitInteraction).toHaveBeenCalledOnce();
+
+    // This is the production session-boundary invalidation; the next game then
+    // installs its own adapter, generation, and committed engine snapshot.
+    clearPromptOverlayState();
+    const replacementGeneration = nextGameSessionGeneration();
+    const replacementAdapter = buildEngineAdapterMock(replacementState);
+    useGameStore.setState({
+      adapter: replacementAdapter,
+      gameState: replacementState,
+      gameMode: "ai",
+      gameSessionGeneration: replacementGeneration,
+    });
+    useGameStore.getState().commitEngineSnapshot(await replacementAdapter.getSnapshot());
+    expect(useGameStore.getState().gameState).toEqual(replacementState);
+
+    // The old adapter completes after the replacement and returns its own old
+    // snapshot. The dispatch must not write that result into the new session.
+    releaseOldSubmit({ events: [] });
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
+
+    expect(oldGetSnapshot).not.toHaveBeenCalled();
+    expect(useGameStore.getState().adapter).toBe(replacementAdapter);
+    expect(useGameStore.getState().gameSessionGeneration).toBe(replacementGeneration);
+    expect(useGameStore.getState().gameState).toEqual(replacementState);
+  });
+
+  it("drops a delayed interaction after clear without replacing its adapter", async () => {
+    let releaseSubmit!: (result: SubmitResult) => void;
+    const state = buildGameState({ turn_number: 6 });
+    const oldGetSnapshot = vi.fn<EngineAdapter["getSnapshot"]>().mockResolvedValue({
+      state,
+      legalResult: buildLegalActionsResult(),
+      seq: nextSnapshotSeq(),
+    });
+    const submitInteraction = vi.fn<NonNullable<EngineAdapter["submitInteraction"]>>(
+      () => new Promise<SubmitResult>((resolve) => {
+        releaseSubmit = resolve;
+      }),
+    );
+    const adapter = buildEngineAdapterMock(state, {
+      submitInteraction,
+      getSnapshot: oldGetSnapshot,
+    });
+    useGameStore.setState({ adapter, gameState: state, gameMode: "ai" });
+    const generation = useGameStore.getState().gameSessionGeneration;
+
+    const delayedInteraction = dispatchInteraction(interactionSubmission, 0);
+    expect(submitInteraction).toHaveBeenCalledOnce();
+
+    clearPromptOverlayState();
+    expect(useGameStore.getState().adapter).toBe(adapter);
+    expect(useGameStore.getState().gameSessionGeneration).toBe(generation);
+
+    releaseSubmit({ events: [] });
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
+
+    expect(oldGetSnapshot).not.toHaveBeenCalled();
+    expect(useGameStore.getState().waitingFor).toBeNull();
+    expect(useGameStore.getState().adapter).toBe(adapter);
+    expect(useGameStore.getState().gameSessionGeneration).toBe(generation);
+  });
+
+  it("drops an interaction snapshot if replacement happens while fetching it", async () => {
+    let releaseOldSnapshot!: (snapshot: EngineSnapshot) => void;
+    const oldState = buildGameState({ turn_number: 4 });
+    const replacementState = buildGameState({ turn_number: 9 });
+    const oldGetSnapshot = vi.fn<EngineAdapter["getSnapshot"]>(
+      () => new Promise<EngineSnapshot>((resolve) => {
+        releaseOldSnapshot = resolve;
+      }),
+    );
+    const oldAdapter = buildEngineAdapterMock(oldState, {
+      submitInteraction: vi.fn<NonNullable<EngineAdapter["submitInteraction"]>>()
+        .mockResolvedValue({ events: [] }),
+      getSnapshot: oldGetSnapshot,
+    });
+    useGameStore.setState({ adapter: oldAdapter, gameState: oldState, gameMode: "ai" });
+
+    const delayedInteraction = dispatchInteraction(interactionSubmission, 0);
+    await Promise.resolve();
+    expect(oldGetSnapshot).toHaveBeenCalledOnce();
+
+    clearPromptOverlayState();
+    const replacementGeneration = nextGameSessionGeneration();
+    const replacementAdapter = buildEngineAdapterMock(replacementState);
+    useGameStore.setState({
+      adapter: replacementAdapter,
+      gameState: replacementState,
+      gameMode: "ai",
+      gameSessionGeneration: replacementGeneration,
+    });
+    useGameStore.getState().commitEngineSnapshot(await replacementAdapter.getSnapshot());
+    expect(useGameStore.getState().gameState).toEqual(replacementState);
+
+    releaseOldSnapshot({
+      state: oldState,
+      legalResult: buildLegalActionsResult(),
+      seq: nextSnapshotSeq(),
+    });
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
+
+    expect(useGameStore.getState().adapter).toBe(replacementAdapter);
+    expect(useGameStore.getState().gameSessionGeneration).toBe(replacementGeneration);
+    expect(useGameStore.getState().gameState).toEqual(replacementState);
+  });
+
+  it("suppresses an interaction rejection from a replaced session", async () => {
+    let rejectOldSubmit!: (error: Error) => void;
+    const oldState = buildGameState({ turn_number: 5 });
+    const replacementState = buildGameState({ turn_number: 10 });
+    const oldSubmitInteraction = vi.fn<NonNullable<EngineAdapter["submitInteraction"]>>(
+      () => new Promise<SubmitResult>((_resolve, reject) => {
+        rejectOldSubmit = reject;
+      }),
+    );
+    const oldAdapter = buildEngineAdapterMock(oldState, {
+      submitInteraction: oldSubmitInteraction,
+    });
+    useGameStore.setState({ adapter: oldAdapter, gameState: oldState, gameMode: "ai" });
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+
+    const delayedInteraction = dispatchInteraction(interactionSubmission, 0);
+    expect(oldSubmitInteraction).toHaveBeenCalledOnce();
+
+    clearPromptOverlayState();
+    const replacementGeneration = nextGameSessionGeneration();
+    const replacementAdapter = buildEngineAdapterMock(replacementState);
+    useGameStore.setState({
+      adapter: replacementAdapter,
+      gameState: replacementState,
+      gameMode: "ai",
+      gameSessionGeneration: replacementGeneration,
+    });
+    useGameStore.getState().commitEngineSnapshot(await replacementAdapter.getSnapshot());
+
+    rejectOldSubmit(new Error("old session interaction failed"));
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
+
+    expect(useAppNotificationStore.getState().notification).toBeNull();
+    expect(useGameStore.getState().adapter).toBe(replacementAdapter);
+    expect(useGameStore.getState().gameSessionGeneration).toBe(replacementGeneration);
+    expect(useGameStore.getState().gameState).toEqual(replacementState);
+  });
+
+  it("reports and rethrows a rejection while its session is still current", async () => {
+    const state = buildGameState({ turn_number: 11 });
+    const currentError = new Error("current session interaction failed");
+    const submitInteraction = vi.fn<NonNullable<EngineAdapter["submitInteraction"]>>()
+      .mockRejectedValue(currentError);
+    const adapter = buildEngineAdapterMock(state, { submitInteraction });
+    useGameStore.setState({ adapter, gameState: state, gameMode: "ai" });
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+
+    await expect(dispatchInteraction(interactionSubmission, 0)).rejects.toBe(currentError);
+
+    expect(submitInteraction).toHaveBeenCalledOnce();
+    expect(useAppNotificationStore.getState().notification).toMatchObject({
+      description: currentError.message,
+    });
+    expect(useGameStore.getState().adapter).toBe(adapter);
+    expect(useGameStore.getState().gameState).toEqual(state);
   });
 });

@@ -23,12 +23,13 @@
 //!   variants (mill, exile, return-to-hand) come for free.
 
 use nom::branch::alt;
-use nom::bytes::complete::tag_no_case;
-use nom::combinator::value;
+use nom::bytes::complete::{tag, tag_no_case};
+use nom::combinator::{opt, value};
 use nom::Parser;
 
 use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::primitives::parse_number;
+use crate::parser::oracle_nom::target::{controller_phrase_among_mixed_case, ControllerPhrase};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, PileSource, PlayerScope, QuantityExpr,
     TargetFilter, TypeFilter, TypedFilter, VoterScope,
@@ -133,13 +134,15 @@ fn parse_separates_line(input: &str) -> Option<(&str, VoterScope)> {
 
 fn consume_creatures_they_control(input: &str) -> Option<&str> {
     // Two variants: "the creatures they control " and the rarer "creatures
-    // they control " (no article). Both are nom alternatives.
+    // they control " (no article), so the article is optional.
     let res: nom::IResult<&str, (), OracleError<'_>> = value(
         (),
-        alt((
-            tag_no_case("the creatures they control "),
-            tag_no_case("creatures they control "),
-        )),
+        (
+            opt(tag_no_case("the ")),
+            tag_no_case("creatures "),
+            controller_phrase_among_mixed_case(&[ControllerPhrase::THEY_CONTROL]),
+            tag(" "),
+        ),
     )
     .parse(input);
     res.ok().map(|(rest, ())| rest)
@@ -495,6 +498,42 @@ fn parse_exiled_pile_disposition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creatures_they_control_marker() {
+        for head in ["the creatures", "creatures"] {
+            assert_eq!(
+                consume_creatures_they_control(&format!("{head} they control into two piles")),
+                Some("into two piles"),
+                "{head:?}"
+            );
+            for declined in [
+                "you control",
+                "that player controls",
+                "controlled by that player",
+                "the chosen player controls",
+            ] {
+                assert_eq!(
+                    consume_creatures_they_control(&format!("{head} {declined} into two piles")),
+                    None,
+                    "{head:?} {declined:?}"
+                );
+            }
+        }
+    }
+
+    /// The pile line keeps its original case, so a capitalized controller phrase
+    /// is consumed exactly as its lowercase spelling is.
+    #[test]
+    fn creatures_they_control_marker_mixed_case() {
+        for head in ["The Creatures", "Creatures"] {
+            assert_eq!(
+                consume_creatures_they_control(&format!("{head} They Control into two piles")),
+                Some("into two piles"),
+                "{head:?}"
+            );
+        }
+    }
 
     /// CR 700.3: Make-an-Example body parses to a single
     /// `Effect::SeparateIntoPiles` with `EachOpponent` partition,

@@ -510,7 +510,24 @@ fn replacement_targets(
     // trigger anchors the replacement on its own source without needing to
     // consult the target pipeline.
     if matches!(target, TargetFilter::SelfRef) {
-        return vec![TargetRef::Object(ability.source_id)];
+        return ability
+            .self_ref_binding(state)
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect();
+    }
+
+    // CR 614.1a + CR 601.2c + CR 400.7: a rider bound to an earlier declared
+    // target slot ("If that creature would die this turn, exile it instead" after
+    // an intervening Equipment target — Fiery Annihilation) installs on that
+    // slot's object only while it is still the announced object on the live
+    // board. An illegal-at-resolution slot (CR 608.2b), a missing pin, or a
+    // same-id new object installs nothing.
+    if let TargetFilter::ParentTargetSlot { index } = target {
+        return crate::game::targeting::declared_slot_referent(state, ability, *index)
+            .filter(|referent| referent.pin.is_current(state))
+            .map(|referent| vec![TargetRef::Object(referent.id)])
+            .unwrap_or_default();
     }
 
     resolve_event_context_target(state, target, ability.source_id)
@@ -1348,6 +1365,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -1417,6 +1435,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)

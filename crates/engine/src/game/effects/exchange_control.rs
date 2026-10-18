@@ -174,24 +174,35 @@ pub fn resolve(
     // CR 701.12a: Bidirectional control exchange via two transient continuous effects.
     // Object A gets controller_b, object B gets controller_a. Duration honours
     // the resolved ability (e.g. "until end of turn") with `Permanent` as the
-    // default — mirrors `gain_control::resolve`.
+    // default — mirrors `gain_control::resolve`. CR 701.12b + CR 611.2b: the
+    // halves begin simultaneously, so both durations are tested on the same
+    // board; if either never starts, the entire exchange can't be completed
+    // and per CR 701.12a no part of it occurs.
     let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
-    state.add_transient_continuous_effect(
+    let exchanged = state.add_simultaneous_transient_continuous_effects(
         ability.source_id,
-        controller_b,
-        duration.clone(),
-        TargetFilter::SpecificObject { id: id_a },
-        vec![ContinuousModification::ChangeController],
-        None,
-    );
-    state.add_transient_continuous_effect(
-        ability.source_id,
-        controller_a,
         duration,
-        TargetFilter::SpecificObject { id: id_b },
-        vec![ContinuousModification::ChangeController],
-        None,
+        vec![
+            (
+                controller_b,
+                TargetFilter::SpecificObject { id: id_a },
+                vec![ContinuousModification::ChangeController],
+            ),
+            (
+                controller_a,
+                TargetFilter::SpecificObject { id: id_b },
+                vec![ContinuousModification::ChangeController],
+            ),
+        ],
     );
+    if !exchanged {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     // CR 613.1b + CR 603.2: publish the control change so the event exists for the
     // rules that key off it. Every OTHER Layer-2 control-change path already does
@@ -203,9 +214,9 @@ pub fn resolve(
     // Emitted on the SUCCESS path only, which is what makes it the authoritative
     // "the exchange happened" witness for the CR 608.2c "if you do" / "if you
     // don't or can't" riders on Perplexing Chimera, Gilded Drake, Volatile
-    // Stormdrake and Arteeoh. The SIX REACHABLE no-op returns above each emit
+    // Stormdrake and Arteeoh. The SEVEN REACHABLE no-op returns above each emit
     // `EffectResolved` and no `ControllerChanged`, so the two are distinguishable.
-    // (A seventh `return Ok(())` guards the `Effect::ExchangeControl` destructure
+    // (An eighth `return Ok(())` guards the `Effect::ExchangeControl` destructure
     // at the top of this function; it emits nothing and is unreachable — the only
     // caller is `resolve_effect`'s `Effect::ExchangeControl` arm, which matches the
     // same variant.)
@@ -264,7 +275,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetRef};
+    use crate::types::ability::{Effect, StaticCondition, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -318,10 +329,11 @@ mod tests {
     /// resolved exactly once, published no control change, and installed no
     /// Layer-2 effect.
     ///
-    /// There are SIX such returns (CR 701.12a slot A unresolvable, slot B
+    /// There are SEVEN such returns (CR 701.12a slot A unresolvable, slot B
     /// unresolvable, object A missing, object B missing, a subject in a zone
-    /// where control is not a characteristic; CR 701.12b same controller), and
-    /// this module covers one row per branch. A SEVENTH `return Ok(())` guards
+    /// where control is not a characteristic; CR 701.12b same controller;
+    /// CR 611.2b a half whose duration never starts), and this module covers
+    /// one row per branch. An EIGHTH `return Ok(())` guards
     /// the `Effect::ExchangeControl` destructure at the top of `resolve`; it is
     /// deliberately uncovered because it is unreachable by dispatcher contract —
     /// `resolve_effect`'s `Effect::ExchangeControl` arm is its only caller and
@@ -629,5 +641,68 @@ mod tests {
                 (obj_b, PlayerId(1), PlayerId(0)),
             ]
         );
+    }
+
+    /// An exchange between a P0 permanent and a P1 permanent whose source is a
+    /// third, untapped permanent P0 controls.
+    fn exchange_with_duration(
+        duration: Duration,
+    ) -> (GameState, ResolvedAbility, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let obj_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let obj_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = make_exchange_ability(obj_a, obj_b);
+        ability.source_id = source;
+        ability.duration = Some(duration);
+        (state, ability, obj_a, obj_b)
+    }
+
+    fn assert_exchange_never_started(duration: Duration) {
+        let (mut state, ability, obj_a, obj_b) = exchange_with_duration(duration);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_noop(&state, &events);
+        assert_eq!(state.objects[&obj_a].controller, PlayerId(0));
+        assert_eq!(state.objects[&obj_b].controller, PlayerId(1));
+    }
+
+    /// CR 611.2b + CR 701.12a: a "for as long as" duration that is false as the
+    /// exchange resolves never starts for either half, so no part of the
+    /// exchange occurs.
+    #[test]
+    fn exchange_whose_duration_never_starts_is_noop() {
+        assert_exchange_never_started(Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsTapped,
+        });
+    }
+
+    /// CR 701.12a + CR 701.12b: "for as long as you control" the P0 source
+    /// starts for the half P0 gains but never for the half P1 gains. The
+    /// entire exchange can't be completed, so neither half occurs.
+    #[test]
+    fn exchange_whose_duration_starts_for_only_one_half_is_noop() {
+        assert_exchange_never_started(Duration::WhileControllingHost);
     }
 }

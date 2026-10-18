@@ -38,7 +38,7 @@ pub fn resolve(
         .players
         .iter()
         .find(|p| p.id == player_id)
-        .map(|p| p.library.iter().copied().collect::<Vec<_>>())
+        .map(|p| state.library_of(p.id).iter().copied().collect::<Vec<_>>())
         .unwrap_or_default();
 
     // CR 728.1: Mill cards equal to rad counter count.

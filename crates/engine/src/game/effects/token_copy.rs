@@ -1,17 +1,13 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
-#[cfg(test)]
-use crate::game::layers::has_active_copy_layer_effects;
-use crate::game::layers::{compute_current_copiable_values, remove_subtype_set};
-#[cfg(test)]
-use crate::game::printed_cards::intrinsic_copiable_values;
+use crate::game::layers::{compute_current_copiable_values, remove_core_type, remove_subtype_set};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
-    ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition,
-    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
+    ContinuousModification, CopiableValues, Effect, EffectError, EffectKind, ResolvedAbility,
+    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
-use crate::types::card::PrintedLoyalty;
+use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
@@ -28,7 +24,7 @@ use crate::types::resolved_commands::{
     ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
 };
 use crate::types::zones::Zone;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
@@ -86,8 +82,11 @@ pub fn resolve(
     // loops, through the same single-authority helper `Effect::Token` uses so
     // "target opponent creates a token that's a copy of it" places the copy
     // under the chosen opponent's control rather than the trigger controller's.
-    let token_owner =
-        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter);
+    let Some(token_owner) =
+        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter)
+    else {
+        return crate::game::effects::token::no_token(state, ability, events);
+    };
 
     // Step 1: Resolve the copy source list.
     // CR 608.2c + 603.10a: LTB self-trigger patterns such as Vaultborn Tyrant
@@ -101,96 +100,126 @@ pub fn resolve(
     // create a token …" (e.g., Twinflame), `ability.targets` carries N >= 1
     // object refs and the resolver creates one copy per target.
     //
-    // Zone-eligibility: unlike `Bounce` / `ChangeZone`, `CopyTokenOf` reads
-    // copiable values via `compute_current_copiable_values`, which is
-    // zone-agnostic — so a source in the graveyard is fine.
-    let copy_source_ids: Vec<ObjectId> = if let Some(source_filter) = source_filter {
-        let zones = {
-            let explicit_zones = source_filter.extract_zones();
-            if explicit_zones.is_empty() {
-                vec![Zone::Battlefield]
-            } else {
-                explicit_zones
-            }
-        };
-        let filter_ctx = FilterContext::from_ability(ability);
-        zones
+    // Zone-eligibility: unlike `Bounce` / `ChangeZone`, a copy source other
+    // than the ability's own source is read live through `copy_source`
+    // (`compute_current_copiable_values`, which is zone-agnostic) — so such
+    // a source in the graveyard is fine.
+    //
+    // CR 608.2h + CR 707.2: "a copy of this creature" (`SelfRef`) reads its own
+    // source through `copy_source`, which supplies the source's last-known
+    // copiable values once it has left the zone the ability identified it in.
+    let copy_sources: Vec<CopySource> = if copies_own_source(&ability.effect) {
+        copy_source(state, ability, CopySourceReferent::OwnSource)
             .into_iter()
-            .flat_map(|zone| targeting::zone_object_ids(state, zone))
-            .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
-            .collect()
-    } else if matches!(target_filter, TargetFilter::CostPaidObject) {
-        // CR 400.7: resolve through the shared live-reference guard — a
-        // referent that changed zones is a new object and must not become the
-        // copy source (no fallback to a same-id object).
-        // An ABSENT referent is a malformed ability (nothing was ever bound) and
-        // stays a parameter error. A PRESENT but stale referent is different:
-        // the object was bound and then became a new object (CR 400.7), so the
-        // copy has no legal source and resolves as a clean no-op through the
-        // empty-source path below, which still emits `EffectResolved`.
-        match ability.cost_paid_object.as_ref() {
-            None => {
-                return Err(EffectError::MissingParam(
-                    "CopyTokenOf requires a cost-paid object".to_string(),
-                ));
-            }
-            Some(snapshot) => snapshot
-                .live_object_id(state)
-                .map(|id| vec![id])
-                .unwrap_or_default(),
-        }
-    } else if matches!(
-        target_filter,
-        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-    ) {
-        let effective_filter =
-            crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
-        let id = match &effective_filter {
-            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
-            _ => unreachable!("tracked-set filter resolved to non-tracked filter"),
-        };
-        let filter_ctx = FilterContext::from_ability(ability);
-        state
-            .tracked_object_sets
-            .get(&id)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|id| matches_target_filter(state, *id, &effective_filter, &filter_ctx))
             .collect()
     } else {
-        // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
-        // `SelfRef` always resolves to the source object (the LTB
-        // self-trigger shape — Vaultborn Tyrant, Ochre Jelly), and
-        // `None` / `ParentTarget` fall back to source only when
-        // `ability.targets` is empty. Without this, a chained
-        // `CopyTokenOf { target: SelfRef }` sub-ability would inherit the
-        // parent's targets via chain propagation in
-        // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
-        //
-        // CR 109.4 + CR 115.1: `CopyTokenOf` may carry a *player* target in
-        // `ability.targets` — the `owner` slot for "target opponent creates a
-        // token that's a copy of it" (Wedding Ring). The copy *source* axis is
-        // object-only, so a context-ref source (`ParentTarget` / `None`) would
-        // otherwise see the owner player as a non-empty `ability.targets` and
-        // fail to fall back to the source object. Resolve against an
-        // object-only view so the two axes never cross-contaminate.
-        let object_only_ability;
-        let resolution_ability = if ability
-            .targets
-            .iter()
-            .any(|t| matches!(t, TargetRef::Player(_)))
-        {
-            let mut narrowed = ability.clone();
-            narrowed
-                .targets
-                .retain(|t| matches!(t, TargetRef::Object(_)));
-            object_only_ability = narrowed;
-            &object_only_ability
+        let copy_source_ids: Vec<ObjectId> = if let Some(source_filter) = source_filter {
+            let zones = {
+                let explicit_zones = source_filter.extract_zones();
+                if explicit_zones.is_empty() {
+                    vec![Zone::Battlefield]
+                } else {
+                    explicit_zones
+                }
+            };
+            let filter_ctx = FilterContext::from_ability(ability);
+            zones
+                .into_iter()
+                .flat_map(|zone| targeting::zone_object_ids(state, zone))
+                .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
+                .collect()
+        } else if matches!(target_filter, TargetFilter::CostPaidObject) {
+            // CR 400.7: resolve through the shared live-reference guard — a
+            // referent that changed zones is a new object and must not become the
+            // copy source (no fallback to a same-id object).
+            // An ABSENT referent is a malformed ability (nothing was ever bound) and
+            // stays a parameter error. A PRESENT but stale referent is different:
+            // the object was bound and then became a new object (CR 400.7), so the
+            // copy has no legal source and resolves as a clean no-op through the
+            // empty-source path below, which still emits `EffectResolved`.
+            match ability.cost_paid_object.as_ref() {
+                None => {
+                    return Err(EffectError::MissingParam(
+                        "CopyTokenOf requires a cost-paid object".to_string(),
+                    ));
+                }
+                Some(snapshot) => snapshot
+                    .live_object_id(state)
+                    .map(|id| vec![id])
+                    .unwrap_or_default(),
+            }
+        } else if matches!(
+            target_filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        ) {
+            let effective_filter =
+                crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+            let id = match &effective_filter {
+                TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => {
+                    *id
+                }
+                _ => unreachable!("tracked-set filter resolved to non-tracked filter"),
+            };
+            let filter_ctx = FilterContext::from_ability(ability);
+            state
+                .tracked_object_sets
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| matches_target_filter(state, *id, &effective_filter, &filter_ctx))
+                .collect()
         } else {
-            ability
+            // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
+            // `None` / `ParentTarget` fall back to source only when
+            // `ability.targets` is empty. An own-source `SelfRef` never
+            // reaches this branch: it is read through `copy_source` above,
+            // which never reads `ability.targets`, so a chained
+            // `CopyTokenOf { target: SelfRef }` sub-ability cannot inherit the
+            // parent's targets via chain propagation in
+            // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
+            //
+            // CR 109.4 + CR 115.1: `CopyTokenOf` may carry a *player* target in
+            // `ability.targets` — the `owner` slot for "target opponent creates a
+            // token that's a copy of it" (Wedding Ring). The copy *source* axis is
+            // object-only, so a context-ref source (`ParentTarget` / `None`) would
+            // otherwise see the owner player as a non-empty `ability.targets` and
+            // fail to fall back to the source object. Resolve against an
+            // object-only view so the two axes never cross-contaminate.
+            let object_only_ability;
+            let resolution_ability = if ability
+                .targets
+                .iter()
+                .any(|t| matches!(t, TargetRef::Player(_)))
+            {
+                let mut narrowed = ability.clone();
+                // An occurrence projection: object occurrences keep their pins.
+                let objects: Vec<usize> = narrowed
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| matches!(t, TargetRef::Object(_)))
+                    .map(|(position, _)| position)
+                    .collect();
+                narrowed.project_target_occurrences(&objects);
+                object_only_ability = narrowed;
+                &object_only_ability
+            } else {
+                ability
+            };
+            crate::game::effects::resolved_effect_object_ids(
+                state,
+                resolution_ability,
+                target_filter,
+            )
         };
-        crate::game::effects::resolved_effect_object_ids(state, resolution_ability, target_filter)
+        copy_source_ids
+            .into_iter()
+            .map(|id| {
+                copy_source(state, ability, CopySourceReferent::Object(id))
+                    .ok_or(EffectError::ObjectNotFound(id))
+            })
+            .collect::<Result<_, _>>()?
     };
 
     // CR 609.3 + CR 101.3: "Do as much as possible" — when the copy source
@@ -200,7 +229,7 @@ pub fn resolve(
     // onto a creature, so the copy makes nothing and the chained
     // `Not(IfYouDo)` Insect-token fallback can still fire. `EffectResolved` is
     // still emitted so the chain treats the effect as resolved.
-    if copy_source_ids.is_empty() {
+    if copy_sources.is_empty() {
         // No tokens created — clear the per-resolution token-id ledger so a
         // downstream "the token created this way" anaphor does not pick up a
         // stale id from an earlier resolution. Engine bookkeeping, not a
@@ -215,22 +244,24 @@ pub fn resolve(
     }
 
     // CR 707.2 + CR 115.1d: Create `count` independent copy-tokens per copy
-    // source. Snapshot all source values before the first creation so later SBAs
-    // (e.g., legendary rule) see identical copies. The drain can pause and resume
-    // when the `CreateToken` replacement pipeline requires a CR 616.1 choice.
-    let mut remaining = VecDeque::with_capacity(copy_source_ids.len());
-    for &copy_source_id in &copy_source_ids {
-        let values = compute_current_copiable_values(state, copy_source_id)
-            .ok_or(EffectError::ObjectNotFound(copy_source_id))?;
-        let source = &state.objects[&copy_source_id];
+    // source. All source values were read in Step 1, before the first creation,
+    // so later SBAs (e.g., legendary rule) see identical copies. The drain can
+    // pause and resume when the `CreateToken` replacement pipeline requires a
+    // CR 616.1 choice.
+    let mut remaining = VecDeque::with_capacity(copy_sources.len());
+    for source in copy_sources {
         remaining.push_back(PendingCopyTokenBatch {
             owner: token_owner,
             count: count as u32,
             copy: Box::new(CopyTokenSpec {
-                values: Box::new(values),
+                values: Box::new(source.values),
                 display_source: source.display_source,
-                printed_ref: source.printed_ref.clone(),
-                token_image_ref: source.token_image_ref.clone(),
+                printed_ref: source.printed_ref,
+                token_image_ref: source.token_image_ref,
+                // Created copy-tokens derive their descriptor from their
+                // own base at injection (copy exceptions included), so the
+                // source's captured body is deliberately not carried here.
+                token_art: None,
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -251,6 +282,161 @@ pub fn resolve(
     );
 
     Ok(())
+}
+
+/// CR 707.2 + CR 608.2h: which copy source a copy effect reads.
+pub(crate) enum CopySourceReferent {
+    /// The ability's own source ("a copy of this creature"), bound to the
+    /// incarnation the ability captured.
+    OwnSource,
+    /// An object the effect's route identified at resolution.
+    Object(ObjectId),
+}
+
+/// CR 707.2: one copy source as a copy effect reads it: the incarnation it
+/// was read from, its copiable values, and the display identity the copy
+/// records with them (not copiable).
+pub(crate) struct CopySource {
+    pub(crate) incarnation: ObjectIncarnationRef,
+    pub(crate) values: CopiableValues,
+    pub(crate) display_source: DisplaySource,
+    pub(crate) printed_ref: Option<PrintedCardRef>,
+    pub(crate) token_image_ref: Option<TokenImageRef>,
+    pub(crate) token_art: Option<TokenArtDescriptor>,
+}
+
+impl CopySource {
+    /// CR 707.2: the current copiable values of an object that is still the
+    /// copy source.
+    fn live(state: &GameState, id: ObjectId) -> Option<Self> {
+        let values = compute_current_copiable_values(state, id)?;
+        let source = state.objects.get(&id)?;
+        Some(Self {
+            incarnation: ObjectIncarnationRef::from_object(source),
+            values,
+            display_source: source.display_source,
+            printed_ref: source.printed_ref.clone(),
+            token_image_ref: source.token_image_ref.clone(),
+            token_art: source.token_art.clone(),
+        })
+    }
+
+    /// CR 608.2h + CR 707.2: the last-known copiable values of the exact
+    /// incarnation `incarnation`, recorded as it left a public zone. The
+    /// display routing is derived as the departed-source reader in
+    /// `replacement::create_entry_copy_spec_for_replacement` derives it.
+    fn last_known(state: &GameState, incarnation: ObjectIncarnationRef) -> Option<Self> {
+        let values = state
+            .lki_copiable_values_by_incarnation
+            .get(&incarnation.object_id)?
+            .get(&incarnation.incarnation)?
+            .clone();
+        let token_image_ref = state
+            .lki_by_incarnation
+            .get(&incarnation.object_id)
+            .and_then(|history| history.get(&incarnation.incarnation))
+            .and_then(|lki| lki.token_image_ref.clone());
+        Some(Self {
+            incarnation,
+            values,
+            display_source: if token_image_ref.is_some() {
+                DisplaySource::Token
+            } else {
+                DisplaySource::Card
+            },
+            printed_ref: None,
+            token_image_ref,
+            token_art: None,
+        })
+    }
+}
+
+/// CR 608.2h + CR 707.2 + CR 400.7: the single authority for what a copy
+/// effect copies from a specific copy source, shared by `CopyTokenOf` and
+/// `BecomeCopy`. The ability's own source is copied with its current
+/// copiable values while it is still the incarnation the ability captured;
+/// once that object has left the public zone it was identified in, with its
+/// last-known copiable values for that exact incarnation. A later object
+/// under the same storage id is a new object and is never the source.
+/// `None` when the source supplies neither. The stack's bulk copy admission
+/// (`token::try_resolve_copy_batch`) reads it too, on each member's swapped
+/// ability, so admission and handler read one copy source per member.
+pub(crate) fn copy_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    referent: CopySourceReferent,
+) -> Option<CopySource> {
+    match referent {
+        CopySourceReferent::Object(id) => CopySource::live(state, id),
+        CopySourceReferent::OwnSource if ability.source_is_current(state) => {
+            CopySource::live(state, ability.source_id)
+        }
+        CopySourceReferent::OwnSource => {
+            CopySource::last_known(state, captured_own_source(ability)?)
+        }
+    }
+}
+
+/// CR 707.2: whether `effect` copies its ability's own source: "a copy of
+/// this creature" as a token (`CopyTokenOf`) or as a permanent becoming a copy
+/// (`BecomeCopy`), and the keyword handlers that build such a copy (Myriad,
+/// CR 702.116a; Encore, CR 702.141a).
+pub(crate) fn copies_own_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            source_filter: None,
+            ..
+        } | Effect::BecomeCopy {
+            target: TargetFilter::SelfRef,
+            ..
+        } | Effect::Myriad
+            | Effect::Encore
+    )
+}
+
+/// CR 400.7 + CR 608.2h: the `CopyTokenOf` ability a keyword handler builds to
+/// copy its own source (Myriad, CR 702.116a; Encore, CR 702.141a). It carries
+/// the outer ability's captured source identity, so `copy_source` binds the
+/// incarnation the outer ability captured.
+pub(crate) fn own_source_copy_ability(effect: Effect, outer: &ResolvedAbility) -> ResolvedAbility {
+    let mut ability = ResolvedAbility::new(effect, vec![], outer.source_id, outer.controller);
+    ability.trigger_source = outer.trigger_source.clone();
+    ability.source_incarnation = outer.source_incarnation;
+    ability
+}
+
+/// CR 400.7 + CR 400.7j: the source incarnation an ability captured: a
+/// trigger's source identity, or the incarnation an activated ability's
+/// source had as the ability was put on the stack (for Embalm, Eternalize and
+/// Encore, the exile incarnation its own cost created).
+fn captured_own_source(ability: &ResolvedAbility) -> Option<ObjectIncarnationRef> {
+    match &ability.trigger_source {
+        Some(source) => Some(source.identity.reference),
+        None => ability
+            .source_incarnation
+            .map(|incarnation| ObjectIncarnationRef::of(ability.source_id, incarnation)),
+    }
+}
+
+/// CR 104.4b + CR 608.2h: collect the source incarnations whose last-known
+/// copiable values `ability`, or a branch of it, can still read as its own
+/// copy source. `GameState::normalize_for_loop` reads them before it erases
+/// the abilities' identities.
+pub(crate) fn collect_own_copy_sources(
+    ability: &ResolvedAbility,
+    sources: &mut HashSet<ObjectIncarnationRef>,
+) {
+    if copies_own_source(&ability.effect) {
+        sources.extend(captured_own_source(ability));
+    }
+    for branch in [&ability.sub_ability, &ability.else_ability]
+        .into_iter()
+        .flatten()
+    {
+        collect_own_copy_sources(branch, sources);
+    }
 }
 
 /// CR 707.2 + CR 614.1a: Route a queue of `PendingCopyTokenBatch`es through the
@@ -510,6 +696,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -574,6 +761,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 display_source,
                 printed_ref: printed_ref.clone(),
                 token_image_ref: token_image_ref.clone(),
+                token_art: token_art.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -703,6 +891,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             display_source,
             printed_ref: printed_ref.clone(),
             token_image_ref: token_image_ref.clone(),
+            token_art: token_art.clone(),
             extra_keywords: extra_keywords.clone(),
             additional_modifications: additional_modifications.clone(),
             tapped,
@@ -1258,63 +1447,6 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     true
 }
 
-/// CR 707.2: Compute the longest contiguous prefix of `source_ids` (top-down
-/// resolution order) whose copy sources all share IDENTICAL copiable values.
-///
-/// Tier-3 batch support: a run of "create a token that's a copy of it"
-/// self-copy triggers from distinct sources produces N tokens with identical
-/// characteristics iff every source has the same CR 707.2 copiable values. This
-/// walks the run, snapshots the top source's copiable values, then extends the
-/// prefix while each subsequent source's values are `==` to the snapshot.
-///
-/// Conserves on a vanished source: if `compute_current_copiable_values` returns
-/// `None` for any source in the prefix walk, the prefix stops there (the top
-/// source returning `None` yields `None` overall — nothing to batch).
-///
-/// Returns `(prefix_values, prefix_len)`. `prefix_len` may be shorter than
-/// `source_ids.len()` (a divergent tail resolves later). Token art is read from
-/// the live source at resolution time (`token_copy::resolve`), so no display
-/// `PrintedCardRef` is threaded through the batch probe (CR 707.2: not a
-/// copiable characteristic).
-#[cfg(test)]
-pub(crate) fn compute_copy_batch_prefix(
-    state: &GameState,
-    source_ids: &[ObjectId],
-) -> Option<(crate::types::ability::CopiableValues, u32)> {
-    let top_id = *source_ids.first()?;
-    if !has_active_copy_layer_effects(state) {
-        let top = state.objects.get(&top_id)?;
-        let prefix_values = intrinsic_copiable_values(top);
-        let mut prefix_len = 1u32;
-        for &id in source_ids.iter().skip(1) {
-            let Some(obj) = state.objects.get(&id) else {
-                break;
-            };
-            if intrinsic_copiable_values(obj) == prefix_values {
-                prefix_len += 1;
-            } else {
-                break;
-            }
-        }
-        return Some((prefix_values, prefix_len));
-    }
-
-    // Conserve on a vanished top source.
-    let prefix_values = compute_current_copiable_values(state, top_id)?;
-
-    let mut prefix_len = 1u32;
-    for &id in source_ids.iter().skip(1) {
-        // CR 707.2: stop at the first source that vanished (None) or whose
-        // copiable values diverge from the prefix snapshot.
-        match compute_current_copiable_values(state, id) {
-            Some(values) if values == prefix_values => prefix_len += 1,
-            _ => break,
-        }
-    }
-
-    Some((prefix_values, prefix_len))
-}
-
 /// CR 707.2 + CR 707.9: Apply non-keyword `, except <body>` modifications to
 /// a synthesized token. Tokens are created with copiable values baked in, so
 /// each modification mutates BOTH the layered view (`card_types`,
@@ -1445,10 +1577,13 @@ fn apply_token_modifications(
                     }
                 }
             }
+            // CR 205.1a: removing a card type removes its correlated subtypes too;
+            // applied to both live and base types so the loss is part of the
+            // token's copiable values (CR 707.9b).
             ContinuousModification::RemoveType { core_type } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.card_types.core_types.retain(|t| t != core_type);
-                    token.base_card_types.core_types.retain(|t| t != core_type);
+                    remove_core_type(&mut token.card_types, *core_type);
+                    remove_core_type(&mut token.base_card_types, *core_type);
                 }
             }
             ContinuousModification::AddSubtype { subtype } => {
@@ -1492,17 +1627,11 @@ fn apply_token_modifications(
             // Stamped into both live and base card types so the override is part
             // of the token's copiable values (CR 707.9b).
             ContinuousModification::SetCardTypes { core_types } => {
-                let all_creature_types = &state.all_creature_types;
-                let objects = &mut state.objects;
-                if let Some(token) = objects.get_mut(&token_id) {
+                if let Some(token) = state.objects.get_mut(&token_id) {
                     token.card_types.core_types = core_types.clone();
                     token.base_card_types.core_types = core_types.clone();
                     let keep = |subtype: &String| {
-                        crate::game::layers::subtype_matches_core_types(
-                            subtype,
-                            core_types,
-                            all_creature_types,
-                        )
+                        crate::game::layers::subtype_matches_core_types(subtype, core_types)
                     };
                     token.card_types.subtypes.retain(|s| keep(s));
                     token.base_card_types.subtypes.retain(|s| keep(s));
@@ -1728,9 +1857,10 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
                     token.base_card_types.core_types.push(*core_type);
                 }
             }
+            // CR 205.1a + CR 707.9b: same as the layered `RemoveType` arm.
             ContinuousModification::RemoveType { core_type } => {
-                token.card_types.core_types.retain(|t| t != core_type);
-                token.base_card_types.core_types.retain(|t| t != core_type);
+                remove_core_type(&mut token.card_types, *core_type);
+                remove_core_type(&mut token.base_card_types, *core_type);
             }
             ContinuousModification::AddSubtype { subtype } => {
                 if !token.card_types.subtypes.iter().any(|s| s == subtype) {
@@ -1756,11 +1886,7 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
                 token.card_types.core_types = core_types.clone();
                 token.base_card_types.core_types = core_types.clone();
                 let keep = |subtype: &String| {
-                    crate::game::layers::subtype_matches_core_types(
-                        subtype,
-                        core_types,
-                        all_creature_types,
-                    )
+                    crate::game::layers::subtype_matches_core_types(subtype, core_types)
                 };
                 token.card_types.subtypes.retain(|s| keep(s));
                 token.base_card_types.subtypes.retain(|s| keep(s));
@@ -2039,6 +2165,256 @@ mod tests {
             .base_card_types
             .supertypes
             .contains(&Supertype::Legendary));
+    }
+
+    /// CR 205.1a + CR 707.9b: a baked `RemoveType { Creature }` copy exception
+    /// removes the creature types with the Creature type, in both the live and
+    /// the base (copiable) card types. Kindred keeps the creature set
+    /// (CR 308.2).
+    #[test]
+    fn copy_token_remove_type_creature_drops_creature_types_in_card_and_base_types() {
+        for (core_types, subtypes, expected_core, expected_subtypes) in [
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Heartwood", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Heartwood"],
+            ),
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Vibranium", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Vibranium"],
+            ),
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Equipment", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Equipment"],
+            ),
+            (
+                vec![CoreType::Kindred, CoreType::Creature],
+                vec!["Eldrazi"],
+                vec![CoreType::Kindred],
+                vec!["Eldrazi"],
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            state.all_creature_types = vec!["Bear".to_string(), "Eldrazi".to_string()];
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let source = state.objects.get_mut(&source_id).unwrap();
+                source.base_card_types = CardType {
+                    supertypes: vec![],
+                    core_types: core_types.clone(),
+                    subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+                };
+                source.card_types = source.base_card_types.clone();
+            }
+
+            let mut events = Vec::new();
+            let ability = ResolvedAbility::new(
+                Effect::CopyTokenOf {
+                    target: TargetFilter::SelfRef,
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }],
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            );
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let token = state
+                .objects
+                .get(&ObjectId(state.next_object_id - 1))
+                .unwrap();
+            let expected_subtypes: Vec<String> =
+                expected_subtypes.iter().map(|s| s.to_string()).collect();
+            // Reach guard: the token exists, lost Creature and kept the expected type.
+            assert_eq!(token.card_types.core_types, expected_core);
+            assert_eq!(token.base_card_types.core_types, expected_core);
+            assert_eq!(token.card_types.subtypes, expected_subtypes);
+            assert_eq!(token.base_card_types.subtypes, expected_subtypes);
+        }
+    }
+
+    /// CR 205.1a + CR 707.2 + CR 707.9b: the immediate (liminal token) copy
+    /// exception path removes creature types with the Creature type too.
+    #[test]
+    fn immediate_copy_token_remove_type_creature_drops_creature_types() {
+        for (core_types, subtypes, expected_core, expected_subtypes) in [
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Heartwood", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Heartwood"],
+            ),
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Vibranium", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Vibranium"],
+            ),
+            (
+                vec![CoreType::Artifact, CoreType::Creature],
+                vec!["Equipment", "Bear"],
+                vec![CoreType::Artifact],
+                vec!["Equipment"],
+            ),
+            (
+                vec![CoreType::Kindred, CoreType::Creature],
+                vec!["Eldrazi"],
+                vec![CoreType::Kindred],
+                vec!["Eldrazi"],
+            ),
+        ] {
+            let mut token = GameObject::new(
+                ObjectId(900),
+                CardId(900),
+                PlayerId(0),
+                "Liminal Token".to_string(),
+                Zone::Battlefield,
+            );
+            token.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: core_types.clone(),
+                subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+            };
+            token.card_types = token.base_card_types.clone();
+
+            apply_immediate_copy_token_modifications_to_object(
+                &mut token,
+                &[ContinuousModification::RemoveType {
+                    core_type: CoreType::Creature,
+                }],
+                &["Bear".to_string(), "Eldrazi".to_string()],
+            );
+
+            let expected_subtypes: Vec<String> =
+                expected_subtypes.iter().map(|s| s.to_string()).collect();
+            assert_eq!(token.card_types.core_types, expected_core);
+            assert_eq!(token.base_card_types.core_types, expected_core);
+            assert_eq!(token.card_types.subtypes, expected_subtypes);
+            assert_eq!(token.base_card_types.subtypes, expected_subtypes);
+        }
+    }
+
+    #[test]
+    fn copy_token_artifact_subtypes_follow_owner_in_both_baked_paths() {
+        // CR 205.1a/205.3g + CR 707.9b: synthetic copy exceptions test the
+        // shared primitive, without claiming a printed token-animation pair.
+        for subtype in ["Heartwood", "Vibranium"] {
+            for (modification, core, expected_subtype) in [
+                (
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    },
+                    CoreType::Artifact,
+                    subtype,
+                ),
+                (
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Artifact,
+                    },
+                    CoreType::Creature,
+                    "Bear",
+                ),
+                (
+                    ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Artifact],
+                    },
+                    CoreType::Artifact,
+                    subtype,
+                ),
+                (
+                    ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Creature],
+                    },
+                    CoreType::Creature,
+                    "Bear",
+                ),
+            ] {
+                let mut state = GameState::new_two_player(42);
+                state.all_creature_types = vec!["Bear".into(), "Elf".into()];
+                let source_id = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    "Artifact copy source".into(),
+                    Zone::Battlefield,
+                );
+                let source = state.objects.get_mut(&source_id).unwrap();
+                source.base_card_types = CardType {
+                    supertypes: vec![Supertype::Legendary],
+                    core_types: vec![CoreType::Artifact, CoreType::Creature],
+                    subtypes: vec![subtype.into(), "Bear".into()],
+                };
+                source.card_types = source.base_card_types.clone();
+                let mut liminal = source.clone();
+                let ability = ResolvedAbility::new(
+                    Effect::CopyTokenOf {
+                        target: TargetFilter::SelfRef,
+                        owner: TargetFilter::Controller,
+                        source_filter: None,
+                        enters_attacking: false,
+                        tapped: false,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        extra_keywords: vec![],
+                        additional_modifications: vec![modification.clone()],
+                    },
+                    vec![],
+                    source_id,
+                    PlayerId(0),
+                );
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                let token_id = ObjectId(state.next_object_id - 1);
+                assert_ne!(token_id, source_id);
+                let token = &state.objects[&token_id];
+                assert!(token.is_token, "reach: CopyTokenOf created a token");
+                assert_eq!(token.name, "Artifact copy source");
+                assert_eq!(
+                    state.objects[&source_id].card_types.subtypes,
+                    vec![subtype.to_string(), "Bear".to_string()]
+                );
+                apply_immediate_copy_token_modifications_to_object(
+                    &mut liminal,
+                    &[modification],
+                    &state.all_creature_types,
+                );
+                for object in [token, &liminal] {
+                    assert_eq!(object.card_types.core_types, vec![core]);
+                    assert_eq!(object.base_card_types.core_types, vec![core]);
+                    assert_eq!(
+                        object.card_types.subtypes,
+                        vec![expected_subtype.to_string()]
+                    );
+                    assert_eq!(
+                        object.base_card_types.subtypes,
+                        vec![expected_subtype.to_string()]
+                    );
+                    assert_eq!(object.card_types.supertypes, vec![Supertype::Legendary]);
+                    assert_eq!(
+                        object.base_card_types.supertypes,
+                        vec![Supertype::Legendary]
+                    );
+                }
+            }
+        }
     }
 
     #[test]

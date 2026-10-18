@@ -38,8 +38,8 @@
 
 use crate::game::players;
 use crate::types::ability::{
-    ContinuousModification, DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ContinuousModification, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
@@ -81,7 +81,7 @@ pub fn resolve(
             additional_modifications: vec![],
         };
         let copy_ability =
-            ResolvedAbility::new(copy_effect, vec![], ability.source_id, ability.controller);
+            crate::game::effects::token_copy::own_source_copy_ability(copy_effect, ability);
         crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
 
         // CR 702.141a + CR 508.1d: each token created for this opponent "attacks
@@ -131,6 +131,7 @@ pub fn resolve(
                 controller: ability.controller,
                 source_id: ability.source_id,
                 one_shot: true,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
             },
             events,

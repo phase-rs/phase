@@ -44,9 +44,44 @@ pub fn describe_action(state: &GameState, action: &GameAction) -> String {
     let Ok(value) = serde_json::to_value(action) else {
         return verb;
     };
-    let Some(data) = value.get("data").and_then(Value::as_object) else {
-        // A unit variant (`PassPriority`) has no payload; the verb is the whole
-        // description.
+    // A unit variant (`PassPriority`) has no payload; the verb is the whole
+    // description.
+    describe_payload(state, verb, value.get("data"))
+}
+
+/// A one-line description of any engine enum value, read from its serialized
+/// form: a bare unit-variant string, an internally tagged object
+/// (`{"type": "AtNextPhase", "phase": "End"}`), or an adjacently tagged one
+/// (`{"type": .., "data": {..}}`). The same structural walk
+/// [`describe_action`] uses, so a new variant of any such enum is described the
+/// day it is added.
+pub fn describe_tagged(state: &GameState, value: &Value) -> String {
+    match value {
+        Value::String(variant) => humanize_identifier(variant),
+        Value::Object(fields) => {
+            let Some(kind) = fields.get("type").and_then(Value::as_str) else {
+                return render_value(state, "", value);
+            };
+            let verb = humanize_identifier(kind);
+            match fields.get("data") {
+                Some(data) => describe_payload(state, verb, Some(data)),
+                None => {
+                    let rest: serde_json::Map<String, Value> = fields
+                        .iter()
+                        .filter(|(field, _)| field.as_str() != "type")
+                        .map(|(field, item)| (field.clone(), item.clone()))
+                        .collect();
+                    describe_payload(state, verb, Some(&Value::Object(rest)))
+                }
+            }
+        }
+        other => render_value(state, "", other),
+    }
+}
+
+/// `verb` followed by the payload's non-empty fields: `Verb (Field: value, ..)`.
+fn describe_payload(state: &GameState, verb: String, data: Option<&Value>) -> String {
+    let Some(data) = data.and_then(Value::as_object) else {
         return verb;
     };
 
@@ -80,16 +115,11 @@ pub fn describe_action(state: &GameState, action: &GameAction) -> String {
 /// candidate line with the card name — the highest-signal token for a model
 /// that already knows the card.
 pub fn primary_object_name(state: &GameState, action: &GameAction) -> Option<String> {
-    let id = match action {
-        GameAction::CastSpell { object_id, .. }
-        | GameAction::PlayLand { object_id, .. }
-        | GameAction::Foretell { object_id, .. }
-        | GameAction::PlayFaceDown { object_id, .. }
-        | GameAction::TurnFaceUp { object_id, .. } => Some(*object_id),
-        GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
-        _ => None,
-    }?;
-    object_name(state, id)
+    // The engine's exhaustive source-object authority, not a list kept here:
+    // every action that works on one permanent or card — a mana ability on an
+    // artifact or creature as much as a spell cast from hand — leads with that
+    // object's name, including variants added after this was written.
+    object_name(state, action.source_object()?)
 }
 
 fn object_name(state: &GameState, id: ObjectId) -> Option<String> {
@@ -252,6 +282,54 @@ mod tests {
         // `card_id` must NOT be resolved through the object table.
         assert!(rendered.contains("Card ID: 3"), "{rendered}");
         assert!(rendered.contains("Object ID: object #7"), "{rendered}");
+    }
+
+    /// Every action on one object leads with that object's name — including
+    /// mana-source actions, so an artifact a seat can tap for mana reads as
+    /// that artifact rather than as an anonymous payload.
+    #[test]
+    fn the_primary_object_comes_from_the_engines_source_object_authority() {
+        use engine::game::create_object;
+        use engine::types::mana::ManaType;
+        use engine::types::player::PlayerId;
+        use engine::types::zones::Zone;
+
+        let mut state = empty_state();
+        let rock = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mind Stone".to_string(),
+            Zone::Battlefield,
+        );
+        let action = GameAction::TapForConvoke {
+            object_id: rock,
+            mana_type: ManaType::Colorless,
+        };
+        assert_eq!(
+            primary_object_name(&state, &action).as_deref(),
+            Some("Mind Stone")
+        );
+        assert_eq!(primary_object_name(&state, &GameAction::PassPriority), None);
+    }
+
+    #[test]
+    fn tagged_values_describe_as_their_variant_and_fields() {
+        let state = empty_state();
+        let internal = serde_json::json!({ "type": "AtNextPhase", "phase": "End" });
+        assert_eq!(
+            describe_tagged(&state, &internal),
+            "At Next Phase (Phase: End)"
+        );
+        let adjacent = serde_json::json!({ "type": "WhenLeavesPlay", "data": { "object_id": 9 } });
+        assert_eq!(
+            describe_tagged(&state, &adjacent),
+            "When Leaves Play (Object ID: object #9)"
+        );
+        assert_eq!(
+            describe_tagged(&state, &serde_json::json!("EndOfTurn")),
+            "End Of Turn"
+        );
     }
 
     #[test]

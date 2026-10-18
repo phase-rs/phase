@@ -13,16 +13,17 @@ import type { GameState, WaitingFor } from "../adapter/types";
 
 /**
  * CR 601.2g + CR 107.4f: WaitingFor variants resolved by the single
- * `ManaPaymentUI` overlay. The generic `ManaPayment` prompt and the per-shard
- * `PhyrexianPayment` prompt share one panel because both are caster-only cost
- * decisions for the same spell — `ManaPaymentUI` discriminates internally.
+ * `ManaPaymentUI` overlay. The generic `ManaPayment` prompt, the per-shard
+ * `PhyrexianPayment` prompt, and a mana ability's own payment window
+ * (`ManaAbilityManaPayment`, CR 605.3a) share one panel because all are
+ * caster-only cost decisions — `ManaPaymentUI` discriminates internally.
  *
  * This set is the single source of truth: `GamePage` gates the overlay's
  * mount on it, and `HANDLED_WAITING_FOR_TYPES` spreads it. Wiring the overlay
  * and registering it as "handled" therefore cannot drift apart.
  */
 export const MANA_PAYMENT_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
-  new Set<WaitingFor["type"]>(["ManaPayment", "PhyrexianPayment"]);
+  new Set<WaitingFor["type"]>(["ManaPayment", "PhyrexianPayment", "ManaAbilityManaPayment"]);
 
 /**
  * Discriminator strings the frontend has a user-facing UI handler for.
@@ -108,6 +109,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // enchant-player Auras). Legal picks come from `getWaitingForClickTargetRefs`
     // (viewmodel/gameStateView.ts), which every click surface reads.
     "ReturnAsAuraTarget",
+    // Digital-only Alchemy (no CR entry): batch boon "one of them" token-host
+    // pick. Same board/HUD click route as ReturnAsAuraTarget above.
+    "ChooseTokenHost",
     "EquipTarget",
     "CrewVehicle",
     "StationTarget",
@@ -133,6 +137,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // CR 701.71a: empower Jace N — single-pick among the controller's Jace
     // planeswalker tokens (EmpowerJaceChoiceModal, rendered via CardChoiceModal).
     "EmpowerJaceChoice",
+    // CR 405.3 + CR 707.10: pick the spell whose copy goes on the stack next
+    // (SpellCopyOrderChoiceModal, rendered via CardChoiceModal).
+    "SpellCopyOrderChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
@@ -148,6 +155,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseAnnouncingOpponent",
     "ChooseGiftRecipient",
     "ClashCardPlacement",
+    // Eye to Eye / Mouth to Mouth: real-time clicking contest (ContestOverlay).
+    "PhysicalContest",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).
     "AssistChoosePlayer",
@@ -271,6 +280,7 @@ export function waitingForReason(
     case "PhyrexianPayment":
     case "PayCost":
     case "PayManaAbilityMana":
+    case "ManaAbilityManaPayment":
     case "UnlessPayment":
       return { key: "status.reason.payingCost" };
     case "MulliganDecision":

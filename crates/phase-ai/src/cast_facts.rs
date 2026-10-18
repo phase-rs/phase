@@ -550,7 +550,6 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::Regenerate { target, .. }
         | Effect::RemoveAllDamage { target, .. }
         | Effect::DoublePT { target, .. }
-        | Effect::PreventDamage { target, .. }
         | Effect::Animate { target, .. }
         // CR 113.1a + CR 611.2: the donor whose activated abilities are gained
         // (Quicksilver Elemental) is a real declared target.
@@ -565,6 +564,15 @@ fn effect_requires_targets(effect: &Effect) -> bool {
             target,
             ..
         } => !matches!(target, TargetFilter::None),
+        // CR 115.1a + CR 115.10a: only a declared prevention recipient ("prevent
+        // all damage that would be dealt to target creature") declares a target.
+        // The mass (`All`) scope ("...to creatures this turn", Blinding Fog) is an
+        // untargeted population, so it falls through to `false`.
+        Effect::PreventDamage {
+            recipient_scope: EffectScope::Single,
+            target,
+            ..
+        } => !target.is_context_ref(),
         // CR 701.60a: only single-permanent suspect/unsuspect declares a target.
         // The mass (`All`) scope (e.g. Absolving Lammasu, "all suspected
         // creatures are no longer suspected") is a non-targeting population
@@ -624,11 +632,12 @@ mod tests {
     use engine::game::game_object::GameObject;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, PreventionAmount, PreventionScope, QuantityExpr,
+        TargetFilter, TypedFilter,
     };
     use engine::types::actions::GameAction;
     use engine::types::game_state::GameState;
-    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 
     fn make_object() -> GameObject {
         let mut object = GameObject::new(
@@ -916,6 +925,62 @@ mod tests {
             !effect_requires_targets(&mass),
             "mass Unsuspect{{All}} (Absolving Lammasu) must not be target-requiring"
         );
+    }
+
+    // CR 115.10a: a mass prevention recipient ("prevent all damage that would be
+    // dealt to creatures this turn", Blinding Fog) declares no target. `Single`
+    // requires a target only when its recipient is not a context reference.
+    #[test]
+    fn prevention_target_facts_exclude_context_references_and_mass_recipients() {
+        for (target, declares_target) in [
+            (TargetFilter::Typed(TypedFilter::creature()), true),
+            (TargetFilter::None, false),
+            (TargetFilter::SelfRef, false),
+            (TargetFilter::Controller, false),
+            (TargetFilter::ParentTarget, false),
+            (
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                false,
+            ),
+        ] {
+            for recipient_scope in [EffectScope::Single, EffectScope::All] {
+                let ability = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PreventDamage {
+                        amount: PreventionAmount::All,
+                        amount_dynamic: None,
+                        target: target.clone(),
+                        recipient_scope,
+                        scope: PreventionScope::AllDamage,
+                        damage_source_filter: None,
+                        prevention_duration: None,
+                    },
+                );
+                let mut object = make_object();
+                Arc::make_mut(&mut object.abilities).push(ability.clone());
+                object.trigger_definitions.push(
+                    TriggerDefinition::new(TriggerMode::ChangesZone)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination(Zone::Battlefield)
+                        .execute(ability),
+                );
+
+                let facts = cast_facts_for_object(&object);
+                assert_eq!(facts.primary_effects.len(), 1);
+                assert_eq!(facts.immediate_etb_triggers.len(), 1);
+                let requires_targets = recipient_scope == EffectScope::Single && declares_target;
+                assert_eq!(
+                    facts.requires_targets_in_spell_text, requires_targets,
+                    "spell prevention: {recipient_scope:?}, {target:?}"
+                );
+                assert_eq!(
+                    facts.requires_targets_in_immediate_etb, requires_targets,
+                    "ETB prevention: {recipient_scope:?}, {target:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, useState } from "react";
 import i18n from "i18next";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // A real `localStorage` for the store's `persist` middleware and for the
@@ -54,7 +54,6 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
-      allow_experimental_dungeons: false,
       custom_rules: {
         id: 0,
         structural: {
@@ -85,6 +84,14 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
   }),
 }));
 
+const { ceilingMock } = vi.hoisted(() => ({ ceilingMock: vi.fn() }));
+vi.mock("../../../services/engineRuntime", async () => ({
+  ...(await vi.importActual<typeof import("../../../services/engineRuntime")>(
+    "../../../services/engineRuntime",
+  )),
+  bestOfThreeCeilingForFormat: ceilingMock,
+}));
+
 import { HostSetup } from "../HostSetup";
 import * as serverDirectory from "../../../services/serverDirectory";
 import type { ConnectionMode, LobbySourceStatus } from "../../../stores/multiplayerStore";
@@ -112,6 +119,8 @@ describe("HostSetup", () => {
   let socketUrls: string[] = [];
 
   beforeEach(() => {
+    ceilingMock.mockReset();
+    ceilingMock.mockImplementation(async (format: string) => (format === "Dandan" ? "Bo1" : "Bo3"));
     socketUrls = refuseRealWebSockets();
     vi.spyOn(serverDirectory, "refreshServerDirectory").mockResolvedValue(undefined);
     vi.spyOn(useMultiplayerStore.getState(), "ensureSubscriptionSocket").mockResolvedValue(null);
@@ -592,7 +601,7 @@ describe("HostSetup", () => {
   });
 
   describe.each(["server", "p2p"] as const)("accessible hosting options (%s mode)", (connectionMode) => {
-    it("names every visible switch and associates only the sandbox and experimental-dungeons help", () => {
+    it("names every visible switch and associates only the sandbox help", () => {
       render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       // "List in lobby" is present in BOTH modes: a P2P room brokered by a
@@ -602,7 +611,6 @@ describe("HostSetup", () => {
         "List in lobby",
         "Start when full",
         "Sandbox Mode — allow debug actions",
-        "Experimental Dungeons",
         "Set password",
       ];
 
@@ -611,8 +619,6 @@ describe("HostSetup", () => {
         const control = screen.getByRole("switch", { name });
         if (name === "Sandbox Mode — allow debug actions") {
           expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.sandboxModeHelp);
-        } else if (name === "Experimental Dungeons") {
-          expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.experimentalDungeonsHelp);
         } else {
           expect(control).not.toHaveAttribute("aria-describedby");
           expect(control).not.toHaveAccessibleDescription();
@@ -677,15 +683,6 @@ describe("HostSetup", () => {
       expect(sandboxSwitch).not.toBeChecked();
       await user.keyboard("{Enter}");
       expect(sandboxSwitch).toBeChecked();
-
-      const experimentalSwitch = screen.getByRole("switch", { name: "Experimental Dungeons" });
-      await user.tab();
-      expect(experimentalSwitch).toHaveFocus();
-      expect(experimentalSwitch).not.toBeChecked();
-      await user.keyboard(" ");
-      expect(experimentalSwitch).toBeChecked();
-      await user.keyboard(" ");
-      expect(experimentalSwitch).not.toBeChecked();
 
       const passwordSwitch = screen.getByRole("switch", { name: "Set password" });
       await user.tab();
@@ -1010,7 +1007,6 @@ describe("HostSetup", () => {
         sideboard_policy: { type: "Limited" as const, data: 15 },
         default_deck_copy_limit: { type: "UpTo" as const, data: 4 },
         allow_debug_actions: false,
-        allow_experimental_dungeons: false,
       };
 
       it("mounts and seeds the form from the format's own resolved config", () => {
@@ -1550,6 +1546,131 @@ describe("HostSetup", () => {
         }),
         null,
       );
+    });
+  });
+  describe("best-of-three ceiling", () => {
+    function seedRemembered(format: "Dandan" | "Standard") {
+      useMultiplayerStore.setState({
+        lastHostConfig: {
+          format,
+          formatConfig: FORMAT_DEFAULTS[format],
+          savedCustomFormatId: null,
+          playerCount: 2,
+          matchType: "Bo3",
+          loopDetection: { type: "Off" },
+          isPublic: true,
+          startWhenFull: true,
+          ranked: false,
+          aiSeats: [],
+        },
+      });
+    }
+
+    function renderHost(onHost = vi.fn().mockResolvedValue(false)) {
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+      return onHost;
+    }
+
+    const bo3 = () => screen.getByRole("button", { name: "BO3" });
+    const bo1 = () => screen.getByRole("button", { name: "BO1" });
+
+    it("H2: a format whose ceiling admits Bo3 leaves it enabled and submits it", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      const onHost = renderHost();
+
+      await waitFor(() => expect(bo3()).toBeEnabled());
+      expect(bo3()).toHaveClass("bg-white/10");
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo3" }), expect.any(String));
+      expect(useMultiplayerStore.getState().lastHostConfig?.matchType).toBe("Bo3");
+    });
+
+    it("H1: a remembered Bo3 on Dandan is disabled, submitted as Bo1, and stays remembered", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Dandan");
+      const onHost = renderHost();
+
+      await waitFor(() => expect(ceilingMock).toHaveBeenCalledWith("Dandan"));
+      await act(async () => {
+        await ceilingMock.mock.results[0].value;
+      });
+      expect(bo3()).toBeDisabled();
+      expect(bo1()).toHaveClass("bg-white/10");
+      expect(bo3()).not.toHaveClass("bg-white/10");
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
+      expect(useMultiplayerStore.getState().lastHostConfig?.matchType).toBe("Bo3");
+    });
+
+    it("H3: an unresolved or failed lookup offers no Bo3", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      ceilingMock.mockImplementation(() => new Promise(() => {}));
+      const onHost = renderHost();
+
+      expect(bo3()).toBeDisabled();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
+      expect(useMultiplayerStore.getState().lastHostConfig?.matchType).toBe("Bo3");
+
+      cleanup();
+      ceilingMock.mockImplementation(async () => {
+        throw new Error("engine unavailable");
+      });
+      const onHostRejected = renderHost();
+      await waitFor(() => expect(ceilingMock).toHaveBeenCalledTimes(2));
+      await act(async () => {});
+      expect(bo3()).toBeDisabled();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+      expect(onHostRejected).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
+    });
+
+    it("H4: switching format never reuses the previous format's answer", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      const settle: Array<() => void> = [];
+      ceilingMock.mockImplementation(
+        (format: string) =>
+          new Promise((resolve) => {
+            settle.push(() => resolve(format === "Dandan" ? "Bo1" : "Bo3"));
+          }),
+      );
+      renderHost();
+
+      await act(async () => settle.shift()?.());
+      await waitFor(() => expect(bo3()).toBeEnabled());
+      expect(bo3()).toHaveClass("bg-white/10");
+
+      await user.click(screen.getByRole("button", { name: "Format" }));
+      await user.click(screen.getByRole("option", { name: "Dandân" }));
+      expect(bo3()).toBeDisabled();
+      await act(async () => settle.shift()?.());
+      expect(bo3()).toBeDisabled();
+
+      await user.click(screen.getByRole("button", { name: "Format" }));
+      await user.click(screen.getByRole("option", { name: "Standard" }));
+      expect(bo3()).toBeDisabled();
+      await act(async () => settle.shift()?.());
+      await waitFor(() => expect(bo3()).toBeEnabled());
+      expect(bo3()).toHaveClass("bg-white/10");
+    });
+
+    it("H5: a lookup that throws synchronously fails closed", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      ceilingMock.mockImplementation(() => {
+        throw new Error("missing export");
+      });
+      const onHost = renderHost();
+
+      await waitFor(() => expect(ceilingMock).toHaveBeenCalled());
+      await act(async () => {});
+      expect(bo3()).toBeDisabled();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
     });
   });
 });

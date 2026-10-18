@@ -284,6 +284,52 @@ fn curse_of_stalked_prey_fires_on_combat_damage_to_enchanted_player() {
     );
 }
 
-// NOTE: Curse of Hospitality is not tested here because the engine does not
-// yet support the "deals combat damage to enchanted player" trigger pattern.
-// A test should be added once that trigger matcher is implemented.
+/// CR 303.4 + CR 603.2: the trigger watches combat damage to the ENCHANTED
+/// player only. P1 (enchanted) attacks P0 with its own creature: no counter.
+/// The test above is the positive partner.
+#[test]
+fn curse_of_stalked_prey_ignores_combat_damage_to_another_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let curse_id = {
+        let mut builder = scenario.add_creature_from_oracle(
+            P0,
+            "Curse of Stalked Prey",
+            0,
+            0,
+            CURSE_OF_STALKED_PREY,
+        );
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura", "Curse"]);
+        builder.id()
+    };
+    let attacker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P0, "Plains");
+        scenario.add_card_to_library_top(P1, "Plains");
+    }
+    let mut runner = scenario.build();
+    attach_to_player(runner.state_mut(), curse_id, P1);
+    evaluate_layers(runner.state_mut());
+    reindex_object_triggers(runner.state_mut(), curse_id);
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .expect("DeclareAttackers must succeed");
+    let outcome = runner.combat_damage();
+    assert!(outcome.life_delta(P0) <= -2, "the attack connected");
+    let counters = runner.state().objects[&attacker]
+        .counters
+        .get(&engine::types::counter::CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        counters, 0,
+        "damage to P0, who is not enchanted, adds no counter"
+    );
+}
+
+// Curse of Hospitality is tested in `curse_of_hospitality_9213.rs`.

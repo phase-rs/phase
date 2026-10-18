@@ -10,7 +10,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1106,6 +1106,148 @@ fn gilgamesh_host_then_equipment_choice_preserves_event_scoped_candidates() {
     }
 
     panic!("Gilgamesh's combined host and Equipment choices did not resolve");
+}
+
+/// Probe board P1 (#9762 plan gate, CR 603.12 + CR 400.7 + CR 608.2c):
+/// Gilgamesh's "When you put one or more Equipment onto the battlefield this
+/// way, you may attach one of them to a Samurai you control" is a reflexive
+/// trigger. "Them" is the set its Dig moved — frozen as the reflexive is
+/// created — so with two Equipment kept and a third Equipment already on the
+/// battlefield, only the two moved Equipment are offered, and the second one
+/// can be chosen and attached.
+#[test]
+fn gilgamesh_reflexive_offers_only_the_equipment_moved_this_way() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let samurai = scenario
+        .add_creature(P0, "Chosen Samurai", 2, 2)
+        .with_subtypes(vec!["Samurai"])
+        .id();
+    scenario
+        .add_creature(P0, "Other Samurai", 2, 2)
+        .with_subtypes(vec!["Samurai"]);
+    let preexisting = scenario
+        .add_artifact_from_oracle(P0, "Old Equipment", "Equip {2}")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let gilgamesh = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gilgamesh, Master-at-Arms", 3, 3, GILGAMESH_ORACLE)
+        .with_subtypes(vec!["Human", "Warrior"])
+        .with_mana_cost(ManaCost::default())
+        .id();
+    let first_equipment = scenario.add_card_to_library_top(P0, "First Dug Equipment");
+    let second_equipment = scenario.add_card_to_library_top(P0, "Second Dug Equipment");
+    let _rest = scenario.add_card_to_library_top(P0, "Library Rest");
+    let mut runner = scenario.build();
+    for equipment_id in [first_equipment, second_equipment] {
+        let equipment = runner
+            .state_mut()
+            .objects
+            .get_mut(&equipment_id)
+            .expect("dug Equipment exists");
+        equipment.card_types.core_types.push(CoreType::Artifact);
+        equipment.card_types.subtypes.push("Equipment".to_string());
+        equipment.base_card_types = equipment.card_types.clone();
+    }
+
+    cast_for_free(&mut runner, gilgamesh);
+    let mut dug = false;
+    let mut original_trigger = None;
+    let mut reflexive_on_stack = false;
+    let mut offered_equipment = None;
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                let gilgamesh_triggers: Vec<_> = runner
+                    .state()
+                    .stack
+                    .iter()
+                    .filter(|entry| {
+                        entry.source_id == gilgamesh
+                            && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    })
+                    .map(|entry| entry.id)
+                    .collect();
+                if !dug && original_trigger.is_none() {
+                    original_trigger = gilgamesh_triggers.first().copied();
+                }
+                // CR 603.12: after the Dig resolved, the reflexive waits on the
+                // stack as its own object, and the trigger that created it is
+                // gone.
+                if dug {
+                    reflexive_on_stack |= gilgamesh_triggers
+                        .iter()
+                        .any(|id| Some(*id) != original_trigger)
+                        && original_trigger
+                            .is_some_and(|original| !gilgamesh_triggers.contains(&original));
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass must be accepted");
+            }
+            WaitingFor::DigChoice { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![first_equipment, second_equipment],
+                    })
+                    .expect("keep both dug Equipment");
+                dug = true;
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                assert_eq!(
+                    runner.state().objects[&second_equipment].zone,
+                    Zone::Battlefield,
+                    "the reflexive's \"you may\" comes after both Equipment moved"
+                );
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the optional attachment");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } if cards.contains(&samurai) => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![samurai],
+                    })
+                    .expect("choose the Samurai host");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                offered_equipment = Some(cards.clone());
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![second_equipment],
+                    })
+                    .expect("choose the second moved Equipment");
+            }
+            other => panic!("unexpected Gilgamesh prompt: {other:?}"),
+        }
+    }
+    assert!(
+        original_trigger.is_some(),
+        "reach: Gilgamesh's enters trigger was on the stack"
+    );
+    assert!(
+        reflexive_on_stack,
+        "reach: after the Dig, a separate Gilgamesh reflexive was on the stack"
+    );
+    let offered = offered_equipment.expect("reach: the Equipment choice opened");
+    assert_eq!(
+        offered.len(),
+        2,
+        "only the two moved Equipment: {offered:?}"
+    );
+    assert!(offered.contains(&first_equipment) && offered.contains(&second_equipment));
+    assert!(
+        !offered.contains(&preexisting),
+        "the pre-existing Equipment is excluded"
+    );
+    assert_eq!(
+        runner.state().objects[&second_equipment].attached_to,
+        Some(AttachTarget::Object(samurai))
+    );
+    assert_eq!(runner.state().objects[&preexisting].attached_to, None);
 }
 
 #[test]

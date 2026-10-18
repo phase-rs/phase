@@ -38,7 +38,9 @@ pub fn resolve(
     }
 
     // CR 608.2d: the Oracle text supplies the player who makes this choice.
-    let choice_player = super::resolve_player_for_context_ref(state, ability, chooser);
+    let Some(choice_player) = super::resolve_player_for_context_ref(state, ability, chooser) else {
+        return Ok(());
+    };
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

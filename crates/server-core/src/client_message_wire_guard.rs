@@ -111,6 +111,8 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        // One `u32` sequence number: no field to bound, so nothing to reject.
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
@@ -384,6 +386,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::BootstrapTerminalDelivery { .. }
         | ClientMessage::ReadTerminalResult { .. }
         | ClientMessage::AckTerminalDelivery { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }
         | ClientMessage::Ping { .. }
@@ -575,6 +578,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::BootstrapTerminalDelivery { .. }
         | ClientMessage::ReadTerminalResult { .. }
         | ClientMessage::AckTerminalDelivery { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }
         | ClientMessage::SeatMutate { .. }
@@ -637,7 +641,8 @@ mod tests {
         PreviewRequestId, MAX_INTERACTION_LIST_LEN,
     };
     use engine::types::mana::{
-        ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaRestriction, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity,
+        ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
@@ -797,6 +802,27 @@ mod tests {
 
         let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
         assert!(err.contains("TapLandForMana.selection.restrictions.OnlyForAny"));
+    }
+
+    #[test]
+    fn dispatch_guard_accepts_deferred_mana_quantity_at_action_boundary() {
+        let msg = ClientMessage::Action {
+            action: GameAction::ActivateManaSource {
+                selection: ManaSourceSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(1), 1),
+                    ability_index: Some(0),
+                    mana_type: ManaType::Colorless,
+                    output: ManaSourceOutput::DeferredColorChoice {
+                        quantity: ManaSourceQuantity::Fixed(3),
+                    },
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    penalty: ManaSourcePenalty::Sacrifices,
+                    taps_for_mana: Vec::new(),
+                },
+            },
+        };
+        assert!(guard_client_message_before_dispatch(&msg, ServerMode::Full).is_ok());
     }
 
     #[test]

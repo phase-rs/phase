@@ -2,6 +2,7 @@ use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{BatchCompletion, CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
@@ -41,19 +42,12 @@ pub fn resolve(
         .map(|obj| obj.spell_mana_value())
         .unwrap_or(0);
 
-    // CR 603.3a: Re-read the controller from the source spell at resolution
-    // time rather than trusting `ability.controller` (captured at trigger-
-    // creation time). If the cascade spell is still on the stack we use its
-    // current `controller` so a control-change effect between trigger
-    // creation and resolution is honored. If the spell has left the stack,
-    // fall back to the trigger's snapshot.
-    // TODO: unify controller-at-resolution pattern across triggers (this
-    // currently has to be done at the resolver per effect).
-    let controller = state
-        .objects
-        .get(&ability.source_id)
-        .map(|obj| obj.controller)
-        .unwrap_or(ability.controller);
+    // CR 603.3a + CR 109.5: a triggered ability is controlled by the player who
+    // controlled its source when it triggered, and "you"/"your" in its text
+    // mean that player. A later control change of the cascade spell (e.g.
+    // Commandeer) does not move the exile walk to another library or hand the
+    // free cast to the new controller.
+    let controller = ability.controller;
 
     if !state.players.iter().any(|p| p.id == controller) {
         return Err(EffectError::PlayerNotFound);
@@ -86,7 +80,7 @@ pub(crate) fn continue_exile_loop(
         .players
         .iter()
         .find(|player| player.id == controller)
-        .and_then(|player| player.library.front().copied())
+        .and_then(|player| state.library_of(player.id).front().copied())
     else {
         return finish_without_hit(state, controller, source_id, exiled_misses, events);
     };
@@ -126,7 +120,9 @@ pub(crate) fn complete_exile_loop_step(
             .players
             .iter()
             .find(|player| player.id == controller)
-            .is_some_and(|player| player.library.front().copied() == Some(current_card));
+            .is_some_and(|player| {
+                state.library_of(player.id).front().copied() == Some(current_card)
+            });
         return if current_card_is_still_top {
             finish_without_hit(state, controller, source_id, exiled_misses, events)
         } else {
@@ -236,7 +232,7 @@ pub(crate) fn shuffle_to_bottom(
     use rand::seq::SliceRandom;
 
     let mut shuffled = cards.to_vec();
-    shuffled.shuffle(&mut state.rng);
+    shuffled.shuffle(state.rng.draw(RandomDraw::Placement));
 
     let requests = shuffled
         .into_iter()

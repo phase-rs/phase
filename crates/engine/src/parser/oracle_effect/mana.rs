@@ -23,7 +23,7 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_quantity::{
-    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+    parse_cda_quantity_with_context, parse_event_context_quantity,
 };
 use super::super::oracle_target::parse_type_phrase_folding;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
@@ -269,9 +269,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     {
         if let Some(color_options) = parse_mana_color_set(before.trim()) {
             if color_options.len() > 1 {
-                if let Some(qty) =
-                    super::super::oracle_quantity::parse_for_each_clause(for_each_rest.trim())
-                {
+                if let Some(qty) = super::super::oracle_quantity::parse_for_each_clause_with_context(
+                    for_each_rest.trim(),
+                    &ctx.clone_player_antecedents(),
+                ) {
                     return Some(Effect::Mana {
                         produced: ManaProduction::AnyCombination {
                             count: QuantityExpr::Ref { qty },
@@ -2499,12 +2500,26 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
     None
 }
 
-/// CR 106.6: Parse "If that mana is spent on an instant or sorcery spell,
+/// CR 106.6 + CR 106.6a: an additional effect on the spell the mana is spent on is
+/// created separately for each mana produced, so 'any of that mana' (multi-mana
+/// producers) and 'that mana' name the same per-unit event (Scryfall rulings: split
+/// across two creature spells, each gains haste).
+fn parse_if_that_mana_is_spent_on(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("if "),
+            opt(tag("any of ")),
+            tag("that mana is spent on "),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 106.6: Parse "If [any of] that mana is spent on an instant or sorcery spell,
 /// that spell can't be countered" (Boseiju, Who Shelters All).
 fn parse_conditional_cant_be_countered_grant(lower: &str) -> Option<ManaSpellGrant> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
-        .parse(lower)
-        .ok()?;
+    let (rest, ()) = parse_if_that_mana_is_spent_on(lower).ok()?;
     let (rest, filter_text) = terminated(
         take_until::<_, _, OracleError<'_>>(", that spell can't be countered"),
         tag(", that spell can't be countered"),
@@ -2561,11 +2576,12 @@ fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpell
 /// CR 106.6 + CR 702.10: Parse mana-rider keyword grants:
 /// - "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
 /// - "If that mana is spent on a creature spell, it gains haste." (Hall of the Bandit Lord)
+/// - "If any of that mana is spent on a creature spell, it gains haste until end of turn."
+///   (Arena of Glory, Generator Servant — CR 106.6a: one effect per mana unit, so spending
+///   any unit on a creature spell grants it)
 fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
     let trimmed = lower.trim().trim_end_matches('.');
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
-        .parse(trimmed)
-        .ok()?;
+    let (rest, ()) = parse_if_that_mana_is_spent_on(trimmed).ok()?;
     let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))
         .parse(rest)
         .ok()?;
@@ -2970,8 +2986,9 @@ fn try_parse_amount_equal_to_with_context(
     })?;
     let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
 
-    let count = parse_event_context_quantity(quantity_text)
-        .or_else(|| parse_cda_quantity(quantity_text))?;
+    let count = parse_event_context_quantity(quantity_text).or_else(|| {
+        parse_cda_quantity_with_context(quantity_text, &mut ctx.clone_player_antecedents())
+    })?;
 
     let color_options: Vec<ManaColor> = colors;
     Some(Effect::Mana {
@@ -3738,6 +3755,96 @@ mod tests {
         );
     }
 
+    /// The controller of a `Ref(ObjectCount { Typed(Creature) })` count.
+    fn creature_count_controller(count: &QuantityExpr) -> Option<ControllerRef> {
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(typed),
+                },
+        } = count
+        else {
+            panic!("expected an object-count ref, got {count:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        typed.controller.clone()
+    }
+
+    /// CR 608.2c: the mana for-each clause binds "that player" to the
+    /// caller's player antecedent. With no antecedent it keeps the permanent
+    /// for-each seed, `ScopedPlayer`.
+    #[test]
+    fn color_set_for_each_clause_binds_that_player_to_relative_scope() {
+        for (relative_player_scope, expected) in [
+            (
+                Some(ControllerRef::TargetPlayer),
+                ControllerRef::TargetPlayer,
+            ),
+            (None, ControllerRef::ScopedPlayer),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope,
+                ..ParseContext::default()
+            };
+            let effect = try_parse_add_mana_effect_with_context(
+                "Add {B} or {G} for each creature that player controls",
+                &mut ctx,
+            )
+            .expect("must parse");
+            let Effect::Mana { produced, .. } = effect else {
+                panic!("expected Effect::Mana, got {effect:?}");
+            };
+            let ManaProduction::AnyCombination {
+                count,
+                color_options,
+            } = produced
+            else {
+                panic!("expected AnyCombination, got {produced:?}");
+            };
+            assert!(color_options.contains(&ManaColor::Black));
+            assert!(color_options.contains(&ManaColor::Green));
+            assert_eq!(creature_count_controller(&count), Some(expected));
+        }
+    }
+
+    /// CR 608.2c: the "an amount of {C} equal to" CDA reader binds "that
+    /// player" to the caller's player antecedent; a literal "you" stays the
+    /// controller (CR 109.5).
+    #[test]
+    fn amount_equal_to_cda_binds_that_player_to_relative_scope() {
+        for (text, expected) in [
+            (
+                "an amount of {G} equal to the number of creatures that player controls",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "an amount of {G} equal to the number of creatures you control",
+                ControllerRef::You,
+            ),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..ParseContext::default()
+            };
+            let effect =
+                try_parse_amount_equal_to_with_context(text, ManaContribution::Base, &mut ctx)
+                    .expect(text);
+            let Effect::Mana { produced, .. } = effect else {
+                panic!("{text}: expected Effect::Mana, got {effect:?}");
+            };
+            let ManaProduction::AnyOneColor {
+                count,
+                color_options,
+                ..
+            } = produced
+            else {
+                panic!("{text}: expected AnyOneColor, got {produced:?}");
+            };
+            assert_eq!(color_options, vec![ManaColor::Green], "{text}");
+            assert_eq!(creature_count_controller(&count), Some(expected), "{text}");
+        }
+    }
+
     #[test]
     fn fixed_count_prefixed_color_choice() {
         let effect = try_parse_add_mana_effect("Add 2 {G} or 2 {W}")
@@ -4019,6 +4126,74 @@ mod tests {
                 duration: Box::new(Duration::Permanent),
             }]
         );
+    }
+
+    /// CR 106.6 + CR 106.6a: Arena of Glory / Generator Servant — "any of that
+    /// mana" opens the same per-unit keyword grant as "that mana". The quantifier
+    /// axis is closed: only "any of" is accepted, so "all of" and the malformed
+    /// "any that" stay unparsed rather than claiming semantics no card defines.
+    #[test]
+    fn parses_any_of_that_mana_keyword_grant() {
+        let grants = parse_mana_spell_grant(
+            "if any of that mana is spent on a creature spell, it gains haste until end of turn.",
+        );
+        assert_eq!(
+            grants,
+            Some(vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }])
+        );
+
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if all of that mana is spent on a creature spell, it gains haste until end of turn.",
+            ),
+            None,
+            "only the 'any of' quantifier is accepted"
+        );
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if any that mana is spent on a creature spell, it gains haste until end of turn.",
+            ),
+            None,
+            "the quantifier must be the complete phrase 'any of'"
+        );
+
+        // Reach-guard: the shared opening still serves the unquantified
+        // phrasing (Hall of the Bandit Lord) with its exact current grant.
+        assert_eq!(
+            parse_mana_spell_grant("if that mana is spent on a creature spell, it gains haste."),
+            Some(vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+                duration: Box::new(Duration::Permanent),
+            }])
+        );
+    }
+
+    /// CR 106.6 + CR 106.6a: the can't-be-countered rider shares the same
+    /// opening, so "any of that mana" yields exactly Boseiju's grant.
+    #[test]
+    fn parses_any_of_that_mana_cant_be_countered_grant() {
+        let boseiju = parse_mana_spell_grant(
+            "if that mana is spent on an instant or sorcery spell, that spell can't be countered",
+        );
+        assert!(
+            matches!(
+                boseiju.as_deref(),
+                Some([ManaSpellGrant::CantBeCountered {
+                    filter: TargetFilter::Or { .. }
+                }])
+            ),
+            "Boseiju's phrasing must keep its instant-or-sorcery grant, got {boseiju:?}"
+        );
+
+        let quantified = parse_mana_spell_grant(
+            "if any of that mana is spent on an instant or sorcery spell, that spell can't be countered",
+        );
+        assert_eq!(quantified, boseiju);
     }
 
     /// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry's passive-voice

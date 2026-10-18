@@ -743,5 +743,13 @@
     "slotTraditional": "Traditional Draft",
     "slotCommanderDraft": "Commander Draft",
     "slotWinston": "Winston Draft"
+  },
+  "llmDrafters": {
+    "label": "AI drafters",
+    "picking": "Picking",
+    "ready": "Picked",
+    "fallback": "Engine pick",
+    "waiting": "Waiting on all players to pick…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }

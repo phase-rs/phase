@@ -12,7 +12,6 @@ import {
   compareLobbyGameEntries,
   findLobbyGameByCode,
   hostingLobbySource,
-  isLobbyEntryCompatible,
   lobbySources,
   useMultiplayerStore,
   type LobbyGameEntry,
@@ -551,7 +550,6 @@ export function LobbyView({
                 key={`${entry.source.url}:${entry.game.game_code}`}
                 entry={entry}
                 onJoin={handleJoinFromList}
-                compatible={isLobbyEntryCompatible(entry.game.host_build_commit)}
                 hostGameCode={hostGameCode}
                 healthHint={hintByUrl.get(entry.source.url) ?? null}
               />

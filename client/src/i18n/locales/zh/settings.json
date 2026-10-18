@@ -1,0 +1,552 @@
+{
+  "artChain": {
+    "addRule": "添加规则",
+    "addSet": "添加系列",
+    "emptyState": "正在使用默认的 Scryfall 插画。在下方添加规则即可自定义。",
+    "moveDown": "下移",
+    "moveUp": "上移",
+    "remove": "移除",
+    "rules": {
+      "newest": "最新版本",
+      "oldest": "最旧版本",
+      "preferBorderless": "优先无边框",
+      "preferExtended": "优先扩画",
+      "sourcePrinting": "来源版本"
+    },
+    "rulesPriorityNote": "规则自上而下依次尝试，首个匹配的规则生效。“来源版本”会在可用时采用轮抽包或导入套牌中的系列。单卡覆盖（在套牌构筑器中右键点击）始终优先。",
+    "setEntry": "系列：{{name}}（{{code}}）",
+    "setInputPlaceholder": "系列代码或名称…",
+    "unreachable": "“{{rule}}”下方的规则无法生效——它始终匹配。"
+  },
+  "audio": {
+    "globalVolume": "总音量",
+    "musicVolume": "音乐音量",
+    "muteAll": "全部静音",
+    "muteAllAudio": "将所有音频静音",
+    "sfxVolume": "音效音量",
+    "title": "音频"
+  },
+  "audioTheme": {
+    "customThemes": "自定义主题",
+    "import": "导入",
+    "importFailed": "导入主题失败",
+    "importTheme": "导入主题",
+    "loading": "加载中…",
+    "remove": "移除",
+    "theme": "主题",
+    "title": "音频主题"
+  },
+  "data": {
+    "backupDownloaded": "备份已下载。",
+    "description": "导出会将你的偏好设置、导入的套牌和订阅源打包成单个 JSON 文件。导入可在另一台机器上恢复它们。订阅源缓存与音频缓存等 IndexedDB 缓存不在其中，它们会自动重建。注意：游戏存档也不包含在内，且不会自动重建——此备份无法恢复对局进度。",
+    "exportBackup": "导出备份…",
+    "importBackup": "导入备份…",
+    "importConfirm": "要覆盖现有的偏好设置和套牌吗？\n\n确定：用备份替换全部内容（不可恢复）。\n取消：合并——保留现有套牌，并添加备份中的新套牌。",
+    "importMerge": "合并",
+    "importModeMessage": "用备份替换全部内容（不可恢复），或合并——保留现有套牌并添加备份中的新套牌。",
+    "importModeTitle": "导入备份",
+    "importOverwrite": "全部替换",
+    "importedWithPreferences_one": "已导入 {{count}} 副套牌及偏好设置。",
+    "importedWithPreferences_other": "已导入 {{count}} 副套牌及偏好设置。",
+    "imported_one": "已导入 {{count}} 副套牌。",
+    "imported_other": "已导入 {{count}} 副套牌。",
+    "skippedMalformed_one": "已跳过 {{count}} 条格式错误的条目。",
+    "skippedMalformed_other": "已跳过 {{count}} 条格式错误的条目。",
+    "telemetry": "发送匿名崩溃与使用报告",
+    "telemetryDescription": "有助于修复崩溃并确定卡牌支持的优先级。无需账户，不含个人数据——仅收集错误和对局摘要计数。",
+    "title": "备份与恢复"
+  },
+  "experimental": {
+    "showTournaments": "在导航中显示比赛",
+    "showTournamentsDescription": "比赛功能仍在开发中，可能随时变动，恕不另行通知。",
+    "title": "实验性功能",
+    "tournaments": "比赛"
+  },
+  "flexLayout": {
+    "align": {
+      "center": "居中对齐",
+      "left": "左对齐",
+      "right": "右对齐"
+    },
+    "description": "可将面板和 HUD 拖到任意位置，并调整牌桌区域的大小。",
+    "done": "完成",
+    "edit": "自定义布局…",
+    "hint": "拖动任意面板即可移动。拖动发光的分隔条可调整区域大小。",
+    "preset": "预设",
+    "presets": {
+      "default": {
+        "description": "标准的均衡布局。",
+        "label": "布局 1"
+      },
+      "layout2": {
+        "description": "战场更大，手牌收得更紧凑。",
+        "label": "布局 2"
+      },
+      "layout3": {
+        "description": "屏幕下三分之一更高。",
+        "label": "布局 3"
+      }
+    },
+    "reset": "重置布局",
+    "title": "自由布局",
+    "zones": {
+      "actionRail": "操作",
+      "logPanel": "游戏日志",
+      "opponentHud": "对手 HUD",
+      "opponentPiles": "对手区域",
+      "playerHud": "你的 HUD",
+      "playerPiles": "你的区域",
+      "stackPanel": "堆叠"
+    }
+  },
+  "gameplay": {
+    "autoPass": "自动让过",
+    "boardBackground": "牌桌背景",
+    "boardBackgroundGroups": {
+      "automatic": "自动",
+      "battlefields": "战场",
+      "custom": "自定义",
+      "off": "关闭",
+      "plain": "纯色"
+    },
+    "boardBackgroundOptions": {
+      "autoMatchDeck": "自动（匹配套牌）",
+      "customUrl": "自定义 URL",
+      "none": "无",
+      "random": "随机"
+    },
+    "cardSize": "卡牌尺寸",
+    "cardSizeOptions": {
+      "large": "大",
+      "medium": "中",
+      "small": "小"
+    },
+    "collapseLands": "折叠地牌",
+    "collapseSupport": "折叠支援",
+    "collapseZoneOptions": {
+      "auto": "自动",
+      "off": "始终关闭",
+      "on": "始终开启"
+    },
+    "commandZone": "指挥官",
+    "commandZoneOptions": {
+      "auto": "自动",
+      "compact": "紧凑",
+      "inline": "内嵌"
+    },
+    "language": "语言",
+    "logDockSide": "游戏日志位置",
+    "logDockSideOptions": {
+      "left": "左侧",
+      "right": "右侧"
+    },
+    "manualManaPayment": "为咒语手动支付法术力",
+    "nativeEngine": "为本地对局和自建多人游戏使用原生引擎",
+    "nativeEngineDescription": "本地 AI 对局以及你通过大厅主持的对局将使用已下载的引擎。访客仍通过大厅的点对点连接加入。引擎不可用时回退到内置引擎。",
+    "priorityAlerts": "优先权提醒",
+    "priorityAlertVisual": "发光",
+    "priorityAlertSound": "提示音",
+    "priorityAlertTitle": "标签页标题",
+    "priorityAlertsDescription": "在等待之后优先权回到你手上时通知你。当你在其他标签页或窗口，或对手回合中的窗口{{seconds}}秒内未处理时会响起提示音，此时光效也会增强。",
+    "skipLowUsePriorityWindows": "跳过少用的优先权窗口（实验性）",
+    "skipLowUsePriorityWindowsDescription": "自动让过你在堆叠为空时的维持、抓牌和结束步骤优先权窗口。阶段停止点和完全控制仍会暂停。",
+    "spellPayment": "咒语支付",
+    "spellPaymentOptions": {
+      "auto": "自动",
+      "autoExceptSacrificialMana": "牺牲前询问",
+      "manual": "手动"
+    },
+    "title": "玩法"
+  },
+  "llm": {
+    "addProvider": "添加提供方",
+    "apiKey": "API 密钥",
+    "apiKeyGet": "获取密钥",
+    "apiKeyMissing": "请重新输入 API 密钥。密钥不会在重新加载后保留，在此之前该提供方不会用于 AI 座位或轮抽机器人。",
+    "apiKeyOptional": "本地服务器可留空",
+    "apiKeyPlaceholder": "粘贴你的 API 密钥",
+    "apiKeyStorage": "仅保存在本次浏览器会话的内存中。API 密钥绝不会写入磁盘，也不含在备份导出和云同步中，因此重新加载后需要重新输入。除非服务器位于 localhost，否则使用 API 密钥时端点必须为 https://。",
+    "customModel": "自定义…",
+    "defaultOpponent": {
+      "engine": "内置引擎 AI",
+      "hint": "除非你在设置对局时为某个座位另选提供方，否则 AI 对手都使用此提供方。轮抽对局中的对手也包括在内。",
+      "label": "默认对手"
+    },
+    "defaultPrompt": {
+      "action": "设为默认",
+      "badge": "默认对手",
+      "connected": "已连接。要将其设为默认对手吗？",
+      "ready": "要将此提供方设为默认对手吗？"
+    },
+    "draftToggle": {
+      "hint": "轮抽桌中的机器人座位会用该模型选牌，并结合该赛制的系列背景。",
+      "label": "用于轮抽机器人",
+      "profile": "轮抽提供方"
+    },
+    "empty": "未配置提供方。所有座位均由内置引擎 AI 驱动。",
+    "enable": "启用此提供方",
+    "endpoint": "端点",
+    "endpointPlaceholder": "https://your-server/v1",
+    "errors": {
+      "cancelled": "测试已取消。",
+      "emptyBody": "端点返回了空响应。",
+      "engineUnavailable": "无法加载引擎。",
+      "oversized": "端点返回的数据远多于一次聊天补全。",
+      "requestNotBuilt": "此提供方尚未配置完整。",
+      "timedOut": "端点未及时响应。",
+      "undecodable": "端点有响应，但内容无法用于对局。",
+      "unreachable": "无法连接到端点。请检查 URL，并确认该提供方允许浏览器请求。"
+    },
+    "intro": "可选。将 Phase 指向某个 LLM 提供方，即可把 AI 座位——或轮抽桌中的机器人——交给该模型，而不用内置引擎 AI。在你启用提供方并将其分配到座位之前，此处设置不会被使用；一旦出错，对局中途会回退到引擎 AI。",
+    "jevEndpointHint": "Jev 通过 phase 多人游戏服务器访问，该服务器会把每个请求转发给 TypeSafe。你的密钥仅在请求中传递，绝不会存储在服务器上。",
+    "jevEndpointPlaceholder": "默认为你的多人游戏服务器",
+    "model": "模型",
+    "modelId": "模型 ID",
+    "modelPlaceholder": "模型 ID（例如 gpt-5、claude-sonnet-5）",
+    "name": "名称",
+    "namePlaceholder": "为此提供方命名（例如“Claude”）",
+    "provider": "提供方",
+    "remove": "移除此提供方",
+    "test": "测试连接",
+    "testHint": "发送一次真实请求，并按对局回合的方式检查回复。",
+    "testOk": "已连接。",
+    "testing": "测试中…",
+    "title": "LLM 对手",
+    "unnamed": "未命名提供方"
+  },
+  "modal": {
+    "subtitle": "调整玩法、画面、音频和多人游戏的默认设置。",
+    "title": "设置"
+  },
+  "multiplayer": {
+    "displayName": "显示名称",
+    "displayNamePlaceholder": "输入你的名称",
+    "serverSelectionNote": "服务器选择已移至大厅——打开多人游戏，使用服务器标签（P2P 模式下为“选择服务器”）即可切换区域、配置自建服务器或测试连接。",
+    "title": "多人游戏"
+  },
+  "offlinePreparation": {
+    "capabilities": {
+      "appShell": "应用外壳",
+      "browserEngine": "浏览器引擎和卡牌数据库",
+      "bundledAiCatalog": "内置 AI 套牌目录",
+      "coreVisuals": "牌背和法术力符号",
+      "deckLibrary": "已安装的套牌库",
+      "nativeEngine": "原生引擎",
+      "preconCatalog": "生成的预组套牌",
+      "scryfallSearch": "卡牌搜索数据"
+    },
+    "capabilityStates": {
+      "not-applicable": "不适用",
+      "not-installed": "未安装",
+      "not-ready": "未就绪",
+      "ready": "就绪",
+      "reload-required": "需要重新加载"
+    },
+    "cardArtInstalled": "已缓存的卡牌图像：{{packs}}",
+    "cardArtMissing": "尚未安装卡牌图像。离线时卡牌将不带插画显示——请在下方图像包中安装。",
+    "checklistLabel": "离线就绪检查清单",
+    "confirmOffline": "启用离线工作",
+    "description": "在启用“离线工作”前，先让本设备做好冷启动本地对局的准备。",
+    "incompleteMessage": "缺少：{{capabilities}}。仍要启用“离线工作”吗？",
+    "incompleteTitle": "离线准备尚未完成",
+    "prepare": "准备离线",
+    "preparing": "准备中…",
+    "states": {
+      "failed": "部分所需的本地对局功能尚未就绪。",
+      "needs-preparation": "请先准备本设备，再进行离线工作。",
+      "preparing": "正在准备本地对局功能…",
+      "ready": "本设备已可用于离线本地对局。",
+      "reconnect-required": "请先重新联网，再准备离线本地对局。",
+      "reload-or-relaunch-required": "请重新加载应用或重启桌面客户端，然后再次准备。"
+    },
+    "title": "离线准备",
+    "visualWarning": "已安装的图像包需要处理。打开图像包进行修复；本地对局仍可进行。",
+    "workOffline": "离线工作"
+  },
+  "pacing": {
+    "animationSpeed": "动画速度",
+    "animationSpeedDescription": "总速度——数值越高越快。拉到最右将完全跳过动画。",
+    "atDefault": "默认值",
+    "descriptions": {
+      "banners": "回合开始横幅的显示。",
+      "combat": "战斗伤害时机——阻挡者和攻击者在伤害结算前停留的时长。",
+      "effects": "咒语施放、区域变更、死亡、生命变化、指示物、横置/竖置。"
+    },
+    "hint": "各类别滑块会在动画速度的基础上相乘。双击任意滑块——或点击旁边的 <glyph>↺</glyph>——即可重置。",
+    "instant": "立即",
+    "labels": {
+      "banners": "横幅节奏",
+      "combat": "战斗节奏",
+      "effects": "效果节奏"
+    },
+    "resetSection": "重置本节",
+    "resetSliderLabel": "将{{label}}重置为默认值",
+    "resetToDefault": "重置为默认值",
+    "slowest": "最慢",
+    "title": "节奏"
+  },
+  "resetAll": {
+    "button": "重置所有偏好设置",
+    "confirm": "要将所有偏好设置重置为默认值吗？这会清除此对话框中的所有设置。",
+    "confirmAction": "重置"
+  },
+  "sync": {
+    "conflictBody": "本设备和你的云账户都存有数据，无法判断哪份是最新的。请选择一份，或保留两边的套牌收藏。",
+    "conflictTitle": "两份数据都有改动",
+    "description": "登录后即可在多台设备间同步你的套牌、偏好设置和订阅源。数据保存在你的账户中，发生变化时会自动更新。",
+    "diffDecks": "套牌：新增 {{added}}，更改 {{modified}}，移除 {{removed}}",
+    "diffFeeds": "订阅源不同",
+    "diffOther": "其他设置不同",
+    "diffPrefs": "偏好设置不同",
+    "keepBothDecks": "保留两边套牌收藏",
+    "keepCloud": "使用云端",
+    "keepLocal": "保留本设备",
+    "lastSynced": "上次同步：{{time}}",
+    "never": "从未",
+    "providerDiscord": "Discord",
+    "providerGoogle": "Google",
+    "savesNote": "游戏存档和缓存仍保留在本设备上。",
+    "signInWith": "使用 {{provider}} 登录",
+    "signOut": "退出登录",
+    "signedInAs": "已登录为 {{name}}",
+    "statusError": "同步失败",
+    "statusPaused": "离线时云同步会暂停。",
+    "statusSyncing": "同步中…",
+    "syncNow": "立即同步",
+    "title": "云同步"
+  },
+  "tabs": {
+    "ai": "AI 对手",
+    "audio": "音频",
+    "combat": "节奏",
+    "data": "数据",
+    "experimental": "实验性功能",
+    "gameplay": "玩法",
+    "multiplayer": "多人游戏",
+    "visual": "画面"
+  },
+  "visual": {
+    "cardAnimationPreviewHintHover": "悬停即可预览",
+    "cardAnimationPreviewHintTap": "点击即可预览",
+    "cardAnimationStyle": "卡牌动画",
+    "cardAnimationStyleOptions": {
+      "classic": "经典",
+      "webgl": "新版"
+    },
+    "cardArtPreferences": "卡牌插画偏好",
+    "cardPreview": "卡牌悬停预览",
+    "cardPreviewDelay": "悬停延迟",
+    "cardPreviewDelayHint": "悬停卡牌后等待这段时间才显示预览。",
+    "cardPreviewDelayInstant": "立即",
+    "cardPreviewDelayValue": "{{ms}} 毫秒",
+    "cardPreviewFooter": "预览信息",
+    "cardPreviewFooterHint": "包含牌名、可用的起动式异能和键盘提示。隐藏时仍可按 Alt 打开解析详情。",
+    "cardPreviewHint": {
+      "follow": "悬停卡牌时，放大的预览会跟随光标移动。",
+      "shift": "仅在按住 Shift 时显示预览，类似 Tabletop Simulator。",
+      "side": "预览停靠在屏幕边缘，不会遮挡牌桌。"
+    },
+    "cardPreviewOptions": {
+      "follow": "跟随光标",
+      "shift": "按住 Shift",
+      "side": "停靠侧边"
+    },
+    "clearArtOverridesAction": "清除",
+    "clearArtOverridesConfirm_one": "清除全部 {{count}} 项插画覆盖？",
+    "clearArtOverridesConfirm_other": "清除全部 {{count}} 项插画覆盖？",
+    "clearArtOverrides_one": "清除所有插画覆盖（{{count}}）",
+    "clearArtOverrides_other": "清除所有插画覆盖（{{count}}）",
+    "draftCardPreview": "轮抽卡牌悬停预览",
+    "draftCardPreviewHint": "仅在轮抽和构组轮抽套牌时生效。",
+    "draftCardPreviewOff": "关闭",
+    "draftDoubleClickConfirmPick": "轮抽双击确认选牌",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "禁用",
+      "enabled": "启用"
+    },
+    "keywordStrip": "关键字栏",
+    "multiplayerBoardLayout": "多人对战布局",
+    "multiplayerBoardLayoutOptions": {
+      "auto": "自动",
+      "focused": "聚焦对手",
+      "split": "分屏牌桌"
+    },
+    "opponentHoverPreview": "对手悬停预览",
+    "showCardPreviewFooter": "在卡牌预览下方显示信息",
+    "showKeywords": "在战场上的卡牌显示关键字",
+    "showOpponentBoard": "悬停 HUD 时显示对手的场面",
+    "title": "画面",
+    "vfxQuality": "特效质量",
+    "vfxQualityOptions": {
+      "full": "完整",
+      "minimal": "最低",
+      "reduced": "精简"
+    }
+  },
+  "visualPacks": {
+    "actions": {
+      "cancel": "取消操作",
+      "estimate": "扫描目录并估算",
+      "estimateCurated": "重新计算大小",
+      "estimating": "正在扫描 Scryfall 目录…",
+      "estimatingCurated": "正在计算大小…",
+      "install": "安装所选内容",
+      "refresh": "检查 Scryfall 目录",
+      "refreshing": "正在检查 Scryfall 目录…",
+      "removeAll": "移除所有离线图像",
+      "removeComplete": "移除完整目录",
+      "removeSelected": "移除所选内容",
+      "repair": "修复所选内容",
+      "resume": "继续操作",
+      "retry": "重试",
+      "sync": "同步图像",
+      "verifyFull": "校验所有文件",
+      "verifyMetadata": "校验元数据"
+    },
+    "availability": {
+      "browser": "此浏览器未提供离线图像下载所需的本地存储功能。",
+      "browserFuture": "请使用支持 Cache Storage、IndexedDB 和 gzip 解压的现代桌面浏览器。",
+      "empty": "加载当前的 Scryfall 卡牌快照以选择离线图像。",
+      "invalid": "无法读取本地卡牌快照。请刷新后再继续。",
+      "loading": "正在检查离线图像目录支持…",
+      "unsupported": "此桌面应用版本过旧，无法管理离线图像目录。请更新应用后继续。"
+    },
+    "cleanup": {
+      "catalog_state": "无法回收历史目录状态",
+      "malformed_entry": "无法回收一条格式错误的缓存条目",
+      "remove_failed": "无法移除一个缓存文件",
+      "unsafe_entry": "一条不安全的缓存条目未被改动"
+    },
+    "confirm": {
+      "allMessage": "要从此设备移除所有已安装的图像包吗？",
+      "allTitle": "移除所有离线图像？",
+      "cascadeAction": "移除依赖项",
+      "cascadeMessage": "其他已安装的包依赖于 {{selection}}。要移除已固定的选择及其依赖项吗？",
+      "cascadeTitle": "移除依赖的包？",
+      "completeMessage": "要从目录根 {{selection}} 移除所有已安装的包吗？",
+      "completeTitle": "移除此完整目录？",
+      "removeAction": "移除"
+    },
+    "description": "选择要保存在本设备上的图像。卡牌目录缓存自 Scryfall，随后每张图像都直接从 Scryfall 下载。",
+    "errors": {
+      "cancelled": "操作已取消。",
+      "conflict": "此选择已过期：创建之后目录或你的插画偏好发生了变化。请重新估算后再试。",
+      "emit": "应用无法报告目录进度。",
+      "insufficient_storage": "可用空间不足：此次下载至少需要 {{required}}，而目前仅有 {{available}} 可用。",
+      "internal": "无法完成目录操作。",
+      "invalid_input": "请求的目录选择无效。",
+      "network": "Scryfall 目录或图像下载失败。",
+      "storage": "无法将目录写入设备存储。",
+      "trust": "无法在本地校验下载的图像。",
+      "unauthorized": "此窗口无权管理离线图像目录。",
+      "unavailable": "此浏览器不支持离线图像下载。",
+      "unsupported_shell": "此应用版本不支持离线图像目录。"
+    },
+    "estimate": {
+      "curatedTitle": "下载估算",
+      "evictionWarning": "此浏览器未授予持久存储权限，因此设备空间不足时可能会删除这些图像。",
+      "headroomWarning": "这比此浏览器报告的可用空间更大。你仍可安装——若空间不足，下载可以继续，已保存的内容也会保留。",
+      "progress": "已读取 {{downloaded}} MB / {{total}} MB · 已扫描 {{records}} 张牌 · 找到 {{images}} 张图像",
+      "progressTitle": "目录扫描进度",
+      "title": "Scryfall 快照扫描"
+    },
+    "metrics": {
+      "assetRecords": "图像记录",
+      "availableBytes": "可用空间",
+      "estimatedImageBytes": "预计下载大小",
+      "logicalImageBytes": "图像字节数（下载后可知）",
+      "shardBytes": "压缩后的 Scryfall 目录",
+      "shardCount": "元数据文件",
+      "uniqueImageBytes": "去重图像字节数（下载后可知）",
+      "uniqueObjects": "待下载图像"
+    },
+    "offlineUnavailable": "离线时无法进行网络下载。请重新联网以更新目录，或安装、同步、修复、继续下载图像。",
+    "operation": {
+      "estimateNote": "总数在此次下载开始时已确定。已完成的图像存储在本地，继续时会跳过。",
+      "finalizing": "正在完成离线图像安装",
+      "id": "操作",
+      "objects": "图像：{{current}} / {{total}}",
+      "objectsUnknown": "已下载图像：{{current}}",
+      "packs": "包：{{current}} / {{total}}",
+      "root": "Scryfall 快照",
+      "scanNote": "总数会随 Scryfall 快照的扫描而增加。已完成的图像存储在本地，继续时会跳过。",
+      "states": {
+        "cancel_requested": "已请求取消",
+        "cancelled": "已取消",
+        "completed": "已完成",
+        "downloading": "正在下载并扫描 Scryfall",
+        "failed": "失败——可以继续",
+        "finalizing": "正在收尾",
+        "terminated": "已停止——此操作无法继续"
+      },
+      "title": "当前操作"
+    },
+    "packs": {
+      "complete": "当前所有英文卡牌图像",
+      "core": "牌背和法术力符号",
+      "curated": "每张牌一张图像",
+      "deckLibrary": "套牌库",
+      "locale": "{{set}} 版本（{{language}}）",
+      "printing": "{{set}} 版本"
+    },
+    "removal": {
+      "committed": "移除已在修订版本 {{revision}} 提交。",
+      "inProgress": "正在移除离线图像…"
+    },
+    "selector": {
+      "complete": "当前所有英文卡牌图像",
+      "core": "牌背和法术力符号",
+      "curated": "每张牌一张图像",
+      "curatedDefaultNote": "每张牌一张图像。你尚未设置卡牌插画规则，因此将下载每张牌的默认插画——可在“画面”标签页的卡牌插画偏好下添加规则，以选择其他版本。",
+      "curatedNote": "每张牌一张图像，由“画面”标签页中的卡牌插画偏好决定。在那里修改后，此处选择会随之更新。",
+      "currentRoot": "已固定的 Scryfall 快照：{{root}}",
+      "deckLibraryNote": "为共享套牌库中用到的每张牌各下载一张图像，包括 AI 指挥官预组。它会遵循卡牌插画偏好。安装后，应用会在运行期间更新新增内容并移除不再需要的图像；移除此包将停止该同步。",
+      "deck_library": "套牌库",
+      "driftNone": "已安装的图像与这些设置一致。",
+      "driftSummary": "已安装的图像已过期：需新增 {{add}}，需移除 {{remove}}，需刷新 {{refresh}}。",
+      "invalidSet": "请输入有效的三到六位系列代码。",
+      "language": "图像语言",
+      "printing": "系列版本",
+      "setCode": "系列代码",
+      "setPlaceholder": "例如 fin",
+      "title": "下载选择"
+    },
+    "status": {
+      "epoch": "纪元",
+      "installed": "已安装的包",
+      "membershipDigest": "成员指纹：{{digest}}",
+      "noneInstalled": "尚未安装任何图像包。",
+      "persistence": "防清除保护",
+      "persistenceState": {
+        "best_effort": "未授予——设备空间不足时，此浏览器可能会删除这些图像",
+        "persisted": "已授予——此浏览器会保留这些图像",
+        "unsupported": "此浏览器未提供该信息"
+      },
+      "receiptRoot": "安装自快照：{{root}}",
+      "revision": "已安装修订版本",
+      "root": "Scryfall 快照",
+      "selectorCount": "选择器",
+      "shardCount": "分片",
+      "storageUsage": "此站点已用存储空间",
+      "title": "离线图像状态",
+      "upgradeAvailable": "可升级"
+    },
+    "title": "离线卡牌图像",
+    "verification": {
+      "healthy": "未发现校验问题。",
+      "issues": {
+        "corrupt_object": "图像对象已损坏",
+        "dependency_drift": "已安装的依赖记录与受信任目录不一致",
+        "invalid_object_metadata": "图像对象元数据无效",
+        "invalid_root_witness": "目录根见证无效",
+        "invalid_shard": "目录分片无效",
+        "missing_object": "缺少图像对象",
+        "missing_root_witness": "缺少目录根见证",
+        "missing_shard": "缺少目录分片",
+        "projection_drift": "已安装的查询记录与受信任目录不一致",
+        "receipt_metadata": "收据元数据与受信任目录不一致"
+      },
+      "revision": "已校验安装的修订版本 {{revision}}。"
+    }
+  }
+}

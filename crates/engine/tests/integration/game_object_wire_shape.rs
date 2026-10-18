@@ -243,6 +243,16 @@ fn collect_gz(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries {
         let path = entry.expect("read dir entry").path();
         if path.is_dir() {
+            // The `legacy_deferred_spell_delivery` fixtures are real BASE-era snapshots that
+            // carry the retired `deferred_spell_delivery` key; the production decoder refuses
+            // them by design (pinned by `legacy_deferred_spell_delivery_restore`), so this
+            // walk, which must decode every dump it visits, cannot include them.
+            if path
+                .file_name()
+                .is_some_and(|name| name == "legacy_deferred_spell_delivery")
+            {
+                continue;
+            }
             collect_gz(&path, out);
         } else if path
             .file_name()

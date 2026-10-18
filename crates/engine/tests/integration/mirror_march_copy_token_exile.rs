@@ -11,6 +11,10 @@
 //! "those tokens"/"them" anaphora to the created tokens (`LastCreated`), folded
 //! per-win inside the `FlipCoinUntilLose` win_effect.
 //!
+//! The same per-win quantifier also trails a win clause: Crazed Firecat's
+//! "Put a +1/+1 counter on this creature for each flip you won." runs its
+//! one-counter placement once per win inside the same `FlipCoinUntilLose` loop.
+//!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 705.2: the flip-until-lose win effect runs once per win.
 //!   - CR 707.2: a token that's a copy copies the entering creature's copiable
@@ -19,12 +23,13 @@
 
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::counter::CounterType;
+use engine::types::game_state::GameRng;
 use engine::types::keywords::KeywordKind;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
+const CRAZED_FIRECAT: &str = "When this creature enters, flip a coin until you lose a flip. Put a +1/+1 counter on this creature for each flip you won.";
 const MIRROR_MARCH: &str = "Whenever a nontoken creature you control enters, flip a coin until you lose a flip. For each flip you won, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.";
 
 /// CR 707.2 + CR 603.7c (#5966): with Mirror March out, a nontoken creature
@@ -51,7 +56,7 @@ fn mirror_march_exiles_only_copy_tokens_not_the_original() {
 
     let mut runner = scenario.build();
     // Seed the flip sequence to win, win, lose → exactly 2 copy tokens.
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(2);
+    runner.state_mut().rng = GameRng::seed_from_u64(2);
 
     // Cast the bear; on resolution it enters, firing Mirror March's ETB trigger.
     runner.cast(bear).resolve();
@@ -144,7 +149,7 @@ fn mirror_march_no_wins_creates_no_tokens() {
 
     let mut runner = scenario.build();
     // Seed 1: first flip is a loss → 0 wins.
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(1);
+    runner.state_mut().rng = GameRng::seed_from_u64(1);
     runner.cast(bear).resolve();
     runner.advance_until_stack_empty();
 
@@ -163,4 +168,46 @@ fn mirror_march_no_wins_creates_no_tokens() {
         runner.state().battlefield.contains(&bear),
         "the entering creature is untouched when no tokens are created"
     );
+}
+
+/// CR 705.2: Crazed Firecat's ETB flips until a loss, then puts one +1/+1
+/// counter on itself per won flip. Resolves the full Oracle through the real
+/// cast → ETB trigger → coin-flip loop pipeline.
+fn crazed_firecat_counters_after_etb(seed: u64) -> u32 {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    let firecat = scenario
+        .add_creature_to_hand_from_oracle(P0, "Crazed Firecat", 4, 4, CRAZED_FIRECAT)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().rng = GameRng::seed_from_u64(seed);
+    runner.cast(firecat).resolve();
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    assert!(
+        state.battlefield.contains(&firecat),
+        "Crazed Firecat must be on the battlefield"
+    );
+    state.objects[&firecat]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[test]
+fn crazed_firecat_puts_one_counter_per_won_flip() {
+    // Seed 2 flips win, win, lose (see the Mirror March test above): two
+    // counters, one per won flip — not zero (a dropped win clause) and not one
+    // (a single unconditional placement).
+    assert_eq!(crazed_firecat_counters_after_etb(2), 2);
+}
+
+#[test]
+fn crazed_firecat_immediate_loss_puts_no_counters() {
+    // Seed 1 loses the first flip: zero wins, zero counters. Pairs with the
+    // positive test above, which proves the win clause is reached.
+    assert_eq!(crazed_firecat_counters_after_etb(1), 0);
 }

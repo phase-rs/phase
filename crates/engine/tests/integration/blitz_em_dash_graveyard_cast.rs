@@ -2065,6 +2065,7 @@ pub(crate) fn creature_permission(
         extra_cost: None,
         enters_with_counter: None,
         required_cast_keyword,
+        pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(TargetFilter::Typed(filter))
 }

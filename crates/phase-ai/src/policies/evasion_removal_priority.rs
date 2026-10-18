@@ -297,7 +297,7 @@ mod tests {
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
-    use web_time::{Duration, Instant};
+    use std::time::Duration;
 
     const BEAST_WITHIN_ORACLE: &str =
         "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.";
@@ -372,6 +372,23 @@ mod tests {
         let candidate = candidate_for(target);
         EvasionRemovalPriorityPolicy
             .score(&policy_ctx(state, decision, &candidate, config, context))
+    }
+
+    /// The one deadline `get_or_project` received through `context`'s session.
+    /// Asserting the count here is the reach-guard: an arm whose policy never
+    /// reached `get_or_project` fails with a count, not a misleading verdict.
+    fn sole_projection_deadline(
+        context: &crate::context::AiContext,
+        arm: &str,
+    ) -> engine::util::Deadline {
+        let log = context.session.projection_deadline_log.read().unwrap();
+        assert_eq!(
+            log.len(),
+            1,
+            "{arm}: expected exactly one get_or_project call; got {}",
+            log.len()
+        );
+        log[0]
     }
 
     fn policy_score(
@@ -800,38 +817,38 @@ mod tests {
     /// deadline to `get_or_project`, on a fixture where that argument's value
     /// decides the outcome.
     ///
-    /// T7 above cannot see that argument at all, and adding an assertion there
-    /// would not help: its fixture is deliberately already at
-    /// `OpponentBeginCombat`, so `project_to` returns from the
-    /// `Confidence::Exact` short-circuit BEFORE the loop's only
-    /// `deadline.expired()` read. The deadline is structurally inert there, so
-    /// every possible value of that argument leaves T7 green. This test is the
-    /// traversing sibling; keep both, since T7 still guards the
-    /// already-at-horizon path and the cache interaction that this fixture does
-    /// not exercise.
+    /// T7 above cannot see that argument through its outcome: its fixture is
+    /// deliberately already at `OpponentBeginCombat`, so `project_to` returns
+    /// from the `Confidence::Exact` short-circuit BEFORE the loop's only
+    /// `deadline.expired()` read, and every possible value of that argument
+    /// leaves T7's cache assertion green. This test is the traversing sibling:
+    /// here the measurement arm's cache outcome does depend on the handed
+    /// deadline, and both arms also read the argument itself. Keep both, since
+    /// T7 still guards the already-at-horizon path and the cache interaction
+    /// that this fixture does not exercise.
     ///
-    /// Both arms share one fixture and one target, and each is revert-failing
-    /// for a different wrong argument:
-    ///   * measurement arm — `projection_deadline` yields `Deadline::none()`,
-    ///     the traversal completes and the projection is cached. Red for
-    ///     `Deadline::after(0)` (bails at the loop head) and for the pre-change
-    ///     hardcoded `Deadline::after(TIME_CAP_MS)` (this traversal costs
-    ///     several times the 15 ms cap), both of which leave the cache empty.
+    /// Both arms share one fixture and one target, and observe the deadline
+    /// `velocity_score` hands `get_or_project` directly, through the test-only
+    /// `AiSession::projection_deadline_log`. With the intended deadlines,
+    /// neither arm requires the traversal to finish within a particular time:
+    ///   * measurement arm — the handed deadline must be non-expiring
+    ///     (`remaining().is_none()`). Red for `Deadline::after(0)`, for a
+    ///     hardcoded `Deadline::after(TIME_CAP_MS)`, and for
+    ///     `projection_deadline(ExecutionMode::Interactive)`. The traversal must
+    ///     also complete and cache under it.
     ///   * interactive arm — the SAME fixture under `ExecutionMode::Interactive`
-    ///     must NOT complete: the 15 ms cap bails it and the cache stays empty.
-    ///     Red for passing `ctx.context.deadline` instead, which is
-    ///     `Deadline::none()` here — and in production is the planner's
-    ///     whole-turn budget — so the projection would complete and cache one
-    ///     entry. That substitution is invisible under measurement alone,
-    ///     because measurement mode installs `Deadline::none()` on the context
-    ///     too; only the interactive side can discriminate it.
-    ///
-    /// The interactive arm is therefore the one assertion here that compares a
-    /// real elapsed traversal against a wall-clock cap. It is written as a
-    /// negative (`is_empty`) so a drifted-faster traversal fails LOUDLY with a
-    /// populated cache rather than passing vacuously, and the fixture's measured
-    /// traversal is several times the cap in a debug build, which is the only
-    /// build `cargo test` produces.
+    ///     must be handed a finite budget, whose remaining time once the call
+    ///     returns is no more than the 15 ms cap (the cap's upper bound is pinned
+    ///     by `projection_deadline_nulls_wall_clock_only_in_measurement`). Red
+    ///     for passing `ctx.context.deadline` instead, which is
+    ///     `Deadline::none()` here (and in production is the planner's
+    ///     whole-turn budget), for a hardcoded `Deadline::none()`, and for any
+    ///     finite budget large enough to outlast the traversal by more than
+    ///     15 ms. That substitution is invisible under measurement alone, because
+    ///     measurement mode installs `Deadline::none()` on the context too; only
+    ///     the interactive side can discriminate it. Whether the capped traversal
+    ///     actually finishes inside 15 ms is host-dependent and deliberately not
+    ///     asserted.
     #[test]
     fn velocity_score_projection_deadline_is_live_on_a_traversing_fixture() {
         let mut scenario = GameScenario::new_n_player(2, 42);
@@ -885,8 +902,8 @@ mod tests {
         // Guard 2 — and the state genuinely TRAVERSES `project_to`'s loop to
         // the horizon `velocity_score` hardcodes. A `Confidence::Exact` result
         // here would mean the fixture had drifted into the short-circuit class,
-        // which is what makes T7 blind to the deadline; both arms below would
-        // then be vacuous.
+        // which is what makes T7 blind to the deadline; the measurement arm's
+        // cache assertion would then no longer depend on the handed deadline.
         crate::projection::projection_fixtures::assert_traverses_to(
             &state,
             P0,
@@ -896,35 +913,14 @@ mod tests {
 
         let measurement = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
 
-        // Guard 3 — fixture-drift guard for the interactive arm. That arm discriminates
-        // by wall clock: it asserts the 15 ms cap BAILS this traversal, which is a claim
-        // about deadline wiring only while the traversal costs materially more than the
-        // cap. Should the fixture get cheaper (fewer filler cards in
-        // `seed_opponent_begin_combat_horizon`, a cheaper `auto_advance_once` or
-        // `project_to`) or the host get fast enough that it fits inside 15 ms, the arm
-        // silently stops testing anything and its `is_empty` assertion fails as though
-        // the wiring had broken. Fail here instead, naming the real cause.
-        //
-        // Timed on `get_or_project` DIRECTLY, with the same coordinates Guard 2 pinned
-        // and `velocity_score` passes, under an unbounded deadline. Timing
-        // `policy_score_in_context` instead would fold in `candidate_for` and the
-        // policy's other gates, so a slow wrapper could satisfy this guard while the
-        // projection — the only thing that actually reads the deadline — finished well
-        // inside the cap. The probe uses its own session so it cannot warm either arm's
-        // cache.
-        //
-        // MEASURED, and narrower than this test used to claim: the uncapped projection
-        // costs ~29 ms on an M-series debug build, i.e. it clears the 15 ms cap by about
-        // 1.9x — NOT the "several times" the measurement arm's message asserted before
-        // this guard existed. That is the whole reason to time the projection rather
-        // than the wrapper: the wrapper cleared 45 ms comfortably and hid how thin the
-        // real margin is. The threshold sits just above the cap because the arm's actual
-        // precondition is `uncapped > 15 ms` — anything less and it stops discriminating
-        // entirely. A host ~2x faster than this one will trip this guard, which is the
-        // intended outcome: it names the fixture, instead of the arm reporting a wiring
-        // regression that never happened.
+        // Guard 3 — the uncapped projection completes on this fixture through the
+        // same wrapper and coordinates `velocity_score` uses (the reach-guard that
+        // keeps the measurement arm's cache assertion non-vacuous), and the
+        // deadline seam the arms read records the argument exactly as passed (the
+        // instrument witness that keeps the control arm's empty-log assertion
+        // non-vacuous). The probe uses its own session so it cannot warm either
+        // arm's cache.
         let probe = crate::context::AiContext::empty(&measurement.weights);
-        let uncapped_start = Instant::now();
         let uncapped = probe.session.get_or_project(
             &state,
             P0,
@@ -932,20 +928,16 @@ mod tests {
             crate::projection::ProjectionHorizon::OpponentBeginCombat,
             engine::util::Deadline::none(),
         );
-        let uncapped_cost = uncapped_start.elapsed();
         assert!(
             uncapped.is_ok(),
-            "reach-guard: the uncapped projection must complete, else this measures a bail \
-             rather than the traversal cost"
+            "reach-guard: the uncapped projection must complete on this fixture; got {:?}",
+            uncapped.err()
         );
         assert!(
-            uncapped_cost >= Duration::from_millis(20),
-            "T7b interactive arm can no longer discriminate: the uncapped projection costs \
-             {uncapped_cost:?}, which no longer clears the 15 ms interactive cap with any \
-             margin (it measured ~29 ms when this guard was written). Re-seed the fixture so \
-             the traversal is expensive again, or rewrite the arm to observe the deadline \
-             `velocity_score` hands `get_or_project` directly. Do NOT lower this threshold \
-             below the cap — under it the arm asserts nothing."
+            sole_projection_deadline(&probe, "Guard 3 instrument")
+                .remaining()
+                .is_none(),
+            "instrument: projection_deadline_log must record the deadline exactly as passed"
         );
 
         // Control — the policy's non-velocity gates pass on THIS fixture.
@@ -972,16 +964,33 @@ mod tests {
                 .is_empty(),
             "T7b control: with can_afford_projection() false, velocity_score must not project"
         );
+        assert!(
+            expired_ctx
+                .session
+                .projection_deadline_log
+                .read()
+                .unwrap()
+                .is_empty(),
+            "T7b control: with can_afford_projection() false, velocity_score must not call \
+             get_or_project at all"
+        );
 
-        // Measurement arm — kills `Deadline::after(0)` and `Deadline::after(15)`.
+        // Measurement arm — kills Deadline::after(0) and a hardcoded Deadline::after(TIME_CAP_MS).
         let ai_ctx = crate::context::AiContext::empty(&measurement.weights);
         let _ = policy_score_in_context(&state, &decision, grower, &measurement, &ai_ctx);
+        assert!(
+            sole_projection_deadline(&ai_ctx, "T7b measurement arm")
+                .remaining()
+                .is_none(),
+            "under a measurement config velocity_score must hand get_or_project a non-expiring \
+             deadline, bounded by STEP_CAP alone (revert-failing: Deadline::after(0), a \
+             hardcoded Deadline::after(TIME_CAP_MS), or projection_deadline(Interactive))"
+        );
         assert_eq!(
             ai_ctx.session.projection_cache.read().unwrap().len(),
             1,
-            "under a measurement config the projection deadline must not expire, so this \
-             traversal completes and caches (revert-failing: any finite budget passed here bails \
-             a traversal Guard 3 measured at ~29 ms against the 15 ms interactive cap)"
+            "under that non-expiring deadline the traversal must complete and cache (Guard 3 \
+             proved it completes uncapped)"
         );
 
         // Interactive arm — kills `ctx.context.deadline`.
@@ -991,13 +1000,13 @@ mod tests {
             "T7b interactive arm: create_config must default to ExecutionMode::Interactive"
         );
         let interactive_ctx = crate::context::AiContext::empty(&interactive.weights);
-        // Non-vacuity guard: the arm is only meaningful if the policy actually
-        // REACHES `get_or_project` in this context. `AiContext::empty` carries
-        // `Deadline::none()`, so `can_afford_projection`'s `is_none_or` floor
-        // bypass applies despite Medium's 2000 ms `projection_min_budget_ms`.
-        // Were that false, the cache would be empty because nothing projected,
-        // and the assertion below would pass no matter what deadline the
-        // production line passes.
+        // Precondition guard: the arm reads the deadline `velocity_score` hands
+        // `get_or_project`, so the policy must actually REACH `get_or_project`
+        // in this context. `AiContext::empty` carries `Deadline::none()`, so
+        // `can_afford_projection`'s `is_none_or` floor bypass applies despite
+        // Medium's 2000 ms `projection_min_budget_ms`. Were that false,
+        // `sole_projection_deadline` below would fail on an empty log; this
+        // assertion names the real cause first.
         let candidate = candidate_for(grower);
         assert!(
             policy_ctx(
@@ -1008,20 +1017,25 @@ mod tests {
                 &interactive_ctx
             )
             .can_afford_projection(),
-            "T7b interactive arm would be vacuous: velocity_score never reaches get_or_project \
+            "T7b interactive arm precondition: velocity_score never reaches get_or_project \
              because can_afford_projection() is false"
         );
         let _ = policy_score_in_context(&state, &decision, grower, &interactive, &interactive_ctx);
+        // Mirrors `projection::tests::projection_deadline_nulls_wall_clock_only_in_measurement`:
+        // no strict lower bound, since `remaining()` saturates to zero once the
+        // budget elapses. Whether the capped traversal finished is host-dependent
+        // and deliberately not asserted.
+        let remaining = sole_projection_deadline(&interactive_ctx, "T7b interactive arm")
+            .remaining()
+            .expect(
+                "under an interactive config velocity_score must hand get_or_project a finite \
+                 wall-clock budget (revert-failing: passing ctx.context.deadline — \
+                 Deadline::none() here, the caller's whole-turn budget in production — or a \
+                 hardcoded Deadline::none())",
+            );
         assert!(
-            interactive_ctx
-                .session
-                .projection_cache
-                .read()
-                .unwrap()
-                .is_empty(),
-            "under an interactive config the 15 ms projection cap must bail this traversal, so \
-             nothing is cached (revert-failing: passing ctx.context.deadline here hands the \
-             projection the caller's whole-turn budget and it completes)"
+            remaining <= Duration::from_millis(15),
+            "the interactive projection budget must not exceed the 15 ms cap; got {remaining:?}"
         );
     }
 
@@ -1115,15 +1129,23 @@ mod tests {
         let copy = AiDecisionContext {
             waiting_for: WaitingFor::CopyRetarget {
                 player: P0,
+                controller: None,
                 copy_id: ObjectId(1000),
                 target_slots: vec![CopyTargetSlot {
                     current: Some(TargetRef::Object(low)),
                     legal_alternatives: vec![TargetRef::Object(high)],
+                    address: None,
+                    can_keep: true,
+                    can_decline: false,
                 }],
                 effect_kind: EffectKind::Destroy,
                 effect_source_id: None,
                 current_slot: 0,
                 paradigm_remaining_offers: None,
+                mode: None,
+                picks: None,
+                can_keep_rest: true,
+                announcer_election: None,
             },
             candidates: vec![candidate_for(high)],
         };

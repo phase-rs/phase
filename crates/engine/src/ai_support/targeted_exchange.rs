@@ -860,7 +860,7 @@ fn exchange_participants(
     ability: &ResolvedAbility,
     semantic_owner: PlayerId,
 ) -> Option<(ObjectId, TargetRef)> {
-    let mut targets = crate::game::ability_utils::flatten_targets_in_chain(ability).into_iter();
+    let mut targets = crate::game::ability_utils::declared_targets_in_chain(ability).into_iter();
     let TargetRef::Object(source) = targets.next()? else {
         return None;
     };
@@ -937,11 +937,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
-        CopiableValues, CounterSourceRider, DelayedTriggerCondition, DieResultBranch, Duration,
-        PileSource, PlayerFilter, PlayerScope, PtValue, QuantityExpr, ReplacementDefinition,
-        ReplacementMode, StaticDefinition, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessPayModifier, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+        AbilityCost, AbilityDefinition, AbilityKind, ChooseOneOfKind, ContinuousModification,
+        ControllerRef, CopiableValues, CounterSourceRider, DelayedTriggerCondition,
+        DieResultBranch, Duration, PileSource, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition, TypeFilter,
+        TypedFilter, UnlessPayModifier, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::card::CleaveVariant;
     use crate::types::card_type::CoreType;
@@ -1657,6 +1657,15 @@ mod tests {
             ),
         ));
         cases.push((
+            "ExileTopCardContest::winner_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ExileTopCardContest {
+                    winner_effect: Box::new(fight_def()),
+                },
+            ),
+        ));
+        cases.push((
             "RollDie::results[].effect",
             AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -1679,6 +1688,7 @@ mod tests {
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![fight_def()],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ),
         ));
@@ -1842,6 +1852,7 @@ mod tests {
                     target: TargetFilter::Any,
                     source_rider: Some(CounterSourceRider::LosesAbilities {
                         static_def: Box::new(grant_fight_static()),
+                        source_filter: None,
                         duration: Box::new(Duration::UntilHostLeavesPlay),
                     }),
                     countered_spell_zone: None,
@@ -1938,6 +1949,7 @@ mod tests {
             display_source: crate::game::game_object::DisplaySource::default(),
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
         }
     }
 
@@ -1969,6 +1981,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![fight_def()],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         let (state, spell) = guard_fixture(vec![def]);

@@ -9,6 +9,11 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
+ * The longest match structure `format` may be played as; the lobby offers Bo3 only when this is Bo3.
+ */
+export function bestOfThreeCeilingForFormat(format: any): any;
+
+/**
  * Build the HTTP request for one LLM-driven AI decision.
  *
  * `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
@@ -132,6 +137,25 @@ export function customFormatFromLobbyConfig(name: string, format_config: any): a
  * is the single authority — the frontend never re-parses Oracle text.
  */
 export function deckCopyLimit(name: string): any;
+
+/**
+ * Who supplies `format`'s deck; the lobby offers a pile choice only for `HostPile`.
+ */
+export function deckSupplyForFormat(format: any): any;
+
+/**
+ * Host the running Eye to Eye / Mouth to Mouth contest locally (single-player and
+ * P2P-host engines have no server to stamp time). The JS driver passes its own
+ * monotonic `now_ms` (`performance.now()`), the seats that are AI, and any clicks it
+ * collected since the last call — each stamped with its own `at_ms`. Clicks are
+ * applied in order, then the clock is advanced to `now_ms`, exactly as the server
+ * does; the engine's state machine decides everything.
+ *
+ * A contest's real-time result cannot be replayed from a recorded action list, so
+ * the first drive call invalidates an in-progress replay recording (the same
+ * treatment debug actions get).
+ */
+export function drive_contest_js(now_ms: number, ai_players: Uint8Array, away_players: Uint8Array, clicks: any): any;
 
 /**
  * Estimates a Commander deck's bracket without touching `GAME_STATE`.
@@ -298,10 +322,10 @@ export function get_card_parse_details(name: string): any;
 export function get_card_rulings(name: string): any;
 
 /**
- * Filtered-viewer variant of `get_game_state`. Runs the viewer filter
- * first (hides opponent hand/library per standard multiplayer redaction),
- * then derives views over the filtered state so the wire shape is
- * identical to `get_game_state` regardless of filter path.
+ * Variant of `get_game_state` that takes the viewer seat as an argument.
+ * Runs the viewer filter first (hides opponent hand/library per standard
+ * multiplayer redaction), then wraps the result in the same
+ * `ClientGameStateRef` envelope `get_game_state` returns.
  */
 export function get_filtered_game_state(viewer: number): any;
 
@@ -342,8 +366,9 @@ export function get_stack_pressure(): any;
 export function get_viewer_snapshot_js(player_id: number): any;
 
 /**
- * Get the viewer-filtered state, legal actions, interaction projection, and
- * event slice associated with one engine transition.
+ * Combined viewer projection and event slice for one engine transition.
+ * Unlike the legacy state-only endpoint, this path validates the viewer id
+ * before narrowing it to the engine's representable PlayerId domain.
  */
 export function get_viewer_transition_snapshot_js(player_id: number, events: any): any;
 
@@ -708,6 +733,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly bestOfThreeCeilingForFormat: (a: any) => any;
     readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
@@ -718,6 +744,8 @@ export interface InitOutput {
     readonly companionCandidates: (a: any) => [number, number, number];
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
+    readonly deckSupplyForFormat: (a: any) => any;
+    readonly drive_contest_js: (a: number, b: number, c: number, d: number, e: number, f: any) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];

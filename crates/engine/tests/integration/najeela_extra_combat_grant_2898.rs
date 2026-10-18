@@ -3,7 +3,7 @@
 //!
 //!   SetTapState(Untap, All, attacking creatures)
 //!     -> GenericEffect (grant trample/lifelink/haste, affected: ParentTarget, UntilEndOfTurn)
-//!       -> AdditionalPhase(BeginCombat, after EndCombat)
+//!       -> AdditionalPhase(Phase(Combat), after EndCombat)
 //!
 //! The reported bug: only the additional combat phase resolves — the untap and
 //! the keyword grant chained ahead of `AdditionalPhase` are dropped. This is a
@@ -16,8 +16,8 @@
 use engine::game::effects::resolve_ability_chain;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, EffectScope, ExtraPhaseAnchor, ResolvedAbility,
-    StaticDefinition, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    ContinuousModification, Duration, Effect, EffectScope, ExtraPhaseAnchor, ExtraPhaseRecipient,
+    ResolvedAbility, StaticDefinition, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::ExtraPhase;
@@ -43,8 +43,8 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
     // Link 3: additional combat phase (the only effect that currently works).
     let additional_phase = ResolvedAbility::new(
         Effect::AdditionalPhase {
-            target: TargetFilter::Controller,
-            phase: Phase::BeginCombat,
+            recipient: ExtraPhaseRecipient::Controller,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             after: ExtraPhaseAnchor::Step(Phase::EndCombat),
             followed_by: vec![],
             count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -85,6 +85,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

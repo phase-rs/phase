@@ -299,7 +299,7 @@ pub fn resolve(
             .players
             .iter()
             .find(|p| p.id == selecting_player)
-            .map(|p| p.graveyard.iter().copied().collect::<Vec<_>>())
+            .map(|p| state.graveyard_of(p.id).iter().copied().collect::<Vec<_>>())
             .unwrap_or_default()
             .into_iter()
             .filter(|id| {
@@ -427,7 +427,7 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 400.7 + CR 611.2c: Mass-bounce — return every battlefield permanent
+/// CR 400.7: Mass-bounce — return every battlefield permanent
 /// matching the filter to its owner's hand (default) or to the destination
 /// zone if `Effect::BounceAll.destination` is set.
 ///
@@ -457,7 +457,7 @@ pub fn resolve_all(
         _ => (TargetFilter::None, Zone::Hand, None),
     };
 
-    // CR 701.3 + CR 611.2c: A `TargetFilter::None` lands here when the parser
+    // A `TargetFilter::None` lands here when the parser
     // didn't supply a class filter. Default to "all creatures" — the
     // historically dominant mass-bounce shape — to match `destroy::resolve_all`.
     let effective_filter = if matches!(target_filter, TargetFilter::None) {
@@ -496,11 +496,12 @@ pub fn resolve_all(
         ability
             .targets
             .iter()
-            .filter_map(|target| match target {
+            .enumerate()
+            .filter_map(|(position, target)| match target {
                 TargetRef::Object(id)
                     if state.battlefield.contains(id)
                         && ability.target_pin_is_current(*id, state)
-                        && ability.selected_target_pin_is_current(*id, state)
+                        && ability.target_occurrence_is_current(position, state)
                         && crate::game::filter::matches_target_filter(
                             state,
                             *id,
@@ -1165,7 +1166,7 @@ mod tests {
         assert!(!state.players[0].graveyard.contains(&rancor_id));
     }
 
-    /// CR 400.7 + CR 611.2c: Mass-bounce iterates every battlefield permanent
+    /// CR 400.7: Mass-bounce iterates every battlefield permanent
     /// matching the filter. Mixed match/no-match population: only matching
     /// permanents move to their owners' hands; non-matching permanents stay.
     #[test]
@@ -1776,5 +1777,87 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::TypeFilter;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::{CardId, ObjectId};
+
+    /// CR 608.2d + CR 400.1: "their graveyard" is the one shared pile, so the
+    /// chosen player picks among every card in it, whoever owns it.
+    #[test]
+    fn chosen_non_canonical_player_returns_a_card_from_the_shared_pile_graveyard() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Own".into(),
+            Zone::Graveyard,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".into(),
+            Zone::Graveyard,
+        );
+        let chosen = ControllerRef::ChosenPlayer { index: 0 };
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Card)
+                        .controller(chosen.clone())
+                        .properties(vec![
+                            FilterProp::Owned { controller: chosen },
+                            FilterProp::InZone {
+                                zone: Zone::Graveyard,
+                            },
+                        ]),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_players = vec![PlayerId(1)];
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                let mut offered = cards.clone();
+                offered.sort();
+                assert_eq!(offered, vec![own, theirs]);
+            }
+            other => panic!("expected EffectZoneChoice over the pile, got {other:?}"),
+        }
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(1),
+            crate::types::actions::GameAction::SelectCards {
+                cards: vec![theirs],
+            },
+        )
+        .unwrap();
+
+        assert!(state.players[1].hand.contains(&theirs));
+        assert_eq!(
+            state
+                .graveyard_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![own]
+        );
     }
 }

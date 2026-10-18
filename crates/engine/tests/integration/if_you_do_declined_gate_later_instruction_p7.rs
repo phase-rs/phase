@@ -973,18 +973,22 @@ fn hollow_specter_declined_reveals_and_discards_nothing() {
     assert_eq!(runner.state().players[1].hand.len(), 2);
 }
 
-/// J-6 (b2) reach guard at X = 1: paid, the gated reveal and discard effects
-/// resolve. GREEN AT BASE; preservation only. KNOWN-BAD (residue): at X = 1
-/// the whole hand is revealed and nothing is discarded, at base and on the
-/// candidate (measured: 2 cards revealed, P1's hand 2, graveyard 0). This row
-/// pins only the resolved kinds.
+/// J-6 (b2) at X = 1, paid. CR 701.20a: "reveals X cards from their hand and
+/// you choose one of them" is a counted reveal whose chooser rider the reveal
+/// verb does not read, so the clause is an honest gap instead of a whole-hand
+/// reveal (the count-position migration; base resolved `[Reveal, DiscardCard]`
+/// with both cards revealed). The discard after the gap still resolves and
+/// discards nothing: no card was chosen.
 #[test]
-fn hollow_specter_paid_x1_resolves_the_reveal_and_discard_kinds() {
-    let (_, events) = hollow_specter(true);
-    assert_eq!(
-        resolved(&events),
-        vec![EffectKind::Reveal, EffectKind::DiscardCard]
-    );
+fn hollow_specter_paid_x1_reaches_the_honest_reveal_gap() {
+    let (runner, events) = hollow_specter(true);
+    let kinds = resolved(&events);
+    // Reach guard: the declined row resolves nothing, so a non-empty list is
+    // the paid branch running.
+    assert!(!kinds.is_empty());
+    assert_eq!(kinds, vec![EffectKind::DiscardCard]);
+    assert_eq!(runner.state().players[1].hand.len(), 2);
+    assert!(runner.state().players[1].graveyard.is_empty());
 }
 
 /// J-6 (b3): Ardent Dustspeaker declined: nothing is exiled and no play
@@ -1050,10 +1054,6 @@ fn loyal_unicorn(with_commander: bool) -> (bool, bool, bool, Vec<EffectKind>) {
                 drain_order_triggers_with_identity(runner.state_mut());
                 continue;
             }
-            // The engine asks for a creature for the prevention instruction.
-            WaitingFor::TriggerTargetSelection { .. } => runner.act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(c1)),
-            }),
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
             other => panic!("unexpected wait {other:?}"),
@@ -1105,8 +1105,10 @@ fn loyal_unicorn(with_commander: bool) -> (bool, bool, bool, Vec<EffectKind>) {
 /// J-6 (c): Loyal Unicorn's intervening "if" (CR 603.4) is not an "if you do"
 /// gate. With a commander, combat damage to every creature its controller
 /// controls is prevented and the other creatures gain vigilance.
-/// GREEN AT BASE, NON-DISCRIMINATING: there is no `OptionalEffectPerformed`
-/// gate, so the declined walk is unreachable.
+/// RED AT BASE: the "creatures you control" recipient names no target
+/// (CR 115.10a), but at base the trigger raised a spurious
+/// `TriggerTargetSelection` prompt that `loyal_unicorn` no longer answers, so
+/// the helper panics on the unexpected wait.
 #[test]
 fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(true);
@@ -1118,8 +1120,9 @@ fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     assert!(vigilance);
 }
 
-/// J-6 (c): without a commander, nothing happens. GREEN AT BASE,
-/// NON-DISCRIMINATING, as above.
+/// J-6 (c): without a commander, nothing happens. The negative sibling of the
+/// test above: the trigger never fires, so the prompt it once raised is never
+/// reached and this stays green at base.
 #[test]
 fn loyal_unicorn_without_commander_does_nothing() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(false);

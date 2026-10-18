@@ -33,6 +33,7 @@ const ABILITY_KEYS: &[&str] = &[
     "min_x_value",
     "announced_x",
     "cant_be_copied",
+    "illegal_targets_disposition",
     "cost_reduction",
     "forward_result",
     "player_scope",

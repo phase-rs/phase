@@ -398,19 +398,6 @@ where
     serialize_sorted_map_entries(values.iter(), SortedHashSet, serializer)
 }
 
-pub(crate) fn hash_map_of_hash_map<K1, K2, V, H1, H2, S>(
-    values: &HashMap<K1, HashMap<K2, V, H2>, H1>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    K1: Ord + Serialize,
-    K2: Ord + Serialize,
-    V: Serialize,
-    S: Serializer,
-{
-    serialize_sorted_map_entries(values.iter(), SortedHashMap, serializer)
-}
-
 pub(crate) fn im_hash_set<T, H, S>(
     values: &im::HashSet<T, H>,
     serializer: S,
@@ -572,8 +559,6 @@ mod tests {
         maps: &'a Vec<Map<&'static str>>,
         #[serde(serialize_with = "super::hash_map_of_hash_set")]
         map_of_sets: &'a Map<Set>,
-        #[serde(serialize_with = "super::hash_map_of_hash_map")]
-        map_of_maps: &'a Map<Map<&'static str>>,
     }
 
     #[test]
@@ -592,22 +577,11 @@ mod tests {
         ];
         let map_of_sets =
             Map::from_iter([(2, Set::from_iter([3, 1])), (1, Set::from_iter([2, 1]))]);
-        let map_of_maps = Map::from_iter([
-            (2, Map::from_iter([(3, "three"), (1, "one")])),
-            (1, Map::from_iter([(2, "two"), (1, "one")])),
-        ]);
         for inner in map_of_sets.values() {
             let values = inner.iter().copied().collect::<Vec<_>>();
             assert!(
                 values.windows(2).all(|pair| pair[0] > pair[1]),
                 "nested set must expose descending native iteration: {values:?}"
-            );
-        }
-        for inner in map_of_maps.values() {
-            let keys = inner.keys().copied().collect::<Vec<_>>();
-            assert!(
-                keys.windows(2).all(|pair| pair[0] > pair[1]),
-                "nested map must expose descending native iteration: {keys:?}"
             );
         }
 
@@ -618,13 +592,12 @@ mod tests {
             optional_map: &optional_map,
             maps: &maps,
             map_of_sets: &map_of_sets,
-            map_of_maps: &map_of_maps,
         })
         .expect("fixture should serialize");
 
         assert_eq!(
             serialized,
-            r#"{"set":[1,2,3],"optional_set":[1,2,3],"map":{"1":"one","2":"two","3":"three"},"optional_map":{"1":"one","2":"two","3":"three"},"maps":[{"1":"one","2":"two"},{"2":"two","3":"three"}],"map_of_sets":{"1":[1,2],"2":[1,3]},"map_of_maps":{"1":{"1":"one","2":"two"},"2":{"1":"one","3":"three"}}}"#
+            r#"{"set":[1,2,3],"optional_set":[1,2,3],"map":{"1":"one","2":"two","3":"three"},"optional_map":{"1":"one","2":"two","3":"three"},"maps":[{"1":"one","2":"two"},{"2":"two","3":"three"}],"map_of_sets":{"1":[1,2],"2":[1,3]}}"#
         );
     }
 

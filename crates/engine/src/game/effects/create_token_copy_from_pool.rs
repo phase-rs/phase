@@ -19,11 +19,13 @@
 //! token apply path (`token_copy::drive_copy_token_batches`) so the replacement
 //! pipeline and token construction are never duplicated.
 
-use crate::game::effects::token::resolve_token_owner;
+use crate::game::effects::token::{no_token, resolve_token_owner};
 use crate::game::effects::token_copy::drive_copy_token_batches;
 use crate::game::filter::matches_target_filter_against_face;
 use crate::game::game_object::DisplaySource;
-use crate::game::printed_cards::{copiable_values_from_face, printed_ref_from_face};
+use crate::game::printed_cards::{
+    copiable_values_from_face, printed_prepare_face, printed_ref_from_face,
+};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Comparator, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card::CardFace;
@@ -31,6 +33,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::game_state::PendingCopyTokenBatch;
+use crate::types::game_state::RandomDraw;
 use crate::types::mana::ManaCost;
 use crate::types::proposed_event::CopyTokenSpec;
 use rand::Rng;
@@ -98,7 +101,10 @@ pub fn resolve(
             if candidates == 0 {
                 return no_token(state, ability, events);
             }
-            let index = state.rng.random_range(0..candidates);
+            let index = state
+                .rng
+                .draw(RandomDraw::Outcome)
+                .random_range(0..candidates);
             db.faces_in_scan_order()
                 .filter(eligible)
                 .nth(index)
@@ -113,9 +119,10 @@ pub fn resolve(
         }
     };
 
-    // 6. CR 707.2: Build copiable values directly from the face (no battlefield
-    // source object exists for a pool pick).
-    let values = copiable_values_from_face(&face);
+    // 6. CR 707.2 + CR 722.2b: Build copiable values directly from the face (no
+    // battlefield source object exists for a pool pick); a preparation creature's
+    // prepare spell comes from the database's sibling face.
+    let values = copiable_values_from_face(&face, printed_prepare_face(&db, &face));
     let printed_ref = printed_ref_from_face(&face);
 
     // 7. CR 109.4 + CR 111.2: Resolve the token's creator/owner and
@@ -126,7 +133,9 @@ pub fn resolve(
     // change: loop the step-5 draw `count` times, consuming `state.rng` in
     // order for determinism, and enqueue one `PendingCopyTokenBatch { count: 1 }`
     // per pick.
-    let token_owner = resolve_token_owner(state, ability, &owner_filter);
+    let Some(token_owner) = resolve_token_owner(state, ability, &owner_filter) else {
+        return no_token(state, ability, events);
+    };
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
 
     // 8. Emit the copy through the SHARED replacement + apply path. The drain
@@ -142,6 +151,7 @@ pub fn resolve(
             display_source: DisplaySource::Card,
             printed_ref,
             token_image_ref: None,
+            token_art: None,
             extra_keywords: Vec::new(),
             additional_modifications: Vec::new(),
             tapped,
@@ -160,24 +170,6 @@ pub fn resolve(
         events,
     );
 
-    Ok(())
-}
-
-/// CR 609.3 "do as much as possible": resolve without creating a token.
-///
-/// Shared by every branch that finds nothing to copy so they emit an identical
-/// `EffectResolved` and clear `last_created_token_ids` the same way.
-fn no_token(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    state.last_created_token_ids = Vec::new();
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
     Ok(())
 }
 

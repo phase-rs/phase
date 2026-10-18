@@ -83,7 +83,7 @@ expression: "&lowered"
               "description": "the color or colors of your choice"
             }
           ],
-          "duration": "Permanent",
+          "duration": "UntilEndOfTurn",
           "target": {
             "type": "Typed",
             "type_filters": [
@@ -95,7 +95,7 @@ expression: "&lowered"
         },
         "cost": null,
         "sub_ability": null,
-        "duration": null,
+        "duration": "UntilEndOfTurn",
         "description": null,
         "target_prompt": null,
         "condition": null,

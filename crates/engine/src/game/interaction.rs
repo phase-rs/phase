@@ -13,8 +13,9 @@ use crate::ai_support::{
     FilterPipeline, TacticalClass,
 };
 use crate::analysis::decision_template::{
-    declaration_conforms, AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionTemplate,
-    IterationCount, PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
+    declaration_conforms, recorded_answer, AnnouncementSubject, DecisionGroupKey, DecisionKind,
+    DecisionTemplate, IterationCount, PinnedDecision, Ranking, ReplayMode, TargetPin,
+    TargetSchedule,
 };
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
@@ -58,8 +59,8 @@ use crate::types::interaction::{
     MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
 };
 use crate::types::mana::{
-    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceSelection, ManaType,
-    SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
+    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceOutput,
+    ManaSourceSelection, ManaType, SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
 };
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
@@ -288,9 +289,9 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::UntapChoice { .. } => HumanResponseModel::DirectChoices,
         WaitingFor::BetweenGamesSideboard { .. } => HumanResponseModel::SideboardPartition,
-        WaitingFor::ManaPayment { .. } | WaitingFor::ManaSourceSelection { .. } => {
-            HumanResponseModel::DirectChoices
-        }
+        WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. } => HumanResponseModel::DirectChoices,
         WaitingFor::LoopShortcut { .. } => HumanResponseModel::LoopShortcut,
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
@@ -305,11 +306,13 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -361,6 +364,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
@@ -392,6 +396,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         ),
         WaitingFor::ManaPayment { .. }
         | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. }
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::UnlessPayment { .. }
@@ -563,10 +568,12 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::DiscardChoice {
             unless_filter: Some(_),
             ..
@@ -612,6 +619,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
@@ -717,6 +725,33 @@ fn interaction_serial_is_valid(value: &str) -> bool {
 
 fn interaction_session_is_valid(session: &InteractionSessionId) -> bool {
     !session.0.is_empty() && session.0.len() <= MAX_INTERACTION_SESSION_ID_LEN
+}
+
+/// Read the authorized viewer's existing Scry identity independently of the
+/// bounded interaction payload. This getter never allocates or rotates a slot.
+pub(crate) fn scry_prompt_id_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+) -> Option<InteractionId> {
+    let WaitingFor::ScryChoice { player, .. } = &state.waiting_for else {
+        return None;
+    };
+    if interaction_submitter_for_owner(state, *player) != viewer
+        || state
+            .interaction_session_id
+            .as_ref()
+            .is_none_or(|session| !interaction_session_is_valid(session))
+        || !interaction_serial_is_valid(&state.next_interaction_serial)
+    {
+        return None;
+    }
+    state
+        .active_interaction_slots
+        .iter()
+        .find(|slot| {
+            slot.semantic_owner == player.0 && slot.slot_kind == InteractionSlotKind::Single
+        })
+        .map(|slot| slot.interaction_id.clone())
 }
 
 fn increment_decimal(value: &str) -> Option<String> {
@@ -900,6 +935,7 @@ pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
             | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+            | GameAction::SetReplacementAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::CancelAutoPass
             | GameAction::GrantDebugPermission { .. }
@@ -1149,6 +1185,11 @@ struct TargetSequenceProjection {
     max: usize,
     unique: bool,
     action: TargetSequenceAction,
+    /// CR 115.7d: for a "choose new targets" retarget, the announced target of
+    /// each position, in position order; position `i` then also offers a KEEP
+    /// choice (`'k'`, index `i`) that leaves that target unchanged with its
+    /// announced incarnation. Empty for every other projection.
+    keep: Vec<TargetRef>,
     /// CR 115.1: what the announcing spell/ability will do to the chosen
     /// target, derived from the current slot's `effect_kind`. Only the two
     /// slot-carrying states (`TargetSelection`, `TriggerTargetSelection`) can
@@ -1296,7 +1337,7 @@ struct LoopShortcutProjection {
     /// The count-keyed magnitudes are minted downstream by `loop_shortcut_preview`, which
     /// needs the offer's interaction id to speak the published candidate ids — a binding
     /// this projection's own parameter list is pinned against holding.
-    per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
+    per_cycle: Option<crate::analysis::resource::PeriodSignature>,
     points: Vec<LoopShortcutPointProjection>,
     candidates: Vec<LoopShortcutCandidateValue>,
 }
@@ -1340,6 +1381,7 @@ fn target_sequence_projection(
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                keep: Vec::new(),
                 // CR 601.2c: targets are announced one slot at a time, and each
                 // slot carries its own effect, so the label is per-slot rather
                 // than per-spell. A chained "destroy target creature. Draw a
@@ -1363,6 +1405,7 @@ fn target_sequence_projection(
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                keep: Vec::new(),
                 // CR 601.2c: targets are announced one slot at a time, and each
                 // slot carries its own effect, so the label is per-slot rather
                 // than per-spell. A chained "destroy target creature. Draw a
@@ -1388,6 +1431,7 @@ fn target_sequence_projection(
             max: *max_targets,
             unique: true,
             action: TargetSequenceAction::SelectObjects,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ChooseObjectsSelection {
@@ -1401,6 +1445,7 @@ fn target_sequence_projection(
                 .min(eligible.len()),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::EachPlayerCopyChosenSelection {
@@ -1411,6 +1456,7 @@ fn target_sequence_projection(
             max: *max as usize,
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ProliferateChoice { eligible, .. }
@@ -1420,6 +1466,7 @@ fn target_sequence_projection(
             max: eligible.len(),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            keep: Vec::new(),
             intent: InteractionIntentCode::Choose,
         },
         WaitingFor::RetargetChoice {
@@ -1429,6 +1476,10 @@ fn target_sequence_projection(
             legal_new_targets,
             ..
         } => {
+            let keep = match scope {
+                crate::types::game_state::RetargetScope::All => current_targets.clone(),
+                _ => Vec::new(),
+            };
             let (candidates, count) = match scope {
                 // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review
                 // finding MED-2): admission for a `Single` submission is
@@ -1459,6 +1510,7 @@ fn target_sequence_projection(
                 max: count,
                 unique: false,
                 action: TargetSequenceAction::Retarget,
+                keep,
                 // CR 115.7: retargeting changes an existing spell's targets. The
                 // intent belongs to that spell, not to this choice, and this
                 // state carries no slot to read it from.
@@ -2114,7 +2166,7 @@ fn mana_payment_direct_actions(
         state
             .objects
             .values()
-            .filter(|object| object.is_delve_eligible(player))
+            .filter(|object| object.is_delve_eligible(state, player))
             .count()
     } else {
         0
@@ -2122,7 +2174,7 @@ fn mana_payment_direct_actions(
     let total_upper_bound = actions
         .len()
         .checked_add(tapped_for_mana.len())
-        .and_then(|count| count.checked_add(pool.mana_pool.mana.len()))
+        .and_then(|count| count.checked_add(pool.mana_pool.total()))
         .and_then(|count| count.checked_add(convoke_upper_bound))
         .and_then(|count| count.checked_add(delve_upper_bound))
         .and_then(|count| count.checked_add(2))
@@ -2142,8 +2194,7 @@ fn mana_payment_direct_actions(
     );
     actions.extend(
         pool.mana_pool
-            .mana
-            .iter()
+            .units()
             .filter(|unit| unit.pip_id.0 != 0)
             .map(|unit| {
                 if pinned.contains(&unit.pip_id) {
@@ -2159,8 +2210,8 @@ fn mana_payment_direct_actions(
     );
     if has_delve {
         actions.extend(state.objects.values().filter_map(|object| {
-            object
-                .is_delve_eligible(player)
+            state
+                .is_delve_selectable(player, object.id)
                 .then_some(GameAction::TapForConvoke {
                     object_id: object.id,
                     mana_type: ManaType::Colorless,
@@ -2254,6 +2305,20 @@ fn direct_choice_projection(
                 .map(|selection| GameAction::ActivateManaSource { selection })
                 .collect::<Vec<_>>();
             actions.push(GameAction::BackToManaPayment);
+            actions
+        }
+        // CR 605.3a + CR 733.1: the window's moves are the mana activations and
+        // withdrawing the pending activation.
+        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+            if *player != semantic_owner {
+                return Err(InteractionReasonCode::InvalidAuthorityState);
+            }
+            let mut actions =
+                super::mana_sources::activatable_mana_actions_for_player(state, *player);
+            if actions.len() >= MAX_INTERACTION_LIST_LEN {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+            actions.push(GameAction::CancelCast);
             actions
         }
         WaitingFor::PrecastCopyShortcutOffer {
@@ -3039,7 +3104,7 @@ fn shortcut_allocation_domain<'a>(
 /// The announced-choice half is `ShortcutAllocationDomain`, folded in flat: an offer publishing
 /// no announced-target decision has no domain, and states its magnitudes unsplit.
 struct ShortcutPreviewBasis<'a> {
-    delta: &'a crate::analysis::resource::ResourceVector,
+    signature: &'a crate::analysis::resource::PeriodSignature,
     group: Option<u32>,
     ids: Vec<InteractionChoiceId>,
     seats: Option<Vec<PlayerId>>,
@@ -3056,7 +3121,9 @@ fn shortcut_preview_basis<'a>(
     interaction_id: &InteractionId,
     projection: &'a LoopShortcutProjection,
 ) -> Option<ShortcutPreviewBasis<'a>> {
-    let periodic = projection.per_cycle.as_ref()?;
+    let signature = projection.per_cycle.as_ref()?;
+    let (crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)
+    | crate::analysis::resource::PeriodSignature::OneRepetition(periodic)) = signature;
     if shortcut_preview_entries(&periodic.delta, 1, None).is_empty() {
         return None;
     }
@@ -3065,13 +3132,14 @@ fn shortcut_preview_basis<'a>(
             let charge = domain
                 .seats
                 .as_deref()
-                .and_then(|seats| victim_charge(periodic, domain.point, seats));
+                .zip(signature.every_repetition())
+                .and_then(|(seats, periodic)| victim_charge(periodic, domain.point, seats));
             (Some(domain.group), domain.ids, domain.seats, charge)
         }
         None => (None, Vec::new(), None, None),
     };
     Some(ShortcutPreviewBasis {
-        delta: &periodic.delta,
+        signature,
         group,
         ids,
         seats,
@@ -3089,20 +3157,24 @@ fn shortcut_preview_basis<'a>(
 /// A `None` basis is a declaration whose PARTITION is known and whose magnitudes are not: the
 /// count and the allocation are still the proposer's own, and no magnitude is invented beside
 /// them. Only the declared side passes one — an offer with no basis publishes no element at all.
+/// A basis whose signature states one repetition mints the partition alone, for the same reason.
 fn shortcut_preview_element(
     basis: Option<&ShortcutPreviewBasis<'_>>,
     count: u32,
     allocation: Vec<AmountAssignment>,
 ) -> InteractionShortcutPreview {
-    let entries =
-        basis
-            .map(|basis| {
+    let entries = basis
+        .map(|basis| match basis.signature {
+            crate::analysis::resource::PeriodSignature::EveryRepetition(periodic) => {
                 let split = basis.charge.as_ref().zip(basis.seats.as_deref()).and_then(
                     |(charge, seats)| VictimSplit::new(charge, &basis.ids, seats, &allocation),
                 );
-                shortcut_preview_entries(basis.delta, count, split.as_ref())
-            })
-            .unwrap_or_default();
+                shortcut_preview_entries(&periodic.delta, count, split.as_ref())
+            }
+            // The count's consequence is the take's replay, which nothing here performs.
+            crate::analysis::resource::PeriodSignature::OneRepetition(_) => Vec::new(),
+        })
+        .unwrap_or_default();
     InteractionShortcutPreview {
         count,
         entries,
@@ -3556,7 +3628,7 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             // and no per-iteration creature is latched, so the pin states no answer to publish.
             PinnedDecision::ConvokeTaps { .. } => {}
             // CR 603.3b trigger ordering under the static replay mode, not a loop-shortcut
-            // per-iteration decision — and the one variant with no `slot`.
+            // per-iteration decision, so this projection publishes nothing for it.
             PinnedDecision::Order { .. } => {}
         }
     }
@@ -3658,7 +3730,13 @@ fn declared_sequence_preview(
     let basis = shortcut_preview_basis(interaction_id, &declared.projection);
     let charge_escapes_declaration = basis
         .as_ref()
-        .zip(declared.projection.per_cycle.as_ref())
+        .zip(
+            declared
+                .projection
+                .per_cycle
+                .as_ref()
+                .and_then(crate::analysis::resource::PeriodSignature::every_repetition),
+        )
         .is_some_and(|(basis, periodic)| {
             basis.seats.as_deref().is_some_and(|announced| {
                 let life_seats: Vec<PlayerId> = periodic.delta.life.keys().copied().collect();
@@ -3684,6 +3762,7 @@ fn loop_shortcut_projection(
     let WaitingFor::LoopShortcut {
         schema,
         certificate,
+        road,
         ..
     } = waiting_for
     else {
@@ -3714,14 +3793,15 @@ fn loop_shortcut_projection(
     }
     let count = match schema.iteration_count {
         crate::analysis::decision_template::IterationCount::Fixed(suggested) => {
-            // CR 732.2a: the picker's ceiling is the offer's own CR 704 bound, never the raw
-            // global safety limit — a count above it would specify a sequence containing an
-            // elimination, which is a conditional action. The engine owns this number; the
-            // frontend renders it. An unnarrowed offer states `MAX_SHORTCUT_CYCLES`; a bounded
-            // offer states less. Either way this is the offer's own bound, clamped at the same
-            // authority.
+            // CR 732.2a: the picker's ceiling is the capacity this offer published — what the
+            // declare handler will accept — never the CR 704 threshold its producer measured and
+            // never the raw global safety limit. A count above it would specify a sequence
+            // containing an elimination, which is a conditional action. The engine owns this
+            // number; the frontend renders it. An offer that measured no threshold carries a
+            // capacity at `MAX_SHORTCUT_CYCLES`; one that measured a smaller threshold carries
+            // less.
             //
-            // CR 704.5a: `elimination_bounds` returns `0` to mean "no legal repetition exists and
+            // CR 704.5a: `elimination_cascade` returns `0` to mean "no legal repetition exists and
             // the caller must not offer". A published offer carrying `0` is an authority
             // violation, not a number to repair — clamping it to `1` renders a one-iteration
             // offer whose single iteration eliminates a player mid-proposal. Reject it in EVERY
@@ -3737,23 +3817,24 @@ fn loop_shortcut_projection(
             // restored dump into an engine panic.
             //
             // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
-            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has THREE call sites:
-            // `interactive_loop_bridge` and `try_offer_object_growth_shortcut` pass
-            // `MAX_SHORTCUT_CYCLES`, while `certified_bounded_cycle_offer` passes a NARROWED
-            // `max_iterations` — which cannot be `0` either, because that producer refuses
-            // outright unless `(1..MAX_SHORTCUT_CYCLES).contains(&max_iterations)`. The
-            // per-viewer projection in `game/visibility.rs` only re-projects an existing
-            // schema's value; and
-            // `ShortcutDecisionSchema::default().max_iterations == default_max_iterations()
-            // == MAX_SHORTCUT_CYCLES` (`analysis/decision_template.rs`), which is also the
-            // `#[serde(default)]` for a pre-bound save. The only way `0`
+            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has four call sites and
+            // derives every capacity itself: `interactive_loop_bridge` and the unbounded
+            // recorded offer measure no threshold, so theirs is
+            // `MAX_SHORTCUT_CYCLES`, while `bounded_offer_tail` hands it a measured
+            // threshold that cannot be `0` — that producer refuses outright unless the reduction
+            // measured one of at least 1 — and `counted_offer` the repetitions the counting
+            // replay performed, at least one. The per-viewer projection in
+            // `game/visibility.rs` only re-projects an existing schema's pair; and
+            // `ShortcutDecisionSchema::default()` seeds the capacity at `MAX_SHORTCUT_CYCLES`
+            // (`analysis/decision_template.rs`), which is also its `#[serde(default)]` for a save
+            // carrying no capacity key. The only way `0`
             // arrives is a LOADED/PERSISTED authority that explicitly serializes it. This
             // guard is therefore the fail-closed twin of item E: a latent hole shut before
             // it opens.
-            if schema.max_iterations == 0 {
+            if schema.deliverable_capacity == 0 {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
-            let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES);
+            let max = schema.deliverable_capacity.min(MAX_SHORTCUT_CYCLES);
             InteractionShortcutCountSpec::Fixed {
                 min: 1,
                 max,
@@ -3765,12 +3846,13 @@ fn loop_shortcut_projection(
         }
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
-    // state their consequence instead of standing alone. It is published only by the producer
-    // that measured one (`certified_bounded_cycle_offer`); every other mint carries `None`, as
-    // does every save written before the field existed. The other authority the magnitudes
-    // need — a FINITE count — is `count` above, and the two coincide by construction rather
-    // than by luck: the bounded producer both narrows `max_iterations` and mints
-    // `Fixed(max_iterations)`.
+    // state their consequence instead of standing alone. It is published by
+    // `bounded_offer_tail`, for a ring period and a recorded loss period alike, and by
+    // `counted_offer`, whose signature states one repetition and so no count's magnitude; every
+    // other mint carries `None`, as does every save written before the field existed. The other
+    // authority the magnitudes need — a FINITE count — is `count` above, and the two coincide by
+    // construction rather than by luck: each producer mints a `Fixed` VARIANT, which is what
+    // selects the finite arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
     let per_cycle = certificate.per_cycle.clone();
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -3862,21 +3944,27 @@ fn loop_shortcut_projection(
                 )
             }
             DecisionPointKind::MayChoice => {
-                candidates.extend([
-                    LoopShortcutCandidateValue::May(
-                        crate::analysis::decision_template::MayChoiceOption::Take,
-                    ),
-                    LoopShortcutCandidateValue::May(
-                        crate::analysis::decision_template::MayChoiceOption::Decline,
-                    ),
-                ]);
+                // CR 732.2a: a recorded take performs the confirmed period's own answer, so its
+                // "may" is stated as fixed and neither answer is offered.
+                let fixed = *road == crate::analysis::loop_check::OfferRoad::RecordedPeriod;
+                if !fixed {
+                    candidates.extend([
+                        LoopShortcutCandidateValue::May(
+                            crate::analysis::decision_template::MayChoiceOption::Take,
+                        ),
+                        LoopShortcutCandidateValue::May(
+                            crate::analysis::decision_template::MayChoiceOption::Decline,
+                        ),
+                    ]);
+                }
+                let answers = u32::from(!fixed);
                 (
                     InteractionShortcutPointKind::MayChoice,
-                    1,
-                    1,
+                    answers,
+                    answers,
                     true,
                     false,
-                    false,
+                    fixed,
                 )
             }
             DecisionPointKind::UnlessBreak => {
@@ -4727,6 +4815,7 @@ fn selection_projection(
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::ManaPayment { .. }
         | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. }
         | WaitingFor::AssistChoosePlayer { .. }
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseXValue { .. }
@@ -4743,6 +4832,7 @@ fn selection_projection(
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -4751,6 +4841,7 @@ fn selection_projection(
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -4809,6 +4900,7 @@ fn selection_projection(
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
@@ -5560,6 +5652,14 @@ fn push_produced_mana_surfaces(
     let Ok(option) = resolve(state, player, selection) else {
         return;
     };
+    // CR 106.1a + CR 106.1b: A deferred activation has no selected type yet. The
+    // post-cost mana-choice resolver remains the authority for its output.
+    if matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice { .. }
+    ) {
+        return;
+    }
     for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
         .into_iter()
         .enumerate()
@@ -5724,6 +5824,9 @@ fn project_action_payload(
             MulliganChoice::Mulligan => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "mulligan")
             }
+            MulliganChoice::FreeReveal => {
+                push_value_surface(surfaces, InteractionRoleCode::Mulligan, "freeReveal")
+            }
             MulliganChoice::UseSerumPowder { object_id } => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "serumPowder");
                 push_object_surface(
@@ -5813,6 +5916,16 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::Target, "none");
             }
         }
+        GameAction::ChooseReplacementAndRemember { choice } => match choice {
+            crate::types::actions::ReplacementAutoChoice::Order { order } => {
+                for index in order {
+                    push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index);
+                }
+            }
+            crate::types::actions::ReplacementAutoChoice::Optional { index } => {
+                push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index)
+            }
+        },
         GameAction::ChooseReplacement { index }
         | GameAction::ChooseBranch { index }
         | GameAction::ChooseCastingVariant { index }
@@ -6118,6 +6231,7 @@ fn project_action_payload(
         | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {}
         GameAction::AssignCombatDamage {
             assignments,
@@ -6219,12 +6333,20 @@ fn project_action_payload(
         }
         GameAction::RetargetSpell { new_targets } => {
             for (index, target) in new_targets.iter().enumerate() {
-                push_target_surface(
-                    surfaces,
-                    state,
-                    target,
-                    SurfaceRole::indexed(InteractionRoleCode::Target, index),
-                );
+                match target {
+                    Some(target) => push_target_surface(
+                        surfaces,
+                        state,
+                        target,
+                        SurfaceRole::indexed(InteractionRoleCode::Target, index),
+                    ),
+                    // CR 115.7d: this position keeps its announced target.
+                    None => push_value_surface(
+                        surfaces,
+                        SurfaceRole::indexed(InteractionRoleCode::Target, index),
+                        "keep",
+                    ),
+                }
             }
         }
         GameAction::LearnDecision { choice } => match choice {
@@ -6498,6 +6620,12 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::SelectTargets { .. } => InteractionActionCode::SelectTargets,
         GameAction::ChooseTarget { .. } => InteractionActionCode::ChooseTarget,
         GameAction::ChooseReplacement { .. } => InteractionActionCode::ChooseReplacement,
+        GameAction::ChooseReplacementAndRemember { .. } => {
+            InteractionActionCode::ChooseReplacementAndRemember
+        }
+        GameAction::SetReplacementAutoChoice { .. } => {
+            InteractionActionCode::SetReplacementAutoChoice
+        }
         GameAction::ChooseEntryController { .. } => InteractionActionCode::ChooseEntryController,
         GameAction::OrderTriggers { .. } => InteractionActionCode::OrderTriggers,
         GameAction::OrderCostReductions { .. } => InteractionActionCode::OrderCostReductions,
@@ -7073,6 +7201,34 @@ fn target_sequence_choices(
     projection: &TargetSequenceProjection,
     filtered_state: &GameState,
 ) -> Vec<InteractionChoice> {
+    // CR 115.7d: one KEEP choice per retarget position, naming the target it
+    // leaves unchanged.
+    let keep_choices = projection
+        .keep
+        .iter()
+        .enumerate()
+        .map(|(position, target)| {
+            let mut surfaces = vec![InteractionPresentationSurface::Summary {
+                code: InteractionSummaryCode::Decision,
+            }];
+            push_value_surface(
+                &mut surfaces,
+                SurfaceRole::indexed(InteractionRoleCode::Target, position),
+                "keep",
+            );
+            push_target_surface(
+                &mut surfaces,
+                filtered_state,
+                target,
+                SurfaceRole::indexed(InteractionRoleCode::Target, position),
+            );
+            InteractionChoice {
+                id: interaction_choice_id(interaction_id, 'k', position),
+                surfaces,
+                status: InteractionChoiceStatus::Available,
+            }
+        })
+        .collect::<Vec<_>>();
     projection
         .candidates
         .iter()
@@ -7093,6 +7249,7 @@ fn target_sequence_choices(
                 status: InteractionChoiceStatus::Available,
             }
         })
+        .chain(keep_choices)
         .collect()
 }
 
@@ -9860,18 +10017,35 @@ fn materialize_target_sequence_response(
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
     let mut seen = HashSet::with_capacity(choice_ids.len());
-    let targets = choice_ids
+    // CR 115.7d: a KEEP choice answers only ITS OWN position (`None`); a keep
+    // id given at another position, or twice, is not a legal answer.
+    let picks = choice_ids
         .iter()
-        .map(|choice_id| {
+        .enumerate()
+        .map(|(position, choice_id)| {
+            if let Some(kept) = (0..projection.keep.len())
+                .find(|index| interaction_choice_id(interaction_id, 'k', *index) == *choice_id)
+            {
+                return if kept == position {
+                    Ok(None)
+                } else {
+                    Err(InteractionReasonCode::ConstraintUnsatisfied)
+                };
+            }
             let index = (0..projection.candidates.len())
                 .find(|index| interaction_choice_id(interaction_id, 't', *index) == *choice_id)
                 .ok_or(InteractionReasonCode::UnknownChoice)?;
             if projection.unique && !seen.insert(index) {
                 return Err(InteractionReasonCode::ConstraintUnsatisfied);
             }
-            Ok(projection.candidates[index].clone())
+            Ok(Some(projection.candidates[index].clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let targets: Vec<TargetRef> = picks.iter().flatten().cloned().collect();
+    if !matches!(projection.action, TargetSequenceAction::Retarget) && targets.len() != picks.len()
+    {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
+    }
     let action = match projection.action {
         TargetSequenceAction::ChooseTarget => match targets.as_slice() {
             [] => GameAction::ChooseTarget { target: None },
@@ -9890,9 +10064,7 @@ fn materialize_target_sequence_response(
                 .collect::<Result<_, _>>()?,
         },
         TargetSequenceAction::SelectTargets => GameAction::SelectTargets { targets },
-        TargetSequenceAction::Retarget => GameAction::RetargetSpell {
-            new_targets: targets,
-        },
+        TargetSequenceAction::Retarget => GameAction::RetargetSpell { new_targets: picks },
     };
     Ok((
         action,
@@ -10452,7 +10624,12 @@ fn materialize_number_response(
 fn materialize_loop_shortcut_response(
     interaction_id: &InteractionId,
     projection: &LoopShortcutProjection,
-    proposer: PlayerId,
+    // CR 732.2a: the proposer, the certified period and the offer's own published declaration,
+    // carried as ONE value because the seat the minted template is OWNED by and the seat the aim
+    // walk measures against must be the same one.
+    aim: crate::analysis::decision_template::AimContext<'_>,
+    // CR 732.2a: the answers the offer's confirmed period recorded; `None` off a recorded offer.
+    recorded: Option<&[PinnedDecision]>,
     authoritative_schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
     authoritative_state: &GameState,
     response: &InteractionResponse,
@@ -10528,9 +10705,16 @@ fn materialize_loop_shortcut_response(
                         color: *color,
                     });
                 }
+                // CR 732.2a: the confirmed period's own answer is the one its take performs.
+                InteractionShortcutPointKind::MayChoice => {
+                    let answer = recorded
+                        .and_then(|recorded| recorded_answer(recorded, &point.slot))
+                        .filter(|pin| matches!(pin, PinnedDecision::MayChoice { .. }))
+                        .ok_or(InteractionReasonCode::InvalidAuthorityState)?;
+                    decisions.push(answer.clone());
+                }
                 InteractionShortcutPointKind::Targets
                 | InteractionShortcutPointKind::Mode
-                | InteractionShortcutPointKind::MayChoice
                 | InteractionShortcutPointKind::UnlessBreak => {
                     return Err(InteractionReasonCode::InvalidAuthorityState);
                 }
@@ -10690,7 +10874,7 @@ fn materialize_loop_shortcut_response(
         .map(|point| point.slot.source.clone())
         .collect::<Vec<_>>();
     let template = (!projection.points.is_empty()).then(|| DecisionTemplate {
-        owner: proposer,
+        owner: aim.proposer,
         decisions,
         replay: ReplayMode::Scheduled {
             count: count.clone(),
@@ -10703,15 +10887,24 @@ fn materialize_loop_shortcut_response(
         // 0, so an index-0-only check would accept a declaration whose driven image leaves the
         // offer's published legal set at an index the count reaches. The helper's precondition
         // — a count already bounded — is discharged here by the count-spec projection, which
-        // computes `max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` and admits only that
+        // computes `max = schema.deliverable_capacity.min(MAX_SHORTCUT_CYCLES)` and admits only that
         // window.
         //
         // The `required` slot list is still not derived here: `declaration_conforms` derives it
         // from the SAME `authoritative_schema` this site already passed.
+        //
+        // CR 732.2a: the preview and the submit paths share this chokepoint, so both answer the
+        // aim question the same way, and a failure here is this entry's `ConstraintUnsatisfied`
+        // rather than the declare handler's priority handback. Of
+        // `InteractionShortcutDecision`'s three variants, `AcceptSuggested` and `Fixed` both fall
+        // through the pin loop above into this call — so the suggestion-count route is validated
+        // here too — while `Decline` returns before any pin is read and reaches no conjunct.
         if !declaration_conforms(
             authoritative_schema,
             template,
             crate::game::engine::shortcut_validated_range(&count, Some(template)),
+            aim.clone(),
+            recorded,
             authoritative_state,
         ) {
             return Err(InteractionReasonCode::ConstraintUnsatisfied);
@@ -11137,7 +11330,12 @@ fn materialize_response(
         HumanResponseModel::LoopShortcut => {
             let projection = loop_shortcut_projection(&filtered_state.waiting_for)?;
             let WaitingFor::LoopShortcut {
-                proposer, schema, ..
+                proposer,
+                schema,
+                certificate,
+                declaration,
+                period,
+                ..
             } = &authoritative_state.waiting_for
             else {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
@@ -11152,7 +11350,12 @@ fn materialize_response(
             return materialize_loop_shortcut_response(
                 interaction_id,
                 &projection,
-                *proposer,
+                crate::analysis::decision_template::AimContext {
+                    proposer: *proposer,
+                    per_cycle: certificate.per_cycle.as_ref(),
+                    published: declaration.as_ref(),
+                },
+                period.recorded_answers(),
                 schema,
                 authoritative_state,
                 completed.as_ref().unwrap_or(response),
@@ -11478,6 +11681,7 @@ mod tests {
         let object_b = TargetRef::Object(ObjectId(2));
         let object_c = TargetRef::Object(ObjectId(3));
         let waiting = WaitingFor::RetargetChoice {
+            keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
             scope: crate::types::game_state::RetargetScope::Single,
@@ -11508,6 +11712,7 @@ mod tests {
         let object_a = TargetRef::Object(ObjectId(1));
         let object_b = TargetRef::Object(ObjectId(2));
         let waiting = WaitingFor::RetargetChoice {
+            keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
             scope: crate::types::game_state::RetargetScope::Single,
@@ -11771,6 +11976,124 @@ mod tests {
                 .values()
                 .map(|view| view.cards.len())
                 .sum::<usize>()),
+        );
+    }
+    /// CR 732.2a — **the picker's ceiling is the DELIVERABLE CAPACITY, never the CR 704 threshold
+    /// the offer's producer measured.** The capacity is the highest count an accept may legally
+    /// specify: the declare handler refuses any `Fixed(n)` above it, so a picker publishing the
+    /// measurement would offer a count that handler then hands back.
+    ///
+    /// THREE ARMS, because only one of them can discriminate WHICH field is read:
+    ///
+    /// * ⓐ THE DISCRIMINATING ARM — the two published answers differ BELOW the budget, so
+    ///   `.min(MAX_SHORTCUT_CYCLES)` cannot mask a swap. No producer mints this pair
+    ///   (`build_shortcut_schema` derives the capacity as `measured.min(budget)`, which is the
+    ///   measurement itself whenever it fits); it is the loaded/persisted authority the
+    ///   zero-capacity guard above exists for, and it is the only board on which reading the
+    ///   measured field is observable at all.
+    /// * ⓑ the production-reachable boundary — a threshold ABOVE the budget, whose capacity is
+    ///   therefore the budget. The pair a real above-budget board carries.
+    /// * ⓒ the hostile sibling — `UntilLethal` publishes NO finite ceiling, stated on the
+    ///   SUGGESTION's variant rather than on `is_bounded()`: an un-narrowed object-growth offer
+    ///   measures no threshold and still publishes a finite ceiling, so the two are not the same
+    ///   question.
+    ///
+    /// REVERT-PROBE: read `measured_repetition_bound` in place of `deliverable_capacity` ⇒ ⓐ's
+    /// `max` is the measurement and FAILS, while ⓑ stays green under the `.min(..)`. Key ⓒ's arm
+    /// on `is_bounded()` instead of on the variant ⇒ ⓒ publishes a finite ceiling and FAILS.
+    #[test]
+    fn the_picker_publishes_the_deliverable_capacity_and_never_the_measured_threshold() {
+        use crate::analysis::decision_template::ShortcutDecisionSchema;
+        use crate::analysis::loop_check::{LoopCertificate, OfferRoad, WinKind};
+        use crate::analysis::resource::BoardDelta;
+
+        let viewer = PlayerId(0);
+        let offer_at = |iteration_count: IterationCount, measured: Option<u32>, capacity: u32| {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::LoopShortcut {
+                proposer: viewer,
+                predicted_winner: Some(viewer),
+                certificate: LoopCertificate {
+                    unbounded: Vec::new(),
+                    win_kind: Some(WinKind::LethalDamage),
+                    win_kind_at: None,
+                    mandatory: false,
+                    residual_board_delta: BoardDelta::default(),
+                    per_cycle: None,
+                },
+                schema: ShortcutDecisionSchema {
+                    iteration_count,
+                    measured_repetition_bound: measured,
+                    deliverable_capacity: capacity,
+                    ..Default::default()
+                },
+                declaration: None,
+                road: OfferRoad::Ring,
+                period: Default::default(),
+            };
+            bind_interaction_authority(&mut state, InteractionSessionId("picker-ceiling".into()))
+                .expect("a valid interaction authority binding");
+            let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+            let view = derive_viewer_interaction(&state, &filtered, viewer);
+            let [opportunity] = view.opportunities.as_slice() else {
+                panic!(
+                    "the proposer holds exactly one opportunity at its own offer; got {}",
+                    view.opportunities.len()
+                );
+            };
+            let InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Shortcut { count, .. },
+                ..
+            } = &opportunity.response
+            else {
+                panic!("a loop-shortcut offer publishes a shortcut schema");
+            };
+            *count
+        };
+
+        // ⓐ measured 40 against a capacity of 12.
+        let discriminating = offer_at(IterationCount::Fixed(40), Some(40), 12);
+        let InteractionShortcutCountSpec::Fixed { max, .. } = discriminating else {
+            panic!("BOARD CLASS: this arm publishes a finite ceiling");
+        };
+        assert!(
+            max < MAX_SHORTCUT_CYCLES,
+            "BOARD CLASS: the ceiling this arm pins sits strictly below the budget, so the \
+             picker's own `.min(..)` cannot be what produced it; got {max}"
+        );
+        assert_eq!(
+            discriminating,
+            InteractionShortcutCountSpec::Fixed {
+                min: 1,
+                max: 12,
+                suggested: 12,
+            },
+            "CR 732.2a: the ceiling is the capacity (12), and an over-capacity suggestion (40) is \
+             clamped down to it rather than published"
+        );
+
+        // ⓑ the production-reachable pair: a threshold above the budget, capacity at the budget.
+        assert_eq!(
+            offer_at(
+                IterationCount::Fixed(MAX_SHORTCUT_CYCLES),
+                Some(MAX_SHORTCUT_CYCLES + 2),
+                MAX_SHORTCUT_CYCLES,
+            ),
+            InteractionShortcutCountSpec::Fixed {
+                min: 1,
+                max: MAX_SHORTCUT_CYCLES,
+                suggested: MAX_SHORTCUT_CYCLES,
+            },
+            "CR 732.2a: above the budget the deliverable capacity IS the budget, and the picker \
+             publishes it"
+        );
+
+        // ⓒ the hostile sibling: a measured threshold beside an `UntilLethal` suggestion still
+        //   publishes no finite ceiling, because the finite arm is chosen on the VARIANT.
+        assert_eq!(
+            offer_at(IterationCount::UntilLethal, Some(12), 12),
+            InteractionShortcutCountSpec::UntilLethal,
+            "CR 732.2a: `UntilLethal` names no count, so there is no ceiling to publish"
         );
     }
 }

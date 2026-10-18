@@ -692,7 +692,11 @@ fn static_affects_player(
             // against a player. Fail closed.
             Some(ControllerRef::ScopedPlayer) => false,
             // CR 109.4: TargetOpponent fails closed identically to TargetPlayer here.
-            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+            Some(
+                ControllerRef::TargetPlayer
+                | ControllerRef::TargetOpponent
+                | ControllerRef::DeclaredPlayer { .. },
+            ) => false,
             Some(ControllerRef::ParentTargetController) => false,
             // Engine constraint: this reference resolves only inside a trigger
             // event window, which a state-based-action check does not have.
@@ -1067,7 +1071,11 @@ fn perform_creature_deaths(
                     }
                 }
                 if destroyed {
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                 }
                 performed_ids.push(object_id);
             }
@@ -1197,7 +1205,11 @@ fn perform_creature_deaths(
                             return;
                         }
                     }
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                     performed_ids.push(object_id);
                 }
                 *any_performed = true;
@@ -1471,7 +1483,7 @@ fn check_unattached_auras(
                 if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
                     return None;
                 }
-                // CR 704.5m / CR 704.5n apply specifically to *Auras* —
+                // CR 704.5m applies specifically to *Auras* —
                 // gate on the Aura subtype so non-Aura enchantments
                 // (Saga, Class, Background, Shrine, etc.) are not
                 // affected. The CoreType check above is necessary but
@@ -1486,8 +1498,8 @@ fn check_unattached_auras(
                 }
                 // Note: the parser also routes player-attached Auras here.
                 // CR 303.4c: A player who has left the game is an illegal host.
-                // CR 704.5n: An Aura that is "unattached and on the
-                // battlefield" is also put into its owner's graveyard —
+                // CR 704.5m: An Aura that is "not attached to an object or
+                // player" is also put into its owner's graveyard —
                 // covers the case where a target legally chosen at
                 // announcement is removed before resolution can attach
                 // (target destroyed by another stack effect, target left
@@ -2406,7 +2418,9 @@ fn check_counter_cancellation(
 /// non-card objects swept by the same removal loop. The stack is excluded for both
 /// so spell copies (and copies of cards resolving as spells) finish resolving
 /// before the next SBA check; the battlefield is legal for a copy of a card
-/// (CR 707.10f) but not for a token off-battlefield.
+/// (CR 707.10f) but not for a token off-battlefield. CR 722.3c exempts the linked
+/// prepare-spell copy in exile while its prepared permanent remains on the
+/// battlefield; that exemption lives in the shared copy predicate.
 fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     let tokens_to_remove: Vec<(
         crate::types::identifiers::ObjectId,
@@ -2433,9 +2447,9 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 
 /// CR 301.5 / CR 301.6: The permanent core type(s) a non-Aura attacher's
 /// subtypes structurally require its host to have. An Equipment "can't
-/// legally be attached to anything that isn't a creature" (CR 301.5c); a
+/// legally be attached to anything that isn't a creature" (CR 301.5); a
 /// Fortification "can't legally be attached to an object that isn't a land"
-/// (CR 301.6, applying CR 301.5c by analogy). Unlike an Aura's per-card
+/// (CR 301.6, the land analog of CR 301.5). Unlike an Aura's per-card
 /// `Keyword::Enchant` filter, this requirement is fixed by the subtype
 /// itself — every Equipment requires a creature host and every Fortification
 /// requires a land host, with no Oracle-text exception to either.
@@ -2443,7 +2457,7 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 /// Each matching subtype contributes its own requirement independently —
 /// not a single either/or choice — so a (no current Oracle precedent, but
 /// rule-text-legal) card with both subtypes requires a host that is BOTH a
-/// creature AND a land (e.g. an animated land-creature), per CR 301.5c +
+/// creature AND a land (e.g. an animated land-creature), per CR 301.5 +
 /// CR 301.6 applying simultaneously. A card with neither subtype (or only
 /// the Aura subtype, whose requirement is carried by `Keyword::Enchant`
 /// instead) returns no requirements, and the caller's `all()` check is
@@ -2489,6 +2503,27 @@ pub(crate) fn is_valid_attachment_target(
     let Some(attacher) = state.objects.get(&attacher_id) else {
         return false;
     };
+    is_valid_attachment_target_for_attacher(state, attacher_id, attacher, target_id)
+}
+
+/// [`is_valid_attachment_target`] against an explicitly supplied attacher:
+/// the same verdict for a token that does not exist yet, judged from its
+/// projected characteristics. The boon "one of them" offer path
+/// (`effects::token::boon_host_passes_projected_legality`) calls this with
+/// its synthetic Role projection so the offer-time verdict runs the COMPLETE
+/// authority — protection/prohibition, the Enchant filter, and the zone gate
+/// — instead of the protection/prohibition subset, and so offer-time and
+/// entry-time legality cannot drift.
+///
+/// Verdict-identical to [`is_valid_attachment_target`] when `attacher` is the
+/// object stored under `attacher_id`: `attachment_illegality` IS the
+/// projected resolver fed `state.objects.get(&attacher_id)`.
+pub(crate) fn is_valid_attachment_target_for_attacher(
+    state: &GameState,
+    attacher_id: crate::types::identifiers::ObjectId,
+    attacher: &crate::game::game_object::GameObject,
+    target_id: crate::types::identifiers::ObjectId,
+) -> bool {
     let Some(target) = state.objects.get(&target_id) else {
         return false;
     };
@@ -2498,7 +2533,13 @@ pub(crate) fn is_valid_attachment_target(
     // Protection acquired by the host, or a prohibition static, makes the host
     // an illegal attachment target even though the Enchant filter / zone below
     // may still match.
-    if crate::game::effects::attach::attachment_illegality(state, attacher_id, target_id).is_some()
+    if crate::game::effects::attach::attachment_illegality_projected(
+        state,
+        attacher_id,
+        Some(attacher),
+        target_id,
+    )
+    .is_some()
     {
         return false;
     }
@@ -2508,7 +2549,7 @@ pub(crate) fn is_valid_attachment_target(
     });
     let Some(filter) = enchant_filter else {
         // Equipment / Fortification (non-Enchant attacher): the battlefield
-        // is a legal host, AND CR 301.5c / CR 301.6 each require the host to
+        // is a legal host, AND CR 301.5 / CR 301.6 each require the host to
         // actually be of the matching permanent type — "An Equipment ...
         // can't legally be attached to anything that isn't a creature" /
         // "A Fortification ... can't legally be attached to an object that
@@ -2792,7 +2833,8 @@ mod tests {
                 },
             },
             None,
-        );
+        )
+        .expect("the fixture begins with no carrier installed");
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(ability),
             trigger_event: None,
@@ -3788,45 +3830,6 @@ mod tests {
     }
 
     #[test]
-    fn sba_equipment_unattaches_when_creature_dies() {
-        let mut state = setup();
-        // Create a creature that will die
-        let creature_id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
-        state.objects.get_mut(&creature_id).unwrap().damage_marked = 3; // lethal
-
-        // Create equipment attached to that creature
-        let equip_id = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Sword".to_string(),
-            Zone::Battlefield,
-        );
-        let obj = state.objects.get_mut(&equip_id).unwrap();
-        obj.card_types
-            .core_types
-            .push(crate::types::card_type::CoreType::Artifact);
-        obj.card_types.subtypes.push("Equipment".to_string());
-        obj.attached_to = Some(creature_id.into());
-
-        state
-            .objects
-            .get_mut(&creature_id)
-            .unwrap()
-            .attachments
-            .push(equip_id);
-
-        let mut events = Vec::new();
-        check_state_based_actions(&mut state, &mut events);
-
-        // Creature should be dead
-        assert!(!state.battlefield.contains(&creature_id));
-        // Equipment should still be on battlefield but unattached
-        assert!(state.battlefield.contains(&equip_id));
-        assert_eq!(state.objects.get(&equip_id).unwrap().attached_to, None);
-    }
-
-    #[test]
     fn sba_aura_detaches_when_host_gains_protection() {
         // CR 702.16c: a creature enchanted by an opponent's white
         // Aura (Pacifism) that gains protection from white (Mother of Runes) →
@@ -4043,50 +4046,17 @@ mod tests {
     // Fortification identically ("If an Equipment or Fortification is
     // attached to an illegal permanent or to a player, it becomes
     // unattached..."). `check_unattached_equipment` previously matched only
-    // the "Equipment" subtype, so a Fortification whose land host left the
-    // battlefield (destroyed, sacrificed, bounced) kept a stale `attached_to`
-    // forever — the SBA pass that should have unattached it never ran for
-    // that subtype. These tests mirror the existing Equipment SBA tests
+    // the "Equipment" subtype, so a Fortification attached to an illegal
+    // permanent that has not left the zone it was in (a land that gained
+    // protection from artifacts, a nonland permanent) or to a player kept a
+    // stale `attached_to` forever — this sweep never ran for that subtype. A
+    // host that LEAVES — a permanent leaving the zone it was in — is a
+    // different authority: the departure itself ends the edge (CR 701.3d),
+    // not this pass. These tests mirror the existing Equipment SBA tests
     // above so the two attachment kinds are held to the same bar; the
     // Equipment cases are re-asserted here too as a regression guard that
     // broadening the filter to `||` did not change Equipment's own behavior.
     // ---------------------------------------------------------------------
-
-    #[test]
-    fn sba_fortification_unattaches_when_land_leaves_battlefield() {
-        // CR 704.5n + CR 301.6: a Fortification whose land host left the
-        // battlefield (here: sacrificed directly, isolating the SBA from any
-        // destroy-pipeline interaction) must unattach but remain on the
-        // battlefield itself.
-        let mut state = setup();
-        let land = create_land(&mut state, CardId(1), PlayerId(0), "Forest");
-        let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
-        state.objects.get_mut(&fort).unwrap().attached_to = Some(land.into());
-        state.objects.get_mut(&land).unwrap().attachments.push(fort);
-
-        // Move the land to the graveyard directly (bypassing Destroy) so this
-        // test isolates the SBA re-check from any zone-exit severing logic —
-        // the dangling `attached_to` this leaves behind is exactly the stale
-        // pointer that only an unattach SBA covering Fortification can clear.
-        zones::move_to_zone(&mut state, land, Zone::Graveyard, &mut Vec::new());
-
-        let mut events = Vec::new();
-        check_state_based_actions(&mut state, &mut events);
-
-        assert!(
-            !state.battlefield.contains(&land),
-            "the land is gone, as set up"
-        );
-        assert!(
-            state.battlefield.contains(&fort),
-            "CR 704.5n: the Fortification remains on the battlefield"
-        );
-        assert_eq!(
-            state.objects.get(&fort).unwrap().attached_to,
-            None,
-            "CR 704.5n: the Fortification must unattach from its now-departed land host"
-        );
-    }
 
     #[test]
     fn sba_fortification_unattaches_when_host_gains_protection_from_artifacts() {
@@ -4203,7 +4173,7 @@ mod tests {
 
     #[test]
     fn sba_equipment_unattaches_when_attached_to_a_noncreature_permanent() {
-        // Symmetric Equipment case for the same CR 301.5c host-type axis:
+        // Symmetric Equipment case for the same CR 301.5 host-type axis:
         // "An Equipment ... can't legally be attached to anything that isn't
         // a creature." Wired directly onto a land host (bypassing Equip
         // activation) to isolate the SBA re-check.
@@ -4262,7 +4232,7 @@ mod tests {
 
     #[test]
     fn sba_dual_subtype_attachment_unattaches_from_creature_missing_land_type() {
-        // CR 301.5c + CR 301.6 apply simultaneously to a card with both the
+        // CR 301.5 + CR 301.6 apply simultaneously to a card with both the
         // "Equipment" and "Fortification" subtypes: its host must be BOTH a
         // creature AND a land. A plain creature host (no land type) satisfies
         // only the Equipment half of the requirement, so the SBA must still
@@ -4347,17 +4317,26 @@ mod tests {
 
     #[test]
     fn sba_equipment_and_fortification_unattach_independently_in_same_pass() {
-        // Class-level check: a single SBA pass must correctly unattach BOTH
-        // an illegal Equipment (creature host gone) and an illegal
-        // Fortification (land host gone) at once, each going through its own
+        // CR 704.5n: one sweep pass must unattach BOTH an illegal Equipment
+        // and an illegal Fortification, each judged by its own
         // `is_valid_attachment_target` re-check without interfering with the
-        // other — guards against the fix accidentally coupling the two
-        // subtypes' legality (e.g. an Equipment incorrectly validating
-        // against a Fortification's land host or vice versa).
+        // other. Coupling the two subtypes' legality — validating an Equipment
+        // against a land host, or a Fortification against a creature host —
+        // would leave one of them attached.
+        //
+        // Every host stays in the zone it was in for the whole pass, so the
+        // illegality is in place (CR 301.5, CR 301.6) and the sweep is the
+        // only authority that can end these edges. Each host also carries a
+        // LEGAL attachment of the other kind, so the same pass that catches an
+        // under-collecting sweep also catches an over-collecting one. The
+        // attachments are wired directly, bypassing Equip/Fortify activation,
+        // which CR 701.3b would refuse for an illegal host.
         let mut state = setup();
         let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
         let land = create_land(&mut state, CardId(2), PlayerId(0), "Forest");
-        let equip = create_object(
+
+        // CR 301.5: an Equipment can't legally be attached to a non-creature.
+        let equip_on_land = create_object(
             &mut state,
             CardId(3),
             PlayerId(0),
@@ -4365,7 +4344,43 @@ mod tests {
             Zone::Battlefield,
         );
         {
-            let obj = state.objects.get_mut(&equip).unwrap();
+            let obj = state.objects.get_mut(&equip_on_land).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(land.into());
+        }
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .attachments
+            .push(equip_on_land);
+
+        // CR 301.6: a Fortification can't legally be attached to a non-land.
+        let fort_on_creature =
+            create_fortification(&mut state, CardId(4), PlayerId(0), "Darksteel Garrison");
+        state
+            .objects
+            .get_mut(&fort_on_creature)
+            .unwrap()
+            .attached_to = Some(creature.into());
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(fort_on_creature);
+
+        // The legal pair of the same two kinds, on the same two hosts.
+        let equip_on_creature = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equip_on_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Artifact);
             obj.card_types.subtypes.push("Equipment".to_string());
             obj.attached_to = Some(creature.into());
@@ -4375,28 +4390,60 @@ mod tests {
             .get_mut(&creature)
             .unwrap()
             .attachments
-            .push(equip);
-        let fort = create_fortification(&mut state, CardId(4), PlayerId(0), "Darksteel Garrison");
-        state.objects.get_mut(&fort).unwrap().attached_to = Some(land.into());
-        state.objects.get_mut(&land).unwrap().attachments.push(fort);
+            .push(equip_on_creature);
 
-        // Both hosts leave the battlefield in the same SBA-triggering event.
-        zones::move_to_zone(&mut state, creature, Zone::Graveyard, &mut Vec::new());
-        zones::move_to_zone(&mut state, land, Zone::Graveyard, &mut Vec::new());
+        let fort_on_land = create_fortification(&mut state, CardId(6), PlayerId(0), "C.A.M.P.");
+        state.objects.get_mut(&fort_on_land).unwrap().attached_to = Some(land.into());
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .attachments
+            .push(fort_on_land);
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
         assert!(
-            state.battlefield.contains(&equip),
-            "Equipment stays (CR 704.5n)"
+            state.battlefield.contains(&equip_on_land),
+            "CR 704.5n: the unattached Equipment remains on the battlefield"
         );
         assert!(
-            state.battlefield.contains(&fort),
-            "Fortification stays (CR 704.5n)"
+            state.battlefield.contains(&fort_on_creature),
+            "CR 704.5n: the unattached Fortification remains on the battlefield"
         );
-        assert_eq!(state.objects.get(&equip).unwrap().attached_to, None);
-        assert_eq!(state.objects.get(&fort).unwrap().attached_to, None);
+        assert_eq!(
+            state.objects[&equip_on_land].attached_to, None,
+            "CR 301.5c: an Equipment attached to a land must unattach"
+        );
+        assert_eq!(
+            state.objects[&fort_on_creature].attached_to, None,
+            "CR 301.6: a Fortification attached to a creature must unattach"
+        );
+
+        // The legal attachment of the other kind on each host survives the same
+        // pass, which is what makes the two judgements independent rather than
+        // one sweep clearing whatever it finds.
+        assert_eq!(
+            state.objects[&equip_on_creature].attached_to,
+            Some(creature.into()),
+            "a legally equipped creature keeps its Equipment through the same pass"
+        );
+        assert_eq!(
+            state.objects[&fort_on_land].attached_to,
+            Some(land.into()),
+            "a legally fortified land keeps its Fortification through the same pass"
+        );
+        assert_eq!(
+            state.objects[&creature].attachments,
+            vec![equip_on_creature],
+            "the creature host keeps only the legal Equipment"
+        );
+        assert_eq!(
+            state.objects[&land].attachments,
+            vec![fort_on_land],
+            "the land host keeps only the legal Fortification"
+        );
     }
 
     #[test]
@@ -4410,7 +4457,7 @@ mod tests {
         // requires a Fortification's host to be a land, so this fails
         // `is_valid_attachment_target` while both permanents stay put. Host
         // EXIT is deliberately not the vehicle — `zones::move_to_zone` now
-        // severs the attachment graph itself per CR 702.26i, so a departing
+        // severs the attachment graph itself per CR 701.3d, so a departing
         // host would clear the pointer before this SBA ever ran and the
         // assertion would no longer be about the SBA at all.
         let mut state = setup();
@@ -4461,6 +4508,8 @@ mod tests {
             "CR 704.5n: it remains on the battlefield"
         );
     }
+
+    // ----------------- end Issue #1368 regression suite ------------------
 
     #[test]
     fn sba_aura_still_goes_to_graveyard_when_target_leaves() {
@@ -4584,6 +4633,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            delivery_boundary: None,
         });
 
         // A concurrent player-loss SBA (P2 at 0 life) — the reason reconcile runs
@@ -4737,6 +4787,7 @@ mod tests {
             candidates: vec![],
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
             proposed: ProposedEvent::Draw {
@@ -4759,6 +4810,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            delivery_boundary: None,
         });
 
         let mut events = Vec::new();
@@ -6969,7 +7021,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(zone_changed_for(&events, live) > 0);
         assert!(
@@ -7155,9 +7207,29 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.players[0].graveyard.contains(&creature));
-        assert!(events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == creature)
-        ));
+        // CR 704.5h: a state-based destruction names no destroying source.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
+    }
+
+    /// CR 704.5g: lethal damage destroys the creature, and the destruction names
+    /// no destroying source.
+    #[test]
+    fn sba_lethal_damage_destruction_has_no_source() {
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(9910), PlayerId(0), "Burned", 2, 2);
+        state.objects.get_mut(&creature).unwrap().damage_marked = 2;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].graveyard.contains(&creature));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
     }
 
     #[test]
@@ -7196,7 +7268,7 @@ mod tests {
         assert!(state.battlefield.contains(&zero));
         assert!(state.battlefield.contains(&negative));
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == zero || *object_id == negative)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == zero || *object_id == negative)
         ));
     }
 
@@ -7218,7 +7290,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(state.players[0].graveyard.contains(&live));
     }

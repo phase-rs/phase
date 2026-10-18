@@ -1,6 +1,5 @@
-//! CR 732.2a: a board carrying a FUNCTIONING cast-mode trigger routes an accepted object-growth
-//! collapse to the concrete `DriveSequence` replay instead of the batched
-//! `Tokens`/`Counters`/`Life` items. Every row runs on the REAL 4-player
+//! CR 732.2a: a board carrying a FUNCTIONING cast-mode trigger makes an accepted object-growth
+//! take perform its period instead of registering the batched `Tokens`/`Counters`/`Life` items. Every row runs on the REAL 4-player
 //! `sprout_witherbloom_realistic_lands_4p` dump through the production restore chokepoint and the
 //! public `apply()` boundary; grafted and ungrafted arms are ONE OBJECT apart.
 //!
@@ -10,7 +9,7 @@
 //! CR 113.6 / CR 113.6b are the zone gate keeping a library-resident cast trigger from counting.
 //! The whole replay disjunction sits under `!batched.is_empty()`, so the replay route is only
 //! ever the better version of a registration the batched arm would have made, never a
-//! registration out of nothing (`mana_engine_with_cast_trigger_registers_nothing` is its pin).
+//! performance out of nothing (`mana_engine_with_cast_trigger_registers_nothing` is its pin).
 
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::ShortcutResponse;
@@ -43,40 +42,10 @@ const SPROUT: ObjectId = ObjectId(405);
 const FIRST_CONVOKE_FODDER: ObjectId = ObjectId(406);
 /// A second untapped P0 fodder Saproling (406–410, 412 are untapped in the dump).
 const SECOND_CONVOKE_FODDER: ObjectId = ObjectId(407);
-/// `game::engine::MAX_SHORTCUT_CYCLES`, mirrored because it is `pub(crate)` and this binary is an
-/// external crate — the same mirror `fantastic_four_bounded_loop.rs` keeps. It is the LARGEST
-/// count `handle_declare_shortcut` accepts (it refuses `Fixed(n)` for `n > MAX_SHORTCUT_CYCLES`
-/// and for `n > schema.max_iterations`, and the object-growth mint publishes exactly this), so the
-/// large-N arm below runs at the engine's own ceiling rather than at an arbitrary big number.
-const MAX_SHORTCUT_CYCLES_MIRROR: u32 = 1_000;
-
-/// Test-crate mirror of the engine's private `LoopCollapseRoute`. It exists because the production
-/// enum is private and MUST STAY private — this is the OBSERVABLE, not a copy of the
-/// decision. The mapping in [`route_of`] is the only place the proxy is defined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExpectedRoute {
-    /// registers `PersistentAxisMaterialization::DriveSequence { .. }`
-    Replay,
-    /// registers one of the batched axes (`Tokens` / `Counters` / `Life`)
-    Batched,
-}
-
-/// Exhaustive, no wildcard: a future persistent axis must be classified here deliberately rather
-/// than defaulting into `Batched` — the same obligation the production `match` carries.
-fn route_of(m: &PersistentAxisMaterialization) -> ExpectedRoute {
-    match m {
-        PersistentAxisMaterialization::DriveSequence { .. } => ExpectedRoute::Replay,
-        PersistentAxisMaterialization::Tokens(_)
-        | PersistentAxisMaterialization::Counters(_)
-        | PersistentAxisMaterialization::Life { .. } => ExpectedRoute::Batched,
-    }
-}
-
 /// The registered discriminant as a short name, so a failure message names what was actually
-/// observed instead of dumping a whole `CopiableValues` payload. Exhaustive for the same reason.
+/// observed instead of dumping a whole `CopiableValues` payload. Exhaustive, no wildcard.
 fn route_name(m: &PersistentAxisMaterialization) -> &'static str {
     match m {
-        PersistentAxisMaterialization::DriveSequence { .. } => "DriveSequence",
         PersistentAxisMaterialization::Tokens(_) => "Tokens",
         PersistentAxisMaterialization::Counters(_) => "Counters",
         PersistentAxisMaterialization::Life { .. } => "Life",
@@ -91,22 +60,39 @@ fn registered_routes(state: &GameState) -> &[PersistentAxisMaterialization] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// R-route-assert — the instrument standard. PANICS with the observed discriminants on a silent
-/// fall to the batched route, so no row in this file can report a bound (or a fast number) without
-/// having asserted its route first. The empty-stash assertion is what stops a vacuous pass on a
-/// board that registered nothing at all.
-fn assert_route(state: &GameState, expected: ExpectedRoute) {
-    let stash = registered_routes(state);
+/// R-route-assert: the accept registered the batched items.
+fn assert_batched(state: &GameState) {
     assert!(
-        !stash.is_empty(),
-        "R-route-assert: P0's accept registered NOTHING — there is no route to assert, so any \
-         bound read after this point would be vacuous"
+        !registered_routes(state).is_empty(),
+        "R-route-assert: P0's accept registered NOTHING — expected the batched route"
     );
-    let observed: Vec<&'static str> = stash.iter().map(route_name).collect();
+}
+
+/// P0's battlefield Saprolings.
+fn saprolings(state: &GameState) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == P0 && o.name == "Saproling")
+        })
+        .count()
+}
+
+/// R-route-assert: the take performed `n` cycles of one Saproling each and registered nothing.
+fn assert_performed(state: &GameState, offered: usize, n: u32) {
+    let observed: Vec<&'static str> = registered_routes(state).iter().map(route_name).collect();
+    assert_eq!(
+        saprolings(state),
+        offered + n as usize,
+        "R-route-assert: the take performs its {n} cycles; registered {observed:?}"
+    );
     assert!(
-        stash.iter().all(|m| route_of(m) == expected),
-        "R-route-assert: expected every registered materialization on the {expected:?} route, \
-         observed {observed:?}"
+        observed.is_empty(),
+        "R-route-assert: a performed take registers nothing, observed {observed:?}"
     );
 }
 
@@ -235,113 +221,46 @@ fn boundary_max(state: &GameState) -> u32 {
 // wiring the disjunct.
 // ===========================================================================
 
-/// **The grafted board routes to the concrete replay; the untouched shipped board, ONE OBJECT
-/// AWAY, still routes batched.**
+/// **The grafted board performs its take; the untouched shipped board, ONE OBJECT AWAY, still
+/// routes batched.**
 ///
 /// The ungrafted arm is THE discriminator, and its board is NON-TRIVIAL rather than empty: of the
 /// dump's active trigger definitions exactly one passes the CR 113.6 zone gate (an ETB-keyed
 /// def), while every `SpellCast`-keyed def it carries is library-resident with `trigger_zones`
 /// naming only Battlefield or Stack. So that arm tests the ZONE GATE — a real zero with a live
 /// same-gate control — not an absence of triggers.
-///
-/// The large-N arm is a COUNT-INDEPENDENCE pin, not a performance row: it re-runs the grafted arm
-/// at `MAX_SHORTCUT_CYCLES`, the largest count the declare authority accepts. Today that is
-/// structural — `materialize_object_growth_shortcut` never receives `n`, so no route decision can
-/// read it — and the arm exists to keep it that way. It is cheap: the accept only REGISTERS a
-/// `DriveSequence`, and the cycles replay later at a CR 500.5 boundary this arm never drives to.
 #[test]
 fn cast_trigger_board_routes_to_replay_untouched_board_stays_batched() {
     // ── the discriminator: untouched shipped board ⇒ batched ──
     let mut ungrafted = offer_state(false);
     declare_and_accept_all(&mut ungrafted, P0, 100);
-    assert_route(&ungrafted, ExpectedRoute::Batched);
+    assert_batched(&ungrafted);
 
-    // ── one grafted functioning cast trigger ⇒ concrete replay ──
+    // ── one grafted functioning cast trigger ⇒ performed at the take ──
     let mut grafted = offer_state(true);
-    declare_and_accept_all(&mut grafted, P0, 100);
-    assert_route(&grafted, ExpectedRoute::Replay);
-
-    // ── large N: same board, the engine's maximum accepted count, same route ──
-    let mut grafted_at_ceiling = offer_state(true);
-    declare_and_accept_all(&mut grafted_at_ceiling, P0, MAX_SHORTCUT_CYCLES_MIRROR);
-    assert_route(&grafted_at_ceiling, ExpectedRoute::Replay);
-}
-
-/// **The NON-BLANKET discriminator.** The per-axis `collapsed_axes` filter at the `Replay` arm
-/// keeps every `DeferredAccrual` axis: this already-shipped realistic dump's `DriveSequence`
-/// still names the loop's marked axis set EXACTLY, with nothing dropped.
-///
-/// It is its own row because the mixed-axis rows in `combo_infinite_pile` assert only that a
-/// `Mana(_)` axis is EXCLUDED, which an over-aggressive implementation that empties every
-/// `collapsed_axes` also satisfies. This row upgrades the sibling above's DISCRIMINANT-only route
-/// assertion to an EXACT-SET assertion on the same board. Its reach-guard is the shipped
-/// [`assert_route`] instrument on the same arm, which panics on an empty stash so a ROUTE
-/// regression cannot quietly make the exact-set assertion unreachable.
-///
-/// REVERT PROBE: invert the filter at `game::engine::materialize_object_growth_shortcut`'s
-/// `Replay` arm (keep only `StandingCapability`, or drop `DeferredAccrual`) ⇒ `collapsed_axes`
-/// empties ⇒ RED here while the mixed-axis rows stay green.
-#[test]
-fn replay_collapse_names_every_deferred_axis_the_loop_marked() {
-    let mut grafted = offer_state(true);
-    declare_and_accept_all(&mut grafted, P0, 100);
-
-    // REACH-GUARD: a real replay registration exists to read an exact set off.
-    assert_route(&grafted, ExpectedRoute::Replay);
-
-    // The ∞-mark set this accept wrote — the input the filter narrows. Sorted, because it comes
-    // from a `BTreeSet`.
-    let marked: Vec<ResourceAxis> = grafted
-        .unbounded_resources
-        .get(&P0)
-        .expect("the accept marks P0's ∞ axes")
-        .iter()
-        .copied()
-        .collect();
-    assert!(
-        !marked.is_empty(),
-        "reach-guard: an empty ∞-mark set would make the exact-set assertion below vacuous"
-    );
-
-    let stash = registered_routes(&grafted);
-    let [PersistentAxisMaterialization::DriveSequence { collapsed_axes, .. }] = stash else {
-        panic!("assert_route already pinned the Replay route; got {stash:?}")
-    };
-
-    // EXACT SET, not `contains`: every axis this board marks is `DeferredAccrual`
-    // (`ResourceAxis::unbounded_mark_kind`), so the accountability filter must drop NOTHING here.
-    // `collapsed_axes` preserves `proposal.unbounded`'s order, so it is sorted for the comparison.
-    let mut named = collapsed_axes.clone();
-    named.sort();
-    assert_eq!(
-        named, marked,
-        "CR 732.2c: this loop marks only DEFERRED axes, so the accountability filter is the \
-         IDENTITY on it. A filter that empties or narrows `collapsed_axes` reds here while the \
-         mixed-axis rows in `combo_infinite_pile` stay green — which is the whole reason this row \
-         is separate from them. marked={marked:?}"
-    );
+    let offered = saprolings(&grafted);
+    declare_and_accept_all(&mut grafted, P0, 2);
+    assert_performed(&grafted, offered, 2);
 }
 
 /// **The multi-authority hostile fixture.** Two accepts by one controller in ONE phase produce
-/// TWO route decisions sharing ONE stash and ONE boundary amount. That is what makes the route a
-/// per-ACCEPT decision rather than a per-phase one: the cast trigger is grafted BETWEEN the two
-/// accepts, so accept #1 is batched and accept #2 is replay on the same board in the same phase.
+/// TWO route decisions. That is what makes the route a per-ACCEPT decision rather than a per-phase
+/// one: the cast trigger is grafted BETWEEN the two accepts, so accept #1 is batched and accept #2
+/// is performed at its take on the same board in the same phase.
 ///
-/// The stash-composition assertion is not replaceable by the bound alone — a bound-only row would
-/// pass on a board where BOTH accepts took the same route. The boundary assertion is the CR
-/// 732.2c property at row scale ("the shortcut is taken; the game advances to the last proposed
-/// ending point"), so the single prompt the two accepts share must offer the count they were
-/// accepted at, on BOTH routes. `boundary_max` panics unless exactly one collapse prompt
-/// addressed to the loop's controller exists, so a route that published `MAX_SHORTCUT_CYCLES`,
-/// zero, or a second prompt fails here.
+/// The boundary assertion is the CR 732.2c property at row scale ("the shortcut is taken; the game
+/// advances to the last proposed ending point"): the prompt the batched accept owns offers the
+/// count it was accepted at, and the performed accept neither adds to its stash nor moves its
+/// ceiling. `boundary_max` panics unless exactly one collapse prompt addressed to the loop's
+/// controller exists.
 #[test]
-fn two_accepts_one_phase_one_batched_one_replay_share_one_boundary() {
+fn two_accepts_one_phase_one_batched_one_performed_at_the_take() {
     let mut state = offer_state(false);
     let phase_at_first_accept = state.phase;
 
     // ── accept #1: no cast trigger on the board yet ⇒ batched ──
     declare_and_accept_all(&mut state, P0, 100);
-    assert_route(&state, ExpectedRoute::Batched);
+    assert_batched(&state);
     assert_eq!(
         registered_routes(&state).len(),
         1,
@@ -377,26 +296,32 @@ fn two_accepts_one_phase_one_batched_one_replay_share_one_boundary() {
         state.waiting_for
     );
 
-    // ── accept #2: the cast trigger is now functioning ⇒ replay ──
-    declare_and_accept_all(&mut state, P0, 100);
+    // ── accept #2, at a SMALLER count: the cast trigger is now functioning ⇒ performed at the
+    // take, and a performed accept that lowered the bound would cap the boundary at 2 ──
+    let offered = saprolings(&state);
+    declare_and_accept_all(&mut state, P0, 2);
+    assert_eq!(
+        saprolings(&state),
+        offered + 2,
+        "R-mixed: accept #2 performs its cycles at the take"
+    );
 
-    // The stash is the multi-authority evidence: two items, ONE per route.
+    // The stash is the multi-authority evidence: accept #1's item alone.
     let observed: Vec<&'static str> = registered_routes(&state).iter().map(route_name).collect();
     assert_eq!(
         observed,
-        vec!["Tokens", "DriveSequence"],
-        "R-mixed: one stash holding the batched accept #1 and the replay accept #2 — the route is \
-         decided PER ACCEPT from the board as it stands at that instant"
+        vec!["Tokens"],
+        "R-mixed: the stash holds the batched accept #1 alone — the route is decided PER ACCEPT \
+         from the board as it stands at that instant"
     );
 
-    // ── one boundary, one amount: `min(100, 100)`, the count both accepts were taken at ──
+    // ── one boundary, the batched accept's count ──
     drive_to_boundary(&mut state);
     assert_eq!(
         boundary_max(&state),
         100,
-        "R-mixed: ONE boundary applies ONE amount to every stashed item, and CR 732.2c makes that \
-         amount the accepted count on both routes — neither route lowers the ceiling its own \
-         accept published"
+        "R-mixed: CR 732.2c makes the boundary's amount the batched accept's count, which the \
+         performed accept does not lower"
     );
 }
 
@@ -406,11 +331,10 @@ fn two_accepts_one_phase_one_batched_one_replay_share_one_boundary() {
 // ===========================================================================
 
 /// **A real Basalt Monolith + Power Artifact mana engine carrying a functioning cast trigger
-/// still registers NOTHING**, rather than scheduling a `DriveSequence` that would deliver
-/// nothing: uncapped cubic replay cost plus a spurious CR 500.5 collapse prompt for a loop with
-/// nothing to collapse. The route seam's arms are ASYMMETRIC — the batched arm registers
-/// CONDITIONALLY (token profile / counter growth / life growth, none of which a mana engine has)
-/// while the replay arm registers UNCONDITIONALLY, and `cast_sourced` is the only route disjunct
+/// still stands on the mark and registers NOTHING**, rather than performing the period at the take
+/// for growth no batched item would carry. The route seam's arms are ASYMMETRIC — the batched arm
+/// registers CONDITIONALLY (token profile / counter growth / life growth, none of which a mana
+/// engine has), and `cast_sourced` is the only route disjunct
 /// with no axis-shaped conjunct. Without `!batched.is_empty()` ANY functioning cast trigger
 /// anywhere flips this rig: `functioning_board_trigger_defs` walks `state.objects.values()` with
 /// NO controller filter, so an OPPONENT's is enough.
@@ -470,13 +394,14 @@ fn mana_engine_with_cast_trigger_registers_nothing() {
         "reach-guard: the mana-engine offer must still fire WITH the cast trigger grafted, got {:?}",
         rig.runner.state().waiting_for
     );
-    // ── (2) reach-guard: the captured period is the two-activation Basalt+Power cycle, so the
-    // route seam's `!sequence.is_empty()` conjunct is satisfied ──
-    assert_eq!(
-        rig.runner.state().last_loop_action_sequence.len(),
-        2,
-        "reach-guard: the multi-action mana period is captured, so `!sequence.is_empty()` holds \
-         and the cast disjunct is the only conjunct left to decide the route"
+    // ── (2) reach-guard: the offer carries its confirmed period, so the take routes on it ──
+    assert!(
+        matches!(
+            &rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { period, .. } if !period.is_empty()
+        ),
+        "reach-guard: the multi-action mana period is confirmed, so the cast disjunct is the \
+         only conjunct left to decide the route"
     );
 
     rig.runner

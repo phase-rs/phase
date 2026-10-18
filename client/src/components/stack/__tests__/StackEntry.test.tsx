@@ -1,8 +1,10 @@
 import { act } from "react";
+import { AnimatePresence } from "framer-motion";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { StackEntry } from "../StackEntry.tsx";
+import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import type { GameState, StackEntry as StackEntryType } from "../../../adapter/types.ts";
@@ -886,6 +888,88 @@ describe("StackEntry", () => {
       // Non-vacuity: the snapshot deliberately still holds the old prompt, so
       // the two fields have genuinely diverged and the glow followed the live one.
       expect(useGameStore.getState().gameState?.waiting_for?.type).toBe("TargetSelection");
+    });
+  });
+
+  describe("flight veil", () => {
+    const ENTRY_ID = 77;
+    const entry = buildStackEntry({ id: ENTRY_ID, source_id: ENTRY_ID });
+    const cardSize = { width: 120, height: 168 };
+
+    function entryNode() {
+      return document.querySelector<HTMLElement>(`[data-stack-entry="${ENTRY_ID}"]`);
+    }
+
+    beforeEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    afterEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    it("mounts hidden with no entrance, keeping its positioning, when already flight-veiled", () => {
+      useAnimationStore.getState().veilFlight(ENTRY_ID);
+
+      render(<StackEntry entry={entry} index={0} isTop cardSize={cardSize} style={{ zIndex: 3 }} />);
+
+      expect(entryNode()!.style.visibility).toBe("hidden");
+      expect(entryNode()!.style.opacity).toBe("1");
+      expect(entryNode()!.style.zIndex).toBe("3");
+    });
+
+    it("keeps today's entrance when it mounts unveiled", () => {
+      render(<StackEntry entry={entry} index={0} isTop cardSize={cardSize} />);
+
+      expect(entryNode()!.style.opacity).toBe("0");
+      expect(entryNode()!.style.transform).toBe("translateX(30px) scale(0.9)");
+      expect(entryNode()!.style.visibility).toBe("");
+    });
+
+    it("shows without replaying the entrance once the flight releases it", () => {
+      useAnimationStore.getState().veilFlight(ENTRY_ID);
+      render(<StackEntry entry={entry} index={0} isTop cardSize={cardSize} />);
+
+      act(() => useAnimationStore.getState().unveilFlight(ENTRY_ID));
+
+      expect(entryNode()!.style.visibility).toBe("");
+      expect(entryNode()!.style.opacity).toBe("1");
+    });
+
+    it("stays hidden through an exit that began while veiled", () => {
+      function Host({ show }: { show: boolean }) {
+        return (
+          <AnimatePresence>
+            {show && <StackEntry key={ENTRY_ID} entry={entry} index={0} isTop cardSize={cardSize} />}
+          </AnimatePresence>
+        );
+      }
+      useAnimationStore.getState().veilFlight(ENTRY_ID);
+      const { rerender } = render(<Host show />);
+
+      rerender(<Host show={false} />);
+      act(() => useAnimationStore.getState().unveilFlight(ENTRY_ID));
+
+      // Still mounted: the exit animation is running.
+      expect(entryNode()).not.toBeNull();
+      expect(entryNode()!.style.visibility).toBe("hidden");
+    });
+
+    it("keeps a coalesced representative visible while a covered member flies", () => {
+      useAnimationStore.getState().veilFlight(78);
+
+      render(
+        <StackEntry
+          entry={entry}
+          groupedObjectIds={[ENTRY_ID, 78]}
+          index={0}
+          isTop
+          cardSize={cardSize}
+        />,
+      );
+
+      expect(entryNode()).toHaveAttribute("data-grouped-ids", "77 78");
+      expect(entryNode()!.style.visibility).toBe("");
     });
   });
 });

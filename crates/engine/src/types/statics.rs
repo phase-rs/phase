@@ -261,9 +261,9 @@ impl fmt::Display for CostPaymentProhibition {
 /// - `Unlimited` — any number of casts per turn from this source (Conduit of Worlds,
 ///   Crucible of Worlds, Omniscience).
 /// - `OncePerTurn` — at most one cast per turn from this source, tracked by the
-///   source's `ObjectId` in the corresponding per-turn used-set. CR 400.7: zone
-///   change creates a new `ObjectId`, so the permission naturally resets when the
-///   source leaves and returns.
+///   source's `ObjectId` in the corresponding per-turn used-set. CR 400.7: the
+///   source's entry ends when it leaves the battlefield
+///   (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
 /// - `OncePerTurnPerPermanentType` — at most one cast/play per turn from this
 ///   source **for each permanent type** the consumed card has (CR 110.4 lists
 ///   the six permanent types). Tracked by the source's `ObjectId` plus the
@@ -288,6 +288,48 @@ pub enum CastFrequency {
 impl CastFrequency {
     pub fn is_unlimited(&self) -> bool {
         matches!(self, CastFrequency::Unlimited)
+    }
+}
+
+/// CR 109.5 + CR 404.1: Whose graveyards a `GraveyardCastPermission` reaches.
+///
+/// CR 404.1 gives each player their own graveyard, and CR 109.5 makes "your"
+/// the permission holder's. "From your graveyard" (Lurrus, Karador, Yawgmoth's
+/// Will) reaches only the caster's own graveyard; "from any graveyard" (The
+/// Great Work) reaches every player's.
+///
+/// An axis of its own rather than a reading of `StaticDefinition.affected`:
+/// most printed permissions lower their "your graveyard" pool with no
+/// controller on the filter, so the filter alone cannot tell the two pools
+/// apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum GraveyardPermissionPool {
+    /// "From your graveyard": only cards in the graveyard the caster reads.
+    #[default]
+    OwnGraveyard,
+    /// "From any graveyard": cards in every player's graveyard.
+    AnyGraveyard,
+}
+
+impl GraveyardPermissionPool {
+    pub fn is_own_graveyard(&self) -> bool {
+        matches!(self, GraveyardPermissionPool::OwnGraveyard)
+    }
+
+    /// Whether `card` is in this pool for `caster`: "your graveyard" is the
+    /// graveyard container the caster reads (CR 400.1 + CR 109.5).
+    pub fn admits(
+        self,
+        state: &crate::types::game_state::GameState,
+        card: &crate::game::game_object::GameObject,
+        caster: PlayerId,
+    ) -> bool {
+        match self {
+            GraveyardPermissionPool::OwnGraveyard => {
+                state.object_in_players_zone(card, Zone::Graveyard, caster)
+            }
+            GraveyardPermissionPool::AnyGraveyard => true,
+        }
     }
 }
 
@@ -1373,6 +1415,12 @@ pub enum StaticMode {
     /// a keyword tag. E.g., "Creatures you control can boast twice during each of
     /// your turns rather than once" → overrides `OnlyOnceEachTurn` to `MaxTimesEachTurn(2)`
     /// for boast-tagged abilities on affected permanents.
+    ///
+    /// CR 606.3 loyalty reading: with `keyword: "loyalty"`, raises the
+    /// per-permanent loyalty-ability cap (Oath of Teferi class — "You may
+    /// activate the loyalty abilities of planeswalkers you control twice each
+    /// turn rather than only once"). Matched by the loyalty legality gate
+    /// against `is_loyalty_ability_cost`, not by `AbilityTag`.
     ModifyActivationLimit {
         /// The keyword tag whose activation limit is modified.
         keyword: String,
@@ -1505,7 +1553,9 @@ pub enum StaticMode {
         who: ProhibitionScope,
     },
     /// CR 604.2 + CR 305.1: Static ability granting permission to play/cast
-    /// matching cards from owner's graveyard.
+    /// matching cards from the graveyards its `pool` names. A self-referential
+    /// permission's castable zones are its `active_zones`, which may include
+    /// `Exile`.
     GraveyardCastPermission {
         /// CR 601.2a: Per-turn cast frequency. `OncePerTurn` = "once during each of
         /// your turns" (Lurrus, Karador). `Unlimited` = no per-turn cap (Conduit).
@@ -1545,6 +1595,19 @@ pub enum StaticMode {
         /// `StaticDefinition.affected`, which only selects cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         required_cast_keyword: Option<super::keywords::KeywordKind>,
+        /// CR 109.5 + CR 404.1: whose graveyards the permission reaches.
+        /// `OwnGraveyard` (default) is "from your graveyard"; `AnyGraveyard` is
+        /// "from any graveyard" (The Great Work). Read by
+        /// `casting::GraveyardPermissionSource::admits_card`. The land surface
+        /// (`casting::graveyard_lands_playable_by_permission`) walks only the
+        /// player's own graveyard; the parser builds `AnyGraveyard` only for a
+        /// `Cast` permission, and the play-mode cross-graveyard printings
+        /// (Shaman's Trance, Coram, the Undertaker) are not lowered to it.
+        #[serde(
+            default,
+            skip_serializing_if = "GraveyardPermissionPool::is_own_graveyard"
+        )]
+        pool: GraveyardPermissionPool,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -2954,6 +3017,7 @@ impl Hash for StaticMode {
                 graveyard_destination_replacement,
                 extra_cost,
                 required_cast_keyword,
+                pool,
                 // `CounterType` derives Hash but is collision-safe to skip: the
                 // enters-with rider never distinguishes two otherwise-equal
                 // permissions in the interned set (mirrors `extra_cost` below).
@@ -2963,6 +3027,7 @@ impl Hash for StaticMode {
                 play_mode.hash(state);
                 graveyard_destination_replacement.hash(state);
                 required_cast_keyword.hash(state);
+                pool.hash(state);
                 // `AbilityCost` (inside `CastExtraCost`) lacks `Hash` — hash the
                 // mode marker only (mirrors the `alt_cost` treatment) so the
                 // alternative/additional shapes don't collide.
@@ -3351,12 +3416,16 @@ impl fmt::Display for StaticMode {
                 play_mode,
                 graveyard_destination_replacement,
                 extra_cost,
+                pool,
                 // CR 122.1: the enters-with counter payload rides on serde, not
                 // the Display round-trip (mirrors `extra_cost`); FromStr
                 // defaults it to None.
                 ..
             } => {
                 write!(f, "GraveyardCastPermission({play_mode},{frequency}")?;
+                if matches!(pool, GraveyardPermissionPool::AnyGraveyard) {
+                    write!(f, ",pool=any_graveyard")?;
+                }
                 if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
                     write!(f, ",exile_on_graveyard")?;
                 }
@@ -3865,6 +3934,7 @@ impl FromStr for StaticMode {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
@@ -3885,6 +3955,11 @@ impl FromStr for StaticMode {
                         extra_cost: None,
                         enters_with_counter: None,
                         required_cast_keyword: None,
+                        pool: if rest.contains(&"pool=any_graveyard") {
+                            GraveyardPermissionPool::AnyGraveyard
+                        } else {
+                            GraveyardPermissionPool::OwnGraveyard
+                        },
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -3894,6 +3969,7 @@ impl FromStr for StaticMode {
                         extra_cost: None,
                         enters_with_counter: None,
                         required_cast_keyword: None,
+                        pool: GraveyardPermissionPool::OwnGraveyard,
                     }
                 }
             }
@@ -4987,6 +5063,7 @@ mod tests {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4995,6 +5072,16 @@ mod tests {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
+            },
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: Some(Zone::Exile),
+                extra_cost: None,
+                enters_with_counter: None,
+                required_cast_keyword: None,
+                pool: GraveyardPermissionPool::AnyGraveyard,
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
@@ -5188,6 +5275,7 @@ mod tests {
                 }),
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,

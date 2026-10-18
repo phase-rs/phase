@@ -1,4 +1,4 @@
-import type { PlayerId, WaitingFor } from "../adapter/types";
+import type { GameState, PlayerId, WaitingFor } from "../adapter/types";
 import { PLAYER_ID, SPECTATOR_PLAYER_ID } from "../constants/game";
 import type { GameMode } from "../stores/gameStore";
 import { seatSource, useGameStore } from "../stores/gameStore";
@@ -99,6 +99,41 @@ export function waitingPlayer(waitingFor: WaitingFor | null): PlayerId | null {
   return "player" in waitingFor.data ? waitingFor.data.player : null;
 }
 
+function canActForWaitingState(
+  gameMode: GameMode | null,
+  isSpectator: boolean,
+  playerId: PlayerId,
+  gameState: GameState | null,
+  waitingFor: WaitingFor | null,
+): boolean {
+  if (gameMode === "spectate" || isSpectator) return false;
+
+  const semanticPlayer = waitingPlayer(waitingFor);
+  if (!gameState || semanticPlayer == null) return false;
+  if (playerId === SPECTATOR_PLAYER_ID) return false;
+  if (semanticPlayer === playerId) return true;
+  return gameState.turn_decision_controller === playerId && semanticPlayer === gameState.active_player;
+}
+
+/** Synchronous authorization check for event handlers that must read the latest stores. */
+export function getCanActForWaitingState(): boolean {
+  const gameStore = useGameStore.getState();
+  const multiplayerStore = useMultiplayerStore.getState();
+  const playerId = resolveLocalSeat(
+    gameStore.gameMode,
+    multiplayerStore.activePlayerId,
+    SPECTATOR_PLAYER_ID,
+  );
+
+  return canActForWaitingState(
+    gameStore.gameMode,
+    multiplayerStore.isSpectator,
+    playerId,
+    gameStore.gameState,
+    gameStore.waitingFor,
+  );
+}
+
 export function usePerspectivePlayerId(): PlayerId {
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
@@ -113,11 +148,5 @@ export function useCanActForWaitingState(): boolean {
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
 
-  if (gameMode === "spectate" || isSpectator) return false;
-
-  const semanticPlayer = waitingPlayer(waitingFor);
-  if (!gameState || semanticPlayer == null) return false;
-  if (playerId === SPECTATOR_PLAYER_ID) return false;
-  if (semanticPlayer === playerId) return true;
-  return gameState.turn_decision_controller === playerId && semanticPlayer === gameState.active_player;
+  return canActForWaitingState(gameMode, isSpectator, playerId, gameState, waitingFor);
 }

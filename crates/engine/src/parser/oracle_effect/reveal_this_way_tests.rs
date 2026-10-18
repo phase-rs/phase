@@ -189,6 +189,58 @@ fn reveal_gate_fails_closed_unless_it_restates_the_parent_until_condition() {
     assert!(is_reveal_gate_gap(&two), "{two:?}");
 }
 
+fn has_reveal_gate_gap_anywhere(def: &AbilityDefinition) -> bool {
+    matches!(
+        def.effect.as_ref(),
+        Effect::Unimplemented { name, .. } if name == "reveal_this_way_reflexive_gate"
+    ) || def
+        .sub_ability
+        .as_deref()
+        .is_some_and(has_reveal_gate_gap_anywhere)
+}
+
+/// The guard reads one reveal-until's own verdict. With any earlier
+/// instruction — a non-reveal one included (whole-scope fallback) — the
+/// multi-instruction antecedent and occurrence set are not proven by this
+/// lowering, so the head stays explicitly unsupported.
+#[test]
+fn reveal_gate_fails_closed_after_an_earlier_instruction() {
+    for (label, lead) in [
+        ("earlier non-reveal instruction", "You gain 1 life. "),
+        (
+            "earlier reveal-until",
+            "Reveal cards from the top of your library until you reveal a land card. Put that card into your hand and the rest on the bottom of your library in a random order. ",
+        ),
+    ] {
+        let def = gate_outcome(&format!(
+            "{lead}{REVEAL_UNTIL_CREATURE_HEAD}When you reveal a creature card this way, you gain 2 life."
+        ));
+        let parent = def
+            .sub_ability
+            .as_deref()
+            .expect("reach guard: the earlier instruction heads the chain");
+        assert!(
+            matches!(parent.effect.as_ref(), Effect::RevealUntil { .. }),
+            "{label}: reach guard: the reveal-until follows the earlier instruction: {def:?}"
+        );
+        assert!(has_reveal_gate_gap_anywhere(&def), "{label}: {def:?}");
+    }
+}
+
+/// An optional reveal can be declined, so its verdict slot never speaks for a
+/// reveal that did not happen.
+#[test]
+fn reveal_gate_fails_closed_after_an_optional_reveal() {
+    let def = gate_outcome(
+        "You may reveal cards from the top of your library until you reveal a creature card. If you do, put that card into your hand and the rest on the bottom of your library in a random order. When you reveal a creature card this way, you gain 2 life.",
+    );
+    assert!(
+        def.optional && matches!(def.effect.as_ref(), Effect::RevealUntil { .. }),
+        "reach guard: an optional reveal-until heads the chain: {def:?}"
+    );
+    assert!(has_reveal_gate_gap_anywhere(&def), "{def:?}");
+}
+
 const CAIT_SITH_TRIGGER: &str = "Lucky Slots — At the beginning of combat on your turn, scry 1, then exile the top card of your library. You may play that card this turn. When you exile a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.";
 
 fn trigger_json(text: &str, name: &str) -> serde_json::Value {
@@ -197,22 +249,56 @@ fn trigger_json(text: &str, name: &str) -> serde_json::Value {
 }
 
 #[test]
-fn unmodeled_zone_change_reflexive_with_a_where_x_referent_fails_closed() {
-    // Cait Sith, Fortune Teller (verbatim): the where-X referent no longer
-    // misbinds the pump to the exiled card, and because the "When you exile …
-    // this way" reflexive's own target timing is not modeled, the clause is
-    // honestly unsupported instead of announcing its target with the trigger.
+fn zone_change_reflexive_with_a_where_x_referent_lowers_to_the_creation_gate() {
+    // Cait Sith, Fortune Teller (verbatim): CR 603.12 — "When you exile a card
+    // this way" is a reflexive trigger, so the pump is gated by the `WhenYouDo`
+    // creation gate carrying the exile event (its target is chosen as the
+    // reflexive goes on the stack, CR 603.3d), keeps its explicit target, and
+    // the where-X still reads the exiled card.
     let json = trigger_json(CAIT_SITH_TRIGGER, "Cait Sith, Fortune Teller");
     let mut gaps = Vec::new();
     collect_effects(&json, "Unimplemented", &mut gaps);
+    assert!(gaps.is_empty(), "no strict-fail remains: {json}");
+    let parsed = parse_oracle_text(
+        CAIT_SITH_TRIGGER,
+        "Cait Sith, Fortune Teller",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let mut node = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the combat trigger body");
+    while !matches!(node.effect.as_ref(), Effect::Pump { .. }) {
+        node = node.sub_ability.as_deref().expect("the pump node");
+    }
+    let condition = node.condition.as_ref().expect("the reflexive gate");
+    assert!(condition.has_when_you_do_marker(), "{condition:?}");
     assert!(
-        gaps.iter()
-            .any(|gap| gap["name"] == "zone_change_reflexive_target_timing"),
-        "{json}"
+        matches!(
+            condition.zone_changed_this_way_head(),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                destination: None,
+                ..
+            })
+        ),
+        "{condition:?}"
     );
     let mut pumps = Vec::new();
     collect_effects(&json, "Pump", &mut pumps);
-    assert!(pumps.is_empty(), "no misbound pump survives: {json}");
+    assert_eq!(pumps.len(), 1, "reach guard: exactly one pump: {json}");
+    assert_eq!(
+        pumps[0]["target"],
+        serde_json::to_value(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        pumps[0]["power"]["value"]["qty"]["scope"]["type"], "Demonstrative",
+        "the where-X reads the exiled card"
+    );
 }
 
 #[test]
@@ -338,4 +424,98 @@ fn where_x_that_card_after_a_multi_hit_reveal_until_stays_unsupported() {
     );
     let json = serde_json::to_value(&def).unwrap();
     assert!(where_x_gap_present(&json), "{json}");
+}
+
+const GOBLIN_CHARBELCHER: &str = "{3}, {T}: Reveal cards from the top of your library until you reveal a land card. ~ deals damage equal to the number of nonland cards revealed this way to any target. If the revealed land card was a Mountain, ~ deals double that damage instead. Put the revealed cards on the bottom of your library in any order.";
+
+/// CR 701.20a + CR 608.2c: the whole revealed pile — the land included — goes to
+/// the library bottom AFTER the damage (no card is kept for a hand), the damage counts the
+/// nonland cards of the revealed set, and the Mountain override replaces that
+/// damage with a doubled copy of the same count.
+#[test]
+fn goblin_charbelcher_lowers_to_typed_damage_override_and_whole_pile_bottom() {
+    let parsed = parse_oracle_text(
+        GOBLIN_CHARBELCHER,
+        "Goblin Charbelcher",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
+    let reveal = &parsed.abilities[0];
+    // CR 608.2c: the reveal only reveals; the cards stay in the library until the
+    // placement instruction, which follows the damage.
+    let Effect::RevealUntil {
+        matched_disposition,
+        ..
+    } = reveal.effect.as_ref()
+    else {
+        panic!("expected a RevealUntil root, got {:?}", reveal.effect);
+    };
+    assert_eq!(*matched_disposition, RevealUntilDisposition::RevealOnly);
+
+    let damage = gate_sub(reveal);
+    let nonland_revealed = QuantityExpr::Ref {
+        qty: QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(nonland_card()),
+            caused_by: None,
+        },
+    };
+    let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(amount, &nonland_revealed);
+    assert_eq!(target, &TargetFilter::Any);
+
+    let doubled = gate_sub(damage);
+    assert_eq!(
+        doubled.effect.as_ref(),
+        &Effect::DealDamage {
+            amount: QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(nonland_revealed),
+            },
+            target: TargetFilter::ParentTarget,
+            damage_source: None,
+            excess: None,
+        }
+    );
+    assert_eq!(
+        doubled.condition,
+        Some(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Land],
+                additional_filter: None,
+                subtype_filter: Some(Box::new(TargetFilter::Typed(
+                    TypedFilter::default().subtype("Mountain".to_string())
+                ))),
+            }),
+        })
+    );
+    let placement = gate_sub(doubled);
+    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        library_position,
+        random_order,
+        ..
+    } = placement.effect.as_ref()
+    else {
+        panic!("expected the pile placement, got {:?}", placement.effect);
+    };
+    assert_eq!(*origin, Some(Zone::Library));
+    assert_eq!(*destination, Zone::Library);
+    assert_eq!(*target, TargetFilter::LastRevealed);
+    assert_eq!(*library_position, Some(LibraryPosition::Bottom));
+    assert!(!random_order, "\"in any order\" is the owner's arrangement");
+}
+
+fn nonland_card() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::default()
+            .with_type(TypeFilter::Card)
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+    )
 }

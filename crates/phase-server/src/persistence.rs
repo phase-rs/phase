@@ -38,7 +38,29 @@ pub enum SessionRetention {
 pub struct GameDb {
     conn: Mutex<Connection>,
     retention: SessionRetention,
+    pub(crate) full_saves: crate::full_persistence::Scheduler,
+    #[cfg(test)]
+    full_save_hook: Mutex<Option<FullSaveHook>>,
+    #[cfg(test)]
+    full_save_io_hook: Mutex<Option<FullSaveIoHook>>,
+    #[cfg(test)]
+    full_currency_entry: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
 }
+
+/// CPU-prepared SQL inputs. The full game snapshot is released before I/O.
+pub(crate) struct PreparedFullSave {
+    pub(crate) key: FullSessionKey,
+    mutation_revision: u64,
+    activation_epoch: Option<u64>,
+    deck_pools_json: std::sync::Arc<str>,
+    json: String,
+}
+
+#[cfg(test)]
+type FullSaveHook = std::sync::Arc<dyn Fn(&FullPersistSnapshot) + Send + Sync>;
+
+#[cfg(test)]
+type FullSaveIoHook = std::sync::Arc<dyn Fn(&FullSessionKey, u64) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RatingDelta {
@@ -127,7 +149,78 @@ impl GameDb {
         Ok(Self {
             conn: Mutex::new(conn),
             retention,
+            full_saves: crate::full_persistence::Scheduler::default(),
+            #[cfg(test)]
+            full_save_hook: Mutex::new(None),
+            #[cfg(test)]
+            full_save_io_hook: Mutex::new(None),
+            #[cfg(test)]
+            full_currency_entry: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_save_hook(&self, hook: FullSaveHook) {
+        *self.full_save_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_save_io_hook(&self, hook: FullSaveIoHook) {
+        *self.full_save_io_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_currency_entry(&self, entered: std::sync::Arc<tokio::sync::Notify>) {
+        *self.full_currency_entry.lock().unwrap() = Some(entered);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_connection_for_test(
+        &self,
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        let _connection = self.conn.lock().unwrap();
+        entered.notify_one();
+        // Sender teardown unblocks the worker even if the test assertion fails.
+        let _ = release.recv();
+    }
+
+    /// Test fault: a terminal result already recorded for this Full key with different
+    /// content, so every honest `prepare_full_terminal` fails while the key stays
+    /// active (the transient shape of a commit failure).
+    #[cfg(test)]
+    pub(crate) fn plant_terminal_conflict(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO terminal_match_results
+                (game_code, generation, terminal_revision, artifact_digest, display_json, created_at)
+             VALUES (?1, ?2, 0, 'conflicting-digest', '{}', ?3)",
+            params![key.game_code, key.generation, now_epoch()],
+        )?;
+        Ok(())
+    }
+
+    /// Undo [`Self::plant_terminal_conflict`]: the fault clears.
+    #[cfg(test)]
+    pub(crate) fn clear_terminal_conflict(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM terminal_match_results WHERE game_code = ?1 AND generation = ?2",
+            params![key.game_code, key.generation],
+        )?;
+        Ok(())
+    }
+
+    /// Test fault: the Full key is retired out from under the running game.
+    #[cfg(test)]
+    pub(crate) fn retire_full_key_for_test(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE game_sessions SET retired = 1 WHERE game_code = ?1 AND generation = ?2",
+            params![key.game_code, key.generation],
+        )?;
+        Ok(())
     }
 
     /// Legacy persistence path retained while Full runtime callers migrate to
@@ -286,41 +379,156 @@ impl GameDb {
         .optional()
     }
 
+    /// Cheap preflight before capture/serialization. The transactional upsert
+    /// remains authoritative if a retirement or newer save races this read.
+    pub(crate) fn full_save_currency(
+        &self,
+        key: &FullSessionKey,
+        revision: u64,
+        activation_epoch: Option<u64>,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        #[cfg(test)]
+        if let Some(entered) = self.full_currency_entry.lock().unwrap().clone() {
+            entered.notify_one();
+        }
+        let conn = self.conn.lock().unwrap();
+        if !Self::current_activation(&conn, key, activation_epoch)? {
+            return Ok(FullPersistDisposition::NotCurrentActivation);
+        }
+        let retained = conn
+            .query_row(
+                "SELECT generation, mutation_revision, retired, session_state_json IS NULL
+             FROM game_sessions WHERE game_code = ?1",
+                params![key.game_code],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if retained.is_some_and(|(generation, saved, retired, empty)| {
+            generation > key.generation
+                || (generation == key.generation && (retired || (saved >= revision && !empty)))
+        }) {
+            Ok(FullPersistDisposition::SupersededOrRetired)
+        } else {
+            Ok(FullPersistDisposition::Applied)
+        }
+    }
+
+    fn current_activation(
+        conn: &Connection,
+        key: &FullSessionKey,
+        activation_epoch: Option<u64>,
+    ) -> rusqlite::Result<bool> {
+        let Some(epoch) = activation_epoch else {
+            return Ok(true);
+        };
+        let active = conn.query_row(
+            "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
+            [],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+            )),
+        ).optional()?;
+        Ok(active.is_some_and(|(code, generation, active_epoch)| {
+            code == key.game_code && generation == key.generation && active_epoch == epoch
+        }))
+    }
+
     /// Saves a Full authoritative snapshot only when it is newer than the
     /// retained lifetime. Equal revisions are intentionally no-ops.
     pub fn save_full_session(
         &self,
         snapshot: &FullPersistSnapshot,
     ) -> rusqlite::Result<FullPersistDisposition> {
-        let json = serde_json::to_string(&snapshot.persisted)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let json = self.serialize_full_session(snapshot)?;
+        self.save_full_session_parts(
+            &snapshot.key,
+            snapshot.mutation_revision,
+            snapshot.activation_epoch,
+            snapshot.deck_pools_json.as_ref(),
+            &json,
+        )
+    }
+
+    pub(crate) fn prepare_full_session_save(
+        &self,
+        snapshot: FullPersistSnapshot,
+    ) -> Result<PreparedFullSave, (FullSessionKey, rusqlite::Error)> {
+        let json = match self.serialize_full_session(&snapshot) {
+            Ok(json) => json,
+            Err(error) => return Err((snapshot.key, error)),
+        };
+        let FullPersistSnapshot {
+            key,
+            mutation_revision,
+            activation_epoch,
+            deck_pools_json,
+            ..
+        } = snapshot;
+        Ok(PreparedFullSave {
+            key,
+            mutation_revision,
+            activation_epoch,
+            deck_pools_json,
+            json,
+        })
+    }
+
+    fn serialize_full_session(&self, snapshot: &FullPersistSnapshot) -> rusqlite::Result<String> {
+        #[cfg(test)]
+        {
+            let hook = self.full_save_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(snapshot);
+            }
+        }
+        serde_json::to_string(&snapshot.persisted)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+    }
+
+    /// Performs only the fenced SQL write; callers need no game CPU admission.
+    pub(crate) fn save_prepared_full_session(
+        &self,
+        prepared: &PreparedFullSave,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        self.save_full_session_parts(
+            &prepared.key,
+            prepared.mutation_revision,
+            prepared.activation_epoch,
+            prepared.deck_pools_json.as_ref(),
+            &prepared.json,
+        )
+    }
+
+    fn save_full_session_parts(
+        &self,
+        key: &FullSessionKey,
+        mutation_revision: u64,
+        activation_epoch: Option<u64>,
+        deck_pools_json: &str,
+        json: &str,
+    ) -> rusqlite::Result<FullPersistDisposition> {
         let now = now_epoch();
         let mut conn = self.conn.lock().unwrap();
+        #[cfg(test)]
+        {
+            let hook = self.full_save_io_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(key, mutation_revision);
+            }
+        }
         let tx = conn.transaction()?;
 
-        if let Some(epoch) = snapshot.activation_epoch {
-            let active = tx
-                .query_row(
-                    "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, u64>(1)?,
-                            row.get::<_, u64>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if active
-                != Some((
-                    snapshot.key.game_code.clone(),
-                    snapshot.key.generation,
-                    epoch,
-                ))
-            {
-                return Ok(FullPersistDisposition::NotCurrentActivation);
-            }
+        if !Self::current_activation(&tx, key, activation_epoch)? {
+            return Ok(FullPersistDisposition::NotCurrentActivation);
         }
 
         // The dynamic payload and the pools are two columns of one upsert in
@@ -351,12 +559,12 @@ impl GameDb {
                     AND (excluded.mutation_revision > game_sessions.mutation_revision
                         OR game_sessions.session_state_json IS NULL))",
             params![
-                snapshot.key.game_code,
-                snapshot.key.generation,
-                snapshot.mutation_revision,
-                snapshot.activation_epoch,
+                key.game_code,
+                key.generation,
+                mutation_revision,
+                activation_epoch,
                 json,
-                snapshot.deck_pools_json.as_ref(),
+                deck_pools_json,
                 now,
             ],
         )?;
@@ -365,7 +573,7 @@ impl GameDb {
                 "INSERT INTO full_generation_high_water (game_code, generation)
                  VALUES (?1, ?2)
                  ON CONFLICT(game_code) DO UPDATE SET generation = MAX(generation, excluded.generation)",
-                params![snapshot.key.game_code, snapshot.key.generation],
+                params![key.game_code, key.generation],
             )?;
             tx.commit()?;
             Ok(FullPersistDisposition::Applied)
@@ -466,6 +674,7 @@ impl GameDb {
             params![snapshot.key.game_code, snapshot.key.generation],
         )?;
         tx.commit()?;
+        self.full_saves.cancel_all();
         Ok((next_epoch, FullPersistDisposition::Applied))
     }
 
@@ -538,6 +747,7 @@ impl GameDb {
             tx.execute("DELETE FROM full_active_session WHERE slot = 1", [])?;
         }
         tx.commit()?;
+        self.full_saves.cancel(key);
         Ok(FullPersistDisposition::Applied)
     }
 
@@ -639,6 +849,7 @@ impl GameDb {
         {
             if existing_digest == digest {
                 tx.commit()?;
+                self.full_saves.cancel(&artifact.key);
                 return Ok(PrepareFullTerminalDisposition::AlreadyPrepared);
             }
             return Err(rusqlite::Error::InvalidQuery);
@@ -718,6 +929,7 @@ impl GameDb {
             params![artifact.key.game_code, artifact.key.generation],
         )?;
         tx.commit()?;
+        self.full_saves.cancel(&artifact.key);
         Ok(PrepareFullTerminalDisposition::Prepared)
     }
 

@@ -2383,7 +2383,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
                 .filter(|(_, consumed)| *consumed == s.len())
                 .map(|(subtype, _)| subtype)
                 .unwrap_or_else(|| {
-                    let capitalized = format!("{}{}", &s[..1].to_uppercase(), &s[1..]);
+                    let capitalized = capitalize_first(s);
                     // Unknown plural subtype words retain the legacy fallback
                     // ("Daleks" → "Dalek"), while values returned by
                     // `parse_subtype` above are already canonical and must not be
@@ -2514,24 +2514,14 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
 
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
-    let mut props = Vec::new();
-    let type_filter = if let Some(leg) = type_leg {
-        props.extend(leg.properties);
-        leg.type_filter
-    } else {
-        TypeFilter::Card
-    };
+    let mut filter = type_leg.unwrap_or_else(TypedFilter::card);
     if let Some(z) = zone {
-        props.push(FilterProp::InZone { zone: z });
+        filter.properties.push(FilterProp::InZone { zone: z });
     }
     if let Some(prop) = attachment {
-        props.push(prop);
+        filter.properties.push(prop);
     }
-    props.extend(without_keyword);
-    let mut filter = TypedFilter::new(type_filter);
-    if !props.is_empty() {
-        filter = filter.properties(props);
-    }
+    filter.properties.extend(without_keyword);
     if let Some(c) = controller {
         filter = filter.controller(c);
     }
@@ -4002,6 +3992,49 @@ mod tests {
     use super::*;
     use crate::types::ability::Effect;
 
+    // SHAPE: CR 702.5a + CR 205.3m: the single-leg adapter must retain the
+    // creature head, canonical Wall exclusion and controller suffix together.
+    #[test]
+    fn enchant_negated_subtype_from_str_and_declines_shape() {
+        for phrase in [
+            "Enchant:non-Wall creature",
+            "Enchant:non-Wall creature you control",
+        ] {
+            let Keyword::Enchant(TargetFilter::Typed(typed)) = Keyword::from_str(phrase).unwrap()
+            else {
+                panic!("expected typed Enchant");
+            };
+            assert_eq!(
+                typed.type_filters,
+                vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Non(Box::new(TypeFilter::Subtype("Wall".into())))
+                ]
+            );
+            assert_eq!(
+                typed.controller,
+                if phrase == "Enchant:non-Wall creature you control" {
+                    Some(ControllerRef::You)
+                } else {
+                    None
+                }
+            );
+        }
+        for phrase in [
+            "",
+            "non-Aurora enchantment",
+            "non- enchantment",
+            "non-Aura",
+            "non-Wall creature if you control an artifact",
+            "Goblin",
+        ] {
+            assert!(
+                parse_enchant_target(phrase).is_none(),
+                "must decline: {phrase}"
+            );
+        }
+    }
+
     /// CR 702.62a + CR 702.7a: the ordinary case — a keyword whose `kind()` names
     /// it and nothing else supports a kind-level presence test.
     #[test]
@@ -4309,6 +4342,19 @@ mod tests {
 
         let equip = Keyword::from_str("Equip:3").unwrap();
         assert!(matches!(equip, Keyword::Equip(ManaCost::Cost { .. })));
+    }
+
+    /// CR 702.41a + CR 205.3: an unknown subtype whose first letter is not ASCII is capitalized by
+    /// character, not by byte.
+    #[test]
+    fn parse_affinity_for_a_subtype_with_a_non_ascii_initial() {
+        let Keyword::Affinity(filter) = Keyword::from_str("Affinity for éclats").unwrap() else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            filter.type_filters,
+            vec![TypeFilter::Subtype("Éclat".to_string())]
+        );
     }
 
     #[test]

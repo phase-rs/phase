@@ -9,6 +9,7 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
+use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
 use super::oracle_quantity::parse_cda_quantity;
@@ -658,15 +659,11 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
 
     let filters: Vec<TargetFilter> = legs
         .into_iter()
-        .map(|leg| {
-            let mut f = TypedFilter::new(leg.type_filter);
-            if !leg.properties.is_empty() {
-                f = f.properties(leg.properties);
-            }
+        .map(|mut leg| {
             if let Some(ref c) = controller {
-                f = f.controller(c.clone());
+                leg = leg.controller(c.clone());
             }
-            TargetFilter::Typed(f)
+            TargetFilter::Typed(leg)
         })
         .collect();
 
@@ -1404,10 +1401,13 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         return Some((kw, ""));
     }
 
-    // CR 702.124: Partner variant keywords — must come BEFORE generic "partner" match.
-    // MTGJSON sends Character Select, Friends Forever, and generic Partner all as keyword "Partner".
-    // Oracle text em-dash suffix disambiguates them.
-    if let Ok((_, result)) = alt((
+    // CR 702.124i: "Partner—[text]" (Character select, Friends forever).
+    // CR 702.124k: "Choose a Background". CR 702.124m: "Doctor's companion".
+    // MTGJSON sends Character Select, Friends Forever, and generic Partner all as keyword
+    // "Partner"; the Oracle em-dash suffix disambiguates them. Must come BEFORE generic
+    // "partner". The REAL nom remainder is returned so strict callers
+    // (`parse_router_keyword_fragment`) see trailing prose and decline.
+    if let Ok((rest, result)) = alt((
         value(
             Some(Keyword::Partner(PartnerType::CharacterSelect)),
             tag::<_, _, OracleError<'_>>("partner\u{2014}character select"),
@@ -1424,14 +1424,14 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
             Some(Keyword::Partner(PartnerType::DoctorsCompanion)),
             alt((tag("doctor\u{2019}s companion"), tag("doctor's companion"))),
         ),
-        // CR 702.124c: "Partner with [Name]" — handled at the build_oracle_face level
+        // CR 702.124j: "Partner with [Name]" — handled at the build_oracle_face level
         // via MTGJSON keyword detection. Skip here to avoid producing a duplicate with
         // incorrect casing from the lowered oracle text.
         value(None, tag("partner with ")),
     ))
     .parse(text)
     {
-        return result.map(|kw| (kw, ""));
+        return result.map(|kw| (kw, rest));
     }
 
     // CR 702.24: Cumulative upkeep granted via a quoted ability ("[enchanted
@@ -1495,6 +1495,29 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     .parse(text)
     {
         return Some((Keyword::Frenzy(n), ""));
+    }
+
+    // Digital-only Alchemy (no CR entry): "Starting intensity N" — the printed
+    // starting value of the card's intensity (a per-card value, not a CR 122
+    // counter; the variant's own doc says "initial intensity value"). MTGJSON names the
+    // mechanic "Intensity" (AtomicCards `keywords`), which has no
+    // `FromStr` arm, so the Oracle line is the ONLY surface that carries N —
+    // exactly the Renown/Frenzy shape above. Without this arm the line is not
+    // a keyword: all 12 permanent carriers record an `Unimplemented` gap, and on
+    // the spell side it either becomes its own failing unit (Mycelic Ballad,
+    // Colossal Chorus, Static Discharge, Summitfest) or is swallowed into a
+    // parsed ability's `description` (Hymn to the Ages, Legion's Chant, Piece It
+    // Together). Ribald Shanty is the measured silent case — 0 gaps, supported,
+    // `obj.intensity` never seeded, so `QuantityRef::Intensity { Source }`
+    // resolved 0 instead of the printed 2.
+    if let Ok((_, (_, _, n))) = all_consuming((
+        tag::<_, _, OracleError<'_>>("starting intensity"),
+        space1,
+        nom_primitives::parse_number,
+    ))
+    .parse(text)
+    {
+        return Some((Keyword::StartingIntensity(n), ""));
     }
 
     // CR 702.167a/b: Craft with [materials] [cost] — the Oracle line carries the
@@ -1960,6 +1983,20 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         if !normalized.is_empty() {
             return Some((Keyword::BandsWithOther(normalized), ""));
         }
+    }
+
+    // CR 207.2d: an ability/flavor word label ("Echo of the Lost — …" on Hades,
+    // Sorcerer of Eld) is not a keyword declaration. The generic name/parameter
+    // split below would read the label's first word as a keyword name and
+    // fabricate a keyword from the label ("Echo" with an empty mana cost),
+    // silently swallowing the labeled ability. Decline so the line survives for
+    // the static/trigger parsers. See
+    // `keyword_candidate_ability_word_label` for the measurement behind the
+    // seam; every genuine keyword-cost line with this shape is claimed by an arm
+    // above (Suspend/Awaken/Reinforce/Prototype/em-dash cost families) or by a
+    // router slot before this function is reached.
+    if keyword_candidate_ability_word_label(text).is_some() {
+        return None;
     }
 
     // For parameterized keywords, find the first space to split name from parameter.
@@ -2861,7 +2898,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 97] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 98] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -2959,6 +2996,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 97] = [
     "strive",
     "exploit",
     "devoid",
+    "starting intensity",
 ];
 
 /// Check if a line is a keyword with a cost (e.g., "Cycling {2}", "Flashback {3}{R}", "Crew 3").
@@ -2978,12 +3016,133 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
             .is_some_and(|w| w.ends_with("cycling") && w != "cycling")
 }
 
+/// CR 207.2d: the `(label, rest)` split when `line` is a keyword-cost candidate
+/// whose leading spaced-dash label is a short ability/flavor word.
+///
+/// Some ability and flavor words begin with a word that is also a keyword-cost
+/// prefix — "Echo of the Lost — During your turn, you may play cards from your
+/// graveyard." (Hades, Sorcerer of Eld) matches `is_keyword_cost_line` because
+/// "echo" is a candidate prefix at a word boundary, and the label is short
+/// enough for `split_short_label_prefix` to read as a keyword-plus-parameter
+/// declaration. The label has no rules meaning (CR 207.2d), so a line shaped
+/// this way must not be claimed by the generic name/parameter split.
+///
+/// MEASURED, not assumed: a scan of the `client/public/card-data.json` export's
+/// unique `oracle_text` lines (2026-09-30) finds 58 lines that are
+/// `is_keyword_cost_line` candidates and carry a spaced dash; 36 of them carry a
+/// ≤4-word label per `split_short_label_prefix(text, 4)`. Every one of those 36
+/// except Hades is claimed by a dedicated arm BEFORE the decline site (Suspend/
+/// Awaken/Reinforce/Prototype/em-dash cost families) or by a router slot before
+/// `parse_keyword_line_core` is reached (ability-word-prefixed trigger lines at
+/// priority 6b, Strive's pre-loop scan), so declining here removes exactly the
+/// fabricated parse and leaves the genuine keyword lines untouched. The brace
+/// guard inside `split_short_label_prefix` is what keeps "Prototype {1}{U}{U} —
+/// 2/1" out of this class.
+pub(crate) fn keyword_candidate_ability_word_label(line: &str) -> Option<(&str, &str)> {
+    let lower = line.to_lowercase();
+    if !is_keyword_cost_line(&lower) {
+        return None;
+    }
+    split_short_label_prefix(line, 4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCost, SacrificeCost};
+    use crate::types::ability::{AbilityCost, Effect, SacrificeCost};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerCounterKind;
+
+    // SHAPE: CR 702.5a: public full-card ingestion preserves each printed
+    // Enchant restriction; unrelated sibling abilities are not claimed fixed.
+    #[test]
+    fn enchant_negated_subtype_full_oracle_shape() {
+        let cards = [
+            ("Puppet Crafting", "Enchant artifact or non-Aura enchantment\nEnchanted permanent is a Construct creature with base power and toughness 5/5 in addition to its other types.\n{4}{G}: Return this card from your graveyard to your hand."),
+            ("Aggression", "Enchant non-Wall creature\nEnchanted creature has first strike and trample.\nAt the beginning of the end step of enchanted creature's controller, destroy that creature if it didn't attack this turn."),
+            ("Consuming Ferocity", "Enchant non-Wall creature\nEnchanted creature gets +1/+0.\nAt the beginning of your upkeep, put a +1/+0 counter on enchanted creature. If that creature has three or more +1/+0 counters on it, it deals damage equal to its power to its controller, then destroy that creature and it can't be regenerated."),
+            ("Krovikan Plague", "Enchant non-Wall creature you control\nWhen this Aura enters, draw a card at the beginning of the next turn's upkeep.\nTap enchanted creature: This Aura deals 1 damage to any target. Put a -0/-1 counter on enchanted creature. Activate only if enchanted creature is untapped."),
+        ];
+        for (name, oracle) in cards {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &["enchant".into()],
+                &["Enchantment".into()],
+                &["Aura".into()],
+            );
+            let filter = parsed
+                .extracted_keywords
+                .iter()
+                .find_map(|keyword| {
+                    if let Keyword::Enchant(filter) = keyword {
+                        Some(filter)
+                    } else {
+                        None
+                    }
+                })
+                .expect("every printed full-card Enchant must be retained");
+            if name == "Puppet Crafting" {
+                let TargetFilter::Or { filters } = filter else {
+                    panic!("expected union")
+                };
+                assert_eq!(filters.len(), 2);
+                let TargetFilter::Typed(artifact) = &filters[0] else {
+                    panic!("artifact leg")
+                };
+                assert_eq!(artifact.type_filters, vec![TypeFilter::Artifact]);
+                let TargetFilter::Typed(enchantment) = &filters[1] else {
+                    panic!("enchantment leg")
+                };
+                assert_eq!(
+                    enchantment.type_filters,
+                    vec![
+                        TypeFilter::Enchantment,
+                        TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".into())))
+                    ]
+                );
+                assert!(
+                    parsed.parse_warnings.is_empty(),
+                    "{:?}",
+                    parsed.parse_warnings
+                );
+                assert!(parsed
+                    .abilities
+                    .iter()
+                    .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })));
+            } else {
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("single creature leg")
+                };
+                assert_eq!(
+                    typed.type_filters,
+                    vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Non(Box::new(TypeFilter::Subtype("Wall".into())))
+                    ]
+                );
+                assert_eq!(
+                    typed.controller,
+                    if name == "Krovikan Plague" {
+                        Some(ControllerRef::You)
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+        assert!(try_parse_multi_type_enchant("Enchant artifact or non-Aura enchantment").is_some());
+        for phrase in [
+            "Enchant artifact or non-Aura",
+            "Enchant artifact or non-Aurora enchantment",
+            "Enchant artifact or non-Aura enchantment if you control a creature",
+        ] {
+            assert!(
+                try_parse_multi_type_enchant(phrase).is_none(),
+                "must decline: {phrase}"
+            );
+        }
+    }
 
     #[test]
     fn parse_keyword_line_core_emerge_from_artifact_preserves_quality() {
@@ -3042,6 +3201,70 @@ mod tests {
             parse_router_keyword_line("Emerge from artifact {5} if you control an Island")
                 .is_none(),
             "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
+    }
+
+    /// CR 207.2d: an ability/flavor word label that happens to begin with a
+    /// keyword-cost prefix ("Echo of the Lost — During your turn, you may play
+    /// cards from your graveyard." on Hades, Sorcerer of Eld) is NOT a keyword
+    /// declaration. The generic name/parameter split would read the label's first
+    /// word as a keyword name and fabricate `Keyword::Echo` from the label,
+    /// silently swallowing the labeled ability; both strict router surfaces must
+    /// decline the line so it falls through to the static parser.
+    #[test]
+    fn short_label_prefix_is_not_a_keyword_declaration() {
+        let hades = "Echo of the Lost — During your turn, you may play cards from your graveyard.";
+        // Reach guard: the line IS a keyword-cost candidate — that is exactly why
+        // the fabricated parse was reachable at all. Only the label decline rejects it.
+        assert!(
+            is_keyword_cost_line(&hades.to_lowercase()),
+            "reach: \"echo\" must match the candidate prefix at a word boundary"
+        );
+        assert_eq!(
+            parse_router_keyword_line(hades),
+            None,
+            "a rules-free ability/flavor word label must not route as a keyword declaration"
+        );
+        assert_eq!(
+            parse_router_keyword_fragment(&hades.to_lowercase()),
+            None,
+            "the strict fragment sibling must decline the same line"
+        );
+    }
+
+    /// The genuine `echo` keyword-cost declarations still route: the spaced-mana
+    /// form ("Echo {2}") and the CR 702.30a em-dash non-mana form
+    /// ("Echo—discard a card.") carry no spaced-dash label, so the label decline
+    /// does not apply to either.
+    #[test]
+    fn real_echo_lines_still_route() {
+        assert!(
+            matches!(
+                parse_router_keyword_line("Echo {2}").map(|routed| routed.keyword),
+                Some(Some(Keyword::Echo(_)))
+            ),
+            "a spaced-mana Echo declaration must still route"
+        );
+        assert!(
+            matches!(
+                parse_router_keyword_line("Echo—discard a card.").map(|routed| routed.keyword),
+                Some(Some(Keyword::Echo(_)))
+            ),
+            "the em-dash non-mana Echo declaration must still route"
+        );
+    }
+
+    /// CR 702.62a: `Suspend N — {cost}` carries a spaced dash and a short label,
+    /// so it lies inside the decline predicate's shape — but Suspend's dedicated
+    /// arm returns before the decline coordinate and must keep doing so.
+    #[test]
+    fn suspend_spaced_dash_still_routes() {
+        let routed = parse_router_keyword_line("Suspend 17 — {0}")
+            .expect("the dedicated Suspend arm must claim the line before the label decline");
+        assert!(
+            matches!(routed.keyword, Some(Keyword::Suspend { count: 17, .. })),
+            "expected Suspend {{ count: 17, .. }}, got {:?}",
+            routed.keyword
         );
     }
 
@@ -4943,6 +5166,212 @@ mod tests {
         // Also test with straight apostrophe
         let kw = parse_granted_keyword_fragment("doctor's companion").unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::DoctorsCompanion));
+
+        // The permissive (embedded-grant) surface discards the remainder by contract:
+        // the trailing clause belongs to the enclosing sentence.
+        assert_eq!(
+            parse_granted_keyword_fragment("choose a background xyzzy"),
+            Some(Keyword::Partner(PartnerType::ChooseABackground))
+        );
+    }
+
+    /// The five lowercase Partner-family spellings `parse_keyword_line_core` claims
+    /// (both apostrophes of "Doctor's companion"), with the keyword each yields.
+    fn partner_family_spellings() -> [(&'static str, Keyword); 5] {
+        use crate::types::keywords::PartnerType;
+
+        [
+            (
+                "partner\u{2014}character select",
+                Keyword::Partner(PartnerType::CharacterSelect),
+            ),
+            (
+                "partner\u{2014}friends forever",
+                Keyword::Partner(PartnerType::FriendsForever),
+            ),
+            (
+                "choose a background",
+                Keyword::Partner(PartnerType::ChooseABackground),
+            ),
+            (
+                "doctor's companion",
+                Keyword::Partner(PartnerType::DoctorsCompanion),
+            ),
+            (
+                "doctor\u{2019}s companion",
+                Keyword::Partner(PartnerType::DoctorsCompanion),
+            ),
+        ]
+    }
+
+    // CR 702.124i / CR 702.124k / CR 702.124m: the shared core must report the REAL
+    // nom remainder for the Partner family, never a fabricated full consumption.
+    #[test]
+    fn parse_keyword_line_core_partner_family_returns_real_remainder() {
+        for (spelling, keyword) in partner_family_spellings() {
+            // Positive guard: the bare declaration is claimed with nothing left over.
+            assert_eq!(
+                parse_keyword_line_core(spelling),
+                Some((keyword.clone(), "")),
+                "{spelling}"
+            );
+            for tail in [" xyzzy", "x", " (reminder.)"] {
+                let line = format!("{spelling}{tail}");
+                assert_eq!(
+                    parse_keyword_line_core(&line),
+                    Some((keyword.clone(), tail)),
+                    "{line}"
+                );
+            }
+        }
+
+        // CR 702.124j: "Partner with [name]" is typed from MTGJSON; the core declines.
+        assert_eq!(
+            parse_keyword_line_core("partner with alphinaud leveilleur"),
+            None
+        );
+        assert_eq!(parse_keyword_line_core("partner with "), None);
+    }
+
+    #[test]
+    fn parse_router_keyword_fragment_partner_family_declines_trailing_prose() {
+        for (spelling, keyword) in partner_family_spellings() {
+            // Reach guards: the strict fragment reaches the arm and tolerates a
+            // terminal period.
+            assert_eq!(
+                parse_router_keyword_fragment(spelling),
+                Some(keyword.clone()),
+                "{spelling}"
+            );
+            assert_eq!(
+                parse_router_keyword_fragment(&format!("{spelling}.")),
+                Some(keyword.clone()),
+                "{spelling}."
+            );
+            // Semantic prose and a word-boundary violation are both declined.
+            assert_eq!(
+                parse_router_keyword_fragment(&format!("{spelling} xyzzy")),
+                None,
+                "{spelling} xyzzy"
+            );
+            assert_eq!(
+                parse_router_keyword_fragment(&format!("{spelling}x")),
+                None,
+                "{spelling}x"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_router_keyword_list_partner_family_reminder_and_prose() {
+        use crate::types::keywords::PartnerType;
+
+        fn names(list: &[&str]) -> Vec<String> {
+            list.iter().map(|name| (*name).to_string()).collect()
+        }
+
+        // Choose a Background: MTGJSON is the typed authority, so a complete
+        // declaration emits nothing.
+        let background = names(&["choose a background"]);
+        for line in [
+            "Choose a Background (You can have a Background as a second commander.)",
+            "Choose a Background",
+        ] {
+            assert_eq!(
+                parse_router_keyword_list(line, &background),
+                Some(Vec::new()),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            parse_router_keyword_list("Choose a Background xyzzy", &background),
+            None
+        );
+
+        // Doctor's companion.
+        let companion = names(&["doctor's companion"]);
+        assert_eq!(
+            parse_router_keyword_list(
+                "Doctor's companion (You can have two commanders if the other is the Doctor.)",
+                &companion
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_router_keyword_list("Doctor's companion xyzzy", &companion),
+            None
+        );
+
+        // MTGJSON names both em-dash variants as plain "Partner", so the Oracle
+        // suffix is the only source of the typed variant.
+        let partner = names(&["partner"]);
+        for (declaration, variant) in [
+            (
+                "Partner\u{2014}Character select",
+                PartnerType::CharacterSelect,
+            ),
+            (
+                "Partner\u{2014}Character select (You can have two commanders if both have this ability.)",
+                PartnerType::CharacterSelect,
+            ),
+            (
+                "Partner\u{2014}Friends forever (You can have two commanders if both have this ability.)",
+                PartnerType::FriendsForever,
+            ),
+        ] {
+            assert_eq!(
+                parse_router_keyword_list(declaration, &partner),
+                Some(vec![Keyword::Partner(variant)]),
+                "{declaration}"
+            );
+        }
+        for hostile in [
+            "Partner\u{2014}Character select xyzzy",
+            "Partner\u{2014}Friends forever xyzzy",
+        ] {
+            assert_eq!(
+                parse_router_keyword_list(hostile, &partner),
+                None,
+                "{hostile}"
+            );
+        }
+    }
+
+    // Contract pin only: this line never reaches the core, because step 2b
+    // (`is_partner_declaration_line`) claims it first.
+    #[test]
+    fn parse_router_keyword_line_partner_declaration_reminder() {
+        let routed = parse_router_keyword_line(
+            "Partner\u{2014}Character select (You can have two commanders if both have this ability.)",
+        )
+        .expect("a complete Partner declaration is routed");
+        assert_eq!(routed.keyword, None);
+        assert_eq!(
+            routed.tail.permitted_remainder,
+            PermittedKeywordRemainder::ReminderText
+        );
+    }
+
+    // CR 702.124m: "that has / with <keyword>" requires the keyword text to be fully
+    // consumed; the Partner-family arm used to fabricate that.
+    #[test]
+    fn parse_post_spell_modifier_with_doctors_companion_requires_full_consumption() {
+        use crate::parser::oracle_trigger::parse_post_spell_modifier;
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::PartnerType;
+
+        assert_eq!(
+            parse_post_spell_modifier("with doctor's companion"),
+            Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::WithKeyword {
+                    value: Keyword::Partner(PartnerType::DoctorsCompanion),
+                }]
+            )))
+        );
+        assert_eq!(
+            parse_post_spell_modifier("with doctor's companion xyzzy"),
+            None
+        );
     }
 
     // --- CR 702.11f: hexproof from X and from Y expansion ---
@@ -5552,6 +5981,79 @@ mod tests {
             other => panic!("expected Keyword::Freerunning, got {other:?}"),
         }
     }
+
+    /// Digital-only Alchemy "Starting intensity N" (no CR entry — "intensity" has
+    /// zero matches in `docs/MagicCompRules.txt`): the SINGLE keyword-line authority
+    /// must read N and claim full consumption. Reverted, every assertion below
+    /// returns `None`.
+    #[test]
+    fn parse_keyword_line_core_reads_starting_intensity() {
+        // All four spellings the live corpus prints (0 x7, 1 x6, 2 x4, 3 x3 faces).
+        for n in 0..=3u32 {
+            assert_eq!(
+                parse_keyword_line_core(&format!("starting intensity {n}")),
+                Some((Keyword::StartingIntensity(n), "")),
+                "the core must read N={n} and claim full consumption"
+            );
+        }
+        // Hostile siblings. These are `None` pre-fix too: the obligation is that the
+        // new arm does not start claiming a line that carries no count.
+        assert_eq!(parse_keyword_line_core("starting intensity"), None);
+        assert_eq!(parse_keyword_line_core("starting intensity x"), None);
+    }
+
+    /// The whole-line router entry point (spell priority 9 / permanent priority 13),
+    /// including the candidate-prefix gate that rejects before the core is reached.
+    #[test]
+    fn parse_router_keyword_line_routes_starting_intensity() {
+        for (line, n) in [
+            ("Starting intensity 0", 0u32),
+            ("Starting intensity 1", 1),
+            ("Starting intensity 2", 2),
+            ("Starting intensity 3", 3),
+        ] {
+            let routed = parse_router_keyword_line(line)
+                .unwrap_or_else(|| panic!("{line:?} must strictly route"));
+            assert_eq!(routed.keyword, Some(Keyword::StartingIntensity(n)));
+            assert_eq!(
+                routed.tail.permitted_remainder,
+                PermittedKeywordRemainder::None,
+                "{line:?} is fully consumed by the keyword"
+            );
+        }
+        // Unmodelled semantic text must be DECLINED, not absorbed (the
+        // KNOWN_NOUN_PARAM_LEAKS obligation).
+        assert!(
+            parse_router_keyword_line("Starting intensity 0 if you control an artifact").is_none(),
+            "a semantic suffix must never be swallowed by the strict router"
+        );
+        // Same first word, different sentence: the prefix matches the whole phrase at
+        // a word boundary, not the bare word "starting".
+        assert!(
+            parse_router_keyword_line("Starting with you, each player draws a card.").is_none()
+        );
+    }
+
+    /// The strict LIST router on the route all 20 corpus carriers take (priority 1b),
+    /// with production MTGJSON keyword names (lowercased "Intensity").
+    #[test]
+    fn parse_router_keyword_list_extracts_starting_intensity_with_mtgjson_names() {
+        let names = vec!["intensity".to_string()];
+        assert_eq!(
+            parse_router_keyword_list("Starting intensity 2", &names),
+            Some(vec![Keyword::StartingIntensity(2)])
+        );
+        assert_eq!(
+            parse_router_keyword_list("Starting intensity 0", &names),
+            Some(vec![Keyword::StartingIntensity(0)])
+        );
+        // A trailing semantic clause declines the WHOLE line, so it survives for
+        // ordinary parsing and stays honestly red.
+        assert_eq!(
+            parse_router_keyword_list("Starting intensity 2 and draw a card", &names),
+            None
+        );
+    }
 }
 
 /// Plan 02 step 5 item 12 — the exhaustive `is_keyword_cost_line` family registry.
@@ -6091,6 +6593,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "devoid",
             valid_line: "Devoid",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "starting intensity",
+            valid_line: "Starting intensity 0",
             reach: ProductionReach::KeywordCostLine,
         },
         RouterKeywordCase {

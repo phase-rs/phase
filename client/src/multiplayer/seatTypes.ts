@@ -1,4 +1,5 @@
 import type { FormatConfig } from "../adapter/types";
+import type { CommanderBracketTier } from "../types/bracketEstimate";
 
 export type DeckChoice =
   | { type: "Random" }
@@ -11,6 +12,8 @@ export type DeckChoice =
         commander: string[];
         planar_deck?: string[];
         scheme_deck?: string[];
+        /** Declared Commander bracket tier; the engine defaults an omitted tier to Core. */
+        bracket_tier?: CommanderBracketTier;
       };
     };
 

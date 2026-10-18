@@ -22,7 +22,9 @@ pub fn resolve(
                 || (matches!(target, TargetFilter::Any) && ability.targets.is_empty());
 
             if use_self {
-                vec![ability.source_id]
+                // CR 400.7: a source that left and returned is a new object; the
+                // shield would otherwise protect it.
+                ability.self_ref_binding(state).into_iter().collect()
             } else if !ability.targets.is_empty() {
                 ability
                     .targets
@@ -41,7 +43,7 @@ pub fn resolve(
                 // submit explicit targets.
                 let ctx = FilterContext::from_ability(ability);
                 if matches_target_filter(state, ability.source_id, target, &ctx) {
-                    vec![ability.source_id]
+                    ability.self_ref_binding(state).into_iter().collect()
                 } else {
                     vec![]
                 }

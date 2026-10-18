@@ -26,7 +26,7 @@ When the orchestrator's spawn inputs include a phase charter, a phase index, and
 
 1. **Maintainer-simulation matrix:** a row whose consuming function or hostile fixture is deferral-listed to a named later phase is written `DEFERRED(phase n)` — not left incomplete and not escalated as a stop-and-return item. A row the phase's own code forecloses is still a stop-and-return item.
 2. **In-scope game infrastructure command** ("build necessary in-scope game infrastructure as part of the change"): charter-deferred work is *chartered*, not "deferred by default." Build what the phase scopes; defer exactly what the charter defers; stop-and-return still applies to any **uncharted** incompleteness.
-3. **Discriminating-test gate:** a changed behavioral seam whose discriminating test is charter-deferred (the defining property of an infrastructure→consumer seam) records `DEFERRED(phase n)` in the production-path coverage map instead of stop-and-returning. The phase's *own* chartered discriminating test(s) and structural verification (green tree, existing suites, unit-level assertions) remain mandatory, and "if any changed behavioral seam has no mapped production-path test, add one or return it as a stop-and-return item" still applies to every seam that is **not** charter-deferred.
+3. **Discriminating-test gate:** a changed behavioral seam whose discriminating test is charter-deferred (the defining property of an infrastructure→consumer seam) records `DEFERRED(phase n)` in the production-path coverage map instead of stop-and-returning. The phase's *own* chartered discriminating tests and unit-level assertions must still be authored; execution and build-backed structural verification follow Step 5's deferral policy, and "if any changed behavioral seam has no mapped production-path test, add one or return it as a stop-and-return item" still applies to every seam that is **not** charter-deferred.
 4. **New-field threading sweep:** needs no new vocabulary — its existing `defaults intentionally because <reason>` status absorbs chartered deferral with the charter as the reason: `defaults intentionally because DEFERRED(phase n)`.
 
 Everything else — the project rules, preparatory verification blocks, and the stable-HEAD rules — is unchanged in phase mode.
@@ -77,39 +77,25 @@ A "stop and return" is success, not failure. Bandaids that ship are far worse th
 
 ### Implementation/fix mode: preparatory evidence only
 
-Run the following only after implementation/fix edits land. Record the commands, starting SHA, ending SHA, and result as `PREPARATORY`; none completes the candidate gate. The orchestrator derives the committed-candidate completion set from these same surface-specific blocks and must rerun the applicable gates at `CANDIDATE_SHA`, retaining the Tilt-first path and isolated direct fallback specified here; it must not treat this preparatory output as their completion result. Existing discriminating-test, maintainer-simulation, selected-authority/provenance, coverage-honesty, and CR-annotation gates below remain single-sourced and mandatory for implementation/fix mode.
+Apply [SKILL.md Step 5](SKILL.md#step-5--verify-the-committed-candidate): if verification can wait, defer it. After edits, run formatting and cheap source/diff gates. Author the required tests and report the focused selection for a batched final run; do not compile or run tests, clippy, coverage, semantic audits or card-data generation merely to finish an executor handoff. Run a build-backed check early only when its result is needed to proceed, and state that dependency. Record any executed commands, starting SHA, ending SHA, and result as `PREPARATORY`; mark unexecuted checks as deferred, never passed. Existing discriminating-test, maintainer-simulation, selected-authority/provenance, coverage-honesty, and CR-annotation gates below remain single-sourced and mandatory for implementation/fix mode.
 
-After edits land, derive `RUST_PATHS` from the frozen authorized path list (only `*.rs` entries). If it is empty, skip formatting. Otherwise format only those exact paths; never run workspace-wide formatting in `IMPLEMENTATION_WORKTREE`, because it can create an out-of-scope delta:
-
-```bash
-(cd "$IMPLEMENTATION_WORKTREE" && cargo fmt --all -- "${RUST_PATHS[@]}")
-```
-
-For Rust / engine / parser work:
+After edits land, derive `RUST_PATHS` from the frozen authorized path list (only `*.rs` entries). If it is empty, skip formatting. Otherwise format only those exact paths; never run workspace-wide formatting in `IMPLEMENTATION_WORKTREE`, because it can create an out-of-scope delta. `cargo fmt` formats every workspace target whatever paths follow `--`, and plain `rustfmt` follows `mod` declarations into child files, so call `rustfmt` with `skip_children`:
 
 ```bash
-(cd "$IMPLEMENTATION_WORKTREE" &&
-  if tilt get uiresource clippy >/dev/null 2>&1; then
-    ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
-  else
-    cargo clippy --all-targets -- -D warnings
-    cargo test -p phase-engine
-    ./scripts/gen-card-data.sh
-  fi)
+(cd "$IMPLEMENTATION_WORKTREE" && rustfmt --edition 2021 --config skip_children=true "${RUST_PATHS[@]}")
 ```
 
-For frontend work:
+For Rust / engine / parser work, select the focused set for the due verification boundary: every test the change adds or edits, the tests in each module the diff touches, and the tests that scan the source tree (named `*census*` by convention), since an edit anywhere can move their counts. Select every package that holds one of those tests (`phase-ai` tests do not run under `-p phase-engine`): `FOCUSED_PACKAGE_ARGS` carries one `-p <package>` per package. `FOCUSED_FEATURES` is `phase-engine/test-support` plus, package-qualified, every feature a selected test needs to be compiled: its target's `required-features` (`oracle-gen` tests need `phase-engine/cli`) or a `#[cfg(feature = …)]` gate on its module (`phase-engine/proptest`). A filter cannot select a test its features leave uncompiled. Do not build it per commit by default. Report the packages, features and `FOCUSED_FILTER` (a nextest filterset), with the result or deferred status. When due:
 
 ```bash
-(cd "$IMPLEMENTATION_WORKTREE" &&
-  if tilt get uiresource clippy >/dev/null 2>&1; then
-    ./scripts/tilt-wait.sh --timeout 180 check-frontend
-  else
-    (cd client && pnpm run type-check && pnpm lint)
-  fi)
+(cd "$IMPLEMENTATION_WORKTREE" && cargo nextest run "${FOCUSED_PACKAGE_ARGS[@]}" --features "$FOCUSED_FEATURES" -E "$FOCUSED_FILTER")
 ```
 
-After a non-zero `tilt-wait.sh`, fetch details with `tilt logs <resource> --tail 50 --since 2m`. Distinguish your errors from concurrent-agent errors: if an error appears unrelated to your diff, wait several minutes and re-check before intervening — other agents fix their own errors.
+For frontend work, select the test files the change adds, edits, or whose subject it touches, and execute them when due under Step 5. If there are none, skip the run and report why; `vitest run` with no file arguments runs the whole suite:
+
+```bash
+(cd "$IMPLEMENTATION_WORKTREE/client" && pnpm vitest run "${FOCUSED_TEST_FILES[@]}")
+```
 
 ### Parser preparatory gate
 
@@ -130,13 +116,13 @@ If any modified or new file is under `crates/engine/src/parser/`, inspect added 
 
 The `rfind`/`split`/`split_once`/`rsplit` arms are deliberate: `scripts/check-parser-combinators.sh` does not catch them, so a green gate is not proof of combinator compliance — this inline grep covers that blind spot. Any output is a hard failure unless it is a test, comment, explicitly annotated non-dispatch structural use, or `oracle_util.rs` dual-string `TextPair` helper work.
 
-For parser changes always run additionally as preparatory checks:
+For parser changes run the non-compiling preparatory gate:
 
 ```bash
 (cd "$IMPLEMENTATION_WORKTREE" && ./scripts/check-parser-combinators.sh)
-(cd "$IMPLEMENTATION_WORKTREE" && cargo coverage)
-(cd "$IMPLEMENTATION_WORKTREE" && cargo semantic-audit)
 ```
+
+Defer `cargo coverage`, `cargo semantic-audit`, card-data generation and parser-output measurement to the batched final verification boundary unless their results are needed to proceed. Do not duplicate them as mandatory preparatory checks.
 
 `./scripts/gen-card-data.sh` and `cargo coverage` may support preparatory inspection but are never fresh candidate measurement evidence. The candidate semantic-impact result is produced only by `measurement-only` mode below.
 
@@ -226,7 +212,7 @@ Your final message is a structured report to the orchestrator and is the contrac
 
 1. **Diff summary** — files touched, grouped by subsystem, with a one-line purpose per file.
 2. **Worktree record** — `START_SHA`, `IMPLEMENTATION_WORKTREE`, clean-start and stable-HEAD/end-of-edit check results. State explicitly that preparatory evidence is not completion evidence.
-3. **PREPARATORY verification results** — which Tilt resources are green; any failures with `tilt logs` excerpts (own vs unrelated). State explicitly that this is not completion evidence.
+3. **PREPARATORY verification results** — checks actually run, available relevant Tilt results, and any failures (own vs unrelated); list deferred checks, focused test selection and due boundary. Do not wait for Tilt just to complete this report. State explicitly that this is not completion evidence.
 4. **Parser preparatory gate** — pass/fail with offending lines if any.
 5. **Discriminating-test gate** — the existing full production-path coverage map for every behavioral claim, including changed seam/function, production entry point, test name, revert-failing assertion, and sibling/negative cases. Explicitly list any unmapped seam as a stop-and-return item. Confirm no production-reachable arm is left covered only by a degenerate fixture. State if any test is shape-only and whether that is acceptable because semantics remain unsupported/red.
 6. **Maintainer-simulation matrix** — the existing full matrix. Explicitly list incomplete rows as stop-and-return items.

@@ -1,18 +1,17 @@
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousModification, CopyCountStatus,
-    DetachedRemainder, Duration, Effect, EffectKind, KeywordAction, PlayerFilter, QuantityExpr,
-    ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition,
+    DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition, KeywordAction,
+    PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode,
+    TriggerCondition, TriggerDefinitionRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-#[cfg(test)]
-use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, DepartedStackSpell, ExileLink, ExileLinkKind,
-    GameState, MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
+    GameState, MayTriggerAutoChoiceKey, OwedSpellFinalPart, PendingCounterPostAction,
+    PendingSpellResolution, StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext,
     WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
@@ -28,40 +27,70 @@ use crate::types::zones::Zone;
 use std::collections::BTreeMap;
 
 use super::ability_utils::{
-    build_target_slots, flatten_specified_targets_in_chain, flatten_targets_in_chain,
-    illegal_declared_target_slots, validate_targets_in_chain,
+    build_target_slots, clear_illegal_local_target_slots, flatten_specified_targets_in_chain,
+    flatten_targets_in_chain, illegal_declared_target_slots, validate_targets_in_chain,
 };
 use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+/// A second carrier cannot begin while one is installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ResolutionCarrierError {
+    #[error("a resolution carrier is already installed")]
+    AlreadyResolving,
+}
+
 /// Transfers an already-popped stack entry into the active resolution carrier.
+///
+/// CR 608.2: Exactly one stack object resolves at a time. Refuses, leaving the
+/// installed carrier and its firing untouched, when one is already resolving.
+/// CR 608.2n: a final part still owed belongs to the carrier that owes it; a
+/// leftover marker is a contract breach and refuses like a leftover carrier.
 pub(super) fn begin_resolving_stack_entry(
     state: &mut GameState,
     entry: StackEntry,
     firing: Option<TriggerFiring>,
-) {
-    debug_assert!(state.resolving_stack_entry.is_none());
-    debug_assert!(state.resolving_trigger_firing.is_none());
+) -> Result<(), ResolutionCarrierError> {
+    if state.resolving_stack_entry.is_some()
+        || state.resolving_trigger_firing.is_some()
+        || state.resolving_spell_final_part.is_some()
+    {
+        return Err(ResolutionCarrierError::AlreadyResolving);
+    }
     debug_assert_eq!(
         matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }),
         firing.is_some()
     );
     state.resolving_stack_entry = Some(entry);
     state.resolving_trigger_firing = firing;
+    Ok(())
 }
 
 /// Settles the active resolution carrier after its owning resolution completes.
+///
+/// Every resolution end — resolved, an intervening-if or CR 608.2b no-op, or an
+/// abandoned family — routes through here, so this is where the resolving
+/// stack object finally ceases to exist (CR 608.2n).
 pub(super) fn finish_resolving_stack_entry(
     state: &mut GameState,
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) {
     let entry = state.resolving_stack_entry.take();
     let firing = state.resolving_trigger_firing.take();
+    // CR 608.2n: an owed final part belongs to this carrier and ends with it.
+    state.resolving_spell_final_part = None;
     // CR 608.2c: the resolving stack entry owns every nested instruction-result
     // occurrence, including ones parked across replacement choices.
     state.return_result_frames.clear();
     state.active_return_result_occurrence = None;
+    // CR 701.20a + CR 608.2n: a reveal-caused triggered ability keeps its card
+    // revealed until it leaves the stack, which a resolving ability does only
+    // as the final part of its resolution — after any pause for a choice, not
+    // when it was popped to begin resolving.
+    if let Some(entry) = entry.as_ref() {
+        state.release_stack_bound_reveals(entry.id);
+    }
     debug_assert!(
         firing.is_none()
             || entry
@@ -85,20 +114,48 @@ pub(super) fn finish_resolving_stack_entry(
 /// reads here as a pruned slot. No printed card combines that re-seeding with
 /// a `ParentTargetSlot` consumer; writing the seeded copy back into the carrier
 /// would make the two agree.
-fn record_illegal_target_slots(state: &mut GameState, validated: Option<&ResolvedAbility>) {
+///
+/// CR 608.2b: the declared slots the check did not judge (holes of the
+/// validated declared view that are not illegal ? a `PassThrough` occurrence)
+/// are recorded separately in `unjudged_target_slots`: they supply no
+/// information, but neither storage nor the fizzle verdict changes.
+fn record_illegal_target_slots(
+    state: &mut GameState,
+    judged_and_validated: Option<(
+        &ResolvedAbility,
+        &ResolvedAbility,
+        &[Option<crate::game::targeting::DeclaredSlotBinding>],
+    )>,
+) {
     if let Some(root) = state
         .resolving_stack_entry
         .as_mut()
         .and_then(StackEntry::ability_mut)
     {
-        root.illegal_target_slots = validated.map_or_else(Vec::new, |validated| {
-            illegal_declared_target_slots(root, validated)
-        });
+        let (illegal, unjudged) = judged_and_validated.map_or_else(
+            || (Vec::new(), Vec::new()),
+            |(judged, validated, view)| {
+                let illegal = illegal_declared_target_slots(root, judged, validated);
+                let unjudged = view
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, binding)| binding.is_none() && !illegal.contains(slot))
+                    .map(|(slot, _)| slot)
+                    .collect();
+                (illegal, unjudged)
+            },
+        );
+        root.illegal_target_slots = illegal;
+        root.unjudged_target_slots = unjudged;
     }
 }
 
 /// Abandon the currently resolving family as one lifecycle unit. Prompt owners
 /// call this only after settling any events already completed by their cursor.
+///
+/// CR 608.2n: an instant or sorcery still owing its final part is not part of
+/// the abandoned family; its carrier and marker survive so the final-part
+/// authority delivers it once.
 pub(super) fn abandon_active_resolution_carrier(
     state: &mut GameState,
     disposition: super::lifecycle::DelayedTerminalDisposition,
@@ -107,7 +164,17 @@ pub(super) fn abandon_active_resolution_carrier(
     let _ = state
         .clear_active_ability_continuation()
         .expect("resolution abandonment cannot clear a buried ability continuation");
+    let owed_spell = spell_awaiting_final_part(state).is_some().then(|| {
+        (
+            state.resolving_stack_entry.take(),
+            state.resolving_spell_final_part.take(),
+        )
+    });
     finish_resolving_stack_entry(state, disposition);
+    if let Some((entry, owed)) = owed_spell {
+        state.resolving_stack_entry = entry;
+        state.resolving_spell_final_part = owed;
+    }
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
@@ -227,8 +294,12 @@ pub(crate) fn push_copy_to_stack(
     // CR 707.10: Copying a spell on the stack is not casting it. A copied
     // carrier must not inherit the original spell's cast coordinate.
     if matches!(entry.kind, StackEntryKind::Spell { .. }) {
+        // CR 707.10 + CR 400.7: a copy is a new spell, so it gets its own
+        // identity rather than the original's.
+        let announcement = state.mint_spell_announcement();
         if let Some(object) = state.objects.get_mut(&entry.id) {
             object.cast_occurrence = None;
+            object.spell_announcement = Some(announcement);
         }
         if let Some(ability) = entry.ability_mut() {
             ability.set_cast_occurrence_recursive(None);
@@ -283,11 +354,20 @@ fn journal_stack_push(
 ) {
     let resulting_position = state.stack.len();
     let cause = state.current_or_begin_rules_execution_node();
+    let spell_announcement = matches!(entry.kind, StackEntryKind::Spell { .. })
+        .then(|| {
+            state
+                .objects
+                .get(&entry.id)
+                .and_then(|obj| obj.spell_announcement)
+        })
+        .flatten();
     let command = ResolvedStackPushCommand {
         entry: Box::new(entry.clone()),
         trigger_firing,
         origin,
         resulting_position,
+        spell_announcement,
         cause,
     };
     state
@@ -350,6 +430,13 @@ pub fn apply_resolved_stack_push(
     state.stack.push_back(command.entry.as_ref().clone());
     if let Some(firing) = command.trigger_firing {
         state.stack_trigger_firings.insert(command.entry.id, firing);
+    }
+    // CR 601.2a + CR 707.10: install the recorded spell identity; never remint.
+    if let Some(announcement) = command.spell_announcement {
+        if let Some(obj) = state.objects.get_mut(&command.entry.id) {
+            obj.spell_announcement = Some(announcement);
+        }
+        state.next_spell_announcement = state.next_spell_announcement.max(announcement.0);
     }
     Ok(())
 }
@@ -474,6 +561,18 @@ pub(crate) struct PoppedStackEntry {
     pub trigger_firing: Option<TriggerFiring>,
 }
 
+/// Empties the stack together with every per-entry table [`PoppedStackEntry`] carries, the bulk
+/// counterpart of [`remove_stack_entry_at_unobserved`]: a new per-entry table joins both.
+///
+/// It neither journals the removal (CR 733) nor records delayed-trigger outcomes, so it is only
+/// for throwaway comparison copies.
+pub(crate) fn clear_stack_with_entry_tables(state: &mut GameState) {
+    state.stack.clear();
+    state.stack_paid_facts.clear();
+    state.stack_trigger_event_batches.clear();
+    state.stack_trigger_firings.clear();
+}
+
 /// Takes the firing classification coupled to a stack entry.
 ///
 /// Current scheduler pushes always install a row for triggered entries. Older
@@ -538,11 +637,12 @@ fn remove_stack_entry_at_unobserved(
             cause,
         })
         .expect("resolved stack removal must have a live journal cause");
-    // CR 701.20a: a triggered ability caused by revealing a card keeps that
-    // card revealed only until it leaves the stack — resolved, countered,
-    // fizzled, or drained. The release is its own journaled information edit,
-    // so replay applies it after this removal without re-deriving it.
-    state.release_stack_bound_reveals(entry.id);
+    // CR 701.20a: the reveal lease is NOT released here. A non-resolving
+    // removal (countered, drained, rolled back) ends it at once — see
+    // `remove_nonresolving_stack_entry_at` and `pop_nonresolving_top_stack_entry`
+    // — but the CR 405.5 resolution pop only begins resolution: the ability
+    // leaves the stack as the final part of that resolution (CR 608.2n), which
+    // `finish_resolving_stack_entry` settles.
 
     Some(PoppedStackEntry {
         entry,
@@ -592,11 +692,22 @@ pub(super) fn remove_nonresolving_stack_entry_at(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) -> Option<PoppedStackEntry> {
     let popped = remove_stack_entry_at_unobserved(state, index)?;
+    release_departed_entry_reveals(state, &popped);
     record_departed_stack_spell(state, &popped.entry);
     if let Some(firing) = popped.trigger_firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
     Some(popped)
+}
+
+/// CR 701.20a: "If revealing a card causes a triggered ability to trigger, the
+/// card remains revealed until that triggered ability leaves the stack." An
+/// entry removed WITHOUT resolving (countered, drained, rolled back) has left
+/// the stack for good, so its lease ends with the removal. The release is its
+/// own journaled information edit, so replay applies it after the removal
+/// without re-deriving it.
+fn release_departed_entry_reveals(state: &mut GameState, popped: &PoppedStackEntry) {
+    state.release_stack_bound_reveals(popped.entry.id);
 }
 
 /// CR 405.2: removes the topmost object from the stack.
@@ -605,6 +716,10 @@ pub(super) fn remove_nonresolving_stack_entry_at(
 /// index N-1 — kept because the resolution and drain callers have no index to
 /// pass and reading `remove_stack_entry_at_unobserved(state, state.stack.len() - 1)` at
 /// each of them would obscure that they are simply resolving the top object.
+///
+/// Releases no CR 701.20a reveal lease: the resolution caller hands the entry
+/// to the carrier, whose `finish_resolving_stack_entry` releases it, and the
+/// drain caller goes through [`pop_nonresolving_top_stack_entry`].
 pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEntry> {
     remove_stack_entry_at_unobserved(state, state.stack.len().checked_sub(1)?)
 }
@@ -615,6 +730,7 @@ pub(super) fn pop_nonresolving_top_stack_entry(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) -> Option<PoppedStackEntry> {
     let popped = pop_top_stack_entry(state)?;
+    release_departed_entry_reveals(state, &popped);
     if let Some(firing) = popped.trigger_firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
@@ -681,10 +797,10 @@ pub fn apply_resolved_stack_removal(
 /// when another path already removed it, and popping unconditionally would then
 /// discard an unrelated stack object.
 ///
-/// Note this deliberately does NOT clear `pending_trigger`; that is a separate
-/// piece of construction state owned by
-/// `engine::drop_mid_construction_pending_trigger`, which calls this and then
-/// clears it.
+/// Note this deliberately does NOT clear `pending_trigger`; the remaining
+/// construction cursors are released by
+/// `triggers::release_pending_trigger_construction`, which
+/// `engine::drop_mid_construction_pending_trigger` calls after this.
 pub(super) fn pop_uncommitted_pending_trigger_entry(
     state: &mut GameState,
     disposition: super::lifecycle::DelayedTerminalDisposition,
@@ -900,6 +1016,133 @@ pub(crate) fn restore_alternative_spell_normal_face(
     }
 }
 
+/// CR 608.2n + CR 614.6: put a resolved instant or sorcery that is still on the
+/// stack into `dest` through the zone-change pipeline, so self-scoped `Moved`
+/// redirects (the Invoke Calamity rider) and board-wide RIP/Leyline redirects
+/// fire, then record a Rod of Absorption link and apply an exile-instead
+/// consequence rider when the spell landed in exile. Shared by `resolve_top`
+/// and the deferred final part (`finish_deferred_spell_resolution`). A
+/// `NeedsChoice` result means the move is parked for a CR 616.1 ordering choice.
+fn deliver_resolved_spell_off_stack(
+    state: &mut GameState,
+    spell_id: ObjectId,
+    spell_controller: PlayerId,
+    dest: Zone,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
+    let stack_exile_link_source = stack_exile_linked_source(state, spell_id);
+    // CR 603.7a + CR 702.170c: snapshot the exile-instead
+    // consequence rider BEFORE the move — every zone exit clears the
+    // transient rider fields (zones.rs), so the post-move apply site
+    // below must read the pre-move value.
+    let exile_rider = state
+        .objects
+        .get(&spell_id)
+        .and_then(|o| o.exile_from_stack_rider.clone());
+    let req = ZoneMoveRequest::spell_resolution_default(spell_id, dest);
+    let result = zone_pipeline::move_object(state, req, events);
+    if matches!(result, ZoneMoveResult::Done) {
+        // CR 607.2b + CR 406.6: a spell exiled by Rod of
+        // Absorption's per-object linked-source rider is "exiled
+        // with" the trigger source that stamped it. Now that the
+        // pipeline has delivered the move, record the linked-exile
+        // association so the source's linked ability ("cast any
+        // number of cards exiled with this artifact") sees the
+        // accumulating set.
+        // Gate on the object's ACTUAL post-move zone (not the
+        // requested `dest`) so a redirect that diverted the card
+        // away from exile never records a spurious link, while a
+        // redirect INTO exile still records correctly.
+        if spell_in_zone(state, spell_id, Zone::Exile) {
+            if let Some(link_source) = stack_exile_link_source {
+                // CR 607.2b + CR 113.7a: exiled with the Rod that stamped the
+                // rider, which may have left since (CR 400.7).
+                super::exile_links::push_with_kind_as(
+                    state,
+                    spell_id,
+                    link_source.object_id,
+                    Some(link_source.incarnation),
+                    ExileLinkKind::TrackedBySource,
+                );
+            }
+            // CR 603.7a + CR 702.170c: the exile-instead
+            // replacement has now actually been APPLIED (the
+            // spell landed in exile), so this is the moment the
+            // "If you do, ..." consequence is applied — Feather's
+            // return-to-hand delayed trigger, or Lilah's plotted
+            // grant — never earlier (a countered or fizzled
+            // spell's marker was cleared on its stack exit and
+            // never reaches here).
+            // CR 603.7a + CR 603.7e (r5: was 603.7d — the rider is created
+            // by a TRIGGERED ability's replacement, so CR 603.7e is the
+            // rule and CR 603.7d, the spell-created case, is not;
+            // `exile_resolving_spell::arm_return_to` already cites CR
+            // 603.7e, and this annotation now agrees with it rather than
+            // contradicting it three frames away). Chooser: the controller
+            // of the REPLACEMENT EFFECT'S SOURCE (Feather, Lilah) — whose
+            // id this call already carries as the fourth argument — NOT
+            // the resolving spell's controller. `spell_controller`
+            // approximates it correctly, because those sources trigger on
+            // "whenever YOU cast", so the caster IS the source's
+            // controller. Routing this to `live_controller` would hand a
+            // stolen spell's Feather-return to the THIEF, which is wrong.
+            // KNOWN LIMITATION (CR 603.7e): the exact authority is that
+            // source's controller; deriving it here means resolving the
+            // link source's controller at rider-apply time.
+            if let Some(rider) = exile_rider {
+                effects::exile_resolving_spell::apply_exile_rider(
+                    state,
+                    spell_id,
+                    spell_controller,
+                    stack_exile_link_source.map_or(spell_id, |source| source.object_id),
+                    rider,
+                    events,
+                );
+            }
+        }
+    }
+    result
+}
+
+/// CR 400.7 + CR 712.11a + CR 715.3d + CR 720.3d: the bookkeeping a spell's
+/// stack exit owes by how it was cast: a face-swapped spell reverts to its
+/// front face unless it resolved onto the battlefield, an Adventure exiled
+/// this way may be cast as its creature, and an Omen's owner shuffles.
+fn finish_spell_stack_exit(
+    state: &mut GameState,
+    spell_id: ObjectId,
+    casting_variant: CastingVariant,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
+    // face when leaving the stack unless they resolved as that face onto
+    // the battlefield.
+    if casting_variant.restores_front_face_after_stack_exit()
+        && !spell_in_zone(state, spell_id, Zone::Battlefield)
+    {
+        restore_alternative_spell_normal_face(state, spell_id, casting_variant);
+    }
+
+    // CR 715.3d: When an Adventure spell resolves to exile, grant
+    // AdventureCreature permission so it can be cast from exile.
+    if casting_variant == CastingVariant::Adventure {
+        if let Some(obj) = state.objects.get_mut(&spell_id) {
+            obj.casting_permissions
+                .push(crate::types::ability::CastingPermission::AdventureCreature);
+        }
+    }
+    if casting_variant == CastingVariant::Omen {
+        if let Some(owner) = state
+            .objects
+            .get(&spell_id)
+            .filter(|obj| obj.zone == Zone::Library)
+            .map(|obj| obj.owner)
+        {
+            effects::change_zone::shuffle_library(state, owner, events);
+        }
+    }
+}
+
 /// CR 608.2n / CR 608.3 / CR 608.3e: Predicate guard for post-resolution
 /// default-zone moves on a resolving spell.
 ///
@@ -995,7 +1238,10 @@ fn top_pending_trigger_has_no_legal_required_targets(
 
 /// CR 614.1a + CR 608.2n + CR 607.2b: The per-object linked source is also the
 /// exile-instead marker for Rod of Absorption's resolving-spell rider.
-fn stack_exile_linked_source(state: &GameState, object_id: ObjectId) -> Option<ObjectId> {
+fn stack_exile_linked_source(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
     state
         .objects
         .get(&object_id)
@@ -1194,6 +1440,7 @@ pub(crate) fn bind_resolution_scope(
     entry: &StackEntry,
     trigger_event_batch: Option<Vec<GameEvent>>,
 ) -> bool {
+    let rederived: Option<Option<TriggerCondition>>;
     let triggered = match &entry.kind {
         StackEntryKind::TriggeredAbility {
             condition,
@@ -1201,16 +1448,28 @@ pub(crate) fn bind_resolution_scope(
             subject_match_count,
             die_result,
             ..
-        } => Some(TriggeredResolutionScope {
-            condition: condition.as_ref(),
-            controller: entry.controller,
-            trigger_source: entry
-                .ability()
-                .and_then(|ability| ability.trigger_source.as_ref()),
-            trigger_event: trigger_event.as_ref(),
-            subject_match_count: *subject_match_count,
-            die_result: *die_result,
-        }),
+        } => {
+            // CR 603.4 + CR 608.2b: a stored recheck of a payload carrying declared players is
+            // derived again now, so a carried player who has since left names no one.
+            rederived = condition
+                .as_ref()
+                .and(entry.ability())
+                .filter(|ability| !ability.context.outer_declared_players.is_empty())
+                .map(|ability| super::triggers::delayed_intervening_if(state, ability));
+            Some(TriggeredResolutionScope {
+                condition: rederived.as_ref().unwrap_or(condition).as_ref(),
+                controller: entry.controller,
+                trigger_source: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_source.as_ref()),
+                trigger_definition: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_definition_ref.as_ref()),
+                trigger_event: trigger_event.as_ref(),
+                subject_match_count: *subject_match_count,
+                die_result: *die_result,
+            })
+        }
         _ => None,
     };
     bind_triggered_resolution_scope(state, triggered, trigger_event_batch)
@@ -1230,6 +1489,11 @@ pub(crate) struct TriggeredResolutionScope<'a> {
     pub condition: Option<&'a TriggerCondition>,
     pub controller: PlayerId,
     pub trigger_source: Option<&'a TriggerSourceContext>,
+    /// CR 603.4 + CR 607.1c: the resolving ability's own trigger identity, so the
+    /// recheck of a self-linked leaf reads the same key the fire-time check read
+    /// and the ability's deposits record under. `None` when the resolving
+    /// ability carries no triggered identity.
+    pub trigger_definition: Option<&'a TriggerDefinitionRef>,
     pub trigger_event: Option<&'a GameEvent>,
     pub subject_match_count: Option<u32>,
     pub die_result: Option<i32>,
@@ -1256,6 +1520,7 @@ pub(crate) fn bind_triggered_resolution_scope(
                 condition,
                 scope.controller,
                 scope.trigger_source,
+                scope.trigger_definition,
                 scope.trigger_event,
             ) {
                 return false;
@@ -1424,11 +1689,465 @@ pub(crate) fn bind_resolving_ability_referents(
             .or(state.current_trigger_event.as_ref());
         super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
         super::triggers::seed_event_context_parent_targets(
+            state,
             ability,
             event_ref,
             super::triggers::EventContextSeedTiming::ResolutionFallback,
         );
     }
+}
+
+/// CR 608.2c + CR 608.2d: whether the object now resolving still has an
+/// instruction of its own outstanding — a question it asked is open, or work
+/// it parked (a continuation, a typed resolution frame, a replacement choice,
+/// a spell it is casting) has not drained. Read right after its instructions
+/// ran. It is exactly the condition under which
+/// `engine::run_spell_final_part_if_due` (`engine::resolution_instructions_are_done`)
+/// refuses to retire the resolution, so a final part deferred on it is
+/// completed by that authority and by nothing else.
+///
+/// A game that ended during the resolution (CR 104.1) is not paused on
+/// anything: no answer will ever resume it, so the final part is not deferred.
+fn resolution_is_paused(state: &GameState) -> bool {
+    match state.waiting_for {
+        WaitingFor::GameOver { .. } => false,
+        WaitingFor::Priority { .. } => !super::engine::resolution_instructions_are_done(state),
+        _ => true,
+    }
+}
+
+/// What a resolving spell's on-resolution keyword hooks armed; the destination
+/// rule (`resolved_spell_destination`) reads it.
+#[derive(Debug, Clone, Copy, Default)]
+struct OnResolutionArming {
+    /// CR 702.192a: Paradigm primed — the spell is exiled instead of going to
+    /// the graveyard.
+    paradigm_armed: bool,
+    /// CR 702.88a: rebound's next-upkeep delayed trigger is queued — the spell
+    /// is exiled instead of going to the graveyard.
+    rebound_armed: bool,
+}
+
+/// The on-resolution keyword hooks of a resolving spell — cipher (CR 702.99a),
+/// paradigm (CR 702.192a), rebound (CR 702.88a) and epic (CR 702.50a) — which
+/// run once its instructions are done, as it is about to leave the stack.
+///
+/// Returns `None` when the cipher encode offer took the resolution's next
+/// answer: the card is held off the stack until that choice completes, and the
+/// caller must not route it anywhere. Otherwise, what the hooks armed.
+fn arm_on_resolution_hooks(
+    state: &mut GameState,
+    entry: &StackEntry,
+    ability: Option<&ResolvedAbility>,
+    live_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Option<OnResolutionArming> {
+    // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
+    // `Keyword::Cipher`, is represented by a card, and its controller has a
+    // creature to host it, pause for the optional "exile this card encoded on a
+    // creature you control" choice. The card is held off the stack until the
+    // choice completes (mirroring the Mutate merge pause); the choice handler
+    // exiles+encodes on accept, or routes the card to its graveyard on decline.
+    // Skipped (resolution proceeds to graveyard normally) when there is no legal
+    // host.
+    // CR 702.99a + CR 109.5: "you may exile this card encoded on a creature you
+    // control" — "you" is the object's controller, i.e. the spell's controller as
+    // it resolves (CR 608.2c). This argument does double duty in `cipher.rs`: it
+    // selects `legal_encode_creatures(state, controller)` AND becomes
+    // `PendingCipherEncode.controller`, which owns the prompt. Both halves are the
+    // same "you".
+    if super::cipher::begin_encode_choice(state, entry.id, live_controller, events) {
+        return None;
+    }
+
+    // CR 702.192a: Paradigm — first-resolution hook. If the
+    // resolving spell carries `Keyword::Paradigm` and this is the first
+    // resolution of any spell with this name by the controller (per the
+    // reminder text: "After you first resolve a spell with this name"), arm
+    // the Paradigm offer: push a `ParadigmPrime` record and mint an
+    // `ExileLinkKind::ParadigmSource` link, then override destination routing
+    // to Exile. Copies (`is_token`) never arm Paradigm because their card
+    // name is derived but they are not "the" spell per the reminder.
+    let paradigm_armed = {
+        let obj = state.objects.get(&entry.id);
+        let has_paradigm = obj.is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Paradigm)
+        });
+        if has_paradigm {
+            let card_name = obj.map(|o| o.name.clone()).unwrap_or_default();
+            // CR 702.192a: Paradigm means "If this is the first time a spell YOU
+            // control with this spell's name has resolved this game, at the
+            // beginning of each of YOUR precombat main phases for the rest of the
+            // game, create a copy of this object in exile. You may cast the copy
+            // without paying its mana cost". ONE "you", both halves, no
+            // historical-cast clause — the same shape as epic's CR 702.50a below.
+            // Per CR 608.2c and CR 109.5 that "you" is the spell's controller AS IT
+            // RESOLVES, so a stolen Paradigm spell primes its THIEF and offers the
+            // free copy on the thief's precombat main phases. This argument is BOTH
+            // the `state.paradigm_primed` key and the `already_primed` gate that
+            // reads it three lines earlier inside `arm_paradigm` itself — one
+            // value, one site, so routing keeps the pair in agreement by
+            // construction rather than splitting it.
+            super::effects::paradigm::arm_paradigm(state, entry.id, live_controller, &card_name)
+        } else {
+            false
+        }
+    };
+
+    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
+    // non-permanent spell that carries `Keyword::Rebound`, was cast from
+    // its owner's hand, and is not a token, push the next-upkeep delayed
+    // triggered ability that offers an optional free recast and override
+    // the destination from graveyard to exile.
+    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
+    // CR 603.7a: delayed triggered abilities are created during resolution.
+    // CR 603.7d: source of the delayed trigger IS the resolving spell.
+    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
+    // CR 702.88c: multiple instances of rebound on the same spell are
+    // redundant — `has_keyword` returns true even if duplicates exist, so
+    // arming runs at most once per resolution.
+    let rebound_armed = if !is_permanent_spell(state, entry.id) {
+        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
+        });
+        // CR 601.2a + CR 702.88a: the resolving stack entry has already been
+        // popped, so real instant/sorcery spells must read the pre-announcement
+        // zone from the local ResolvedAbility context. `spell_cast_origin`
+        // remains the fallback for object-stamped placeholder/permanent paths.
+        let cast_from_zone = ability
+            .and_then(|a| a.context.cast_from_zone)
+            .or_else(|| super::casting::spell_cast_origin(state, entry.id));
+        // CR 702.88a: "If this spell was cast from YOUR hand … at the beginning of
+        // YOUR next upkeep, YOU may cast this card from exile." ONE "you" serves
+        // both the arming condition and the entitlement. This argument is the
+        // entitlement half — the player who may recast — but the engine's arming
+        // test is the separate, player-blind `cast_from_zone == Some(Zone::Hand)`
+        // above. Routing only this half would grant a thief a rebound whose own
+        // arming condition CR 702.88a makes false for them.
+        // KNOWN LIMITATION (CR 702.88a): closing it requires the arming test to
+        // record WHOSE hand, then both halves move together.
+        if has_rebound && cast_from_zone == Some(Zone::Hand) {
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // CR 702.50a-b: Epic — on-resolve hook. If the resolving spell still
+    // carries `Keyword::Epic`, lock its controller out of casting spells for
+    // the rest of the game (CR 702.50b) and arm a RECURRING delayed triggered
+    // ability that copies the spell at the beginning of each of the
+    // controller's upkeeps (CR 702.50a). A copied spell that still has Epic
+    // also arms this effect when it resolves; Epic-generated copies do not
+    // recurse because `EpicCopy` strips `Keyword::Epic` before pushing them.
+    // The Epic spell itself takes the normal destination (no override); that
+    // object is the prototype the upkeep copies clone.
+    let has_epic = state
+        .objects
+        .get(&entry.id)
+        .is_some_and(|o| super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Epic));
+    if has_epic {
+        if let Some(spell_ability) = ability {
+            // CR 702.50a: "For the rest of the game, you can't cast spells" and
+            // "At the beginning of each of your upkeeps for the rest of the
+            // game, copy this spell…" — ONE "you", used twice, with no
+            // historical-cast clause to entangle it. Per CR 608.2c and CR 109.5
+            // that is the spell's controller as it resolves, so a stolen Epic
+            // spell locks out its thief and copies on the thief's upkeeps.
+            super::effects::epic::arm_epic(state, entry.id, live_controller, spell_ability.clone());
+        }
+    }
+
+    Some(OnResolutionArming {
+        paradigm_armed,
+        rebound_armed,
+    })
+}
+
+/// The zone a resolving spell leaves the stack for once its instructions are
+/// done: the battlefield for a permanent spell (CR 608.3), its owner's
+/// graveyard for an instant or sorcery (CR 608.2n), or wherever a keyword,
+/// an alternative cost, a casting permission's rider or an armed hook sends it
+/// instead. One rule for the inline and the deferred (`finish_deferred_spell_resolution`)
+/// completion of a resolution.
+fn resolved_spell_destination(
+    state: &GameState,
+    entry_id: ObjectId,
+    ability: Option<&ResolvedAbility>,
+    casting_variant: CastingVariant,
+    arming: OnResolutionArming,
+) -> Zone {
+    if arming.paradigm_armed {
+        // CR 702.192a: Paradigm-armed spell exiles instead of going to
+        // graveyard. The ExileLink is already created by arm_paradigm.
+        Zone::Exile
+    } else if arming.rebound_armed {
+        // CR 702.88a: Rebound-armed non-permanent spell exiles instead
+        // of going to graveyard — the delayed trigger is already
+        // queued by `arm_rebound`.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Adventure {
+        // CR 715.3d: Adventure spell resolves → exile with casting permission.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Omen {
+        // CR 720.3d: Omen spell resolves → shuffle into owner's library.
+        Zone::Library
+    } else if casting_variant == CastingVariant::Harmonize {
+        // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
+        if is_permanent_spell(state, entry_id) {
+            Zone::Battlefield
+        } else {
+            Zone::Exile
+        }
+    } else if casting_variant == CastingVariant::Aftermath {
+        // CR 702.127a: If an aftermath spell was cast from a graveyard,
+        // exile it instead of putting it anywhere else any time it would
+        // leave the stack.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Flashback {
+        // CR 702.34a: If the flashback cost was paid, exile this card
+        // instead of putting it anywhere else any time it would leave the stack.
+        // Flashback only appears on instants/sorceries — unconditional exile is correct.
+        Zone::Exile
+    } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
+        || stack_exile_linked_source(state, entry_id).is_some())
+        && !is_permanent_spell(state, entry_id)
+    {
+        // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
+        // spell cast this way would be put into your graveyard, exile it
+        // instead") are a STATIC destination rule selected here. Permanent
+        // spells still resolve to the battlefield. The Invoke Calamity
+        // free-cast rider is no longer read here — it is a self-scoped
+        // `Moved` replacement on the spell, consulted by the pipeline when
+        // the spell's stack → graveyard move is delivered (CR 614.6).
+        // Rod of Absorption's per-object linked source is the same kind of
+        // STATIC destination rule and is honored here too.
+        Zone::Exile
+    } else if is_permanent_spell(state, entry_id) {
+        // CR 608.3: Permanent spells enter the battlefield.
+        Zone::Battlefield
+    } else if ability.is_some_and(|a| a.context.additional_cost_paid)
+        && state.objects.get(&entry_id).is_some_and(|o| {
+            o.keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)))
+        })
+    {
+        // CR 702.27a: If the buyback cost was paid, put this spell into its
+        // owner's hand instead of into that player's graveyard as it resolves.
+        // Buyback appears only on instants/sorceries, so this branch is
+        // unreachable for permanent spells. Does NOT redirect on counter
+        // (CR 701.5a) or fizzle (CR 608.2b) — buyback applies only "as it
+        // resolves."
+        Zone::Hand
+    } else {
+        // CR 608.2n: Non-permanent spells are put into owner's graveyard.
+        Zone::Graveyard
+    }
+}
+
+/// What `finish_deferred_spell_resolution` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeferredFinalPart {
+    /// The resolving carrier is not an instant or sorcery whose final part was
+    /// deferred; there was nothing to run.
+    NotOwed,
+    /// The final part ran and the spell has left the stack.
+    Completed,
+    /// The final part raised a question of its own — a CR 616.1 ordering
+    /// choice on the spell's move, or the cipher encode offer — and the
+    /// carrier must stay installed until that prompt's resume path completes
+    /// the move.
+    Parked,
+}
+
+/// CR 608.2n: the owed final part, only while it names the installed carrier.
+fn owed_final_part(state: &GameState) -> Option<OwedSpellFinalPart> {
+    state.resolving_spell_final_part.filter(|owed| {
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|carrier| carrier.id == owed.spell)
+    })
+}
+
+/// CR 608.2c + CR 608.2n: whether the resolving carrier is an instant or
+/// sorcery spell whose instructions paused and whose final part — leaving the
+/// stack — therefore still has to run.
+///
+/// The authority is the carrier's own marker
+/// (`GameState::resolving_spell_final_part`), latched by `resolve_top` only
+/// when it deferred that final part; nothing is inferred from the carrier's
+/// shape. An unlatched carrier owes nothing: one whose instructions are still
+/// running, one paused on an inline cipher offer (CR 702.99a), or one whose
+/// final part already ran and parked a question of its own (CR 616.1).
+pub(super) fn resolving_spell_owes_final_part(state: &GameState) -> bool {
+    owed_final_part(state).is_some()
+}
+
+/// CR 608.2n: the instant or sorcery whose deferred final part is still owed
+/// (see [`resolving_spell_owes_final_part`]) and that is still on the stack.
+/// It was popped from `state.stack` as it began resolving, but it is still an
+/// object on the stack, which `targeting::zone_object_ids(Zone::Stack)` cannot
+/// see; it is the final part's own subject (`finish_deferred_spell_resolution`).
+///
+/// The marker decides whether the final part is owed. A card that is again a
+/// live stack entry is a new cast of it (buyback, a recursion loop), not the
+/// paused resolution.
+pub(super) fn spell_awaiting_final_part(state: &GameState) -> Option<&StackEntry> {
+    owed_final_part(state)
+        .and(state.resolving_stack_entry.as_ref())
+        .filter(|entry| {
+            matches!(entry.kind, StackEntryKind::Spell { .. })
+                && spell_still_on_stack(state, entry.id)
+                && !state.stack.iter().any(|live| live.id == entry.id)
+        })
+}
+
+/// CR 800.4a + CR 608.2n: the instant or sorcery the resolution carrier names,
+/// while it is still an object on the stack — whether its final part is still
+/// owed or already ran and parked a question of its own (a CR 616.1 ordering of
+/// its own move). `resolve_top` popped it from `state.stack` as it began
+/// resolving, so `targeting::zone_object_ids(Zone::Stack)` cannot list it; the
+/// player-leaves-the-game procedure and the end procedures (CR 724.1b /
+/// CR 724.2b) ask for it here. A card that is again a
+/// live stack entry is a new cast of it, not this resolution. Permanent spells
+/// (CR 608.3) keep their own paused-entry carrier and are not included.
+pub(super) fn resolving_instant_or_sorcery_on_stack(state: &GameState) -> Option<&StackEntry> {
+    state.resolving_stack_entry.as_ref().filter(|entry| {
+        matches!(entry.kind, StackEntryKind::Spell { .. })
+            && !is_permanent_spell(state, entry.id)
+            && spell_still_on_stack(state, entry.id)
+            && !state.stack.iter().any(|live| live.id == entry.id)
+    })
+}
+
+/// CR 608.2c + CR 608.2n: run the final part of a resolution `resolve_top`
+/// deferred because one of the spell's instructions paused for a choice — the
+/// on-resolution keyword hooks, the destination rule, and the move off the
+/// stack, exactly as the inline completion runs them — now that every
+/// instruction has been followed. Called only by
+/// `engine::run_spell_final_part_if_due`, which retires the carrier on
+/// `Completed` or `NotOwed`.
+///
+/// This is also where the resolution is reported (`GameEvent::StackResolved`):
+/// at the pause the spell was still on the stack, still resolving. As on the
+/// inline path, the report accompanies the final part whether the move
+/// completes or parks a question of its own.
+pub(super) fn finish_deferred_spell_resolution(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DeferredFinalPart {
+    if owed_final_part(state).is_none() {
+        return DeferredFinalPart::NotOwed;
+    }
+    let Some(entry) = spell_awaiting_final_part(state).cloned() else {
+        return finish_deferred_resolution_of_departed_spell(state, events);
+    };
+    let StackEntryKind::Spell {
+        ability,
+        casting_variant,
+        ..
+    } = &entry.kind
+    else {
+        unreachable!("`spell_awaiting_final_part` admits only spell carriers");
+    };
+    let casting_variant = *casting_variant;
+    // CR 608.2c + CR 400.7a + CR 613.1b + CR 109.4: the LIVE controller, read
+    // while the object is still on the stack — the same latch `resolve_top`
+    // takes before its instructions run, taken again here because a layer-2
+    // control change can have moved the spell while it was paused.
+    let live_controller = stack_object_controller(state, &entry);
+    // CR 608.2c + CR 109.5: re-stamp the baked announcement controller so the
+    // hooks run for whoever controls the spell now (mirrors `resolve_top`).
+    let ability = ability.as_deref().map(|ability| {
+        let mut ability = ability.clone();
+        if ability.controller != live_controller {
+            ability.set_controller_recursive(live_controller);
+        }
+        ability
+    });
+    let resolved = GameEvent::StackResolved {
+        object_id: entry.id,
+    };
+    let Some(arming) =
+        arm_on_resolution_hooks(state, &entry, ability.as_ref(), live_controller, events)
+    else {
+        // CR 702.99a: the cipher encode offer owns the resolution's next
+        // answer; its choice handler moves the card.
+        events.push(resolved);
+        clear_deferred_final_part(state);
+        return DeferredFinalPart::Parked;
+    };
+    let dest =
+        resolved_spell_destination(state, entry.id, ability.as_ref(), casting_variant, arming);
+    // `spell_awaiting_final_part` admits only a spell still on the stack, so
+    // the inline path's stack-residency guard holds here by construction.
+    match deliver_resolved_spell_off_stack(state, entry.id, entry.controller, dest, events) {
+        ZoneMoveResult::Done => {
+            finish_spell_stack_exit(state, entry.id, casting_variant, events);
+            events.push(resolved);
+            DeferredFinalPart::Completed
+        }
+        // CR 616.1: a replacement-ordering choice parked the move; the
+        // replacement-choice resume path delivers it.
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            events.push(resolved);
+            clear_deferred_final_part(state);
+            DeferredFinalPart::Parked
+        }
+    }
+}
+
+/// CR 608.2m + CR 608.2n: the final part of a deferred resolution whose spell
+/// is no longer on the stack — its own instructions moved it ("Exile Invoke
+/// Calamity"), or its owner left the game while its controller finished it.
+/// It keeps resolving fully (CR 608.2m), so it owes the stack-exit bookkeeping
+/// of how it was cast, as on the inline path; only the move is skipped, because
+/// it is already where it was put (issue #323). Reported resolved exactly once
+/// (CR 608.2m) — whether its own instruction moved it, its owner left, or its
+/// controller left while another player still had its instruction to answer.
+/// A carrier the elimination retires as `Eliminated` (the departed player's
+/// question was its last live work) never reaches here and is not reported
+/// resolved. A carrier whose final part was not deferred owes nothing here.
+fn finish_deferred_resolution_of_departed_spell(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DeferredFinalPart {
+    let Some((spell_id, casting_variant)) = owed_final_part(state)
+        .and(state.resolving_stack_entry.as_ref())
+        .filter(|entry| {
+            !spell_still_on_stack(state, entry.id)
+                && !state.stack.iter().any(|live| live.id == entry.id)
+        })
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } => Some((entry.id, *casting_variant)),
+            StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
+        })
+    else {
+        return DeferredFinalPart::NotOwed;
+    };
+    finish_spell_stack_exit(state, spell_id, casting_variant, events);
+    events.push(GameEvent::StackResolved {
+        object_id: spell_id,
+    });
+    DeferredFinalPart::Completed
+}
+
+/// The deferred final part has run (and parked a question of its own): clear
+/// the carrier's deferral latch, so the carrier, which stays installed until
+/// that question is answered, is not later read as still owing it.
+fn clear_deferred_final_part(state: &mut GameState) {
+    state.resolving_spell_final_part = None;
 }
 
 /// CR 608.2: Resolve the top object on the stack.
@@ -1455,23 +2174,36 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     "stale pending trigger must transfer its firing to the live stack entry"
                 );
             }
-            state.pending_trigger_entry = None;
-            state.pending_trigger = None;
-            state.pending_trigger_event_batch.clear();
+            super::triggers::release_pending_trigger_construction(state);
         }
     }
 
+    // CR 608.2n + CR 405.5: a resolution whose paused instructions completed has
+    // its final part run before another object begins resolving. When it runs
+    // here nothing is popped: the pass's pipeline puts its batch on the stack
+    // above this entry first (`engine::pass_priority_once_with_pipeline`).
+    if super::engine::run_spell_final_part_if_due(state, events) {
+        return;
+    }
     // CR 608.2c: A resolution that completed at the preceding Priority
     // boundary must settle its exact carrier before another stack object can
     // begin resolving. A parked continuation remains live and therefore still
     // fails the invariant below rather than being silently cleared.
     super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
-    // CR 707.10: A prior resolution must have settled before another stack
-    // object can begin resolving. A parked continuation owns its carrier until
-    // its own completion or abort path; silently clearing it here would lose a
-    // receipt-eligible delayed firing.
-    debug_assert!(state.resolving_stack_entry.is_none());
-    debug_assert!(state.resolving_trigger_firing.is_none());
+    // CR 608.2c + CR 608.2m: A prior resolution must finish its instructions
+    // before another stack object begins resolving. A parked continuation owns
+    // its carrier until its own completion or abort path; silently clearing it here would
+    // lose a receipt-eligible delayed firing. This holds in release builds too:
+    // with a live carrier the top entry stays on the stack and nothing begins.
+    if state.resolving_stack_entry.is_some()
+        || state.resolving_trigger_firing.is_some()
+        || state.resolving_spell_final_part.is_some()
+    {
+        tracing::error!(
+            "resolve_top refused: a resolution carrier is still installed; the stack top was not popped"
+        );
+        return;
+    }
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
@@ -1480,6 +2212,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // republished below for an `ActivatedAbility` entry (and only for that kind).
     state.announced_source_x = None;
     state.turn_up_paid_cost_source = None;
+    // CR 608.2c + CR 608.2h: the "that many" counts an instruction stamps are
+    // resolution-local — a later instruction of THIS resolution reads them, and no
+    // other stack object may. One player action can resolve several stack objects
+    // in a row, so clear them here, before this object begins resolving, rather
+    // than only once per action in `apply()`. A CR 615.5 prevention/replacement
+    // rider reads its stamped amount synchronously, inside the event or resolution
+    // that stamped it, and never passes through here.
+    state.last_effect_count = None;
+    state.last_effect_counts_by_player.clear();
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let Some(PoppedStackEntry {
@@ -1493,7 +2234,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     };
     // CR 603.4 + CR 608.2b: transfer the exact firing before any branch can
     // abort, resolve, or park this popped triggered ability.
-    begin_resolving_stack_entry(state, entry.clone(), trigger_firing);
+    begin_resolving_stack_entry(state, entry.clone(), trigger_firing)
+        .expect("the carrier slot was checked empty before popping");
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -1621,6 +2363,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if ability.controller != live_controller {
                 ability.set_controller_recursive(live_controller);
             }
+        }
+    }
+
+    // CR 612.1 + CR 608.2b + CR 113.1c: a text change on a spell applies before the legality recheck and target binding below, and an ability on the stack is not a spell so only spell entries are rewritten.
+    if is_spell {
+        if let Some(ability) = ability.as_mut() {
+            super::text_substitution::restamp_resolving_spell_text(state, entry.id, ability);
         }
     }
 
@@ -1805,12 +2554,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     {
         state.announced_source_x = activated.chosen_x.map(|x| (*source_id, x));
     }
-    let resolution_start_phase = state.phase;
 
     // Only run targeting validation and effect execution when an ability exists.
     // Permanent spells with no spell ability (ability is None) skip straight to
     // zone-change handling below.
-    if let Some(ref ability) = ability {
+    if let Some(ability) = ability.as_mut() {
         // CR 608.2b + CR 115.10a: count only the targets the spell SPECIFIED, not
         // anaphoric snapshots an inheriting rider carries — see
         // `flatten_specified_targets_in_chain`. BOTH sides use it: an all-anaphoric
@@ -1837,9 +2585,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && !bestow_reverted_at_resolution
             && !mutate_reverted_at_resolution
         {
-            let validated = validate_targets_in_chain(state, ability);
+            let (validated, validated_view) =
+                crate::game::ability_utils::validate_targets_in_chain_with_view(state, ability);
             let legal_targets = flatten_specified_targets_in_chain(&validated);
-            if targeting::check_fizzle(&original_targets, &legal_targets) {
+            // CR 608.2b + CR 101.1: the ability's own text ("This ability still resolves if
+            // its target becomes illegal") can override non-resolution. Targets are still
+            // pruned by validate_targets_in_chain above, so illegal targets stay unaffected.
+            let fizzle_applies = match ability.illegal_targets_disposition {
+                IllegalTargetsDisposition::DoesNotResolve => true,
+                IllegalTargetsDisposition::StillResolves => false,
+            };
+            if fizzle_applies && targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
                 if is_spell {
                     // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
@@ -1893,32 +2649,52 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.resolution_source_relatch = None;
                 return;
             }
-            record_illegal_target_slots(state, Some(&validated));
+            // CR 608.2b: validation already stamped each node's local illegal
+            // positions; the carrier receives the chain-numbered stamp.
+            record_illegal_target_slots(state, Some((ability, &validated, &validated_view)));
             execute_effect(state, &validated, events);
         } else {
             record_illegal_target_slots(state, None);
+            clear_illegal_local_target_slots(ability);
             execute_effect(state, ability, events);
         }
     }
 
-    // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
-    // `Keyword::Cipher`, is represented by a card, and its controller has a
-    // creature to host it, pause for the optional "exile this card encoded on a
-    // creature you control" choice. The card is held off the stack until the
-    // choice completes (mirroring the Mutate merge pause); the choice handler
-    // exiles+encodes on accept, or routes the card to its graveyard on decline.
-    // Skipped (resolution proceeds to graveyard normally) when there is no legal
-    // host. `is_spell` gates out triggered/activated stack entries.
-    // CR 702.99a + CR 109.5: "you may exile this card encoded on a creature you
-    // control" — "you" is the object's controller, i.e. the spell's controller as
-    // it resolves (CR 608.2c). This argument does double duty in `cipher.rs`: it
-    // selects `legal_encode_creatures(state, controller)` AND becomes
-    // `PendingCipherEncode.controller`, which owns the prompt. Both halves are the
-    // same "you".
-    if is_spell && super::cipher::begin_encode_choice(state, entry.id, live_controller, events) {
-        events.push(GameEvent::StackResolved {
-            object_id: entry.id,
-        });
+    // CR 608.2c + CR 608.2n: the controller follows the spell's instructions in
+    // the order written, and "as the final part of an instant or sorcery
+    // spell's resolution, the spell is put into its owner's graveyard." When
+    // one of those instructions paused for a player's choice (a chosen
+    // discard or a library search, CR 608.2d; a free-cast window, CR 608.2g),
+    // the instructions have not all been followed yet, so that final part has
+    // not come: the spell stays on the stack, still resolving, and
+    // `finish_deferred_spell_resolution` runs the final part — the
+    // on-resolution keyword hooks, the destination, the move, and the
+    // `StackResolved` report — at the priority boundary that proves its
+    // instructions done (`engine::run_spell_final_part_if_due`). Moving the spell now
+    // would put Faithless Looting into the graveyard BENEATH the cards it then
+    // discards, and Doomsday into the graveyard its own search then exiles
+    // "the rest" of.
+    //
+    // The owed final part is latched on the resolution carrier
+    // (`GameState::resolving_spell_final_part`), never on the spell's ability,
+    // so a copy cannot inherit it (CR 707.10).
+    //
+    // Permanent spells are CR 608.3, not CR 608.2n: their entry is its own
+    // pipeline below, with its own paused-entry carrier (`PendingSpellResolution`).
+    if is_spell && !is_permanent_spell(state, entry.id) && resolution_is_paused(state) {
+        let carrier_is_this_spell = state
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|carrier| carrier.id == entry.id);
+        debug_assert!(
+            carrier_is_this_spell,
+            "a deferred final part is latched on the resolving spell's own carrier"
+        );
+        // Latched whatever the shape of the spell's ability (a spell with no
+        // ability owes its final part too); only the carrier's identity gates it.
+        if carrier_is_this_spell {
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell: entry.id });
+        }
         state.current_trigger_event = None;
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
@@ -1926,115 +2702,30 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
-    // CR 702.xxx: Paradigm (Strixhaven) — first-resolution hook. If the
-    // resolving spell carries `Keyword::Paradigm` and this is the first
-    // resolution of any spell with this name by the controller (per the
-    // reminder text: "After you first resolve a spell with this name"), arm
-    // the Paradigm offer: push a `ParadigmPrime` record and mint an
-    // `ExileLinkKind::ParadigmSource` link, then override destination routing
-    // to Exile. Copies (`is_token`) never arm Paradigm because their card
-    // name is derived but they are not "the" spell per the reminder. Assign
-    // when WotC publishes SOS CR update.
-    let paradigm_armed = if is_spell {
-        let obj = state.objects.get(&entry.id);
-        let has_paradigm = obj.is_some_and(|o| {
-            !o.is_token
-                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Paradigm)
-        });
-        if has_paradigm {
-            let card_name = obj.map(|o| o.name.clone()).unwrap_or_default();
-            // CR 702.192a: Paradigm means "If this is the first time a spell YOU
-            // control with this spell's name has resolved this game, at the
-            // beginning of each of YOUR precombat main phases for the rest of the
-            // game, create a copy of this object in exile. You may cast the copy
-            // without paying its mana cost". ONE "you", both halves, no
-            // historical-cast clause — the same shape as epic's CR 702.50a below.
-            // Per CR 608.2c and CR 109.5 that "you" is the spell's controller AS IT
-            // RESOLVES, so a stolen Paradigm spell primes its THIEF and offers the
-            // free copy on the thief's precombat main phases. This argument is BOTH
-            // the `state.paradigm_primed` key and the `already_primed` gate that
-            // reads it three lines earlier inside `arm_paradigm` itself — one
-            // value, one site, so routing keeps the pair in agreement by
-            // construction rather than splitting it.
-            super::effects::paradigm::arm_paradigm(state, entry.id, live_controller, &card_name)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
-    // non-permanent spell that carries `Keyword::Rebound`, was cast from
-    // its owner's hand, and is not a token, push the next-upkeep delayed
-    // triggered ability that offers an optional free recast and override
-    // the destination from graveyard to exile.
-    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
-    // CR 603.7a: delayed triggered abilities are created during resolution.
-    // CR 603.7d: source of the delayed trigger IS the resolving spell.
-    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
-    // CR 702.88c: multiple instances of rebound on the same spell are
-    // redundant — `has_keyword` returns true even if duplicates exist, so
-    // arming runs at most once per resolution.
-    let rebound_armed = if is_spell && !is_permanent_spell(state, entry.id) {
-        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
-            !o.is_token
-                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
-        });
-        // CR 601.2a + CR 702.88a: the resolving stack entry has already been
-        // popped, so real instant/sorcery spells must read the pre-announcement
-        // zone from the local ResolvedAbility context. `spell_cast_origin`
-        // remains the fallback for object-stamped placeholder/permanent paths.
-        let cast_from_zone = ability
-            .as_ref()
-            .and_then(|a| a.context.cast_from_zone)
-            .or_else(|| super::casting::spell_cast_origin(state, entry.id));
-        // CR 702.88a: "If this spell was cast from YOUR hand … at the beginning of
-        // YOUR next upkeep, YOU may cast this card from exile." ONE "you" serves
-        // both the arming condition and the entitlement. This argument is the
-        // entitlement half — the player who may recast — but the engine's arming
-        // test is the separate, player-blind `cast_from_zone == Some(Zone::Hand)`
-        // above. Routing only this half would grant a thief a rebound whose own
-        // arming condition CR 702.88a makes false for them.
-        // KNOWN LIMITATION (CR 702.88a): closing it requires the arming test to
-        // record WHOSE hand, then both halves move together.
-        if has_rebound && cast_from_zone == Some(Zone::Hand) {
-            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // CR 702.50a-b: Epic — on-resolve hook. If the resolving spell still
-    // carries `Keyword::Epic`, lock its controller out of casting spells for
-    // the rest of the game (CR 702.50b) and arm a RECURRING delayed triggered
-    // ability that copies the spell at the beginning of each of the
-    // controller's upkeeps (CR 702.50a). A copied spell that still has Epic
-    // also arms this effect when it resolves; Epic-generated copies do not
-    // recurse because `EpicCopy` strips `Keyword::Epic` before pushing them.
-    // The Epic spell itself takes the normal destination below (no override);
-    // that object is the prototype the upkeep copies clone.
-    if is_spell {
-        let has_epic = state.objects.get(&entry.id).is_some_and(|o| {
-            super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Epic)
-        });
-        if has_epic {
-            if let Some(spell_ability) = ability.clone() {
-                // CR 702.50a: "For the rest of the game, you can't cast spells" and
-                // "At the beginning of each of your upkeeps for the rest of the
-                // game, copy this spell…" — ONE "you", used twice, with no
-                // historical-cast clause to entangle it. Per CR 608.2c and CR 109.5
-                // that is the spell's controller as it resolves, so a stolen Epic
-                // spell locks out its thief and copies on the thief's upkeeps.
-                super::effects::epic::arm_epic(state, entry.id, live_controller, *spell_ability);
+    let arming = if is_spell {
+        match arm_on_resolution_hooks(state, &entry, ability.as_deref(), live_controller, events) {
+            Some(arming) => arming,
+            // CR 702.99a: the cipher encode offer owns the resolution's next
+            // answer; the card is held off the stack until it completes.
+            None => {
+                events.push(GameEvent::StackResolved {
+                    object_id: entry.id,
+                });
+                state.current_trigger_event = None;
+                state.current_trigger_events.clear();
+                state.current_trigger_match_count = None;
+                state.die_result_this_resolution = None;
+                return;
             }
         }
-    }
+    } else {
+        OnResolutionArming::default()
+    };
 
-    // CR 608.2g + CR 608.3: A spell paused on a during-resolution free-cast
-    // window remains on the stack and targetable until its continuation ends.
+    // CR 608.2g + CR 608.3: A permanent spell paused on a during-resolution
+    // free-cast window remains on the stack and targetable until its
+    // continuation ends. (A non-permanent spell paused there never reaches this
+    // point: the CR 608.2n deferral above returned.)
     if is_spell
         && !matches!(
             state.waiting_for,
@@ -2044,86 +2735,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         )
     {
-        let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
-            matches!(ability.effect, Effect::EndTheTurn)
-                || (matches!(ability.effect, Effect::EndCombatPhase)
-                    && resolution_start_phase.is_combat())
-        });
-        let dest = if end_procedure_exiles_resolving_object {
-            // CR 724.1b / CR 724.2b: The "end the turn" and "end the combat
-            // phase" procedures exile every object on the stack, including the
-            // resolving object that `resolve_top` already popped before
-            // executing its effect.
-            Zone::Exile
-        } else if paradigm_armed {
-            // CR 702.xxx: Paradigm-armed spell exiles instead of going to
-            // graveyard. The ExileLink is already created by arm_paradigm.
-            Zone::Exile
-        } else if rebound_armed {
-            // CR 702.88a: Rebound-armed non-permanent spell exiles instead
-            // of going to graveyard — the delayed trigger is already
-            // queued by `arm_rebound`.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Adventure {
-            // CR 715.3d: Adventure spell resolves → exile with casting permission.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Omen {
-            // CR 720.3d: Omen spell resolves → shuffle into owner's library.
-            Zone::Library
-        } else if casting_variant == CastingVariant::Harmonize {
-            // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
-            if is_permanent_spell(state, entry.id) {
-                Zone::Battlefield
-            } else {
-                Zone::Exile
-            }
-        } else if casting_variant == CastingVariant::Aftermath {
-            // CR 702.127a: If an aftermath spell was cast from a graveyard,
-            // exile it instead of putting it anywhere else any time it would
-            // leave the stack.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Flashback {
-            // CR 702.34a: If the flashback cost was paid, exile this card
-            // instead of putting it anywhere else any time it would leave the stack.
-            // Flashback only appears on instants/sorceries — unconditional exile is correct.
-            Zone::Exile
-        } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
-            || stack_exile_linked_source(state, entry.id).is_some())
-            && !is_permanent_spell(state, entry.id)
-        {
-            // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
-            // spell cast this way would be put into your graveyard, exile it
-            // instead") are a STATIC destination rule selected here. Permanent
-            // spells still resolve to the battlefield. The Invoke Calamity
-            // free-cast rider is no longer read here — it is a self-scoped
-            // `Moved` replacement on the spell, consulted by the pipeline when
-            // the spell's stack → graveyard move is delivered below (CR 614.6).
-            // Rod of Absorption's per-object linked source is the same kind of
-            // STATIC destination rule and is honored here too.
-            Zone::Exile
-        } else if is_permanent_spell(state, entry.id) {
-            // CR 608.3: Permanent spells enter the battlefield.
-            Zone::Battlefield
-        } else if ability
-            .as_ref()
-            .is_some_and(|a| a.context.additional_cost_paid)
-            && state.objects.get(&entry.id).is_some_and(|o| {
-                o.keywords
-                    .iter()
-                    .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)))
-            })
-        {
-            // CR 702.27a: If the buyback cost was paid, put this spell into its
-            // owner's hand instead of into that player's graveyard as it resolves.
-            // Buyback appears only on instants/sorceries, so this branch is
-            // unreachable for permanent spells. Does NOT redirect on counter
-            // (CR 701.5a) or fizzle (CR 608.2b) — buyback applies only "as it
-            // resolves."
-            Zone::Hand
-        } else {
-            // CR 608.2n: Non-permanent spells are put into owner's graveyard.
-            Zone::Graveyard
-        };
+        let dest = resolved_spell_destination(
+            state,
+            entry.id,
+            ability.as_deref(),
+            casting_variant,
+            arming,
+        );
         if dest == Zone::Battlefield {
             // CR 707.10f + CR 608.3f: A copy of a permanent spell becomes a token
             // permanent AS it resolves onto the battlefield — BEFORE the ETB
@@ -2651,87 +3269,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // and undoes its own self-exile clause (issue #323).
             if spell_still_on_stack(state, entry.id) {
                 // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
-                // default move through the pipeline so self-scoped `Moved`
-                // redirects (the Invoke Calamity rider) and board-wide
-                // RIP/Leyline redirects fire (PLAN §8 Risk #2 — confirmed bug on
-                // the old raw-move path). A redirect only matches a Graveyard
-                // destination, so flashback/adventure/omen spells (dest already
-                // Exile/Library) never engage it. On a CR 616.1 ordering choice
-                // (two simultaneous Graveyard→Exile redirects on the same spell),
-                // `move_object` parks the prompt; the spell is already off the
-                // stack and the dest is Graveyard, so every post-move bookkeeping
-                // step below is a no-op (front-face restore / Adventure / Omen /
-                // battlefield-entry tail all gate on non-graveyard zones). Mirror
-                // the permanent-spell NeedsChoice arm: emit StackResolved + clear
-                // trigger context, then bail so the replacement-choice resume
-                // path delivers the redirected move.
-                let stack_exile_link_source = stack_exile_linked_source(state, entry.id);
-                // CR 603.7a + CR 702.170c: snapshot the exile-instead
-                // consequence rider BEFORE the move — every zone exit clears the
-                // transient rider fields (zones.rs), so the post-move apply site
-                // below must read the pre-move value.
-                let exile_rider = state
-                    .objects
-                    .get(&entry.id)
-                    .and_then(|o| o.exile_from_stack_rider.clone());
-                let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
-                match zone_pipeline::move_object(state, req, events) {
-                    ZoneMoveResult::Done => {
-                        // CR 607.2b + CR 406.6: a spell exiled by Rod of
-                        // Absorption's per-object linked-source rider is "exiled
-                        // with" the trigger source that stamped it. Now that the
-                        // pipeline has delivered the move, record the linked-exile
-                        // association so the source's linked ability ("cast any
-                        // number of cards exiled with this artifact") sees the
-                        // accumulating set.
-                        // Gate on the object's ACTUAL post-move zone (not the
-                        // requested `dest`) so a redirect that diverted the card
-                        // away from exile never records a spurious link, while a
-                        // redirect INTO exile still records correctly.
-                        if spell_in_zone(state, entry.id, Zone::Exile) {
-                            if let Some(link_source) = stack_exile_link_source {
-                                super::exile_links::push_tracked_by_source(
-                                    state,
-                                    entry.id,
-                                    link_source,
-                                );
-                            }
-                            // CR 603.7a + CR 702.170c: the exile-instead
-                            // replacement has now actually been APPLIED (the
-                            // spell landed in exile), so this is the moment the
-                            // "If you do, ..." consequence is applied — Feather's
-                            // return-to-hand delayed trigger, or Lilah's plotted
-                            // grant — never earlier (a countered or fizzled
-                            // spell's marker was cleared on its stack exit and
-                            // never reaches here).
-                            // CR 603.7a + CR 603.7e (r5: was 603.7d — the rider is created
-                            // by a TRIGGERED ability's replacement, so CR 603.7e is the
-                            // rule and CR 603.7d, the spell-created case, is not;
-                            // `exile_resolving_spell::arm_return_to` already cites CR
-                            // 603.7e, and this annotation now agrees with it rather than
-                            // contradicting it three frames away). Chooser: the controller
-                            // of the REPLACEMENT EFFECT'S SOURCE (Feather, Lilah) — whose
-                            // id this call already carries as the fourth argument — NOT
-                            // the resolving spell's controller. `entry.controller`
-                            // approximates it correctly, because those sources trigger on
-                            // "whenever YOU cast", so the caster IS the source's
-                            // controller. Routing this to `live_controller` would hand a
-                            // stolen spell's Feather-return to the THIEF, which is wrong.
-                            // KNOWN LIMITATION (CR 603.7e): the exact authority is that
-                            // source's controller; deriving it here means resolving the
-                            // link source's controller at rider-apply time.
-                            if let Some(rider) = exile_rider {
-                                effects::exile_resolving_spell::apply_exile_rider(
-                                    state,
-                                    entry.id,
-                                    entry.controller,
-                                    stack_exile_link_source.unwrap_or(entry.id),
-                                    rider,
-                                    events,
-                                );
-                            }
-                        }
-                    }
+                // default move through the pipeline — see
+                // `deliver_resolved_spell_off_stack`.
+                match deliver_resolved_spell_off_stack(
+                    state,
+                    entry.id,
+                    entry.controller,
+                    dest,
+                    events,
+                ) {
+                    ZoneMoveResult::Done => {}
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         // NOTE: the `exile_rider` snapshot is intentionally
                         // dropped on this bail — a parked move here can only be
@@ -2754,33 +3301,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
-        // face when leaving the stack unless they resolved as that face onto
-        // the battlefield.
-        if casting_variant.restores_front_face_after_stack_exit()
-            && !spell_in_zone(state, entry.id, Zone::Battlefield)
-        {
-            restore_alternative_spell_normal_face(state, entry.id, casting_variant);
-        }
-
-        // CR 715.3d: When an Adventure spell resolves to exile, grant
-        // AdventureCreature permission so it can be cast from exile.
-        if casting_variant == CastingVariant::Adventure {
-            if let Some(obj) = state.objects.get_mut(&entry.id) {
-                obj.casting_permissions
-                    .push(crate::types::ability::CastingPermission::AdventureCreature);
-            }
-        }
-        if casting_variant == CastingVariant::Omen {
-            if let Some(owner) = state
-                .objects
-                .get(&entry.id)
-                .filter(|obj| obj.zone == Zone::Library)
-                .map(|obj| obj.owner)
-            {
-                effects::change_zone::shuffle_library(state, owner, events);
-            }
-        }
+        finish_spell_stack_exit(state, entry.id, casting_variant, events);
 
         // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
         // battlefield attached to the player or object it was targeting.
@@ -3361,21 +3882,20 @@ fn resolve_keyword_action(
     }
 }
 
-// ── Session-authorized sequential batch proof ────────────────────────────
+// ── Session-authorized multi-entry resolution ────────────────────────────
 //
-// `resolve_next` normally resolves exactly one stack object. A committed
-// session may authorize a fenced prefix; it is proved by resolving each exact
-// member through `resolve_top` and the normal post-action pipeline on a clone.
-
-/// Sentinel object id used only to build Layer C probe events. `keys_from_event`
-/// reads only `record.core_types`/`to` (ETB keys) and the `TokenCreated` variant
-/// tag — never the `object_id` — so a sentinel is sound (§2.3 PROBE_ID note).
-#[cfg(test)]
-const PROBE_ID: ObjectId = ObjectId(u64::MAX);
+// `resolve_next` normally resolves exactly one stack object. A live
+// stack-resolution session may authorize a fenced prefix through
+// `engine::stack_resolution_session_authorized_limit`. Every member of an
+// authorized run resolves through `resolve_top` on a clone: the bulk token
+// executor (`resolve_bulk_token_run`) runs member 1's full post-action
+// checkpoint and elides the later ones its admission proves inert, and the
+// sequential proof (`resolve_proven_inert_trigger_batch`) runs the normal
+// post-action pipeline after every member.
 
 /// CR 608.2: Resolve the next stack object, collapsing a batch-safe run when
 /// one begins at the top. Returns the number of stack entries consumed
-/// (≥ 1) so the caller can correct the auto-pass baseline (§7.2).
+/// (0 when the top was not popped) so the caller can correct the auto-pass baseline (§7.2).
 pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
     resolve_next_with_limit(state, events, None)
 }
@@ -3386,10 +3906,12 @@ pub fn resolve_next_with_limit(
     max_consumed: Option<u32>,
 ) -> u32 {
     // A caller supplied cap is not itself permission to consume several stack
-    // entries.  The only multi-entry authority is a live committed session whose
-    // cursor still fences the actual top entry.  Keeping this check at the
-    // resolver boundary prevents a transport or future caller from turning a
-    // harmless `Some(n)` into an unauthorized shortcut.
+    // entries.  The only multi-entry authority is
+    // `engine::stack_resolution_session_authorized_limit`: a live session whose
+    // fence covers the top and whose every participant authorized the skipped
+    // windows.  Keeping this check at the resolver boundary prevents a
+    // transport or future caller from turning a harmless `Some(n)` into an
+    // unauthorized shortcut.
     let max_consumed = authorized_batch_limit(state, max_consumed);
     // CR 603.3c/d: never collapse while the top entry is mid-construction.
     let pending_top = state
@@ -3442,10 +3964,14 @@ pub fn resolve_next_with_limit(
             let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
                 crate::game::perf_counters::record_stack_batch_candidate();
-                // The batch proof executes the ordinary resolver and full
-                // post-resolution checkpoint once per captured entry on a clone.
-                // Token/copy handlers therefore remain single-entry authorities;
-                // no bulk token creation is permitted here.
+                // CR 117.4 + CR 608.2: bulk first, then the sequential proof,
+                // then a single entry. Both multi-entry paths consume at most the
+                // session-authorized `run_len` and resolve every member through
+                // `resolve_top`; bulk also elides the checkpoints between members
+                // that its admission proves inert.
+                if let Some(consumed) = resolve_bulk_token_run(state, events, run_len) {
+                    return consumed;
+                }
                 if let Some(consumed) =
                     resolve_proven_inert_trigger_batch(state, events, run_len, None)
                 {
@@ -3454,44 +3980,335 @@ pub fn resolve_next_with_limit(
             }
         }
     }
+    let top = state.stack.back().map(|entry| entry.id);
     resolve_top(state, events);
-    1
+    // §7.2: callers shrink their auto-pass baselines and advance the session
+    // cursor by this count, so it counts only an entry this call took off the
+    // stack. `resolve_top` returns without popping on a mid-construction top, a
+    // still-installed carrier, and when it ran an owed final part instead.
+    u32::from(top.is_some_and(|id| !state.stack.iter().any(|entry| entry.id == id)))
+}
+
+fn created_token_ids(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 111.1 + CR 614.1a: an event a bulk member's resolution may emit, without
+/// its object ids: a token's creation and battlefield entry, a replacement
+/// applied to that creation, and the completion of the token effect and of the
+/// stack object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenEntryEvent {
+    Created,
+    Entered,
+    ReplacementApplied,
+    Resolved(EffectKind),
+    StackResolved,
+}
+
+/// A member's resolution events as `TokenEntryEvent`s, in order. `None` when
+/// any event is something else (a later instruction's damage, life change or
+/// zone move), which no inert checkpoint of member 1 vetted.
+fn token_entry_events(events: &[GameEvent]) -> Option<Vec<TokenEntryEvent>> {
+    let created = created_token_ids(events);
+    events
+        .iter()
+        .map(|event| match event {
+            GameEvent::TokenCreated { .. } => Some(TokenEntryEvent::Created),
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                ..
+            } if created.contains(object_id) => Some(TokenEntryEvent::Entered),
+            GameEvent::ReplacementApplied { .. } => Some(TokenEntryEvent::ReplacementApplied),
+            GameEvent::EffectResolved {
+                kind: kind @ (EffectKind::Token | EffectKind::CopyTokenOf),
+                ..
+            } => Some(TokenEntryEvent::Resolved(*kind)),
+            GameEvent::StackResolved { .. } => Some(TokenEntryEvent::StackResolved),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a reader between two bulk members can see of a produced token: its
+/// event-object snapshot (every characteristic the trigger-subject grammar
+/// interrogates) plus its functioning trigger and static definitions.
+type TokenReaderView = (
+    crate::types::events::EventObjectSnapshot,
+    Vec<crate::types::ability::TriggerDefinition>,
+    Vec<crate::types::ability::StaticDefinition>,
+);
+
+fn token_reader_views(state: &GameState, tokens: &[ObjectId]) -> Vec<Option<TokenReaderView>> {
+    tokens
+        .iter()
+        .map(|&id| {
+            let obj = state.objects.get(&id)?;
+            Some((
+                state.capture_event_object_snapshot(id)?,
+                super::functioning_abilities::active_trigger_definitions(state, obj)
+                    .map(|active| active.definition.clone())
+                    .collect(),
+                super::functioning_abilities::active_static_definitions(state, obj)
+                    .cloned()
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
+/// CR 603.7 + CR 610.3 + CR 702.50a: the conservative run-start gates. With
+/// no delayed trigger, epic effect or exile link, the elided checkpoints'
+/// delayed-trigger check and exile-return pass have nothing to act on.
+fn bulk_checkpoint_carriers_are_empty(state: &GameState) -> bool {
+    state.delayed_triggers.is_empty()
+        && state.epic_effects.is_empty()
+        && state.exile_links.is_empty()
+}
+
+/// The outcome of resolving a captured bulk run on a clone.
+enum BulkMemberRun {
+    /// Every member resolved. `last_member_start` is the index in `events`
+    /// where the last member's events begin; that member's checkpoint is the
+    /// caller's ordinary post-action pass.
+    Complete {
+        state: Box<GameState>,
+        events: Vec<GameEvent>,
+        last_member_start: usize,
+    },
+    /// CR 603.3b: the production collector found a trigger on the events of
+    /// member `index` (zero-based). That trigger must go on the stack before
+    /// the next member resolves, so the run ends at that member.
+    StoppedAt { index: usize },
+}
+
+/// CR 117.4 + CR 117.5 + CR 608.2 + CR 704.3: Resolve the captured run on a
+/// clone. Member 1 resolves and takes the full post-action checkpoint, exactly
+/// as the sequential proof does; it must be inert, and the run's remaining
+/// checkpoints are elided only on what member 1's shows: every produced token
+/// is a fixed point of that checkpoint's layer pass and is neither legendary
+/// nor world once layered (CR 704.5j, CR 704.5k), the entry perturbs no
+/// other object's layered values (`layers::entry_perturbs_layer_reads`), and
+/// no state trigger (CR 603.8), delayed trigger (CR 603.7), epic effect or
+/// exile link exists. Member 1's checkpoint speaks for an elided one only if
+/// that member did what member 1 did: member 1 must create a token and emit
+/// nothing but its token entry (`token_entry_events`), and each of members
+/// 2..N must emit exactly member 1's token-entry events, or the whole run is
+/// refused. A `ForAsLongAs` duration the elided layer flushes would retire
+/// (CR 611.2b) is not re-checked between members; every member emits only its
+/// token entry, which no parsed duration condition reads. Members
+/// 2..N each resolve through `resolve_top` with their own captured entry (no
+/// representative replay), and members 2..N−1
+/// keep the production event-trigger collection (CR 603.2) over their own
+/// events; the last member's checkpoint is the caller's.
+fn resolve_bulk_members(
+    state: &GameState,
+    members: &[CapturedBatchMember],
+) -> Option<BulkMemberRun> {
+    let mut bulk = state.clone();
+    let mut bulk_events = Vec::new();
+    let default_wf = WaitingFor::Priority {
+        player: bulk.active_player,
+    };
+
+    // Member 1: exact resolution plus the full checkpoint.
+    let first = members.first()?;
+    if !top_matches_captured_member(&bulk, first) {
+        return None;
+    }
+    let stack_before = bulk.stack.len();
+    resolve_top(&mut bulk, &mut bulk_events);
+    if stack_before.saturating_sub(bulk.stack.len()) != 1
+        || !matches!(bulk.waiting_for, WaitingFor::Priority { .. })
+    {
+        return None;
+    }
+    let produced = created_token_ids(&bulk_events);
+    // CR 117.5 + CR 704.3: the elided checkpoints are vetted on member 1's
+    // alone, so member 1 must have created a token and done nothing else; each
+    // later member is held to these events below.
+    let run_events = token_entry_events(&bulk_events).filter(|_| !produced.is_empty())?;
+    let views_before = token_reader_views(&bulk, &produced);
+    let events_after_resolution = bulk_events.len();
+    let stack_after_resolution = bulk.stack.len();
+    let wf = super::engine_priority::run_post_action_pipeline_from(
+        &mut bulk,
+        &mut bulk_events,
+        0,
+        &default_wf,
+        false,
+        false,
+    )
+    .ok()?;
+    if !matches!(wf, WaitingFor::Priority { .. })
+        || !matches!(bulk.waiting_for, WaitingFor::Priority { .. })
+        || bulk_events.len() != events_after_resolution
+        || bulk.stack.len() != stack_after_resolution
+        || !priority_checkpoint_is_settled(&bulk)
+    {
+        return None;
+    }
+    // CR 613.1: the layer pass of member 1's checkpoint is what every elided
+    // checkpoint would have applied to its member's token; a reader between
+    // members sees the token unflushed, so the pass must not change it.
+    if token_reader_views(&bulk, &produced) != views_before {
+        return None;
+    }
+    // CR 613.1d + CR 704.5j + CR 704.5k: a continuous effect can make the
+    // token legendary or world in layer 4 though its printed spec is neither.
+    // Member 1's token alone trips neither rule, but member 2's identical
+    // token would at member 2's checkpoint. With the fixed point above and
+    // `entry_perturbs_layer_reads` below, every later member's token gets the
+    // layered supertypes member 1's has.
+    if produced.iter().any(|id| {
+        bulk.objects.get(id).is_some_and(|obj| {
+            effects::token::has_pairwise_sba_supertype(&obj.card_types.supertypes)
+        })
+    }) {
+        return None;
+    }
+    let entrants: std::collections::BTreeSet<ObjectId> = produced.iter().copied().collect();
+    if super::layers::entry_perturbs_layer_reads(&bulk, &entrants) {
+        return None;
+    }
+    if super::triggers::has_active_state_triggers(&bulk) {
+        return None;
+    }
+    if !bulk_checkpoint_carriers_are_empty(&bulk) {
+        return None;
+    }
+
+    let collection = super::triggers::BulkMemberTriggerCollection::prepare(&bulk);
+    let mut last_member_start = 0;
+    for (index, member) in members.iter().enumerate().skip(1) {
+        if !top_matches_captured_member(&bulk, member) {
+            return None;
+        }
+        let member_start = bulk_events.len();
+        let stack_before = bulk.stack.len();
+        resolve_top(&mut bulk, &mut bulk_events);
+        // CR 117.5 + CR 704.3: this member's elided checkpoint is member 1's
+        // only if the member created member 1's tokens through the same events
+        // and did nothing else.
+        if stack_before.saturating_sub(bulk.stack.len()) != 1
+            || !matches!(bulk.waiting_for, WaitingFor::Priority { .. })
+            || !priority_checkpoint_is_settled(&bulk)
+            || token_entry_events(&bulk_events[member_start..]).as_ref() != Some(&run_events)
+        {
+            return None;
+        }
+        // The elided layer pass would have indexed the new token's triggers.
+        for id in created_token_ids(&bulk_events[member_start..]) {
+            super::trigger_index::reindex_object_triggers(&mut bulk, id);
+        }
+        last_member_start = member_start;
+        if index + 1 < members.len() {
+            let member_events = bulk_events[member_start..].to_vec();
+            if !collection.collect(&mut bulk, &member_events).is_empty() {
+                return Some(BulkMemberRun::StoppedAt { index });
+            }
+        }
+    }
+    Some(BulkMemberRun::Complete {
+        state: Box::new(bulk),
+        events: bulk_events,
+        last_member_start,
+    })
+}
+
+/// The abilities of the top `run_len` entries, top-down. A member whose effect
+/// copies "this creature" copies its own source (CR 707.2), so the bulk
+/// admission reads each member. `None` when an entry carries no ability.
+fn run_member_abilities(state: &GameState, run_len: u32) -> Option<Vec<&ResolvedAbility>> {
+    state
+        .stack
+        .iter()
+        .rev()
+        .take(run_len as usize)
+        .map(StackEntry::ability)
+        .collect()
+}
+
+/// CR 117.4 + CR 608.2: the bulk token executor. Resolves the top `run_len`
+/// entries (already clamped to the session-authorized limit) when Layer B
+/// admits the run (`effects::admits_bulk_token_run`) and its member-1
+/// checkpoint proves the elided checkpoints inert (`resolve_bulk_members`).
+/// When the production collector finds a trigger on member k's events, the
+/// run ends at member k (CR 603.3b): the clone, whose collection ledgers that
+/// collection already wrote, is discarded and members 1..k are resolved again,
+/// so member k's checkpoint is the caller's ordinary pass. Any refusal returns
+/// `None` and the caller falls back to the sequential proof.
+fn resolve_bulk_token_run(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_len: u32,
+) -> Option<u32> {
+    if !priority_checkpoint_is_settled(state) {
+        return None;
+    }
+    // Activation-local trigger collection lives in `state.pending_cast` or in a
+    // cast prompt's `WaitingFor`; with no pending cast at the run start and
+    // `WaitingFor::Priority` after every member, the elided checkpoints'
+    // activation staging has nothing to stage.
+    if state.pending_cast.is_some() || !bulk_checkpoint_carriers_are_empty(state) {
+        return None;
+    }
+    let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack.back()?.kind else {
+        return None;
+    };
+    let run_members = run_member_abilities(state, run_len)?;
+    if !effects::admits_bulk_token_run(state, ability, &run_members) {
+        return None;
+    }
+    let mut members = capture_batch_members(state, run_len);
+    if members.len() < 2 {
+        return None;
+    }
+    let (bulk, bulk_events, last_member_start) = match resolve_bulk_members(state, &members)? {
+        BulkMemberRun::Complete {
+            state,
+            events,
+            last_member_start,
+        } => (state, events, last_member_start),
+        BulkMemberRun::StoppedAt { index } => {
+            members.truncate(index + 1);
+            match resolve_bulk_members(state, &members)? {
+                BulkMemberRun::Complete {
+                    state,
+                    events,
+                    last_member_start,
+                } => (state, events, last_member_start),
+                BulkMemberRun::StoppedAt { .. } => return None,
+            }
+        }
+    };
+    let consumed = members.len() as u32;
+    *state = *bulk;
+    // CR 603.2c: members 1..N−1's events were collected on the clone; only the
+    // last member's events reach the caller's checkpoint.
+    state.consumed_before_priority_trigger_events =
+        consumed_trigger_event_occurrences(&bulk_events[..last_member_start]);
+    events.extend(bulk_events);
+    crate::game::perf_counters::record_stack_batch_plan();
+    crate::game::perf_counters::record_stack_batched_entries(consumed);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_stack_bulk_entries(consumed);
+    Some(consumed)
 }
 
 fn authorized_batch_limit(state: &GameState, requested: Option<u32>) -> u32 {
     let Some(requested) = requested.filter(|limit| *limit > 1) else {
         return 1;
     };
-    let Some(session) = state.stack_resolution_session.as_ref() else {
-        return 1;
-    };
-    if session.policy != StackResolutionPolicy::Committed {
-        return 1;
-    }
-    let Some(top_fence) = session.entries.get(session.cursor) else {
-        return 1;
-    };
-    if !state
-        .stack
-        .back()
-        .is_some_and(|entry| top_fence.matches_captured_entry(entry))
-    {
-        return 1;
-    }
-    let budget = session
-        .budget
-        .max_resolutions()
-        .map(|maximum| maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX)))
-        .unwrap_or(u32::MAX);
-    let fenced_prefix = state
-        .stack
-        .iter()
-        .rev()
-        .zip(session.entries.iter().skip(session.cursor))
-        .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    requested.min(budget).min(fenced_prefix).max(1)
+    super::engine::stack_resolution_session_authorized_limit(state)
+        .map_or(1, |authorized| requested.min(authorized))
 }
 
 /// Optional post-resolution invariant checked after each `resolve_top` and the
@@ -3799,12 +4616,17 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_incarnation,
         trigger_source,
         trigger_definition_ref,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -3829,6 +4651,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -3850,6 +4673,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         repeat_until,
         replacement_applied: _,
         sub_link,
+        target_reads,
         sibling_condition,
         modal,
         mode_abilities,
@@ -3907,6 +4731,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // it is not the vanilla self-counter shape this batch path proves safe.
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -3939,6 +4764,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
+        && *target_reads == TargetReadOrigin::OwnAnnouncement
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -4040,12 +4866,17 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -4070,6 +4901,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4091,6 +4923,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         repeat_until,
         replacement_applied: _,
         sub_link,
+        target_reads,
         sibling_condition,
         modal,
         mode_abilities,
@@ -4140,6 +4973,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4158,6 +4992,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
+        && *target_reads == TargetReadOrigin::OwnAnnouncement
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -4261,12 +5096,17 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
-        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
+        legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -4291,6 +5131,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4312,6 +5153,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         repeat_until,
         replacement_applied: _,
         sub_link,
+        target_reads,
         sibling_condition,
         modal,
         mode_abilities,
@@ -4365,6 +5207,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4383,6 +5226,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
+        && *target_reads == TargetReadOrigin::OwnAnnouncement
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -4391,117 +5235,6 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
-}
-
-/// CR 603.2 + CR 603.3 + CR 603.6a: Layer C — battlefield-wide
-/// observer-order-invariance gate. A batched run is order-invariant iff NO
-/// battlefield trigger fans out on the token-ETB events the batch will emit.
-/// Build the REAL `ZoneChanged` + `TokenCreated` events one produced token
-/// emits (from the resolved spec's true characteristics) and route each through
-/// the public `candidates_for_event` — the same `keys_from_event` path the real
-/// events take downstream, with NO hand-picked key set. If ANY observer is
-/// registered for those events — including one on the run's own source (HIGH-2:
-/// a source carrying a second observer trigger keyed on the produced token's
-/// ETB/TokenCreated must NOT be excluded; doing so would skip the per-trigger
-/// priority interleaving CR 603.3 requires) — sequential resolution interleaves
-/// it per-token (CR 603.3 topmost-on-stack), so the batch ("all tokens, then
-/// all observers") may diverge. Refuse, fall back per-entry. The §2.2a
-/// emits-exactly gate makes this two-event probe complete by construction for
-/// ALL observer axes.
-#[cfg(test)]
-fn observers_are_batch_safe(state: &mut GameState, plan: &effects::BatchPlan) -> bool {
-    for (spec, mana_value) in plan
-        .produced_token_specs()
-        .into_iter()
-        .zip(plan.produced_token_mana_values())
-    {
-        let record = zone_change_record_from_spec(spec, mana_value);
-        let zc = GameEvent::ZoneChanged {
-            object_id: PROBE_ID,
-            from: None,
-            to: Zone::Battlefield,
-            record: Box::new(record),
-        };
-        let tc = GameEvent::TokenCreated {
-            object_id: PROBE_ID,
-            name: spec.characteristics.display_name.clone(),
-            // Synthetic batch-safety probe; the creating source is irrelevant to the
-            // observer-shape check, so reuse the probe sentinel id.
-            source_id: PROBE_ID,
-        };
-        for ev in [&zc, &tc] {
-            // unclassified ∪ buckets matching keys_from_event(ev). The
-            // unclassified bucket (Always/Immediate/dynamic/synthetic-keyword)
-            // is unconditionally included → any catch-all observer forces refuse.
-            // CR 603.3: any registered observer (including the run's own source)
-            // forces sequential resolution so priority interleaves per-token.
-            let candidates = crate::game::trigger_index::candidates_for_event(state, ev);
-            if !candidates.is_empty() && !observer_candidates_are_inert(state, ev, &candidates) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-fn observer_candidates_are_inert(
-    state: &mut GameState,
-    event: &GameEvent,
-    candidates: &[ObjectId],
-) -> bool {
-    let event_keys = crate::game::trigger_index::keys_from_event(event, state);
-    for candidate in candidates {
-        let Some(source_obj) = state.objects.get(candidate) else {
-            continue;
-        };
-        let source_context = super::triggers::trigger_source_context_for_latch(state, source_obj);
-        let controller = source_context.lki.controller;
-        let source = source_context.identity.reference;
-        let triggers = source_context
-            .trigger_entries
-            .iter()
-            .cloned()
-            .enumerate()
-            .collect::<Vec<_>>();
-
-        for (trigger_index, entry) in triggers {
-            let definition_ref = crate::types::ability::TriggerDefinitionRef {
-                source,
-                occurrence: entry.occurrence.clone(),
-            };
-            let trigger = entry.definition;
-            let (trigger_keys, unclassified) =
-                crate::game::trigger_index::keys_from_trigger_def(&trigger);
-            if !unclassified && !trigger_keys.iter().any(|key| event_keys.contains(key)) {
-                continue;
-            }
-            if trigger.condition.as_ref().is_some_and(|condition| {
-                !super::triggers::check_trigger_condition_with_source(
-                    state,
-                    condition,
-                    controller,
-                    Some(&source_context),
-                    Some(event),
-                )
-            }) {
-                continue;
-            }
-
-            let mut ability = super::triggers::build_triggered_ability_from_context(
-                state,
-                &trigger,
-                &source_context,
-                Some(&definition_ref),
-            );
-            ability.ability_index = Some(trigger_index);
-            ability.may_trigger_origin = Some(MayTriggerOrigin::Definition { definition_ref });
-            if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 fn optional_ability_is_inert_under_auto_choice(
@@ -4591,58 +5324,15 @@ fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool 
     optional_ability_is_inert_under_auto_choice(state, ability, trigger_event.as_ref())
 }
 
-/// CR 603.6a + CR 603.10: Build the faithful `ZoneChangeRecord` a produced
-/// token emits, from the resolved `TokenSpec` characteristics. `keys_from_event`
-/// reads only `core_types`/`to` for ETB keys, so the record's `core_types`
-/// drives the entire probe key set (mirrors `snapshot_for_zone_change`).
-#[cfg(test)]
-fn zone_change_record_from_spec(
-    spec: &crate::types::proposed_event::TokenSpec,
-    mana_value: u32,
-) -> crate::types::game_state::ZoneChangeRecord {
-    let ch = &spec.characteristics;
-    crate::types::game_state::ZoneChangeRecord {
-        object_id: PROBE_ID,
-        name: ch.display_name.clone(),
-        core_types: ch.core_types.clone(),
-        subtypes: ch.subtypes.clone(),
-        supertypes: ch.supertypes.clone(),
-        keywords: ch.keywords.clone(),
-        trigger_definitions: Vec::new(),
-        trigger_source_context: None,
-        power: ch.power,
-        toughness: ch.toughness,
-        base_power: ch.power,
-        base_toughness: ch.toughness,
-        colors: ch.colors.clone(),
-        mana_value,
-        controller: spec.controller,
-        owner: spec.controller,
-        from_zone: None,
-        cast_from_zone: None,
-        played_from_zone: None,
-        to_zone: Zone::Battlefield,
-        attachments: Vec::new(),
-        linked_exile_snapshot: Vec::new(),
-        is_token: true,
-        combat_status: Default::default(),
-        co_departed: Vec::new(),
-        attached_to: None,
-        entered_incarnation: None,
-        turn_zone_change_index: 0,
-        recorded_turn_number: 0,
-        // A freshly created token is never suspected (CR 701.60b).
-        is_suspected: false,
-    }
-}
-
 /// CR 111.2 + CR 109.4: The run-identity axis along the source dimension. A
-/// base token's characteristics and controller are fixed at creation and do not
-/// read the creating source, so triggers from DISTINCT sources are
-/// resolution-identical and collapse under `SourceIndependent`. Any
-/// source-relative effect (a copy that reads its own `SelfRef` source, an
-/// attacking/attached token, a source-relative count) keeps a per-source
-/// boundary via `Source(id)` so two sources never collapse incorrectly.
+/// base token whose top-level effect passes
+/// `token::token_effect_is_source_independent` (controller-owned, `Fixed`
+/// count, not attacking, not attached) groups triggers from DISTINCT sources
+/// under `SourceIndependent`; any other effect keeps a per-source boundary via
+/// `Source(id)`. Grouping is not interchangeability: a member's spec or
+/// `ConditionInstead` sub-ability can still read its own source, so every
+/// member resolves through `resolve_top` and the bulk admission
+/// (`token::admits_bulk_run`) compares members before eliding checkpoints.
 #[derive(PartialEq)]
 enum BatchSourceAxis {
     SourceIndependent,
@@ -4667,9 +5357,10 @@ struct BatchRunKey<'a> {
 /// CR 111.2 + CR 109.4: `ResolvedAbility` embeds `source_id` (and nested sub/
 /// else abilities embed their own), so a derived `PartialEq` would treat two
 /// otherwise-identical abilities from distinct sources as unequal — defeating
-/// the `SourceIndependent` collapse. When both keys are `SourceIndependent` the
-/// effect provably reads nothing from the source, so abilities are compared
-/// with `source_id` canonicalized away (recursively, on the chain). When either
+/// the `SourceIndependent` collapse. When both keys are `SourceIndependent`,
+/// abilities are compared with `source_id` canonicalized away (recursively, on
+/// the chain); what each member still reads from its own source is compared by
+/// the bulk admission (`token::admits_bulk_run`). When either
 /// key is `Source(id)`, the per-source boundary already differs, so the regular
 /// deep equality (including `source_id`) applies.
 impl PartialEq for BatchRunKey<'_> {
@@ -4694,9 +5385,10 @@ impl PartialEq for BatchRunKey<'_> {
 
 /// Compare two resolved abilities for batch-run identity while ignoring the
 /// source-object id at every level of the sub/else chain. Cheap clone+normalize
-/// only runs on the batch-eligible path. The classifier guarantees the effect
-/// reads nothing else from the source, so source-id is the only field allowed
-/// to differ across a `SourceIndependent` run.
+/// only runs on the batch-eligible path. Source-id is the only field allowed to
+/// differ across a `SourceIndependent` run; equal abilities can still read
+/// different values from their sources, which the bulk admission compares per
+/// member (`token::admits_bulk_run`).
 fn abilities_equal_ignoring_source(a: &ResolvedAbility, b: &ResolvedAbility) -> bool {
     normalize_ability_source(a) == normalize_ability_source(b)
 }
@@ -4743,6 +5435,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: a_force_block_attacker,
         target_incarnations: a_target_incarnations,
         controller: a_controller,
@@ -4781,6 +5474,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: a_min_x_value,
         announced_x: a_announced_x,
         cant_be_copied: a_cant_be_copied,
+        illegal_targets_disposition: a_illegal_targets_disposition,
         copy_count_status: a_copy_count_status,
         forward_result: a_forward_result,
         unless_pay: a_unless_pay,
@@ -4802,14 +5496,19 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         repeat_until: a_repeat_until,
         replacement_applied: a_replacement_applied,
         sub_link: a_sub_link,
+        target_reads: a_target_reads,
         sibling_condition: a_sibling_condition,
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
-        selected_target_incarnations: a_selected_target_incarnations,
+        target_pins: _,
+        legacy_selected_target_incarnations: _,
+        chosen_target_slots: a_chosen_target_slots,
         activation_cost_reduction: a_activation_cost_reduction,
         activation_record: a_activation_record,
         illegal_target_slots: a_illegal_target_slots,
+        unjudged_target_slots: a_unjudged_target_slots,
+        illegal_local_target_slots: a_illegal_local_target_slots,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -4823,6 +5522,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: b_force_block_attacker,
         target_incarnations: b_target_incarnations,
         controller: b_controller,
@@ -4861,6 +5561,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: b_min_x_value,
         announced_x: b_announced_x,
         cant_be_copied: b_cant_be_copied,
+        illegal_targets_disposition: b_illegal_targets_disposition,
         copy_count_status: b_copy_count_status,
         forward_result: b_forward_result,
         unless_pay: b_unless_pay,
@@ -4882,14 +5583,19 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         repeat_until: b_repeat_until,
         replacement_applied: b_replacement_applied,
         sub_link: b_sub_link,
+        target_reads: b_target_reads,
         sibling_condition: b_sibling_condition,
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
-        selected_target_incarnations: b_selected_target_incarnations,
+        target_pins: _,
+        legacy_selected_target_incarnations: _,
+        chosen_target_slots: b_chosen_target_slots,
         activation_cost_reduction: b_activation_cost_reduction,
         activation_record: b_activation_record,
         illegal_target_slots: b_illegal_target_slots,
+        unjudged_target_slots: b_unjudged_target_slots,
+        illegal_local_target_slots: b_illegal_local_target_slots,
     } = b;
 
     a_effect == b_effect
@@ -4904,12 +5610,15 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // keeps this manual comparison in agreement with the type's derived
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
-        && a_selected_target_incarnations == b_selected_target_incarnations
+        && a.aligned_target_pins() == b.aligned_target_pins()
+        && a_chosen_target_slots == b_chosen_target_slots
         // CR 608.2b: the resolution legality stamp participates for the same
         // reason — agreement with the derived `PartialEq`.
         && a_activation_cost_reduction == b_activation_cost_reduction
         && a_activation_record == b_activation_record
         && a_illegal_target_slots == b_illegal_target_slots
+        && a_unjudged_target_slots == b_unjudged_target_slots
+        && a_illegal_local_target_slots == b_illegal_local_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind
@@ -4942,6 +5651,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_min_x_value == b_min_x_value
         && a_announced_x == b_announced_x
         && a_cant_be_copied == b_cant_be_copied
+        && a_illegal_targets_disposition == b_illegal_targets_disposition
         && a_copy_count_status == b_copy_count_status
         && a_forward_result == b_forward_result
         && a_unless_pay == b_unless_pay
@@ -4969,6 +5679,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_repeat_until == b_repeat_until
         && a_replacement_applied == b_replacement_applied
         && a_sub_link == b_sub_link
+        && a_target_reads == b_target_reads
         && a_sibling_condition == b_sibling_condition
         && a_modal == b_modal
         && a_mode_abilities == b_mode_abilities
@@ -5008,16 +5719,17 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 ///   during resolution. Not in key by design.
 /// - `subject_match_count` — RESOLUTION-RELEVANT but PROVABLY EQUAL across a
 ///   run: it is the CR 603.2c filtered subject count from the firing event
-///   batch. `resolve_batched` lifts it into resolution scope from the run's top
-///   entry (stack.rs:1135-1145), and `trigger_event` (which carries the firing
-///   event) is already in the key — two entries with equal `trigger_event` and
-///   equal deep `ability` carry the same batched subject count. It is therefore
-///   redundant to key on (would never break a run the other fields kept
-///   together) and is correctly applied from the top entry in the batch path.
+///   batch, and `trigger_event` (which carries the firing event) is already in
+///   the key — two entries with equal `trigger_event` and equal deep `ability`
+///   carry the same batched subject count. It is therefore redundant to key on
+///   (would never break a run the other fields kept together). Each member
+///   still resolves its own entry through `resolve_top`, whose
+///   `bind_resolution_scope` lifts that entry's count into resolution scope.
 /// - `die_result` — EXCLUDED for the same reason as `subject_match_count`: it
-///   is CR 706.2 resolution data (the carried die-roll result re-stamped from
-///   the run's top entry in `resolve_batched`), not run identity. Keying on it
-///   would needlessly split runs without changing correctness.
+///   is CR 706.2 resolution data (the carried die-roll result that
+///   `bind_resolution_scope` re-stamps from each member's own entry), not run
+///   identity. Keying on it would needlessly split runs without changing
+///   correctness.
 fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<BatchRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
         source_id,
@@ -5344,8 +6056,8 @@ pub(crate) fn create_warp_delayed_trigger(
     events: &mut Vec<GameEvent>,
 ) {
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Effect,
-        ResolvedAbility,
+        AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition,
+        DelayedTriggerKind, Effect, ResolvedAbility,
     };
     use crate::types::phase::Phase;
 
@@ -5404,6 +6116,7 @@ pub(crate) fn create_warp_delayed_trigger(
             controller,
             source_id: object_id,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,
@@ -5416,17 +6129,18 @@ mod tests {
     use crate::game::game_object::BackFaceData;
     use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
+    use crate::types::ability::{AttachSelection, AttachmentReferent, FilterProp};
     use crate::types::ability::{
         CastingPermission, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, Effect,
-        ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter,
+        ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
         AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
         WaitingFor,
     };
-    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggerFiring};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -5434,6 +6148,200 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 608.2b (typed composition, not printed Oracle): an unjudged
+    /// `PassThrough` occurrence supplies no information to an application
+    /// reader either. Chain: `TargetOnly(C)` (slot 0) -> an `Attach` node whose
+    /// `[C]` is an unclaimed tail (slot 1) -> `TargetOnly(G)` (slot 2, an
+    /// independently legal creature, so the chain resolves) -> an untargeted
+    /// `DestroyAll(Equipment attached to <declared slot>)`. With C's actual
+    /// declaration illegal, reading the tail's slot 1 destroys nothing, while
+    /// reading G's slot 2 on the same chain destroys G's Equipment (reach: the
+    /// chain resolves and the reader works). Control: with C legal, reading
+    /// C's own slot 0 destroys C's Equipment.
+    #[test]
+    fn untargeted_reader_gets_no_information_from_an_unjudged_tail() {
+        let artifact = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        let creature_filter = || TargetFilter::Typed(TypedFilter::creature());
+        // (C's declaring filter, slot read, [C's Equipment destroyed, G's destroyed])
+        let cases = [
+            (artifact(), 1, [false, false]),
+            (artifact(), 2, [false, true]),
+            (creature_filter(), 0, [true, false]),
+        ];
+        for (root_filter, read_slot, destroyed) in cases {
+            let label = format!("read slot {read_slot}, destroyed {destroyed:?}");
+            let mut state = setup();
+            let permanent = |state: &mut GameState, name: &str, core: CoreType| {
+                let id = create_object(
+                    state,
+                    CardId(1),
+                    PlayerId(1),
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(core);
+                if core == CoreType::Artifact {
+                    obj.card_types.subtypes.push("Equipment".to_string());
+                }
+                id
+            };
+            let c = permanent(&mut state, "Creature C", CoreType::Creature);
+            let g = permanent(&mut state, "Creature G", CoreType::Creature);
+            let c_equipment = permanent(&mut state, "Equipment E", CoreType::Artifact);
+            let g_equipment = permanent(&mut state, "Equipment F", CoreType::Artifact);
+            crate::game::effects::attach::attach_to(&mut state, c_equipment, c);
+            crate::game::effects::attach::attach_to(&mut state, g_equipment, g);
+            let spell = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Probe".to_string(),
+                Zone::Stack,
+            );
+            let destroy = ResolvedAbility::new(
+                Effect::DestroyAll {
+                    target: TargetFilter::Typed(
+                        TypedFilter::default()
+                            .subtype("Equipment".to_string())
+                            .properties(vec![FilterProp::AttachedTo {
+                                to: AttachmentReferent::DeclaredTarget { slot: read_slot },
+                            }]),
+                    ),
+                    cant_regenerate: false,
+                },
+                vec![],
+                spell,
+                PlayerId(0),
+            );
+            let mut keep_alive = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: creature_filter(),
+                },
+                vec![TargetRef::Object(g)],
+                spell,
+                PlayerId(0),
+            );
+            keep_alive.sub_ability = Some(Box::new(destroy));
+            let mut attach = ResolvedAbility::new(
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::ParentTarget,
+                    selection: AttachSelection::Targeted,
+                },
+                vec![TargetRef::Object(c)],
+                spell,
+                PlayerId(0),
+            );
+            attach.sub_ability = Some(Box::new(keep_alive));
+            let mut root = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: root_filter,
+                },
+                vec![TargetRef::Object(c)],
+                spell,
+                PlayerId(0),
+            );
+            root.sub_ability = Some(Box::new(attach));
+            root.capture_target_incarnations_recursive(&state);
+            assert_eq!(
+                crate::game::ability_utils::declared_targets_in_chain(&root).len(),
+                3,
+                "{label}: reach: C, the Attach tail and G occupy slots 0, 1 and 2"
+            );
+            state.stack.push_back(StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(3),
+                    ability: Some(Box::new(root)),
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+            let zone = |gone: bool| {
+                if gone {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            };
+            assert_eq!(
+                [
+                    state.objects[&c_equipment].zone,
+                    state.objects[&g_equipment].zone
+                ],
+                [zone(destroyed[0]), zone(destroyed[1])],
+                "{label}: [C's Equipment, G's Equipment]"
+            );
+        }
+    }
+
+    #[test]
+    fn residual_trigger_firing_refuses_resolution_without_popping_the_stack() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pending spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                ))),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        // Exercise the existing residual continuation-firing boundary, not a
+        // claim that ordinary play creates an incoherent carrier.
+        crate::game::effects::restore_continuation_trigger_firing(
+            &mut state,
+            Some(TriggerFiring::Ordinary),
+        );
+        assert!(state.resolving_stack_entry.is_none());
+        assert_eq!(
+            state.resolving_trigger_firing,
+            Some(TriggerFiring::Ordinary)
+        );
+        let mut events = Vec::new();
+
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack.back().unwrap().id, source);
+        assert_eq!(state.objects[&source].zone, Zone::Stack);
+        assert_eq!(
+            state.resolving_trigger_firing,
+            Some(TriggerFiring::Ordinary)
+        );
+        assert!(events.is_empty());
+
+        // Paired reach control: this same spell resolves once the admission
+        // slots are empty, so refusal did not pass by using an empty stack.
+        state.resolving_trigger_firing = None;
+        resolve_top(&mut state, &mut events);
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::StackResolved { object_id } if *object_id == source
+        )));
     }
 
     #[test]
@@ -5697,6 +6605,271 @@ mod tests {
                 actual_mana_spent: 0,
             },
         }
+    }
+
+    /// CR 608.2c + CR 608.2n: a carrier whose instant or sorcery is still on the
+    /// stack and whose marker says it owes that spell's final part. The settle
+    /// before a trigger selection does not retire it; the next resolution runs
+    /// the final part first, and only then is the carrier retired.
+    #[test]
+    fn an_owed_final_part_blocks_settling_until_it_is_run() {
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Window Sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.resolving_stack_entry = Some(pending_spell_entry(spell));
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        super::super::engine::settle_resolving_stack_entry_before_trigger_selection(&mut state);
+        assert!(
+            state.resolving_stack_entry.is_some(),
+            "the carrier stays while its spell's final part is owed"
+        );
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(state.players[0].graveyard.contains(&spell));
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == spell)
+        ));
+        assert!(
+            state.resolving_stack_entry.is_none(),
+            "then the carrier settles"
+        );
+        assert!(
+            state.resolving_spell_final_part.is_none(),
+            "and the owed final part ends with its carrier"
+        );
+    }
+
+    /// CR 608.2n: abandoning a resolution family keeps the carrier of an instant
+    /// or sorcery still owing its final part, which then delivers it, and drops
+    /// a carrier whose spell already left the stack.
+    #[test]
+    fn abandoning_a_resolution_keeps_only_a_spell_still_owing_its_final_part() {
+        for (zone, kept) in [(Zone::Stack, true), (Zone::Graveyard, false)] {
+            let mut state = setup();
+            let spell = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Paused Sorcery".to_string(),
+                zone,
+            );
+            state.resolving_stack_entry = Some(pending_spell_entry(spell));
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+
+            abandon_active_resolution_carrier(
+                &mut state,
+                super::super::lifecycle::DelayedTerminalDisposition::Removed,
+            );
+            assert_eq!(
+                state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+                kept.then_some(spell),
+                "{zone:?}"
+            );
+            assert_eq!(
+                state.resolving_spell_final_part.map(|owed| owed.spell),
+                kept.then_some(spell),
+                "{zone:?}"
+            );
+            if !kept {
+                continue;
+            }
+
+            let mut events = Vec::new();
+            assert!(super::super::engine::run_spell_final_part_if_due(
+                &mut state,
+                &mut events
+            ));
+            assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::StackResolved { object_id } if *object_id == spell
+                    ))
+                    .count(),
+                1
+            );
+            assert!(state.resolving_stack_entry.is_none());
+            assert!(state.resolving_spell_final_part.is_none());
+        }
+    }
+
+    /// CR 608.2c + CR 608.2n: "the instructions are done" and "the carrier may
+    /// settle" are different questions. A carrier whose instructions are done
+    /// but which still owes its spell's final part is not retired by the settle
+    /// wrappers; only `run_spell_final_part_if_due` runs that part, retires the
+    /// carrier, and claims the part's events for the ordinary collector.
+    #[test]
+    fn the_settle_wrappers_never_run_an_owed_final_part() {
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Paused Sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.resolving_stack_entry = Some(pending_spell_entry(spell));
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        assert!(super::super::engine::resolution_instructions_are_done(
+            &state
+        ));
+        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        assert_eq!(
+            state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+            Some(spell),
+            "the wrapper does not retire a carrier that owes its final part"
+        );
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+
+        let mut events = Vec::new();
+        assert!(super::super::engine::run_spell_final_part_if_due(
+            &mut state,
+            &mut events
+        ));
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::StackResolved { object_id } if *object_id == spell
+                ))
+                .count(),
+            1
+        );
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_spell_final_part.is_none());
+        assert!(!state.consumed_before_priority_trigger_events.is_empty());
+        assert!(state
+            .consumed_before_priority_trigger_events
+            .iter()
+            .all(|claimed| claimed.scope
+                == crate::game::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly));
+
+        // Paired positive: with no owed final part the same carrier is done
+        // and may settle, and the wrapper retires it.
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Finished Sorcery".to_string(),
+            Zone::Graveyard,
+        );
+        state.resolving_stack_entry = Some(pending_spell_entry(spell));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        assert!(state.resolving_stack_entry.is_none());
+    }
+
+    /// §7.2: the resolver's count is the number of entries it took off the
+    /// stack. A refusal that leaves the top entry in place consumes nothing.
+    #[test]
+    fn the_resolver_counts_only_an_entry_it_popped() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pending spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                ))),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        // A residual firing makes `resolve_top` refuse without popping.
+        crate::game::effects::restore_continuation_trigger_firing(
+            &mut state,
+            Some(TriggerFiring::Ordinary),
+        );
+        let mut events = Vec::new();
+
+        assert_eq!(resolve_next(&mut state, &mut events), 0);
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack.back().unwrap().id, source);
+
+        // Paired positive: once the firing is cleared the entry pops and
+        // resolves, and the count is 1.
+        state.resolving_trigger_firing = None;
+        assert_eq!(resolve_next(&mut state, &mut events), 1);
+        assert!(state.stack.is_empty());
+    }
+
+    /// CR 608.2n: an owed final part belongs to the carrier that owes it. A
+    /// marker left with no carrier is a contract breach: a new carrier cannot
+    /// begin, and `resolve_top` refuses without popping the stack.
+    #[test]
+    fn a_leftover_final_part_marker_refuses_a_new_carrier() {
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pending sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(pending_spell_entry(spell));
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart {
+            spell: ObjectId(spell.0 + 100),
+        });
+
+        assert_eq!(
+            begin_resolving_stack_entry(&mut state, pending_spell_entry(spell), None),
+            Err(ResolutionCarrierError::AlreadyResolving)
+        );
+        assert!(state.resolving_stack_entry.is_none());
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+        assert_eq!(state.stack.len(), 1, "the stack top was not popped");
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert!(events.is_empty());
+
+        // Paired reach control: with no leftover marker the same spell pops
+        // and resolves, so the refusal above was the marker's.
+        state.resolving_spell_final_part = None;
+        resolve_top(&mut state, &mut events);
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == spell)
+        ));
     }
 
     #[test]
@@ -5994,6 +7167,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let description =
             "Whenever this creature deals combat damage to a player, you may destroy target artifact or enchantment that player controls."
@@ -6409,6 +7583,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(999)), // target doesn't matter for this test
             source_id: spell_id,
             source_controller: PlayerId(0),
+            targeter: None,
         };
 
         // Build a triggered ability that would want to resolve TriggeringSpellController
@@ -7253,7 +8428,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -8341,13 +9516,14 @@ mod tests {
         // Driver internals under test (the stack module).
         use super::super::{
             batch_run_len, effects, fixed_controller_gain_life_run_len,
-            fixed_opponent_effect_run_len, observers_are_batch_safe,
-            priority_checkpoint_is_settled, resolve_next, resolve_next_with_limit,
-            resolve_proven_inert_trigger_batch_with_proof_hook, resolve_top, self_counter_run_len,
+            fixed_opponent_effect_run_len, priority_checkpoint_is_settled, resolve_next,
+            resolve_next_with_limit, resolve_proven_inert_trigger_batch_with_proof_hook,
+            resolve_top, run_member_abilities, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::{pending_spell_entry, setup};
         use crate::game::triggers;
+        use crate::game::turn_control::authorized_submitter_for_player;
         use crate::game::zones::create_object;
         use crate::types::ability::{
             AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, FilterProp,
@@ -8358,8 +9534,9 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
-            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, MeldSelection,
-            PendingLiminalEntryResume, PendingResolutionCompletion, PendingTokenBattlefieldEntry,
+            ActivePlayerControl, AutoMayChoice, GameState, MayTriggerAutoChoiceKey,
+            MayTriggerOrigin, MeldSelection, PendingLiminalEntryResume,
+            PendingResolutionCompletion, PendingTokenBattlefieldEntry, PriorityPassingMode,
             StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
             StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
             StackResolutionSession,
@@ -8501,8 +9678,8 @@ mod tests {
 
         /// Create a plain creature permanent (no triggers/replacements) under
         /// player 0 with the given P/T and a single subtype, and return its id.
-        /// Copy sources for the batch-copy path must be observer-free so the
-        /// copy token inherits no ETB-keyed trigger (§2.3a). `name` doubles as
+        /// Copy sources for the batch-copy path are observer-free so the copy
+        /// token inherits no trigger that sees its siblings. `name` doubles as
         /// the subtype so distinct names yield distinct copiable values.
         fn add_plain_creature_source(
             state: &mut GameState,
@@ -8573,7 +9750,7 @@ mod tests {
         /// trigger. `name` doubles as the subtype so distinct names yield
         /// distinct copiable values. Unlike `add_plain_creature_source`, the copy
         /// token is NOT observer-free — but its Land-keyed trigger does not
-        /// observe its Creature siblings, so the refined §2.3a gate batches it.
+        /// observe its Creature siblings, so the run still batches.
         fn add_landfall_creature_source(
             state: &mut GameState,
             name: &str,
@@ -8626,8 +9803,8 @@ mod tests {
         /// Create a copy source whose copied token would OBSERVE its in-batch
         /// siblings: a Creature carrying a "whenever a creature you control
         /// enters" trigger registered under `EnterBattlefield(Some(Creature))`.
-        /// A CR 707.2 copy inherits it, and the copy's Creature emission DOES
-        /// intersect the Creature ETB key, so the refined §2.3a gate must refuse.
+        /// A CR 707.2 copy inherits it, and it sees each Creature copy enter,
+        /// so the run must never take a bulk boundary.
         fn add_creature_observer_source(
             state: &mut GameState,
             name: &str,
@@ -8998,22 +10175,13 @@ mod tests {
             all_events
         }
 
-        /// Test shim: gather the top `run_len` run source ids and invoke the
-        /// real `effects::try_resolve_batch`. Mirrors the gather `resolve_next`
-        /// performs at the live call site so tests exercise the true signature.
-        fn try_batch(
-            state: &GameState,
-            ability: &ResolvedAbility,
-            run_len: u32,
-        ) -> Option<effects::BatchPlan> {
-            let run_source_ids: Vec<ObjectId> = state
-                .stack
-                .iter()
-                .rev()
-                .take(run_len as usize)
-                .map(|e| e.source_id)
-                .collect();
-            effects::try_resolve_batch(state, ability, run_len, &run_source_ids)
+        /// Test shim over the production bulk admission verdict for the run on
+        /// top of the stack, with the call site's per-member source gather.
+        fn admits(state: &GameState, ability: &ResolvedAbility) -> bool {
+            let run_len = batch_run_len(state).expect("a batch run is on top");
+            let run_members =
+                run_member_abilities(state, run_len).expect("every member is an ability");
+            effects::admits_bulk_token_run(state, ability, &run_members)
         }
 
         fn token_ids(state: &GameState) -> Vec<ObjectId> {
@@ -9055,7 +10223,7 @@ mod tests {
         }
 
         #[test]
-        fn resolve_next_with_limit_requires_a_committed_session() {
+        fn resolve_next_with_limit_requires_a_session_authority() {
             let mut state = setup();
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
@@ -9089,7 +10257,7 @@ mod tests {
         }
 
         #[test]
-        fn recheck_session_cannot_authorize_a_multi_entry_resolution() {
+        fn recheck_session_without_a_verified_or_standing_pass_resolves_one_entry() {
             let mut state = setup();
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
@@ -9104,6 +10272,95 @@ mod tests {
                 1
             );
             assert_eq!(state.stack.len(), 2);
+        }
+
+        /// CR 117.3b + CR 117.4 + CR 732.2b: once every participant is a
+        /// representative with a verified pass, the Recheck session authorizes
+        /// the whole fenced prefix in one boundary.
+        #[test]
+        fn fully_verified_recheck_session_authorizes_the_fenced_prefix() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+            arm_committed_session(&mut state);
+            {
+                let session = state.stack_resolution_session.as_mut().unwrap();
+                session.policy = StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
+                session.representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+                session.verified_pass_representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+            }
+
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_with_limit(&mut state, &mut events, Some(u32::MAX)),
+                3
+            );
+            assert!(state.stack.is_empty());
+            assert_eq!(token_ids(&state).len(), 3);
+        }
+
+        /// CR 117.1: a Full Control participant never authorizes a skipped
+        /// window, so a committed session resolves one entry per boundary.
+        #[test]
+        fn full_control_participant_limits_a_committed_session_to_one_entry() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+            state
+                .priority_passing_modes
+                .insert(PlayerId(1), PriorityPassingMode::FullControl);
+
+            let mut events = Vec::new();
+            assert_eq!(resolve_next_committed(&mut state, &mut events), 1);
+            assert_eq!(state.stack.len(), 2);
+            assert_eq!(token_ids(&state).len(), 1);
+        }
+
+        /// CR 723.5: the Full Control preference that refuses a skipped window
+        /// belongs to the player making the seat's decisions, so a
+        /// turn-controlled seat follows its controller's mode, not its own.
+        #[test]
+        fn turn_controlled_seat_full_control_follows_its_controller() {
+            let build = |full_control: PlayerId| {
+                let mut state = setup();
+                add_lands(&mut state, 3);
+                let src = add_scute_source(&mut state);
+                push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+                state.active_player = PlayerId(0);
+                state.active_full_turn_control = Some(ActivePlayerControl {
+                    controller: PlayerId(1),
+                    timestamp: 1,
+                });
+                state.turn_decision_controller = Some(PlayerId(1));
+                state.turn_decision_control_timestamp = Some(1);
+                state
+                    .priority_passing_modes
+                    .insert(full_control, PriorityPassingMode::FullControl);
+                state
+            };
+
+            let mut controlled_seat_full_control = build(PlayerId(0));
+            assert_eq!(
+                authorized_submitter_for_player(&controlled_seat_full_control, PlayerId(0)),
+                PlayerId(1),
+                "reach guard: the turn-control latch routes P0's decisions to P1"
+            );
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_committed(&mut controlled_seat_full_control, &mut events),
+                3
+            );
+            assert!(controlled_seat_full_control.stack.is_empty());
+
+            let mut controller_full_control = build(PlayerId(1));
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_committed(&mut controller_full_control, &mut events),
+                1
+            );
+            assert_eq!(controller_full_control.stack.len(), 2);
         }
 
         #[test]
@@ -9831,20 +11088,6 @@ mod tests {
             );
         }
 
-        // §9.2 — Layer C reports safe on an observer-free board.
-        #[test]
-        fn observers_are_batch_safe_true_without_observers() {
-            let mut state = setup();
-            add_lands(&mut state, 3);
-            let src = add_scute_source(&mut state);
-            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
-            let run_len = batch_run_len(&state).unwrap();
-            assert_eq!(run_len, 5);
-            let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
-            assert!(observers_are_batch_safe(&mut state, &plan));
-        }
-
         // §9.4a — Cathars'-class creature-ETB observer forces refusal + the
         // sequential fall-back produces the DESCENDING per-token distribution.
         #[test]
@@ -9890,14 +11133,13 @@ mod tests {
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
 
-            // Layer C refuses.
+            // Reach guard: the shape gate admits the run, so the refusal below
+            // is member 1's priority checkpoint collecting the observer.
             {
-                let run_len = batch_run_len(&state).unwrap();
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
-                let plan = try_batch(&state, &ability, run_len).unwrap();
                 assert!(
-                    !observers_are_batch_safe(&mut state, &plan),
-                    "creature-ETB observer must force refusal"
+                    admits(&state, &ability),
+                    "reach: the observer-free token shape must pass admission"
                 );
             }
 
@@ -9932,8 +11174,8 @@ mod tests {
         }
 
         // §9.5 — entering +1/+1 counter + live CounterAdded observer: the §2.2a
-        // gate refuses BEFORE Layer C is consulted (try_resolve_batch == None),
-        // and the sequential fall-back produces the descending distribution.
+        // gate refuses the run at admission, and the sequential fall-back
+        // produces the descending distribution.
         #[test]
         fn entering_counter_with_counteradded_observer_refuses_and_falls_back() {
             let mut state = setup();
@@ -9990,13 +11232,13 @@ mod tests {
             }
             push_token_triggers(&mut state, src, saproling, None, 5);
 
-            // §2.2a: spec_emits_only_etb_pair == false ⇒ try_resolve_batch == None.
+            // §2.2a: spec_emits_only_etb_pair == false ⇒ admission refuses.
             {
-                let run_len = batch_run_len(&state).unwrap();
+                assert_eq!(batch_run_len(&state), Some(5));
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 assert!(
-                    try_batch(&state, &ability, run_len).is_none(),
-                    "entering-counter spec must fail the §2.2a gate before Layer C"
+                    !admits(&state, &ability),
+                    "entering-counter spec must fail the §2.2a gate"
                 );
             }
 
@@ -10047,9 +11289,9 @@ mod tests {
                 };
             }
             push_token_triggers(&mut state, src, effect, None, 5);
-            let run_len = batch_run_len(&state).unwrap();
+            assert_eq!(batch_run_len(&state), Some(5));
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            assert!(try_batch(&state, &ability, run_len).is_none());
+            assert!(!admits(&state, &ability));
         }
 
         #[test]
@@ -10191,13 +11433,14 @@ mod tests {
         }
 
         // §2.2 + CR 707.2 — ConditionInstead MET copy branch: a single
-        // (identical-value) source's met copy-instead swap now BATCHES along the
-        // value-equal prefix (whole run), consuming `run_len` entries.
+        // (identical-value) source's met copy-instead swap is admitted by the
+        // production verdict, and the bulk executor consumes the whole run in
+        // one boundary.
         #[test]
-        fn condition_instead_met_copy_branch_refuses() {
+        fn condition_instead_met_copy_branch_is_admitted() {
             let mut state = setup();
             add_lands(&mut state, 6); // 6 lands → "if you control 6+ lands" is met.
-                                      // Observer-free source so the copy token passes the §2.3a gate.
+                                      // Observer-free source, so member 1's checkpoint stays inert.
             let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
             let sub = copy_instead_sub(src, 6);
 
@@ -10208,17 +11451,18 @@ mod tests {
                 Some(Box::new(sub)),
                 5,
             );
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // Condition met (6 lands) ⇒ swap to CopyTokenOf. The single source's
-            // 5 entries share identical copiable values (CR 707.2), so the copy
-            // prefix collapses the whole run into one batch.
-            let plan = try_batch(&state, &ability, run_len)
-                .expect("met copy-instead with identical values must batch");
+            // Condition met (6 lands) ⇒ swap to CopyTokenOf. The single
+            // source's 5 entries share identical copiable values (CR 707.2).
+            assert!(
+                admits(&state, &ability),
+                "met copy-instead with identical values must be admitted"
+            );
+            crate::game::perf_counters::reset();
+            assert_eq!(resolve_to_empty_batched(&mut state), vec![5]);
             assert_eq!(
-                plan.consumed(),
-                run_len,
-                "identical-source copy prefix must consume the full run"
+                crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                5
             );
         }
 
@@ -10266,7 +11510,8 @@ mod tests {
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // Land count invariant (token is a Creature, condition counts Lands) ⇒
             // base branch is provably stable ⇒ batchable.
-            assert!(try_batch(&state, &ability, run_len).is_some());
+            assert_eq!(run_len, 5);
+            assert!(admits(&state, &ability));
         }
 
         // §3.4 — mandatory Doubling-Season-class replacement still batches and
@@ -10306,11 +11551,11 @@ mod tests {
         }
 
         // §3.4 + CR 614.1a + CR 707.2 (issue #1511): a mandatory token-count
-        // doubler applies to a `CopyTokenOf` swap collapsed into the copy-prefix
-        // batch — each of the 5 self-copy resolutions creates one copy doubled
-        // to two, for 10 copy tokens. Locks in that routing copy-token creation
-        // through the `CreateToken` replacement pipeline doubles uniformly on
-        // the batched copy path without double-counting.
+        // doubler applies to a `CopyTokenOf` swap inside a bulk copy run — each
+        // of the 5 self-copy resolutions creates one copy doubled to two, for
+        // 10 copy tokens. Locks in that routing copy-token creation through the
+        // `CreateToken` replacement pipeline doubles uniformly on the batched
+        // copy path without double-counting.
         #[test]
         fn mandatory_token_doubling_batches_and_doubles_copy_prefix() {
             let mut state = setup();
@@ -10450,90 +11695,9 @@ mod tests {
             );
         }
 
-        // §9.5 HIGH-2 — produced-token-non-observer gate (direct, discriminating):
-        // the gate is the INTERSECTION of a trigger's registered keys with the
-        // produced token's CR 603.6a emission. A Creature produced token emits
-        // exactly {EnterBattlefield(None), EnterBattlefield(Some(Creature)),
-        // TokenCreated}. A creature-ETB observer intersects (refused); the real
-        // Scute-shape landfall trigger (EnterBattlefield(Some(Land))) does NOT
-        // intersect a creature emission and is batch-SAFE (the HIGH fix — the old
-        // coarse wildcard gate refused this and the headline repro never batched).
-        #[test]
-        fn produced_token_non_observer_gate_discriminates() {
-            use super::super::effects::token::produced_token_is_non_observer;
-            // The produced (copied) token is a Creature: emission =
-            // {None, Some(Creature), TokenCreated}.
-            let produced_creature = [CoreType::Creature];
-
-            // A creature-ETB observer trigger registers under Some(Creature) ⇒
-            // intersects the creature emission ⇒ must fail the gate.
-            let etb_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Creature],
-                    ..Default::default()
-                }));
-            assert!(
-                !produced_token_is_non_observer(
-                    std::slice::from_ref(&etb_observer),
-                    &produced_creature
-                ),
-                "a creature-ETB-observing produced token must fail the gate"
-            );
-
-            // The HEADLINE fix: a landfall trigger registers under
-            // EnterBattlefield(Some(Land)). A Creature copy emits no Land key, so
-            // the intersection is EMPTY ⇒ the Scute-shape copy is batch-SAFE. The
-            // old coarse gate (any EnterBattlefield(_)) refused this and the named
-            // repro never collapsed.
-            let landfall = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Land],
-                    ..Default::default()
-                }));
-            assert!(
-                produced_token_is_non_observer(std::slice::from_ref(&landfall), &produced_creature),
-                "a Land-keyed landfall trigger on a Creature copy does not observe \
-                 its creature siblings ⇒ batch-safe (the HIGH fix)"
-            );
-
-            // Over-permit guard: a broad permanent-ETB observer registers under
-            // the broad EnterBattlefield(None) key, which is in EVERY token's
-            // emission ⇒ must still be refused.
-            let broad_etb = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Permanent],
-                    ..Default::default()
-                }));
-            assert!(
-                !produced_token_is_non_observer(
-                    std::slice::from_ref(&broad_etb),
-                    &produced_creature
-                ),
-                "a broad permanent-ETB observer (None key) intersects every emission ⇒ refused"
-            );
-
-            // Symmetry check: the SAME landfall trigger on a LAND copy (emission
-            // includes Some(Land)) DOES intersect ⇒ refused. Proves the gate keys
-            // off the produced token's real core types, not a fixed assumption.
-            assert!(
-                !produced_token_is_non_observer(std::slice::from_ref(&landfall), &[CoreType::Land]),
-                "a landfall trigger on a Land copy observes its land siblings ⇒ refused"
-            );
-
-            // No triggers ⇒ passes (the bare Insect/Servo go-wide case).
-            assert!(
-                produced_token_is_non_observer(&[], &produced_creature),
-                "a trigger-free produced token passes the gate"
-            );
-        }
-
-        // §9.5 HIGH-2 — produced-token-non-observer gate: a CopyTokenOf run whose
-        // copy SOURCE carries an ETB observer trigger must refuse. (The copy
-        // branch falls back wholesale in v1 — see B5 — so this confirms a
-        // copy-source observer never reaches a batched resolution.)
+        // A CopyTokenOf run whose copy SOURCE carries an ETB observer trigger
+        // must refuse. Its copy target is a specific object, not `SelfRef`, so
+        // the copy arm's shape gate refuses it.
         #[test]
         fn copy_source_with_etb_observer_refuses_to_batch() {
             let mut state = setup();
@@ -10572,8 +11736,8 @@ mod tests {
             let src = add_scute_source(&mut state);
 
             // sub: CopyTokenOf gated by a MET ConditionInstead (lands >= 1) so the
-            // copy branch is selected, then assert refusal (copy path falls back
-            // wholesale in v1 — so a copy-source observer never batches).
+            // copy branch is selected, then assert refusal: the copy target is a
+            // specific object, not `SelfRef`, so the copy arm's shape gate refuses.
             let copy_effect = Effect::CopyTokenOf {
                 target: TargetFilter::SpecificObject { id: copy_source },
                 owner: TargetFilter::Controller,
@@ -10607,14 +11771,13 @@ mod tests {
                 Some(Box::new(sub)),
                 5,
             );
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // The instead-swap fires (>= 1 land) ⇒ copy branch ⇒ not batchable in
-            // v1 (the copy path produces no TokenSpec and falls back). The gate
-            // therefore refuses regardless — confirming a copy-source observer
-            // never reaches a batched resolution.
+            // The instead-swap fires (>= 1 land) ⇒ copy branch. Its copy target
+            // is a specific object, not `SelfRef`, so the copy arm's shape gate
+            // refuses — a copy-source observer never reaches a batched
+            // resolution.
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "copy branch (and any copy-source observer) must refuse to batch"
             );
         }
@@ -10647,12 +11810,12 @@ mod tests {
             crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
-            let run_len = batch_run_len(&state).unwrap();
+            assert_eq!(batch_run_len(&state), Some(5));
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // The optional replacement could pause for a NeedsChoice prompt
             // mid-batch ⇒ Layer B refuses.
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "optional replacement must force fall-back"
             );
         }
@@ -10663,13 +11826,10 @@ mod tests {
         // creature enters, draw a card."). Under CR 603.3 each token-creation and
         // each observer firing goes on the stack one at a time, with priority in
         // between, so batching ("all tokens, then all observers") would skip the
-        // priority interleaving and let a player act between resolutions. Layer C
-        // MUST refuse. This test would have FALSELY PASSED (batch wrongly allowed)
-        // when `observers_are_batch_safe` excluded the run's own source IDs: the
-        // creature-ETB candidate == the run source, so the old `run_source_ids`
-        // exclusion filtered it out and reported the run batch-safe. With the
-        // exclusion removed, any registered observer — including the source's own
-        // second trigger — forces sequential resolution.
+        // priority interleaving and let a player act between resolutions. Member
+        // 1's priority checkpoint runs the production collector, which sees the
+        // source's own second trigger exactly as sequential resolution would, so
+        // the run resolves one entry at a time.
         #[test]
         fn source_with_own_token_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -10703,16 +11863,10 @@ mod tests {
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
 
-            let run_len = batch_run_len(&state).unwrap();
+            // Reach guard: admission passes, so the refusal below is member 1's
+            // checkpoint collecting the source's own creature-ETB trigger.
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
-            // The creature-ETB candidate IS the run source `src`. Pre-fix, the
-            // exclusion dropped it and this assertion would FAIL (batch allowed);
-            // post-fix it must hold (refuse to batch).
-            assert!(
-                !observers_are_batch_safe(&mut state, &plan),
-                "run source's own token-ETB observer must force sequential resolution (CR 603.3)"
-            );
+            assert!(admits(&state, &ability));
 
             // End-to-end: the batch driver must fall back to one entry at a time.
             let steps = resolve_to_empty_batched(&mut state);
@@ -10724,8 +11878,8 @@ mod tests {
 
         // §9.4a HIGH-1 regression — a live non-run battlefield observer keyed on a
         // NARROW non-Creature ETB subtype (artifact creature) that the produced
-        // token matches must force Layer C to refuse. A round-2-style fixed
-        // `Some(Creature)` probe would have MISSED the `Some(Artifact)` bucket.
+        // token matches must force refusal. Member 1's checkpoint collects it
+        // through the production collector, whatever bucket it registers under.
         #[test]
         fn narrow_artifact_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -10763,8 +11917,7 @@ mod tests {
             crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
             // The produced token is an ARTIFACT CREATURE (core_types = [Artifact,
-            // Creature]) — so the Layer C probe builds a record whose core_types
-            // include Artifact and hits the narrow observer's bucket.
+            // Creature]), so its entry matches the narrow observer.
             let mut servo = insect_token_effect();
             if let Effect::Token { name, types, .. } = &mut servo {
                 *name = "Servo".to_string();
@@ -10772,17 +11925,17 @@ mod tests {
             }
             push_token_triggers(&mut state, src, servo, None, 5);
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
+            assert!(admits(&state, &ability), "reach: admission passes");
+            let steps = resolve_to_empty_batched(&mut state);
             assert!(
-                !observers_are_batch_safe(&mut state, &plan),
-                "narrow artifact-ETB observer must force refusal (Some(Artifact) bucket)"
+                steps.iter().all(|&c| c == 1),
+                "narrow artifact-ETB observer must force refusal, got {steps:?}"
             );
         }
 
         // §9.4a — a meaningful broad-ETB observer (valid_card = Permanent) keyed
-        // under EnterBattlefield(None) must still force Layer C to refuse.
+        // under EnterBattlefield(None) must still force refusal.
         #[test]
         fn kodama_broad_permanent_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -10822,28 +11975,25 @@ mod tests {
 
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = try_batch(&state, &ability, run_len).unwrap();
+            assert!(admits(&state, &ability), "reach: admission passes");
+            let steps = resolve_to_empty_batched(&mut state);
             assert!(
-                !observers_are_batch_safe(&mut state, &plan),
-                "meaningful broad permanent-ETB observer must force Layer C refusal"
+                steps.iter().all(|&c| c == 1),
+                "meaningful broad permanent-ETB observer must force refusal, got {steps:?}"
             );
         }
 
-        // CR 113.6 + CR 603.3 — the third production consumer of the
-        // `candidates_for_event` seam. `observers_are_batch_safe` is the
-        // batch-safety gate, so the live-zone guard changes a BATCHING decision
-        // here, not only trigger firing: a stale off-battlefield observer used
-        // to make `candidates` non-empty and force the conservative sequential
-        // path. Dropping it cannot turn a safe batch unsafe, because an
-        // observer that cannot legally trigger under CR 113.6 cannot make a
-        // batch order-sensitive.
+        // CR 113.6 + CR 603.3 — a stale off-battlefield observer reaches the
+        // bulk executor only through member 1's checkpoint, which runs the
+        // production collector and its `candidates_for_event` live-zone guard.
+        // An observer that cannot legally trigger under CR 113.6 cannot make
+        // the run order-sensitive, so the bulk outcome must equal sequential.
         #[test]
         fn stale_off_battlefield_observer_does_not_force_batch_refusal() {
             // Same broad permanent-ETB observer shape as
             // `kodama_broad_permanent_etb_observer_forces_refusal`.
-            let build = || -> (GameState, ObjectId, effects::BatchPlan) {
+            let build = || -> (GameState, ObjectId) {
                 let mut state = setup();
                 add_lands(&mut state, 3);
                 let src = add_scute_source(&mut state);
@@ -10875,51 +12025,37 @@ mod tests {
                     obj.trigger_definitions.push(trig);
                 }
                 // Register while the observer is legitimately on the
-                // battlefield. No rebuild can intervene later:
-                // `observers_are_batch_safe` consults `candidates_for_event`
-                // directly and never calls `ensure_ready`.
+                // battlefield.
                 crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
                 push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
-
-                let run_len = batch_run_len(&state).unwrap();
-                let ability = state.stack.back().unwrap().ability().unwrap().clone();
-                let plan = try_batch(&state, &ability, run_len).unwrap();
-                (state, observer_id, plan)
+                (state, observer_id)
             };
 
-            // 1. Positive reach-guard: this observer really is a shape the gate
-            //    reacts to. Without it the negative below could be satisfied
-            //    vacuously by an observer that never registered under any key.
+            // 1. Positive reach-guard: this observer really is a shape member
+            //    1's checkpoint reacts to while it is on the battlefield.
             {
-                let (mut state, _observer_id, plan) = build();
+                let (mut state, _observer_id) = build();
+                let steps = resolve_to_empty_batched(&mut state);
                 assert!(
-                    !observers_are_batch_safe(&mut state, &plan),
+                    steps.iter().all(|&c| c == 1),
                     "reach-guard: an on-battlefield broad permanent-ETB observer \
-                     must force refusal"
+                     must force refusal, got {steps:?}"
                 );
             }
 
             // 2. The delta. Induce the desync AFTER the rebuild, leaving
             //    `state.battlefield` and the index stale.
             let stale = {
-                let (mut state, observer_id, plan) = build();
+                let (mut state, observer_id) = build();
                 state.objects.get_mut(&observer_id).unwrap().zone = Zone::Hand;
-                let mut probe = state.clone();
-                assert!(
-                    observers_are_batch_safe(&mut probe, &plan),
-                    "CR 113.6: a stale off-battlefield observer must not force \
-                     batch refusal"
-                );
                 state
             };
 
-            // 3. Outcome identity: the batch the guard newly permits resolves
-            //    exactly as the sequential path would. This is what pins "the
-            //    batching delta is observationally inert" instead of asserting
-            //    it. Deliberately NOT asserting the step shape — that would flip
-            //    red without the guard and silently promote this into a
-            //    falsification vehicle, which it is not.
+            // 3. Outcome identity: the stale board resolves exactly as the
+            //    sequential path would. Deliberately NOT asserting the step
+            //    shape, which would promote this into a falsification vehicle
+            //    for the zone guard, which it is not.
             let mut batched = stale.clone();
             let mut sequential = stale;
             resolve_to_empty_batched(&mut batched);
@@ -10937,7 +12073,7 @@ mod tests {
         }
 
         // §9.4b / §9.2 — ConditionInstead DIFFERENTIAL harness: run BOTH the
-        // not-met (batches) and met (falls back) cases through the real pipeline
+        // not-met (base arm) and met (copy arm) cases through the real pipeline
         // and assert each produces the correct final state vs the sequential path.
         #[test]
         fn condition_instead_differential_not_met_and_met() {
@@ -10947,8 +12083,8 @@ mod tests {
                 let mut state = setup();
                 add_lands(&mut state, lands);
                 // Observer-free copy source so the met-copy branch can batch
-                // (a copy inherits the source's triggers; an ETB-keyed trigger
-                // would fail the §2.3a non-observer gate).
+                // (a copy inherits the source's triggers; one that sees its
+                // siblings would stop the run at member 1's checkpoint).
                 let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
                 let sub = copy_instead_sub(src, 6);
                 push_token_triggers(
@@ -10984,9 +12120,9 @@ mod tests {
                 assert_eq!(batched.battlefield.len(), sequential.battlefield.len());
             }
 
-            // MET (6 lands): copy-instead fires ⇒ Layer B copy-prefix batches.
+            // MET (6 lands): copy-instead fires ⇒ the copy arm decides.
             // The single source's 5 entries share identical copiable values
-            // (CR 707.2), and the observer-free copy token passes §2.3a, so the
+            // (CR 707.2), and the observer-free copy token sees no sibling, so the
             // whole run collapses into ONE batched step producing 5 copies —
             // equal to the sequential path.
             {
@@ -11047,9 +12183,10 @@ mod tests {
         }
 
         // CR 707.2 — cross-source copy collapse: K distinct sources with
-        // IDENTICAL copiable values each fire a met copy-instead self-copy. The
-        // value-equal prefix spans the whole run, so all K collapse into one
-        // batch producing K copies. Result equals the sequential path.
+        // IDENTICAL copiable values each fire a met copy-instead self-copy.
+        // Every member shares the top member's copiable values, so all K
+        // collapse into one batch producing K copies. Result equals the
+        // sequential path.
         #[test]
         fn cross_source_copy_identical_values_forms_one_batch() {
             let mut base = setup();
@@ -11108,10 +12245,9 @@ mod tests {
                 3,
             );
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "copy-token batch must refuse values that emit intrinsic CounterAdded events"
             );
         }
@@ -11120,12 +12256,9 @@ mod tests {
         // K distinct copy sources are real Scute-Swarm-shape creatures, each
         // carrying a landfall trigger keyed EnterBattlefield(Some(Land)). The
         // copied tokens are CREATURES that inherit the landfall trigger (CR
-        // 707.2/707.5). A Creature copy emits {None, Some(Creature), TokenCreated}
-        // — the Land-keyed landfall does NOT intersect it, so the §2.3a gate is
-        // safe and the whole run STILL collapses into ONE batch. This is
-        // DISCRIMINATING: under the OLD coarse gate (any EnterBattlefield(_)
-        // rejected) try_resolve_copy_batch returned None and the run resolved
-        // one-at-a-time — the named perf bug was never fixed for its own card.
+        // 707.2/707.5). A land trigger never sees a Creature copy enter, so
+        // member 1's checkpoint and the per-member collection find nothing and
+        // the whole run STILL collapses into ONE batch.
         #[test]
         fn cross_source_copy_with_landfall_trigger_still_batches() {
             let mut base = setup();
@@ -11181,22 +12314,22 @@ mod tests {
             );
         }
 
-        // CR 603.6a (over-permit guard) — a SelfRef copy whose copied token DOES
-        // observe its in-batch siblings must STILL refuse. The copy source is a
-        // Creature carrying a "whenever a creature you control enters" trigger
-        // (EnterBattlefield(Some(Creature))); the Creature copy's emission
-        // includes Some(Creature), so the intersection is non-empty ⇒ refused.
-        // Proves the refined gate did not become unsafe.
+        // CR 603.2 + CR 603.6a (over-permit guard) — a SelfRef copy run whose
+        // copy sources carry a "whenever a creature you control enters" trigger,
+        // which each copy inherits (CR 707.2), must never take a bulk boundary.
+        // Admission does not decide observers (D5.4): member 1's checkpoint
+        // collects the live sources' triggers on member 1's copy, so the run
+        // refuses there and resolves as the sequential path does.
         #[test]
         fn cross_source_copy_with_creature_etb_observer_refuses_batch() {
-            let mut state = setup();
-            add_lands(&mut state, 6); // met ⇒ copy branch fires.
+            let mut base = setup();
+            add_lands(&mut base, 6); // met ⇒ copy branch fires.
 
             for _ in 0..5 {
-                let src = add_creature_observer_source(&mut state, "Watcher", 2, 2);
+                let src = add_creature_observer_source(&mut base, "Watcher", 2, 2);
                 let sub = copy_instead_sub(src, 6);
                 push_token_triggers(
-                    &mut state,
+                    &mut base,
                     src,
                     insect_token_effect(),
                     Some(Box::new(sub)),
@@ -11204,18 +12337,27 @@ mod tests {
                 );
             }
 
-            let run_len = batch_run_len(&state).unwrap();
-            let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // The copied token observes creature ETB (its siblings) ⇒ the §2.3a
-            // intersection is non-empty ⇒ must refuse to batch.
-            assert!(
-                try_batch(&state, &ability, run_len).is_none(),
-                "a copy whose token observes creature-ETB siblings must refuse to batch"
+            // Reach guard: admission passes, so the refusal below is member 1's
+            // checkpoint collecting the sources' creature-ETB triggers.
+            let ability = base.stack.back().unwrap().ability().unwrap().clone();
+            assert!(admits(&base, &ability), "reach: admission passes");
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+            crate::game::perf_counters::reset();
+            let (_, batched_events) = resolve_to_empty_batched_with_events(&mut batched);
+            assert_eq!(
+                crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                0,
+                "a copy whose token observes creature-ETB siblings must never take a bulk boundary"
             );
+            let sequential_events = resolve_to_empty_sequential_with_events(&mut sequential);
+            assert_eq!(token_ids(&batched).len(), token_ids(&sequential).len());
+            assert_eq!(batched_events, sequential_events);
         }
 
-        // CR 707.2 — divergent-tail prefix batching: K cross-source copies where
-        // a middle source diverges in copiable values. Clone proof proves that the
+        // CR 707.2 — divergent member: K cross-source copies where a middle
+        // source diverges in copiable values. Clone proof proves that the
         // entire run is equivalent to sequential resolution, so all five entries
         // collapse into one batch despite the divergent source values.
         #[test]
@@ -11229,7 +12371,8 @@ mod tests {
             //
             // Build: 2 identical "Alpha" sources, then 1 "Beta" (divergent P/T),
             // then 2 more "Alpha". Pushed bottom→top. Resolution order (top→down):
-            // Alpha, Alpha, Beta, Alpha, Alpha. The prefix is the top 2 Alphas.
+            // Alpha, Alpha, Beta, Alpha, Alpha. The copy arm refuses the run
+            // (Beta's copiable values diverge), so the clone proof takes it.
             let specs: [(&str, i32, i32); 5] = [
                 ("Alpha", 2, 2),
                 ("Alpha", 2, 2),
@@ -11312,12 +12455,11 @@ mod tests {
                 5,
             );
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // The copy creates Lands; the condition counts Lands ⇒ each created
             // Land flips the count ⇒ order-sensitive ⇒ must refuse.
             assert!(
-                try_batch(&state, &ability, run_len).is_none(),
+                !admits(&state, &ability),
                 "a met copy creating Lands gated on a Land count must refuse to batch"
             );
         }
@@ -14169,11 +15311,14 @@ mod tests {
         /// the (3.3)/(3.4) boards.
         const OVERRIDDEN_NAME: &str = "Cloned Bear";
 
-        /// "Three or more permanents named `OVERRIDDEN_NAME`", counted
+        /// "`comparator` `count` permanents named `OVERRIDDEN_NAME`", counted
         /// board-wide. Same shape as (3.1)'s gate minus the recipient context:
         /// no `FilterProp::Another`, so `condition_uses_recipient_context` is
         /// false and every gather strips it off the effect it pushes.
-        fn overridden_name_count_at_least(count: i32) -> crate::types::ability::StaticCondition {
+        fn overridden_name_count(
+            comparator: Comparator,
+            count: i32,
+        ) -> crate::types::ability::StaticCondition {
             crate::types::ability::StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
@@ -14182,7 +15327,7 @@ mod tests {
                         },
                     },
                 },
-                comparator: Comparator::GE,
+                comparator,
                 rhs: QuantityExpr::Fixed { value: count },
             }
         }
@@ -14192,19 +15337,21 @@ mod tests {
         /// `install_gate`.
         ///
         /// WHY LAYER 1 and not the layer-4 rewrite (3.1) uses: a source-level
-        /// condition and a `ForAsLongAs` duration are both evaluated inside
-        /// `gather_transient_continuous_effects`, and `evaluate_layers` gathers
-        /// at Step 3 — after layer 1 has been applied and before layers 2-7.
-        /// Layer 1 is therefore the ONLY layer whose writes such a gate can see
-        /// within one pass. (A retained recipient-context condition is instead
-        /// re-checked at APPLY time, which is why (3.1) can use layer 4.)
-        /// `prepare_incremental_flush` gathers with NO layer applied at all, so
-        /// the entrant is still printed-named there — that divergence is exactly
-        /// the staleness these boards catch.
+        /// condition is evaluated inside `gather_transient_continuous_effects`,
+        /// and `evaluate_layers` gathers at Step 3 — after layer 1 has been
+        /// applied and before layers 2-7. Layer 1 is therefore the ONLY layer
+        /// whose writes such a gate can see within one pass. (A retained
+        /// recipient-context condition is instead re-checked at APPLY time,
+        /// which is why (3.1) can use layer 4; a `ForAsLongAs` duration is
+        /// checked on the settled board, CR 611.2b.) `prepare_incremental_flush`
+        /// gathers with NO layer applied at all, so the entrant is still
+        /// printed-named there — that divergence is exactly the staleness these
+        /// boards catch.
         ///
         /// Nothing else on the board is a creature, so the overridden-name
         /// population is exactly the creature count: 2 before the entry, 3
-        /// after, which moves a `GE 3` gate from OFF to ON.
+        /// after, which moves a `GE 3` gate from OFF to ON (and ends a `LT 3`
+        /// duration).
         fn transient_name_count_gate_board(
             install_gate: impl Fn(&mut GameState, ObjectId, &[ObjectId]),
         ) -> GameState {
@@ -14261,7 +15408,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::UntilEndOfTurn,
-                    Some(overridden_name_count_at_least(3)),
+                    Some(overridden_name_count(Comparator::GE, 3)),
                 )
             })
         }
@@ -14285,7 +15432,8 @@ mod tests {
                 !forced.transient_continuous_effects.is_empty()
                     && forced.transient_continuous_effects.iter().all(|tce| {
                         matches!(tce.affected, TargetFilter::SpecificObject { .. })
-                            && tce.condition.as_ref() == Some(&overridden_name_count_at_least(3))
+                            && tce.condition.as_ref()
+                                == Some(&overridden_name_count(Comparator::GE, 3))
                     }),
                 "the fixture must install SpecificObject-bound transients whose gate is \
                  source-level, or the `e.condition` channel would cover this board"
@@ -14322,17 +15470,20 @@ mod tests {
             assert_pt_identical(&normal, &forced, "transient source-level condition reads");
         }
 
-        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. Identical board to (3.3)
-        /// with the gate moved from `tce.condition` into
-        /// `Duration::ForAsLongAs` (CR 611.2b — the effect lasts exactly as
-        /// long as its stated condition holds). `transient_effect_is_live`
-        /// evaluates it in the same gather, and no gather ever copies a
-        /// duration's condition onto an `ActiveContinuousEffect`, so this gate
-        /// is invisible to every channel except the transient walk.
+        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. The (3.3) board with the
+        /// gate moved from `tce.condition` into `Duration::ForAsLongAs` and its
+        /// comparator inverted to "fewer than three". CR 611.2b: a duration that
+        /// is false when the effect begins never starts, and one that ends
+        /// never restarts — so the only flip an entry can cause is an END. Pre-
+        /// entry two permanents carry the overridden name (duration holds,
+        /// 3/3); the renamed entrant makes three and ends it for good (2/2). No
+        /// gather ever copies a duration's condition onto an
+        /// `ActiveContinuousEffect`, so this gate is invisible to every channel
+        /// except the transient walk.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and `ReadKinds` loses NameText exactly
-        /// as in (3.3) — recipients keep a stale 2/2.
+        /// as in (3.3), so the entry no longer escalates.
         fn transient_duration_gate_read_board() -> GameState {
             use crate::types::ability::ContinuousModification;
             transient_name_count_gate_board(|state, source, bears| {
@@ -14345,7 +15496,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::ForAsLongAs {
-                        condition: overridden_name_count_at_least(3),
+                        condition: overridden_name_count(Comparator::LT, 3),
                     },
                     None,
                 )
@@ -14362,30 +15513,36 @@ mod tests {
                 escalated,
                 "CR 611.2b makes a `for as long as` duration a live gate, so the kinds \
                  it reads are live reads — a layer-1 name override reaching the entrant \
-                 must escalate"
+                 can end it and must escalate"
             );
+            let mut pre = transient_duration_gate_read_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION, not in `condition`,
             // so no `tce.condition` channel could have covered this board.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_read_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_base_named(&pre, "NameBear"),
-                vec![(Some(2), Some(2)); 2],
+                vec![(Some(3), Some(3)); 2],
                 "pre-entry only 2 permanents carry the overridden name, so the \
-                 duration has not started"
+                 duration holds"
             );
             assert_eq!(
                 pts_base_named(&forced, "NameBear"),
-                vec![(Some(3), Some(3)); 2],
-                "layer 1 renames the entrant too, making it the third — the duration holds"
+                vec![(Some(2), Some(2)); 2],
+                "layer 1 renames the entrant too, making it the third — the duration ends"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_base_named(&normal, "NameBear"),
@@ -14397,18 +15554,17 @@ mod tests {
 
         /// (3.5) `ForAsLongAs` DURATION, PERTURBATION-PROBE CHANNEL. The twin
         /// of (3.2) with the gate moved into the duration: Master Thief's "for
-        /// as long as you control this creature" shape, inverted to an
-        /// opponent-presence check so an entry can start it. NOTHING on this
+        /// as long as you control this creature" shape, recast as an
+        /// opponent-ABSENCE check so an entry can end it. CR 611.2b: the
+        /// duration holds when the effect begins (no opponent creature, 5/5);
+        /// the opponent's entrant ends it permanently (2/2). NOTHING on this
         /// board writes the kinds the gate reads, so the read union cannot see
-        /// the flip — while the duration is unmet the effect is not gathered at
-        /// all and `all_writes` is empty, which exits the kind relation at
-        /// stage 1.
+        /// the flip.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and the probe's transient arm sees only
-        /// `tce.condition`, which is `None` here — no disjunct fires, the entry
-        /// stays incremental, and the frozen recipients keep a stale 2/2 while
-        /// a full pass says 5/5.
+        /// `tce.condition`, which is `None` here — no disjunct fires and the
+        /// entry no longer escalates.
         fn transient_duration_gate_probe_board() -> GameState {
             use crate::types::ability::{ContinuousModification, StaticCondition};
             use crate::types::ControllerRef;
@@ -14435,12 +15591,14 @@ mod tests {
                 // CR 611.2b + CR 109.5: the duration is re-read every pass and
                 // "an opponent" stays bound to the resolver, P0.
                 Duration::ForAsLongAs {
-                    condition: StaticCondition::IsPresent {
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![TypeFilter::Creature],
-                            controller: Some(ControllerRef::Opponent),
-                            ..Default::default()
-                        })),
+                    condition: StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                controller: Some(ControllerRef::Opponent),
+                                ..Default::default()
+                            })),
+                        }),
                     },
                 },
                 None,
@@ -14458,29 +15616,35 @@ mod tests {
             assert!(
                 escalated,
                 "CR 611.2c freezes a resolved effect's affected SET, not its duration — \
-                 an entry that starts a `for as long as` duration must escalate or every \
+                 an entry that ends a `for as long as` duration must escalate or every \
                  frozen recipient keeps a stale board"
             );
+            let mut pre = transient_duration_gate_probe_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION only.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_probe_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_named(&pre, "DurationBear"),
-                vec![(Some(2), Some(2)); 2],
-                "pre-entry no opponent controls a creature, so the duration never started"
+                vec![(Some(5), Some(5)); 2],
+                "pre-entry no opponent controls a creature, so the duration holds"
             );
             assert_eq!(
                 pts_named(&forced, "DurationBear"),
-                vec![(Some(5), Some(5)); 2],
-                "the opponent's entrant starts the duration for every frozen recipient"
+                vec![(Some(2), Some(2)); 2],
+                "the opponent's entrant ends the duration for every frozen recipient"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_named(&normal, "DurationBear"),
@@ -14704,6 +15868,7 @@ mod tests {
             amount: 6,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
         state.stack.push_back(StackEntry {
             id: source,
@@ -15133,6 +16298,7 @@ mod tests {
                     condition: None,
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
@@ -15158,6 +16324,7 @@ mod tests {
                     condition: None,
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: None,
                     die_result: None,
@@ -15184,6 +16351,7 @@ mod tests {
                     condition: None,
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: None,
                     subject_match_count: Some(2),
                     die_result: None,
@@ -15233,6 +16401,7 @@ mod tests {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 99 }),
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
@@ -15263,6 +16432,7 @@ mod tests {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
@@ -15311,6 +16481,7 @@ mod tests {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
                     controller: PlayerId(0),
                     trigger_source: None,
+                    trigger_definition: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(3),
                     die_result: Some(20),
@@ -15334,6 +16505,89 @@ mod tests {
                  not a second binding policy"
             );
         }
+    }
+
+    /// CR 603.4 + CR 607.1c: the resolution recheck of a self-linked guard reads
+    /// the resolving entry's own trigger identity. Driven through the
+    /// entry-shaped adapter, so the scope field's fill is exercised as well as
+    /// the recheck it feeds.
+    #[test]
+    fn resolution_recheck_reads_the_resolving_entrys_trigger_identity() {
+        let source = ObjectId(9201);
+        let definition_ref = TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(source, 0),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        let guarded_entry = |definition: Option<&TriggerDefinitionRef>, controller| {
+            let mut ability = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            ability.trigger_definition_ref = definition.cloned();
+            StackEntry {
+                id: ObjectId(9200),
+                source_id: source,
+                controller,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: Some(TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+                    }),
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            }
+        };
+
+        // Positive control: the entry's identity, not yet recorded, keeps the
+        // guard true, so the resolution proceeds.
+        let mut state = setup();
+        assert!(bind_resolution_scope(
+            &mut state,
+            &guarded_entry(Some(&definition_ref), PlayerId(0)),
+            None
+        ));
+
+        // The entry's own identity was recorded: the guard is false.
+        let mut state = setup();
+        state
+            .triggered_abilities_added_mana_this_turn
+            .insert((definition_ref.clone(), PlayerId(0)));
+        assert!(!bind_resolution_scope(
+            &mut state,
+            &guarded_entry(Some(&definition_ref), PlayerId(0)),
+            None
+        ));
+
+        // A copied entry controlled by P1 keeps the definition but asks P1's
+        // question; P0's record cannot close that entry's guard.
+        assert!(bind_resolution_scope(
+            &mut state,
+            &guarded_entry(Some(&definition_ref), PlayerId(1)),
+            None
+        ));
+
+        // An entry carrying no identity is unanswerable and fails closed, even
+        // though `Not` would invert a plain false.
+        let mut state = setup();
+        assert!(!bind_resolution_scope(
+            &mut state,
+            &guarded_entry(None, PlayerId(0)),
+            None
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -15533,8 +16787,13 @@ mod tests {
 #[cfg(test)]
 mod stack_bound_reveal_release_tests {
     //! CR 603.3d + CR 701.20a: the uncommitted-trigger pop releases the popped
-    //! entry's reveal lease, and only when it actually popped.
-    use super::pop_uncommitted_pending_trigger_entry;
+    //! entry's reveal lease, and only when it actually popped. CR 608.2n: the
+    //! resolution pop leaves the lease to the carrier's finish.
+    use super::{
+        begin_resolving_stack_entry, finish_resolving_stack_entry,
+        pop_nonresolving_top_stack_entry, pop_top_stack_entry,
+        pop_uncommitted_pending_trigger_entry,
+    };
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
@@ -15612,6 +16871,59 @@ mod stack_bound_reveal_release_tests {
         );
         assert!(state.stack.is_empty(), "reach guard: popped");
         assert!(!state.holds_stack_bound_reveal(card));
+        assert!(state.stack_bound_reveals.is_empty());
+    }
+
+    /// CR 701.20a + CR 608.2n: the CR 405.5 resolution pop only begins
+    /// resolution, so the lease survives it and ends when the carrier finishes;
+    /// a non-resolving drain of the top entry (CR 724.1b) ends it at once.
+    #[test]
+    fn only_the_carrier_finish_or_a_nonresolving_pop_releases_the_lease() {
+        let mut state = GameState::new_two_player(3);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Leased".into(),
+            Zone::Hand,
+        );
+
+        let resolving = trigger_entry(&mut state, source);
+        state.grant_stack_bound_reveal(resolving, &[card]);
+        let popped = pop_top_stack_entry(&mut state).expect("reach guard: popped");
+        assert_eq!(popped.entry.id, resolving, "reach guard: the leased entry");
+        assert!(
+            state.holds_stack_bound_reveal(card),
+            "the resolution pop keeps the lease"
+        );
+        begin_resolving_stack_entry(&mut state, popped.entry, popped.trigger_firing)
+            .expect("reach guard: carrier installed");
+        assert!(state.holds_stack_bound_reveal(card), "still resolving");
+        finish_resolving_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        assert!(!state.holds_stack_bound_reveal(card), "finish releases it");
+        assert!(state.stack_bound_reveals.is_empty());
+
+        let drained = trigger_entry(&mut state, source);
+        state.grant_stack_bound_reveal(drained, &[card]);
+        pop_nonresolving_top_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Removed,
+        )
+        .expect("reach guard: drained");
+        assert!(
+            !state.holds_stack_bound_reveal(card),
+            "the drain releases it"
+        );
         assert!(state.stack_bound_reveals.is_empty());
     }
 }

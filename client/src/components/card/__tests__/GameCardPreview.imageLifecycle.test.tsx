@@ -76,6 +76,7 @@ vi.mock("../../../services/scryfall.ts", () => ({
   isCardImageRotatedSync: vi.fn(() => false),
   isLocaleArtReady: vi.fn(() => true),
   loadLocaleArt: vi.fn().mockResolvedValue(undefined),
+  loadScryfallData: vi.fn().mockResolvedValue(null),
   resolveFaceIndexSync: vi.fn(() => null),
   resolveOracleIdSync: vi.fn(() => null),
   resolvePrintingImageUrl: vi.fn(),

@@ -1,4 +1,6 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -16,6 +18,8 @@ pub fn resolve(
         Effect::RevealTop { count, player } => (*count as usize, player.clone()),
         _ => return Err(EffectError::MissingParam("RevealTop count".to_string())),
     };
+
+    state.last_parent_target_missing_reason = None;
 
     // CR 701.20 + CR 601.2c: "two target players each reveal the top card of their
     // library" (Parker Luck). When the reveal is a true `Player`-target reveal with
@@ -43,11 +47,12 @@ pub fn resolve(
             // WATCH-POINT N2: skip an empty library INDIVIDUALLY — never
             // early-return, or a first empty library would suppress every later
             // player's reveal (CR 608.2b fail-closed per player).
-            if player.library.is_empty() {
+            let library = state.library_of(player.id);
+            if library.is_empty() {
                 continue;
             }
-            let count_n = count.min(player.library.len());
-            let revealed_ids: Vec<_> = player.library.iter().take(count_n).copied().collect();
+            let count_n = count.min(library.len());
+            let revealed_ids: Vec<_> = library.iter().take(count_n).copied().collect();
             // CR 701.20b: Revealing a card doesn't cause it to leave its zone.
             for &card_id in &revealed_ids {
                 state.revealed_cards.insert(card_id);
@@ -65,8 +70,7 @@ pub fn resolve(
         }
         // CR 108.3 + CR 608.2c: the full ordered set drives owner-keyed per-player
         // binding and the OtherRevealedCard by-exclusion cross-loss.
-        super::publish_fresh_tracked_set(state, accumulated.clone());
-        state.last_revealed_ids = accumulated;
+        super::publish_reveal_result(state, accumulated);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
@@ -79,10 +83,17 @@ pub fn resolve(
     // DefendingPlayer, etc.) must consult state slots, not `ability.targets`,
     // so a chained "reveal top of your library" sub-ability does not inherit
     // the parent's Player target and reveal from the wrong library.
-    let target_player = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    let Some(target_player) = super::resolve_player_for_context_ref(state, ability, &player_filter)
+    else {
+        super::publish_reveal_result(state, Vec::new());
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        return Ok(());
+    };
 
-    let library = &state.players[target_player.0 as usize].library;
+    let library = state.library_of(target_player);
     if library.is_empty() {
+        super::publish_reveal_result(state, Vec::new());
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
@@ -101,8 +112,7 @@ pub fn resolve(
     }
 
     // Store revealed IDs for sub_ability condition/target injection
-    super::publish_fresh_tracked_set(state, revealed_ids.clone());
-    state.last_revealed_ids = revealed_ids.clone();
+    super::publish_reveal_result(state, revealed_ids.clone());
 
     // Emit event with card names
     let card_names: Vec<String> = revealed_ids

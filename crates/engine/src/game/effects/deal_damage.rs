@@ -54,7 +54,35 @@ pub(crate) struct DamageContext {
     pub(crate) lifelink_bonus: u32,
 }
 
+/// A player-recipient filter's outcome; `NoReferent` must not fall through to the
+/// node's object targets.
+enum PlayerRecipient {
+    Bound(TargetRef),
+    NoReferent,
+}
+
+/// `None` means "not a player-recipient filter".
 fn player_context_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<PlayerRecipient> {
+    if matches!(
+        target_filter,
+        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+    ) {
+        // CR 608.2b: a declared player with no legal referent is dealt nothing.
+        return Some(
+            match super::resolve_player_for_context_ref(state, ability, target_filter) {
+                Some(player) => PlayerRecipient::Bound(TargetRef::Player(player)),
+                None => PlayerRecipient::NoReferent,
+            },
+        );
+    }
+    bound_player_context_target(state, ability, target_filter).map(PlayerRecipient::Bound)
+}
+
+fn bound_player_context_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -111,11 +139,7 @@ fn player_context_target(
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTargetOwner
     ) {
-        Some(TargetRef::Player(super::resolve_player_for_context_ref(
-            state,
-            ability,
-            target_filter,
-        )))
+        super::resolve_player_for_context_ref(state, ability, target_filter).map(TargetRef::Player)
     } else {
         None
     }
@@ -145,7 +169,11 @@ fn resolve_effect_recipients(
     // `DealDamage { target: SelfRef }` sub-abilities don't inherit the parent's
     // targets via chain propagation (issue #323 class).
     if matches!(target_filter, TargetFilter::SelfRef) {
-        return vec![TargetRef::Object(ability.source_id)];
+        return ability
+            .self_ref_binding(state)
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect();
     }
     // CR 615.5 + CR 120.1: the prevented event's damage source object (Comeuppance
     // reflecting to "that creature"). An OBJECT context ref — resolved here (not
@@ -157,8 +185,10 @@ fn resolve_effect_recipients(
             .map(|id| vec![TargetRef::Object(id)])
             .unwrap_or_default();
     }
-    if let Some(target) = player_context_target(state, ability, target_filter) {
-        return vec![target];
+    match player_context_target(state, ability, target_filter) {
+        Some(PlayerRecipient::Bound(target)) => return vec![target],
+        Some(PlayerRecipient::NoReferent) => return Vec::new(),
+        None => {}
     }
     // CR 608.2c: An inherited target-slot anaphor belongs to the flattened
     // resolving root, not this local damage node.  Resolve it before the local
@@ -286,7 +316,7 @@ fn target_damage_source(state: &GameState, ability: &ResolvedAbility) -> Option<
     // CR 400.7 + CR 608.2b: a pinned referent that became a new object is not
     // the object that was chosen, so it deals nothing.
     if !ability.target_pin_is_current(bound_id, state)
-        || !ability.selected_target_pin_is_current(bound_id, state)
+        || !ability.target_occurrence_is_current(0, state)
     {
         return None;
     }
@@ -877,6 +907,9 @@ pub(crate) fn apply_damage_after_replacement(
         amount: primary_amount,
         is_combat,
         excess: primary_excess,
+        // CR 400.7: the incarnation captured with the damage context, as the
+        // damage record below uses.
+        source_incarnation: ctx.source_incarnation,
     });
 
     // CR 120.1: Record damage for "was dealt damage by" condition queries.
@@ -1207,7 +1240,7 @@ fn cast_tail_with_parent_targets(
 ) -> ResolvedAbility {
     let mut tail = sub.clone();
     if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
-        tail.targets = ability.targets.clone();
+        tail.mirror_targets_from(ability);
     }
     tail
 }
@@ -1595,10 +1628,14 @@ fn each_target_damage_split(
         })
         .collect();
 
-    if let Some(player_recipient) = player_context_target(state, ability, target_filter) {
+    match player_context_target(state, ability, target_filter) {
         // CR 120.3a: implicit/context player recipient (damage to a player
         // causes life loss) — every object target is a source.
-        return Some((player_recipient, object_targets));
+        Some(PlayerRecipient::Bound(player_recipient)) => {
+            return Some((player_recipient, object_targets));
+        }
+        Some(PlayerRecipient::NoReferent) => return None,
+        None => {}
     }
     let (last, sources) = object_targets.split_last()?;
     Some((TargetRef::Object(*last), sources.to_vec()))
@@ -1914,7 +1951,13 @@ pub fn resolve_all(
     // CR 120.3: Collect matching player IDs when the effect also targets players.
     // The player set is part of the same damage event as the object set.
     let matching_players: Vec<PlayerId> = match player_filter {
-        Some(pf) => collect_matching_players(state, pf, ability.controller, ability.source_id),
+        Some(pf) => collect_matching_players(
+            state,
+            pf,
+            ability.controller,
+            ability.source_id,
+            ability.context.granting_object,
+        ),
         None => Vec::new(),
     };
 
@@ -2010,6 +2053,7 @@ fn collect_matching_players(
     player_filter: PlayerFilter,
     source_controller: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
+    granting_object: Option<crate::types::identifiers::ObjectIncarnationRef>,
 ) -> Vec<PlayerId> {
     state
         .players
@@ -2032,6 +2076,15 @@ fn collect_matching_players(
                             source_id,
                         )
                     }
+                    // CR 102.1 + CR 608.2c: the union of the members, answered
+                    // member by member by the generic predicate authority.
+                    PlayerFilter::AnyOf { .. } => crate::game::effects::matches_player_scope(
+                        state,
+                        p.id,
+                        &player_filter,
+                        source_controller,
+                        source_id,
+                    ),
                     PlayerFilter::Opponent => p.id != source_controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -2085,13 +2138,16 @@ fn collect_matching_players(
                             )
                     }
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
-                    // the enchanted/defending player this combat.
+                    // the enchanted player. Delegates to the single scope
+                    // authority (live, kind-preserving, team-aware).
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
-                        p.id != source_controller
-                            && crate::game::effects::enchanted_player_anchor(state, source_id)
-                                .is_some_and(|enchanted| {
-                                    state.player_attacked_player_this_combat(p.id, enchanted)
-                                })
+                        crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            &PlayerFilter::OpponentAttackingEnchantedPlayer,
+                            source_controller,
+                            source_id,
+                        )
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -2156,12 +2212,15 @@ fn collect_matching_players(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
-                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
-                    // the resolution-scoped chosen-player anchor have no meaning
-                    // for a damage-each-player effect (no parent object target /
-                    // chosen player is in scope here); never matches.
+                    // CR 109.4 + CR 108.3 + CR 601.2a + CR 115.1: the parent-object-target
+                    // anchors, the declared-player-target anchor, the resolution-scoped
+                    // chosen-player anchor and the unlatched granter caster have no
+                    // meaning for a damage-each-player effect (none is in scope
+                    // here); never matches.
                     PlayerFilter::ParentObjectTargetController
                     | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::TargetPlayer
+                    | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
@@ -2208,13 +2267,10 @@ fn collect_matching_players(
                             value,
                             source_controller,
                             crate::game::quantity::QuantityContext {
-                                entering: None,
-                                source: source_id,
-                                trigger_source: None,
-                                recipient: None,
                                 scoped_player: Some(p.id),
-                                damage_source: None,
-                                event_amount: None,
+                                // CR 201.5a: a granted body's threshold names its granter.
+                                granting_object,
+                                ..crate::game::quantity::QuantityContext::new(source_id)
                             },
                         );
                         crate::game::players::matches_relation(
@@ -2302,6 +2358,15 @@ pub fn resolve_each_player(
                             ability.source_id,
                         )
                     }
+                    // CR 102.1 + CR 608.2c: the union of the members, answered
+                    // member by member by the generic predicate authority.
+                    PlayerFilter::AnyOf { .. } => crate::game::effects::matches_player_scope(
+                        state,
+                        p.id,
+                        &player_filter,
+                        ability.controller,
+                        ability.source_id,
+                    ),
                     PlayerFilter::Opponent => p.id != ability.controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -2344,16 +2409,16 @@ pub fn resolve_each_player(
                         ability.source_id,
                     ),
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
-                    // the enchanted/defending player this combat.
+                    // the enchanted player. Delegates to the single scope
+                    // authority (live, kind-preserving, team-aware).
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
-                        p.id != ability.controller
-                            && crate::game::effects::enchanted_player_anchor(
-                                state,
-                                ability.source_id,
-                            )
-                            .is_some_and(|enchanted| {
-                                state.player_attacked_player_this_combat(p.id, enchanted)
-                            })
+                        crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            &player_filter,
+                            ability.controller,
+                            ability.source_id,
+                        )
                     }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
@@ -2431,12 +2496,15 @@ pub fn resolve_each_player(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
-                    // the resolution-scoped chosen-player anchor have no meaning
-                    // for a damage-each-player effect (no parent object target /
-                    // chosen player is in scope here); never matches.
+                    // CR 109.4 + CR 108.3 + CR 601.2a + CR 115.1: the parent-object-target
+                    // anchors, the declared-player-target anchor, the resolution-scoped
+                    // chosen-player anchor and the unlatched granter caster have no
+                    // meaning for a damage-each-player effect (none is in scope
+                    // here); never matches.
                     PlayerFilter::ParentObjectTargetController
                     | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::TargetPlayer
+                    | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
@@ -2483,13 +2551,9 @@ pub fn resolve_each_player(
                             value,
                             ability.controller,
                             crate::game::quantity::QuantityContext {
-                                entering: None,
-                                source: ability.source_id,
-                                trigger_source: None,
-                                recipient: None,
                                 scoped_player: Some(p.id),
-                                damage_source: None,
-                                event_amount: None,
+                                granting_object: ability.context.granting_object,
+                                ..crate::game::quantity::QuantityContext::new(ability.source_id)
                             },
                         );
                         crate::game::players::matches_relation(
@@ -2742,13 +2806,14 @@ pub fn resolve_each_source_deals_damage(
         EachDamageRecipient::OtherBatchSource { source_filters } => ability
             .targets
             .iter()
+            .enumerate()
             .zip(source_filters)
-            .filter_map(|(target, source_filter)| {
+            .filter_map(|((position, target), source_filter)| {
                 let TargetRef::Object(id) = target else {
                     return None;
                 };
                 (ability.target_pin_is_current(*id, state)
-                    && ability.selected_target_pin_is_current(*id, state)
+                    && ability.target_occurrence_is_current(position, state)
                     && !crate::game::targeting::validate_targets_for_ability(
                         state,
                         std::slice::from_ref(target),
@@ -3081,6 +3146,143 @@ mod tests {
         resolve_each_player(&mut state, &ability, &mut events).unwrap();
         assert_eq!(state.players[1].life, 14, "archenemy is below half of 40");
         assert_eq!(state.players[2].life, 15, "hero is above half of 20");
+    }
+
+    /// Curse-rider fixture (4-player free-for-all): a curse controlled by P0
+    /// enchanting P1; P2 and P3 each have a creature attacking P1, with the
+    /// declaration ledger written exactly as declaration writes it. P2's
+    /// attacker is then removed from combat, which prunes the attacker but not
+    /// the ledger. Returns the state and the curse.
+    fn curse_with_removed_attacker_fixture() -> (GameState, ObjectId) {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::game_object::AttachTarget;
+
+        let mut state = GameState::new(FormatConfig::standard(), 4, 0);
+        let curse = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        let mut attacker_for = |player: PlayerId| {
+            let card_id = CardId(state.next_object_id);
+            let id = create_object(
+                &mut state,
+                card_id,
+                player,
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let p2_attacker = attacker_for(PlayerId(2));
+        let p3_attacker = attacker_for(PlayerId(3));
+
+        let mut combat = CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(p2_attacker, PlayerId(1)),
+                AttackerInfo::attacking_player(p3_attacker, PlayerId(1)),
+            ],
+            ..CombatState::default()
+        };
+        for player in [PlayerId(2), PlayerId(3)] {
+            combat
+                .attacked_defenders_this_combat
+                .entry(player)
+                .or_default()
+                .insert(PlayerId(1));
+        }
+        state.combat = Some(combat);
+
+        crate::game::effects::remove_from_combat::remove_object_from_combat(
+            &mut state,
+            p2_attacker,
+        );
+        assert!(
+            state.player_attacked_player_this_combat(PlayerId(2), PlayerId(1)),
+            "precondition: the declaration ledger still records P2 attacking P1"
+        );
+        (state, curse)
+    }
+
+    /// Life totals after the effect, against the 20-life start: only the still
+    /// attacking opponent P3 takes 1 damage.
+    fn assert_only_still_attacking_opponent_damaged(state: &GameState) {
+        assert_eq!(
+            state.players[2].life, 20,
+            "P2's attacker was removed from combat: P2 is not attacking P1"
+        );
+        assert_eq!(
+            state.players[3].life, 19,
+            "P3 is still attacking the enchanted player"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "the controller is not an opponent"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "the enchanted player is not attacking"
+        );
+    }
+
+    /// CR 508.6 + CR 506.4: `resolve_each_player` reads LIVE combat membership
+    /// for `OpponentAttackingEnchantedPlayer`. Reverting to the declaration
+    /// ledger damages P2, whose attacker was removed from combat.
+    #[test]
+    fn damage_each_player_opponent_attacking_enchanted_player_is_live() {
+        let (mut state, curse) = curse_with_removed_attacker_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: PlayerFilter::OpponentAttackingEnchantedPlayer,
+            },
+            vec![],
+            curse,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events).unwrap();
+        assert_only_still_attacking_opponent_damaged(&state);
+    }
+
+    /// CR 508.6 + CR 506.4: `resolve_all`'s player population
+    /// (`collect_matching_players`) reads LIVE combat membership for
+    /// `OpponentAttackingEnchantedPlayer`. The object filter matches no
+    /// battlefield permanent, so only the player set is observed. Reverting to
+    /// the declaration ledger damages P2, whose attacker was removed from combat.
+    #[test]
+    fn damage_all_opponent_attacking_enchanted_player_is_live() {
+        let (mut state, curse) = curse_with_removed_attacker_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Planeswalker],
+                    controller: None,
+                    properties: vec![],
+                }),
+                player_filter: Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+                damage_source: None,
+            },
+            vec![],
+            curse,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        assert_only_still_attacking_opponent_damaged(&state);
     }
 
     fn make_ability(num_dmg: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
@@ -5320,7 +5522,9 @@ mod tests {
                             filter: TargetFilter::Typed(TypedFilter {
                                 type_filters: vec![TypeFilter::Subtype("Aura".to_string())],
                                 controller: None,
-                                properties: vec![FilterProp::AttachedToRecipient],
+                                properties: vec![FilterProp::AttachedTo {
+                                    to: crate::types::ability::AttachmentReferent::Recipient,
+                                }],
                             }),
                         },
                     }),
@@ -6741,7 +6945,9 @@ mod tests {
                             filter: TargetFilter::Typed(TypedFilter {
                                 type_filters: vec![TypeFilter::Subtype("Aura".to_string())],
                                 controller: None,
-                                properties: vec![FilterProp::AttachedToRecipient],
+                                properties: vec![FilterProp::AttachedTo {
+                                    to: crate::types::ability::AttachmentReferent::Recipient,
+                                }],
                             }),
                         },
                     }),
@@ -7242,6 +7448,7 @@ mod tests {
             amount: 5,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let ability = ResolvedAbility::new(
@@ -7501,54 +7708,31 @@ mod tests {
     // battles (Screaming Nemesis precedent). These tests drive the real parsed
     // output through the activation/resolution pipeline.
 
-    /// Extract the activated ability definition that a parsed "gains
-    /// \"{T}: …\" until end of turn" trigger grants.
+    /// Iron Fist's granted body parsed as a printed ability, since the card's own grant line
+    /// lowers to the CR 201.5a granter residual.
     #[cfg(test)]
-    fn extract_granted_ability(
-        oracle: &str,
-        card_name: &str,
-    ) -> crate::types::ability::AbilityDefinition {
-        use crate::types::ability::{ContinuousModification, Effect};
-        let parsed = crate::parser::oracle::parse_oracle_text(
-            oracle,
-            card_name,
+    fn iron_fist_granted_body() -> crate::types::ability::AbilityDefinition {
+        crate::parser::oracle::parse_oracle_text(
+            "{T}: Iron Fist deals damage equal to his power to any other target",
+            "Iron Fist, Living Weapon",
             &[],
             &["Creature".into()],
             &[],
-        );
-        let trigger = parsed
-            .triggers
-            .into_iter()
-            .next()
-            .expect("cast trigger present");
-        let execute = trigger.execute.expect("trigger has an execute ability");
-        let Effect::GenericEffect {
-            static_abilities, ..
-        } = &*execute.effect
-        else {
-            panic!(
-                "expected GenericEffect granting an ability, got {:?}",
-                execute.effect
-            );
-        };
-        let modification = static_abilities
-            .iter()
-            .flat_map(|s| s.modifications.iter())
-            .find_map(|m| match m {
-                ContinuousModification::GrantAbility { definition } => Some((**definition).clone()),
-                _ => None,
-            });
-        modification.expect("a GrantAbility modification")
+        )
+        .abilities
+        .into_iter()
+        .next()
+        .expect("the activated ability")
     }
 
     /// CR 120.1 + CR 115.4 + CR 208.3 — DISCRIMINATING runtime gate for Iron
-    /// Fist, Living Weapon. Its cast-trigger grants "{T}: ~ deals damage equal
-    /// to his power to any other target". Parsing the full card, attaching the
-    /// granted ability to a 4-power Iron Fist, and activating it at an opponent
-    /// creature must deal exactly 4 damage. Reverting the gendered-pronoun
-    /// quantity fix makes "his power" fall to `Effect::Unimplemented`, so the
-    /// granted ability deals no damage and `ActivateAbility` never reaches a
-    /// damage resolution — this assertion flips.
+    /// Fist, Living Weapon's granted "{T}: ~ deals damage equal to his power to
+    /// any other target". Attaching that ability to a 4-power Iron Fist and
+    /// activating it at an opponent creature must deal exactly 4 damage.
+    /// Reverting the gendered-pronoun quantity fix makes "his power" fall to
+    /// `Effect::Unimplemented`, so the granted ability deals no damage and
+    /// `ActivateAbility` never reaches a damage resolution — this assertion
+    /// flips.
     #[test]
     fn iron_fist_granted_ability_deals_damage_equal_to_power() {
         use crate::game::scenario::GameScenario;
@@ -7557,11 +7741,7 @@ mod tests {
         const P0: PlayerId = PlayerId(0);
         const P1: PlayerId = PlayerId(1);
 
-        let granted = extract_granted_ability(
-            "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
-             \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
-            "Iron Fist, Living Weapon",
-        );
+        let granted = iron_fist_granted_body();
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -7601,11 +7781,7 @@ mod tests {
         const P0: PlayerId = PlayerId(0);
         const P1: PlayerId = PlayerId(1);
 
-        let granted = extract_granted_ability(
-            "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
-             \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
-            "Iron Fist, Living Weapon",
-        );
+        let granted = iron_fist_granted_body();
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -7768,5 +7944,63 @@ mod tests {
         // Silence the unused CounterType import on builds where the matches! arm
         // already consumed it via the qualified path.
         let _ = CounterType::Plus1Plus1;
+    }
+
+    /// CR 608.2b: a declared player with no legal referent is dealt nothing, and the
+    /// chain's inherited targets do not stand in for it.
+    #[test]
+    fn damage_to_a_declared_player_reads_the_declared_referent() {
+        use crate::types::ability::ChosenGroupId;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let targets = vec![
+            TargetRef::Player(PlayerId(1)),
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+        ];
+        let damage = |damage_source| {
+            let mut root = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::DeclaredPlayer { group },
+                    damage_source,
+                    excess: None,
+                },
+                targets.clone(),
+                ObjectId(99),
+                PlayerId(0),
+            );
+            root.declares_chosen_group = Some(group);
+            root
+        };
+        let carrier = |root: &ResolvedAbility| StackEntry {
+            id: ObjectId(500),
+            source_id: ObjectId(99),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(99),
+                ability: Box::new(root.clone()),
+            },
+        };
+        let player = vec![TargetRef::Player(PlayerId(1))];
+        for (damage_source, legal_sources, illegal_sources) in [
+            (None, vec![ObjectId(99)], vec![ObjectId(99)]),
+            (
+                Some(DamageSource::EachTarget),
+                vec![ObjectId(1), ObjectId(2)],
+                vec![],
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let mut root = damage(damage_source);
+            state.resolving_stack_entry = Some(carrier(&root));
+            assert_eq!(damage_recipients(&state, &root), player);
+            assert_eq!(damage_sources(&state, &root), legal_sources);
+
+            root.illegal_target_slots = vec![0];
+            state.resolving_stack_entry = Some(carrier(&root));
+            assert_eq!(damage_recipients(&state, &root), Vec::<TargetRef>::new());
+            assert_eq!(damage_sources(&state, &root), illegal_sources);
+        }
     }
 }

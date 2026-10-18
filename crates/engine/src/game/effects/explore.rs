@@ -282,7 +282,8 @@ pub(crate) fn resolve_explore_effect(
         .find(|p| p.id == controller)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    if player.library.is_empty() {
+    let library = state.library_of(player.id);
+    if library.is_empty() {
         // CR 701.44a: Explore with empty library — just put a +1/+1 counter.
         add_explore_counter(state, explorer_id, events);
 
@@ -295,7 +296,7 @@ pub(crate) fn resolve_explore_effect(
     }
 
     // Reveal top card
-    let top_card_id = player.library[0];
+    let top_card_id = library[0];
     let revealed_name = state
         .objects
         .get(&top_card_id)
@@ -326,7 +327,8 @@ pub(crate) fn resolve_explore_effect(
                 top_card_id,
                 crate::types::zones::Zone::Hand,
                 ability.source_id,
-            )],
+            )
+            .performed_by(controller)],
             Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
             events,
         );

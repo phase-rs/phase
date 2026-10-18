@@ -302,12 +302,10 @@ fn process_declaration_triggers_with_delayed_phase(
     let waiting_before = state.waiting_for.clone();
     let mut batch_events = vec![GameEvent::PhaseChanged { phase: state.phase }];
     batch_events.extend_from_slice(trigger_events);
-    let outcome = triggers::process_triggers_with_delayed_phase_events(
-        state,
-        &batch_events,
-        &batch_events,
-        events,
-    );
+    // CR 603.3b: printed and delayed triggers from one declaration are ordered
+    // in the same choice.
+    let outcome =
+        triggers::process_triggers_with_delayed_declaration_events(state, &batch_events, events);
     outcome.prompt.filter(|prompt| {
         matches!(prompt, WaitingFor::OrderTriggers { .. }) || *prompt != waiting_before
     })

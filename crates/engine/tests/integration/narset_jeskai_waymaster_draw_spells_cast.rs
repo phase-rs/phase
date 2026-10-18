@@ -4,11 +4,13 @@
 //! do, draw cards equal to the number of spells you've cast this turn."
 //!
 //! `SpellsCastThisTurn { Controller }` was already a recognized quantity ref,
-//! but the draw effect-construction path (`try_parse_equal_to_quantity_effect`)
-//! only consulted `parse_event_context_quantity`, so this non-event-context
-//! count dropped the whole draw clause to `Unimplemented`. The B2 fix adds a
-//! `parse_cda_quantity` fallback after the event-context attempt, so the count
-//! now resolves. This test seeds the per-turn spell tally (the runtime input the
+//! but the draw effect-construction path once consulted only
+//! `parse_event_context_quantity`, so this non-event-context count dropped the
+//! whole draw clause to `Unimplemented`. The draw count is now read by the
+//! count slot (`oracle_util::parse_count_slot`), whose "equal to" binder
+//! delegates to `oracle_util::parse_equal_to_count`; that chain tries a
+//! `parse_cda_quantity_with_context` fallback after the event-context attempt,
+//! so the count resolves. This test seeds the per-turn spell tally (the runtime input the
 //! count consumes), drives the parsed trigger's discard+draw chain through the
 //! real `resolve_ability_chain` pipeline, accepts the optional discard, and
 //! asserts cards drawn == spells cast this turn.
@@ -48,6 +50,7 @@ fn spell_record(name: &str) -> SpellCastRecord {
         cast_variant: engine::types::game_state::CastingVariant::Normal,
         was_kicked: false,
         spell_object_id: None,
+        prepared_copy_source: None,
     }
 }
 

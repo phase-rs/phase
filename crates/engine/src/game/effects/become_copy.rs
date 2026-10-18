@@ -1,14 +1,13 @@
+use crate::game::effects::token_copy::{copies_own_source, copy_source, CopySourceReferent};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
-use crate::game::layers::{
-    compute_current_copiable_values, remove_subtype_set, subtype_matches_core_types,
-};
+use crate::game::layers::{remove_subtype_set, subtype_matches_core_types};
 use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
     ContinuousModification, CopiableValues, CopyRecipient, Duration, Effect, EffectError,
     EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
-use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
+use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCounterAddition, PendingEffectResolved, TransientContinuousEffectBindings,
@@ -46,58 +45,55 @@ pub fn resolve(
         ),
     };
 
-    let target_id = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        // CR 115.1 + CR 601.2c: when the RECIPIENT is itself an announced target
-        // (Shuri: "Target artifact you control becomes a copy of a second target
-        // artifact you control"), it was declared FIRST, so the copy source is
-        // the SECOND declared object. `become_copy_copy_source_target_index` is
-        // derived from the same authority the slot builder uses, so this index
-        // cannot drift from the surfaced slot order. Mirrors
-        // `fight::resolve_fight_fighters`.
-        .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
-        .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
-
-    let values = compute_current_copiable_values(state, target_id)
-        .ok_or(EffectError::ObjectNotFound(target_id))?;
+    // CR 707.2 + CR 608.2h: the copy source is read once, through the
+    // copy-source authority. "It becomes a copy of this creature" (`SelfRef`,
+    // The Flood of Mars) copies the ability's own source, with its last-known
+    // copiable values once it has left; any other copy source is the declared
+    // object target.
+    let source = if copies_own_source(&ability.effect) {
+        copy_source(state, ability, CopySourceReferent::OwnSource)
+            .ok_or(EffectError::ObjectNotFound(ability.source_id))?
+    } else {
+        let target_id = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            // CR 115.1 + CR 601.2c: when the RECIPIENT is itself an announced target
+            // (Shuri: "Target artifact you control becomes a copy of a second target
+            // artifact you control"), it was declared FIRST, so the copy source is
+            // the SECOND declared object. `become_copy_copy_source_target_index` is
+            // derived from the same authority the slot builder uses, so this index
+            // cannot drift from the surfaced slot order. Mirrors
+            // `fight::resolve_fight_fighters`.
+            .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
+            .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
+        copy_source(state, ability, CopySourceReferent::Object(target_id))
+            .ok_or(EffectError::ObjectNotFound(target_id))?
+    };
 
     // Display identity follows the copy: carry the source's image routing so the
     // copying object renders the copied source's art. Not a CR 707.2 copiable
     // value (kept off `CopiableValues`); rides on the modification so it reverts
-    // with the effect. The source is guaranteed present — the copiable-values
-    // lookup above returned `Some` for `target_id`.
+    // with the effect. The authority supplies it with the values.
     //
     // CR 111.1 + CR 707.2: when the source is a true token, `printed_ref` is
     // `None` and the token's art lives only in the token database — so capture
     // `display_source` + `token_image_ref` too, otherwise a copy-of-token (e.g.
     // Mockingbird copying a Rabbit token) is stranded on the real-card name path
     // for a name that has no real-card printing and renders blank.
-    let (source_display_source, source_printed_ref, source_token_image_ref) = state
-        .objects
-        .get(&target_id)
-        .map(|o| {
-            (
-                o.display_source,
-                o.printed_ref.clone(),
-                o.token_image_ref.clone(),
-            )
-        })
-        .unwrap_or_default();
-
     let copy = PrecomputedCopyValues {
         source_id: ability.source_id,
         controller: ability.controller,
-        duration_subject: ObjectIncarnationRef::from_object(&state.objects[&target_id]),
+        duration_subject: source.incarnation,
         duration,
-        values,
-        display_source: source_display_source,
-        printed_ref: source_printed_ref,
-        token_image_ref: source_token_image_ref,
+        values: source.values,
+        display_source: source.display_source,
+        printed_ref: source.printed_ref,
+        token_image_ref: source.token_image_ref,
+        token_art: source.token_art,
         additional_modifications,
         effect_kind: EffectKind::from(&ability.effect),
     };
@@ -119,6 +115,7 @@ pub(crate) struct PrecomputedCopyValues {
     pub display_source: DisplaySource,
     pub printed_ref: Option<PrintedCardRef>,
     pub token_image_ref: Option<TokenImageRef>,
+    pub token_art: Option<TokenArtDescriptor>,
     pub additional_modifications: Vec<ContinuousModification>,
     pub effect_kind: EffectKind,
 }
@@ -142,6 +139,7 @@ pub(crate) fn apply_precomputed_copy_values(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         additional_modifications,
         effect_kind,
     } = copy;
@@ -229,6 +227,7 @@ pub(crate) fn apply_precomputed_copy_values(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
     }];
     if !folded {
         modifications.extend(legacy_layered_modifications.into_iter().cloned());
@@ -250,6 +249,7 @@ pub(crate) fn apply_precomputed_copy_values(
         TransientContinuousEffectBindings {
             affected_recipient: Some(recipient),
             duration_subject: Some(duration_subject),
+            granting_object: None,
         },
     );
 
@@ -424,7 +424,8 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::ChangeController
             | ContinuousModification::SetBasicLandType { .. }
             | ContinuousModification::SetChosenBasicLandType
-            | ContinuousModification::SetChosenName => Self::Layered(modification),
+            | ContinuousModification::SetChosenName
+            | ContinuousModification::SubstituteTextWord { .. } => Self::Layered(modification),
             ContinuousModification::SetName { name } => {
                 Self::Fold(FoldableCopyException::SetName { name })
             }
@@ -639,9 +640,10 @@ impl FoldableCopyException<'_> {
             }
             Self::SetCardTypes { core_types } => {
                 values.card_types.core_types = core_types.clone();
-                values.card_types.subtypes.retain(|subtype| {
-                    subtype_matches_core_types(subtype, core_types, all_creature_types)
-                });
+                values
+                    .card_types
+                    .subtypes
+                    .retain(|subtype| subtype_matches_core_types(subtype, core_types));
             }
             Self::RemoveAllSubtypes { set } => {
                 remove_subtype_set(&mut values.card_types.subtypes, *set, all_creature_types);
@@ -1209,6 +1211,58 @@ mod tests {
             "the copier's own printed identity is restored"
         );
         assert_eq!(reverted.name, "Mockingbird");
+    }
+
+    #[test]
+    fn copy_of_token_carries_source_art_descriptor_and_reverts() {
+        // Token-source analog of the Mockingbird row above for the
+        // ref-LESS case: the source token has no exact `token_image_ref`,
+        // so the copy must ride the source's intrinsic `token_art`
+        // descriptor (not its own stale/absent one) — and drop it when
+        // the copy expires.
+        let mut state = GameState::new_two_player(42);
+
+        let source_art = TokenArtDescriptor {
+            power: Some(2),
+            toughness: Some(2),
+            colors: vec![ManaColor::Green],
+            subtypes: vec!["Bear".to_string()],
+            keywords: vec![],
+            has_abilities: false,
+        };
+        let token_id = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
+        {
+            let token = state.objects.get_mut(&token_id).unwrap();
+            token.is_token = true;
+            token.display_source = crate::game::game_object::DisplaySource::Token;
+            token.token_image_ref = None;
+            token.token_art = Some(source_art.clone());
+        }
+        let copier_id = create_creature(&mut state, 2, PlayerId(0), "Mockingbird", 1, 1);
+
+        let mut events = Vec::new();
+        let ability = make_copy_ability(
+            token_id,
+            copier_id,
+            PlayerId(0),
+            Some(Duration::UntilEndOfTurn),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copy = &state.objects[&copier_id];
+        assert_eq!(
+            copy.token_art,
+            Some(source_art),
+            "the copy renders from the source token's intrinsic body"
+        );
+
+        execute_cleanup(&mut state, &mut events);
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&copier_id].token_art, None,
+            "a nontoken carries no art body of its own after revert"
+        );
     }
 
     #[test]

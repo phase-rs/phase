@@ -23,9 +23,16 @@ interface DisplayedLifeTotals {
   totals: Map<number, number>;
 }
 
+/** A step as queued, stamped with the `EngineSnapshot.seq` of the state it
+ *  animates: once `gameStore.lastCommittedSeq` reaches it, that state (or a
+ *  newer one that superseded it) has committed. */
+export interface QueuedStep extends AnimationStep {
+  snapshotSeq: number;
+}
+
 interface AnimationStoreState {
-  queue: AnimationStep[];
-  activeStep: AnimationStep | null;
+  queue: QueuedStep[];
+  activeStep: QueuedStep | null;
   activeGeneration: number;
   isPlaying: boolean;
   positionRegistry: Map<number, DOMRect>;
@@ -37,10 +44,20 @@ interface AnimationStoreState {
    * Step-scoped: every step change and queue clear resets it.
    */
   veiledObjectIds: ReadonlySet<number>;
+  /**
+   * Objects a card flight presents itself from launch to landing, so the
+   * surfaces that render them hide until the flight releases them. Unlike
+   * `veiledObjectIds`, a step change does not reset it, because a flight may
+   * outlive its step. Only `clearQueue` resets it.
+   */
+  flightVeiledObjectIds: ReadonlySet<number>;
+  /** Whether the card VFX layer is mounted and initialised, so it presents
+   *  steps as GL effects (the New style); Classic presents them otherwise. */
+  cardVfxReady: boolean;
 }
 
 interface AnimationStoreActions {
-  enqueueSteps: (steps: AnimationStep[]) => void;
+  enqueueSteps: (steps: AnimationStep[], snapshotSeq: number) => void;
   advanceStep: () => void;
   captureSnapshot: () => PositionSnapshot;
   registerPosition: (objectId: number, rect: DOMRect) => void;
@@ -50,6 +67,11 @@ interface AnimationStoreActions {
   recordDisplayedLife: (playerId: number, life: number, engineCommitEpoch: number) => void;
   /** Hide these objects' board cards for the rest of the active step. */
   veilObjects: (objectIds: readonly number[]) => void;
+  /** Hide this object's card surfaces until its flight releases it. */
+  veilFlight: (objectId: number) => void;
+  /** Release a flight veil. */
+  unveilFlight: (objectId: number) => void;
+  setCardVfxReady: (ready: boolean) => void;
   clearQueue: () => void;
 }
 
@@ -66,10 +88,13 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   animationNewState: null,
   displayedLife: null,
   veiledObjectIds: NO_VEILED_OBJECTS,
+  flightVeiledObjectIds: NO_VEILED_OBJECTS,
+  cardVfxReady: false,
 
-  enqueueSteps: (steps) => {
-    if (steps.length === 0) return;
+  enqueueSteps: (unstamped, snapshotSeq) => {
+    if (unstamped.length === 0) return;
 
+    const steps = unstamped.map((step) => ({ ...step, snapshotSeq }));
     const { activeStep, queue } = get();
     if (activeStep) {
       // Already animating — append to queue
@@ -148,6 +173,20 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     set((state) => ({ veiledObjectIds: new Set([...state.veiledObjectIds, ...objectIds]) }));
   },
 
+  veilFlight: (objectId) => {
+    set((state) => ({ flightVeiledObjectIds: new Set([...state.flightVeiledObjectIds, objectId]) }));
+  },
+
+  unveilFlight: (objectId) => {
+    set((state) => {
+      const next = new Set(state.flightVeiledObjectIds);
+      next.delete(objectId);
+      return { flightVeiledObjectIds: next };
+    });
+  },
+
+  setCardVfxReady: (ready) => set({ cardVfxReady: ready }),
+
   clearQueue: () => set((state) => ({
     queue: [],
     activeStep: null,
@@ -156,5 +195,6 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     animationNewState: null,
     displayedLife: null,
     veiledObjectIds: NO_VEILED_OBJECTS,
+    flightVeiledObjectIds: NO_VEILED_OBJECTS,
   })),
 }));

@@ -34,6 +34,11 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Prioritätsfenster mit geringer Nutzung überspringen (experimentell)",
     "skipLowUsePriorityWindowsDescription": "Überspringe automatisch deine eigenen Prioritätsfenster bei leerem Stapel während des Versorgungssegments, Ziehsegments und Endsegments. Phasenstopps und Volle Kontrolle halten weiterhin an.",
+    "priorityAlerts": "Prioritätsbenachrichtigungen",
+    "priorityAlertVisual": "Leuchten",
+    "priorityAlertSound": "Ton",
+    "priorityAlertTitle": "Tab-Titel",
+    "priorityAlertsDescription": "Du wirst benachrichtigt, wenn die Priorität nach einer Wartezeit zu dir zurückkehrt. Der Ton erklingt, wenn du in einem anderen Tab oder Fenster bist oder wenn ein Fenster im Zug eines Gegners {{seconds}} Sekunden lang unbeantwortet bleibt; dann leuchtet es auch stärker.",
     "logDockSide": "Position des Spielprotokolls",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
@@ -76,6 +81,7 @@
   "visual": {
     "title": "Grafik",
     "vfxQuality": "VFX-Qualität",
+    "cardAnimationStyle": "Kartenanimationen",
     "keywordStrip": "Schlüsselwortleiste",
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
@@ -122,7 +128,13 @@
       "full": "Voll",
       "reduced": "Reduziert",
       "minimal": "Minimal"
-    }
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Neu",
+      "classic": "Klassisch"
+    },
+    "cardAnimationPreviewHintHover": "Zum Ansehen darüberfahren",
+    "cardAnimationPreviewHintTap": "Zum Ansehen tippen"
   },
   "flexLayout": {
     "title": "Flexibles Layout",
@@ -498,14 +510,28 @@
     "modelPlaceholder": "Modell-ID (z. B. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpunkt",
     "endpointPlaceholder": "https://dein-server/v1",
+    "jevEndpointPlaceholder": "Standardmäßig dein Multiplayer-Server",
+    "jevEndpointHint": "Jev wird über einen phase-Multiplayer-Server erreicht, der jede Anfrage an TypeSafe weiterleitet. Dein Schlüssel wird nur in dieser Anfrage übertragen und nie auf dem Server gespeichert.",
     "apiKey": "API-Schlüssel",
     "apiKeyPlaceholder": "API-Schlüssel einfügen",
     "apiKeyOptional": "Bei lokalen Servern optional",
+    "apiKeyMissing": "Gib deinen API-Schlüssel erneut ein. Schlüssel bleiben nach einem Neuladen nicht erhalten, und dieser Anbieter wird erst danach für KI-Plätze oder Draft-Bots verwendet.",
     "apiKeyStorage": "Nur für diese Browsersitzung im Arbeitsspeicher. API-Schlüssel werden nie auf die Festplatte geschrieben und sind vom Backup-Export und der Cloud-Synchronisierung ausgenommen — nach einem Neuladen gibst du ihn erneut ein. Ein API-Schlüssel verlangt außerdem einen https://-Endpunkt, sofern der Server nicht auf localhost läuft.",
     "apiKeyGet": "Schlüssel holen",
     "test": "Verbindung testen",
     "testing": "Test läuft …",
     "testOk": "Verbunden.",
+    "defaultPrompt": {
+      "connected": "Verbunden. Als Standard-Gegner verwenden?",
+      "ready": "Diesen Anbieter als Standard-Gegner verwenden?",
+      "action": "Als Standard verwenden",
+      "badge": "Standard-Gegner"
+    },
+    "defaultOpponent": {
+      "label": "Standard-Gegner",
+      "hint": "KI-Gegner nutzen diesen Anbieter, sofern du beim Einrichten einer Partie für einen Platz keinen anderen wählst. Das gilt auch für den Gegner in Draft-Partien.",
+      "engine": "Integrierte Engine-KI"
+    },
     "draftToggle": {
       "label": "Für Draft-Bots verwenden",
       "hint": "Bot-Plätze in einem Draft wählen mit dem Modell, samt Set-Kontext des Formats.",

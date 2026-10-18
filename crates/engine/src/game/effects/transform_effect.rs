@@ -1049,18 +1049,14 @@ mod tests {
     /// resolution did not LOSE the guard, not to fail on revert. Do not promote it
     /// to a discriminator in a later edit.
     ///
-    /// MEASURED CAVEAT ON THE MECHANISM, because this fixture does not reach the
-    /// empty-list route and must not pretend to. `self_ref_is_current`
-    /// (`types/ability.rs`) only reports a stale self-reference as EMPTY when the
-    /// ability carries a latched `trigger_source`; `build_resolved_from_def`
-    /// latches none, on EITHER stack shape. So on all four branches below
-    /// `resolved_targets` returns `[Object(source_id)]`, the `[object_id]` arm
-    /// binds the source, and the guard that is preserved here is
-    /// `self_transform_is_stale` (which reads `source_is_current`) — asserted
-    /// inline, not described. The OUTCOME is identical to the empty-list route,
-    /// which is what makes this a preservation row either way. Do not "simplify"
-    /// the mechanism assertion into the empty-list sentence: it was measured
-    /// false for this fixture on both the activated and the triggered shape.
+    /// THE MECHANISM, asserted inline. `build_resolved_from_def` latches no
+    /// `trigger_source` on EITHER stack shape, so `self_ref_is_current`
+    /// (`types/ability.rs`) reads the captured `source_incarnation` alone: a
+    /// blinked source is stale and `resolved_targets` returns EMPTY, which the
+    /// `[] => ability.source_id` arm then hands to `self_transform_is_stale`
+    /// (which reads `source_is_current`). A live source resolves to
+    /// `[Object(source_id)]`. The OUTCOME is the same on both routes, which is
+    /// what makes this a preservation row.
     ///
     /// Positive control in the same test: the live-source sibling DOES transform,
     /// so "did not transform" cannot pass because the fixture is inert.
@@ -1131,18 +1127,23 @@ mod tests {
                     if blinked { "stale" } else { "current" }
                 );
                 // MECHANISM, asserted rather than described: with no latched
-                // `trigger_source` the SelfRef arm binds the source on every
-                // branch, so the surviving guard below is `self_transform_is_stale`.
+                // `trigger_source` the SelfRef arm follows the captured
+                // incarnation (CR 400.7), so a blinked source binds nothing and
+                // `self_transform_is_stale` guards the `[]` fallback below.
                 let resolved = crate::game::targeting::resolved_targets(
                     ability,
                     &TargetFilter::SelfRef,
                     &state,
                 );
+                let expected = if blinked {
+                    Vec::new()
+                } else {
+                    vec![TargetRef::Object(source_id)]
+                };
                 assert_eq!(
-                    resolved,
-                    vec![TargetRef::Object(source_id)],
-                    "this fixture latches no `trigger_source`, so the SelfRef arm binds the \
-                     source on every branch (triggered={triggered}, blinked={blinked})"
+                    resolved, expected,
+                    "with no latched `trigger_source` the SelfRef arm binds the source only \
+                     while it is current (triggered={triggered}, blinked={blinked})"
                 );
 
                 resolve(&mut state, ability, &mut events).expect("transform ability resolves");

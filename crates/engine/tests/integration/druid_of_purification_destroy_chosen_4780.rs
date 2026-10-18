@@ -57,9 +57,9 @@ fn druid_of_purification_destroys_only_the_chosen_permanent() {
 
     let mut runner = scenario.build();
     if let Some(p) = runner.state_mut().players.iter_mut().find(|p| p.id == P0) {
-        p.mana_pool.mana = (0..6)
-            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
-            .collect();
+        p.mana_pool = engine::types::mana::ManaPool::from_units(
+            (0..6).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])),
+        );
     }
 
     // Cast Druid — its ETB fires and pauses at the per-player choose prompts.

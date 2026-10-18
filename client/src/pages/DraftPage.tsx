@@ -36,6 +36,7 @@ import {
   type ResponsiveDraftLayout,
 } from "../components/draft/workspace/workspacePreferences";
 import { DraftProgress } from "../components/draft/DraftProgress";
+import { LlmDrafterStatus } from "../components/draft/LlmDrafterStatus";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { SealedPackOpening } from "../components/draft/SealedPackOpening";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
@@ -814,10 +815,15 @@ export function DraftPage() {
                     ? "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-rows-[minmax(0,56%)_minmax(0,44%)] gap-2"
                     : "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-cols-[minmax(340px,40%)_minmax(0,60%)] gap-2"}
           >
-            <div className={responsiveLayout === "desktop" ? "w-full min-w-0" : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
+            <div className={responsiveLayout === "desktop" ? "w-full min-w-0" : "relative h-full min-h-0 w-full min-w-0 overflow-hidden"}>
               {responsiveLayout === "desktop" && (
                 <DraftProgress />
               )}
+              {/* Inline on desktop; overlaid on compact layouts, where the pack
+                  fills its whole cell and an extra row would clip it. */}
+              <LlmDrafterStatus
+                className={responsiveLayout === "desktop" ? "mt-2" : "absolute left-2 top-2 z-20 max-w-[calc(100%-1rem)]"}
+              />
               <PackDisplay
                 controller={packController}
                 presentation={packPresentation}

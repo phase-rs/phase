@@ -7,17 +7,21 @@
 //! - Surveil + dynamic draw: for each opponent who lost life this turn
 //! - Tap + stun counters: -2 loyalty ability
 
-use engine::game::combat::{AttackerInfo, CombatState};
+use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+use engine::game::effects::counters::remove_counter_with_replacement;
+use engine::game::layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
+use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-    PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    PlayerFilter, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TargetRef,
     TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
-use engine::types::counter::{CounterMatch, CounterType};
+use engine::types::card_type::{CoreType, Supertype};
+use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -27,6 +31,16 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 use std::sync::Arc;
+
+// Verbatim Scryfall Oracle text for Kaito, Bane of Nightmares.
+const KAITO_ORACLE: &str = r#"Ninjutsu {1}{U}{B} ({1}{U}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)
+During your turn, as long as Kaito has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof.
++1: You get an emblem with "Ninjas you control get +1/+1."
+0: Surveil 2. Then draw a card for each opponent who lost life this turn.
+−2: Tap target creature. Put two stun counters on it."#;
+
+// Verbatim MTGJSON Oracle text for Futurist Operative.
+const FUTURIST_ORACLE: &str = "As long as this creature is tapped, it's a Human Citizen with base power and toughness 1/1 and can't be blocked.\n{2}{U}: Untap this creature.";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,36 +83,27 @@ fn ninja_pump_static() -> StaticDefinition {
         bypass_beneficiary: None,
         protection_does_not_remove: None,
         room_door: None,
+        granting_object: None,
     }
 }
 
 /// Kaito's compound animation static: DuringYourTurn + HasCounters(loyalty, 1).
 fn kaito_animation_static() -> StaticDefinition {
-    StaticDefinition::continuous()
-        .affected(TargetFilter::SelfRef)
-        .condition(StaticCondition::And {
-            conditions: vec![
-                StaticCondition::DuringYourTurn,
-                StaticCondition::HasCounters {
-                    counters: CounterMatch::OfType(CounterType::Loyalty),
-                    minimum: 1,
-                    maximum: None,
-                },
-            ],
-        })
-        .modifications(vec![
-            ContinuousModification::SetPower { value: 3 },
-            ContinuousModification::SetToughness { value: 4 },
-            ContinuousModification::AddSubtype {
-                subtype: "Ninja".to_string(),
-            },
-            ContinuousModification::AddType {
-                core_type: CoreType::Creature,
-            },
-            ContinuousModification::AddKeyword {
-                keyword: Keyword::Hexproof,
-            },
-        ])
+    let parsed = parse_oracle_text(
+        KAITO_ORACLE,
+        "Kaito, Bane of Nightmares",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Kaito".to_string()],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "Kaito must parse its animation static"
+    );
+    let animation = parsed.statics.into_iter().next().unwrap();
+    assert_eq!(animation.affected, Some(TargetFilter::SelfRef));
+    animation
 }
 
 /// Set up a runner with Kaito on the battlefield at the given phase.
@@ -396,6 +401,83 @@ fn kaito_emblem_creation() {
 // Test: Planeswalker-to-creature animation
 // ---------------------------------------------------------------------------
 
+// CR 205.1a + CR 613.1d: setting only subtypes preserves existing card types.
+#[test]
+fn futurist_subtype_animation_retains_artifact_and_uses_own_tapped_condition() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tapped_id = scenario
+        .add_creature_from_oracle(P0, "Futurist Operative", 3, 4, FUTURIST_ORACLE)
+        .with_subtypes(vec!["Human", "Ninja"])
+        .as_artifact_creature()
+        .id();
+    let untapped_id = scenario
+        .add_creature_from_oracle(P0, "Futurist Operative", 3, 4, FUTURIST_ORACLE)
+        .with_subtypes(vec!["Human", "Ninja"])
+        .as_artifact_creature()
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tapped_id)
+        .unwrap()
+        .tapped = true;
+    runner.state_mut().layers_dirty.mark_full();
+    for id in [tapped_id, untapped_id] {
+        assert_eq!(
+            runner.state().objects[&id].base_card_types.core_types,
+            vec![CoreType::Creature, CoreType::Artifact]
+        );
+    }
+    runner
+        .act(GameAction::PassPriority)
+        .expect("evaluate the parsed subtype-only animation");
+    let state = runner.state();
+    let tapped = &state.objects[&tapped_id];
+    // CR 613.4b: the active base-P/T change proves the layer path was reached.
+    assert_eq!((tapped.power, tapped.toughness), (Some(1), Some(1)));
+    assert_eq!(
+        tapped.card_types.core_types,
+        vec![CoreType::Creature, CoreType::Artifact]
+    );
+    assert!(tapped.card_types.subtypes.contains(&"Human".to_string()));
+    assert!(tapped.card_types.subtypes.contains(&"Citizen".to_string()));
+    // CR 611.3a: the other source's tapped state cannot activate this source.
+    let untapped = &state.objects[&untapped_id];
+    assert_eq!((untapped.power, untapped.toughness), (Some(3), Some(4)));
+    assert_eq!(
+        untapped.card_types.core_types,
+        vec![CoreType::Creature, CoreType::Artifact]
+    );
+    assert_eq!(untapped.card_types.subtypes, vec!["Human", "Ninja"]);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tapped_id)
+        .unwrap()
+        .tapped = false;
+    runner.state_mut().layers_dirty.mark_full();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("re-evaluate after the source becomes untapped");
+    let state = runner.state();
+    for id in [tapped_id, untapped_id] {
+        let object = &state.objects[&id];
+        assert_eq!((object.power, object.toughness), (Some(3), Some(4)));
+        assert_eq!(
+            object.card_types.core_types,
+            vec![CoreType::Creature, CoreType::Artifact]
+        );
+        assert_eq!(object.card_types.subtypes, vec!["Human", "Ninja"]);
+    }
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
 #[test]
 fn kaito_animation_during_your_turn_with_loyalty() {
     let (mut runner, kaito_id) = setup_kaito_on_battlefield(Phase::PreCombatMain);
@@ -431,14 +513,95 @@ fn kaito_animation_during_your_turn_with_loyalty() {
     );
 }
 
+// CR 205.1a + CR 120.3e: Kaito becomes only a creature, retaining loyalty
+// counters while a blocker's combat damage is marked on him.
+#[test]
+fn kaito_blocked_as_creature_takes_damage_without_losing_loyalty() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kaito_id = scenario
+        .add_planeswalker_from_oracle(P0, "Kaito, Bane of Nightmares", "Kaito", 4, KAITO_ORACLE)
+        .as_legendary()
+        .id();
+    let blocker_id = scenario.add_creature(P1, "Blocker", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("evaluate Kaito's parsed static");
+    let kaito = &runner.state().objects[&kaito_id];
+    assert_eq!(kaito.card_types.core_types, vec![CoreType::Creature]);
+    assert_eq!(kaito.card_types.subtypes, vec!["Ninja".to_string()]);
+    // CR 205.4b: changing card types preserves supertypes.
+    assert!(kaito.card_types.supertypes.contains(&Supertype::Legendary));
+    assert_eq!((kaito.power, kaito.toughness), (Some(3), Some(4)));
+    assert!(kaito.keywords.contains(&Keyword::Hexproof));
+    assert_eq!(kaito.loyalty, Some(4));
+    assert_eq!(kaito.counters.get(&CounterType::Loyalty), Some(&4));
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(kaito_id, AttackTarget::Player(P1))])
+        .expect("animated Kaito can attack");
+    // CR 509.1: reach the defending player's actual blocker declaration prompt.
+    for _ in 0..32 {
+        match &runner.state().waiting_for {
+            WaitingFor::DeclareBlockers { .. } => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority until blockers are declared");
+            }
+            other => panic!("expected priority or declare blockers, got {other:?}"),
+        }
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { player: P1, .. }
+    ));
+    runner
+        .declare_blockers(&[(blocker_id, kaito_id)])
+        .expect("the 2/2 can block Kaito");
+    let outcome = runner.combat_damage();
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt { source_id, target: TargetRef::Object(target), amount: 2, .. }
+                if *source_id == blocker_id && *target == kaito_id
+        )),
+        "the blocker must actually deal two damage to Kaito"
+    );
+    let state = outcome.state();
+    let kaito = &state.objects[&kaito_id];
+    assert_eq!(kaito.zone, Zone::Battlefield);
+    assert_eq!(kaito.damage_marked, 2);
+    assert_eq!(kaito.loyalty, Some(4));
+    assert_eq!(kaito.counters.get(&CounterType::Loyalty), Some(&4));
+    assert_eq!(state.objects[&blocker_id].zone, Zone::Graveyard);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(
+        state.phase,
+        Phase::EndCombat | Phase::PostCombatMain
+    ));
+}
+
 #[test]
 fn kaito_not_animated_on_opponents_turn() {
     let (mut runner, kaito_id) = setup_kaito_on_battlefield(Phase::PreCombatMain);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("apply Kaito's animation on his controller's turn");
+    assert_eq!(
+        runner.state().objects[&kaito_id].card_types.core_types,
+        vec![CoreType::Creature]
+    );
 
     // Switch to opponent's turn
     runner.state_mut().active_player = P1;
     runner.state_mut().layers_dirty.mark_full();
-    let _ = runner.act(GameAction::PassPriority);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("re-evaluate Kaito on the opponent's turn");
 
     let state = runner.state();
     let kaito = &state.objects[&kaito_id];
@@ -456,31 +619,46 @@ fn kaito_not_animated_on_opponents_turn() {
             .contains(&CoreType::Planeswalker),
         "Kaito should still be a planeswalker"
     );
+    assert_eq!(kaito.card_types.subtypes, vec!["Kaito".to_string()]);
+    assert_eq!(kaito.loyalty, Some(4));
+    assert!(!kaito.keywords.contains(&Keyword::Hexproof));
 }
 
 #[test]
-fn kaito_not_animated_without_loyalty_counters() {
+fn kaito_layer_animation_stops_without_loyalty_counters() {
     let (mut runner, kaito_id) = setup_kaito_on_battlefield(Phase::PreCombatMain);
-
-    // Remove all loyalty counters
     runner
-        .state_mut()
-        .objects
-        .get_mut(&kaito_id)
-        .unwrap()
-        .counters
-        .remove(&CounterType::Loyalty);
-    runner.state_mut().layers_dirty.mark_full();
-    let _ = runner.act(GameAction::PassPriority);
-
-    let state = runner.state();
-    let kaito = &state.objects[&kaito_id];
-
-    // No loyalty counters: should NOT be a creature even on your turn
-    assert!(
-        !kaito.card_types.core_types.contains(&CoreType::Creature),
-        "Kaito should NOT be a creature without loyalty counters"
+        .act(GameAction::PassPriority)
+        .expect("apply Kaito's animation with loyalty counters");
+    assert_eq!(
+        runner.state().objects[&kaito_id].card_types.core_types,
+        vec![CoreType::Creature]
     );
+
+    // CR 611.3a: the static's counter condition is live. This focused layer-only
+    // check stops before state-based actions would remove a zero-loyalty walker.
+    let mut events = Vec::new();
+    remove_counter_with_replacement(
+        runner.state_mut(),
+        kaito_id,
+        CounterType::Loyalty,
+        4,
+        &mut events,
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::CounterRemoved {
+            object_id,
+            counter_type: CounterType::Loyalty,
+            count: 4,
+        } if *object_id == kaito_id
+    )));
+    layers::evaluate_layers(runner.state_mut());
+    let kaito = &runner.state().objects[&kaito_id];
+    assert_eq!(kaito.card_types.core_types, vec![CoreType::Planeswalker]);
+    assert_eq!(kaito.card_types.subtypes, vec!["Kaito".to_string()]);
+    assert_eq!(kaito.loyalty, Some(0));
+    assert_eq!(kaito.counters.get(&CounterType::Loyalty), Some(&0));
 }
 
 // ---------------------------------------------------------------------------

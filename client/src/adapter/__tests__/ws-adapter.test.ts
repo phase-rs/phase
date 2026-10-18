@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { diagnosticIdFor, getDiagnosticHistory } from "../../services/troubleshooting";
+import { loadDiagnosticHistory } from "../../services/diagnosticHistory";
 
 const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
@@ -15,11 +17,12 @@ import {
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsServerRewind } from "../types";
-import type { FormatConfig, GameAction, GameState } from "../types";
+import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
   InteractionId,
   InteractionPreviewRequest,
+  InteractionSubmission,
   PreviewRequestId,
 } from "../generated/interaction";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
@@ -35,38 +38,25 @@ class MockWebSocket extends EventTarget {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: CloseEvent) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
   constructor(public url: string) {
     super();
     MockWebSocket.last = this;
   }
-  // Deliver a frame the way production does — which is asymmetric between
-  // the two event types, so this routes them differently.
-  //
-  // `"message"`: `onmessage` ONLY. Both `openPhaseSocket`
-  // (`openPhaseSocket.ts:190`) and the adapter (`ws-adapter.ts:528`) assign
-  // the `onmessage` IDL attribute, and neither registers an
-  // `addEventListener("message", ...)` — `PhaseSocketTransport` types
-  // `addEventListener` for `"close"` alone (`openPhaseSocket.ts:20-25`), so
-  // a message listener is not even expressible through the interface. This
-  // previously also called `dispatchEvent(new MessageEvent(...))` under a
-  // comment claiming `openPhaseSocket` registered a message listener; it
-  // does not, and happy-dom routes `dispatchEvent` back through the
-  // `onmessage` attribute, so every frame in this file was handled TWICE.
-  // Harmless for idempotent handlers, but it silently defeats any negative
-  // that depends on state the first delivery consumes.
-  //
-  // `"close"`: both channels, because production genuinely uses both —
-  // `openPhaseSocket.ts:366` registers `addEventListener("close", ...)`
-  // alongside the `onclose` assignment.
-  dispatchSynthetic(type: "message" | "close", data?: string) {
+  // Deliver raw observers and the IDL handler once each; happy-dom would
+  // otherwise invoke the same IDL handler again through dispatchEvent.
+  dispatchSynthetic(type: "message" | "close", data?: string, closeEvent = new CloseEvent("close")) {
     if (type === "message" && data !== undefined) {
-      this.onmessage?.({ data });
+      const handler = this.onmessage;
+      this.onmessage = null;
+      this.dispatchEvent(new MessageEvent("message", { data }));
+      this.onmessage = handler;
+      handler?.({ data });
     } else if (type === "close") {
-      this.onclose?.();
-      this.dispatchEvent(new Event("close"));
+      this.onclose?.(closeEvent);
+      this.dispatchEvent(closeEvent);
     }
   }
 }
@@ -83,18 +73,34 @@ const SERVER_HELLO = JSON.stringify({
     mode: "Full",
   },
 });
+const HEARTBEAT_HELLO = JSON.stringify({
+  ...JSON.parse(SERVER_HELLO),
+  data: {
+    ...JSON.parse(SERVER_HELLO).data,
+    heartbeat: { ping_interval_ms: 5000, silence_budget_ms: 15000 },
+  },
+});
+const CORRELATED_HELLO = JSON.stringify({
+  ...JSON.parse(HEARTBEAT_HELLO),
+  data: {
+    ...JSON.parse(HEARTBEAT_HELLO).data,
+    command_correlation: "CommandIdV1",
+  },
+});
+
+const REPLY_OWNERSHIP_FULL_KEY = { game_code: "GAME01", generation: 7 };
 
 /**
  * Drives an adapter through the shared-handshake pipeline to the
  * post-ServerHello state. Returns the adapter's underlying mock ws once
  * the handshake has landed, so tests can then fire game-level frames.
  */
-async function completeHandshake(adapter: WebSocketAdapter): Promise<MockWebSocket> {
+async function completeHandshake(adapter: WebSocketAdapter, hello = SERVER_HELLO): Promise<MockWebSocket> {
   // Allow the microtask inside `openPhaseSocket` to install its
   // `onmessage` handler before we deliver the hello frame.
   await Promise.resolve();
   const ws = MockWebSocket.last!;
-  ws.dispatchSynthetic("message", SERVER_HELLO);
+  ws.dispatchSynthetic("message", hello);
   // One more tick so the adapter's `attachSocket` re-binds `onmessage`
   // to its post-handshake handler and the `this.ws` assignment settles.
   await Promise.resolve();
@@ -129,6 +135,112 @@ function trackRejection(promise: Promise<unknown>): () => Promise<unknown> {
     await new Promise((resolve) => setTimeout(resolve, 0));
     return outcome;
   };
+}
+
+function interactionSubmission(id: string): InteractionSubmission {
+  return {
+    interactionId: id as InteractionId,
+    response: { type: "choose", data: { choiceId: `choice-${id}` as InteractionChoiceId } },
+  };
+}
+
+function deliveredEventMarker(observation: unknown): string | null {
+  if (typeof observation !== "object" || observation === null || !("resolvedWith" in observation)) return null;
+  const { resolvedWith } = observation as { resolvedWith: SubmitResult };
+  const first = resolvedWith.events[0] as unknown as { marker?: string } | undefined;
+  return first?.marker ?? null;
+}
+
+function submissionTypes(ws: MockWebSocket): string[] {
+  return ws.send.mock.calls
+    .map(([raw]) => JSON.parse(raw as string) as { type?: string })
+    .map((frame) => frame.type)
+    .filter((type): type is string => type === "Action" || type === "Interaction");
+}
+
+function lastSubmissionCommandId(ws: MockWebSocket): unknown {
+  for (const [raw] of ws.send.mock.calls.slice().reverse()) {
+    if (typeof raw !== "string") continue;
+    const frame: unknown = JSON.parse(raw);
+    if (typeof frame !== "object" || frame === null || !("type" in frame)) continue;
+    if (frame.type !== "Action" && frame.type !== "Interaction") continue;
+    return "command_id" in frame ? frame.command_id : undefined;
+  }
+  throw new Error("No game submission was sent");
+}
+
+function deliverOwnershipStateUpdate(
+  ws: MockWebSocket,
+  marker: string,
+  revision: number,
+  commandId?: unknown,
+): void {
+  ws.dispatchSynthetic("message", JSON.stringify({
+    type: "StateUpdate",
+    command_id: commandId,
+    data: {
+      state_revision: revision,
+      state: { ...createMockState(), turn_number: revision },
+      events: [{ marker }],
+      log_entries: [],
+      full_key: REPLY_OWNERSHIP_FULL_KEY,
+    },
+  }));
+}
+
+function acceptFullReplyOwnershipSession(
+  adapter: WebSocketAdapter,
+  ws: MockWebSocket,
+): void {
+  const events = vi.fn();
+  adapter.onEvent(events);
+  ws.dispatchSynthetic("message", JSON.stringify({
+    type: "GameStarted",
+    data: {
+      state_revision: 1,
+      state: createMockState(),
+      your_player: 0,
+      player_token: "accepted-full-session-token",
+      full_key: REPLY_OWNERSHIP_FULL_KEY,
+    },
+  }));
+  expect(events).toHaveBeenCalledWith(expect.objectContaining({
+    type: "sessionChanged",
+    session: expect.objectContaining({ fullKey: REPLY_OWNERSHIP_FULL_KEY }),
+  }));
+  ws.send.mockClear();
+}
+
+async function exerciseOverlappingSubmissionOwnership(
+  ws: MockWebSocket,
+  submitFirst: () => Promise<SubmitResult>,
+  submitSecond: () => Promise<SubmitResult>,
+): Promise<void> {
+  const readFirst = trackRejection(submitFirst());
+  const readSecond = trackRejection(submitSecond());
+
+  deliverOwnershipStateUpdate(ws, "reply-A", 2);
+  const [firstAfterA, secondAfterA] = await Promise.all([readFirst(), readSecond()]);
+  const secondWasSent = submissionTypes(ws).length > 1;
+
+  if (secondWasSent) deliverOwnershipStateUpdate(ws, "reply-B", 3);
+  const firstAfterB = await readFirst();
+  await readSecond();
+
+  const secondErrorCode = typeof secondAfterA === "object" && secondAfterA !== null && "code" in secondAfterA
+    ? secondAfterA.code
+    : null;
+  expect({
+    secondWasSent,
+    secondErrorCode,
+    firstOwnsReplyA: deliveredEventMarker(firstAfterA) === "reply-A",
+    firstSettlesWithoutAnOrphan: deliveredEventMarker(firstAfterB) === "reply-A",
+  }).toEqual({
+    secondWasSent: false,
+    secondErrorCode: AdapterErrorCode.ACTION_NOT_SENT,
+    firstOwnsReplyA: true,
+    firstSettlesWithoutAnOrphan: true,
+  });
 }
 
 // Shared session service relies on localStorage in test environments.
@@ -171,8 +283,9 @@ describe("WebSocketAdapter", () => {
     MockWebSocket.last = null;
     adapter = new WebSocketAdapter(
       "wss://localhost:9374/ws",
-      "host",
+      "join",
       { main_deck: [], sideboard: [] },
+      "GAME01",
     );
     const initPromise = adapter.initialize();
     ws = await completeHandshake(adapter);
@@ -225,6 +338,14 @@ describe("WebSocketAdapter", () => {
         data: fullKey ? { full_key: fullKey } : {},
       }),
     },
+    {
+      label: "ContestProgress",
+      acceptedEvent: "contestProgress",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "ContestProgress",
+        data: { contest: 1, clicks: [[0, 3]], ...(fullKey ? { full_key: fullKey } : {}) },
+      }),
+    },
   ];
 
   it.each(
@@ -274,6 +395,35 @@ describe("WebSocketAdapter", () => {
     } else {
       expect(ws.close).not.toHaveBeenCalled();
     }
+  });
+
+  it("stays silent on a late socket error after rejecting the session identity", () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameCreated",
+        data: {
+          game_code: "GAME01",
+          player_token: "player-token",
+          full_key: { game_code: "GAME01", generation: 0 },
+        },
+      }),
+    );
+    expect(ws.close).toHaveBeenCalledOnce();
+
+    ws.onerror?.();
+
+    expect(listener.mock.calls.map(([event]) => event).filter((event) => event.type === "error"))
+      .toEqual([{ type: "error", message: "Server omitted a valid Full session identity" }]);
+  });
+
+  it("emits a live socket error before any identity rejection", () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    ws.onerror!();
+    expect(listener).toHaveBeenCalledWith({ type: "error", message: "WebSocket connection failed" });
   });
 
   it("exports only the trusted snapshot returned by the server", async () => {
@@ -669,6 +819,33 @@ describe("WebSocketAdapter", () => {
       },
     });
 
+    it("exports authoritative state through the native bridge without a WebSocket URL", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(() => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport),
+      );
+      const initPromise = nativeAdapter.initialize();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: { state: createMockState(), your_player: 0 },
+      }));
+      await initPromise;
+
+      const exported = nativeAdapter.exportPersistenceState();
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ExportAuthoritativeState" }));
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "AuthoritativeStateExport", data: { state: "{\"state\":{}}" },
+      }));
+      await expect(exported).resolves.toBe("{\"state\":{}}");
+    });
+
     it("uses the bridge factory with the full camelCase AI seat wire shape", async () => {
       MockWebSocket.last = null;
       const socketFactory = vi.fn(
@@ -762,7 +939,6 @@ describe("WebSocketAdapter", () => {
         default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
-        allow_experimental_dungeons: false,
       };
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
@@ -845,11 +1021,10 @@ describe("WebSocketAdapter", () => {
       // Presently unsatisfiable on the old code: `attemptReconnect` returned
       // before the `reconnecting` emit, so this event was NEVER produced for
       // a native-ai adapter.
-      expect(listener).toHaveBeenCalledWith({
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({
         type: "reconnecting",
         attempt: 1,
-        maxAttempts: 8,
-      });
+      }));
       expect(listener).not.toHaveBeenCalledWith(
         expect.objectContaining({ type: "reconnectFailed" }),
       );
@@ -881,7 +1056,6 @@ describe("WebSocketAdapter", () => {
         default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
-        allow_experimental_dungeons: false,
       };
       const pregameAdapter = new WebSocketAdapter(
         "native-engine",
@@ -1027,7 +1201,7 @@ describe("WebSocketAdapter", () => {
 
     it("settles an export when native session identity validation fails", async () => {
       const nativeAdapter = new WebSocketAdapter(
-        "wss://localhost:9374/ws",
+        "native-engine",
         "join",
         { main_deck: [], sideboard: [] },
         undefined,
@@ -1534,6 +1708,39 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("Bug C: stateChanged emission", () => {
+    it("keeps reconnect revision 10 when a delayed revision 7 arrives", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state_revision: 10, state: { ...createMockState(), turn_number: 10 }, your_player: 0,
+          full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      const started = await adapter.getSnapshot();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      deliverOwnershipStateUpdate(ws, "stale", 7);
+      expect(await adapter.getSnapshot()).toBe(started);
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+      deliverOwnershipStateUpdate(ws, "fresh", 11);
+      expect((await adapter.getState()).turn_number).toBe(11);
+    });
+
+    it("allows GameStarted to reseed the revision baseline", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      deliverOwnershipStateUpdate(ws, "previous", 10);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state_revision: 3, state: { ...createMockState(), turn_number: 3 }, your_player: 0,
+          full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      deliverOwnershipStateUpdate(ws, "reseeded", 4);
+      expect((await adapter.getState()).turn_number).toBe(4);
+    });
+
     it("emits stateChanged event when StateUpdate arrives without pendingResolve", () => {
       const listener = vi.fn();
       adapter.onEvent(listener);
@@ -1602,6 +1809,537 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("reconnect flow", () => {
+    async function liveReconnectFixture(hello = HEARTBEAT_HELLO) {
+      const subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const initialized = subject.initialize();
+      const socket = await completeHandshake(subject, hello);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state: createMockState(), your_player: 0,
+          player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      await initialized;
+      return { subject, socket };
+    }
+
+    it("retains one privacy-safe close record and updates it when reconnect resumes", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const online = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(1000);
+        socket.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: Date.now() } }));
+        await vi.advanceTimersByTimeAsync(1000);
+        socket.dispatchSynthetic("close", undefined, new CloseEvent("close", {
+          code: 1006, reason: "PRIVATE-token@private-host", wasClean: false,
+        }));
+        const loss = getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0];
+        expect(loss).toMatchObject({
+          code: 1006, reason: "redacted", wasClean: false,
+          receiveAgeMs: 1000, sendAgeMs: 2000, visibility: "visible", online: false,
+          silenceExceeded: false, reconnectAttempt: 0, outcome: "pending",
+        });
+        expect(loadDiagnosticHistory()).toContainEqual(loss);
+        expect(JSON.stringify(loss)).not.toMatch(/PRIVATE|private-host|accepted-full-session-token/);
+        await vi.advanceTimersByTimeAsync(1000);
+        const recovered = await completeHandshake(subject, HEARTBEAT_HELLO);
+        recovered.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state: createMockState(), your_player: 0,
+            player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        const retained = getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss" && entry.diagnosticId === loss.diagnosticId);
+        expect(retained).toHaveLength(1);
+        expect(retained[0]).toMatchObject({ outcome: "resumed" });
+        expect(loadDiagnosticHistory()).toContainEqual(retained[0]);
+      } finally {
+        subject.dispose();
+        online.mockRestore();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("records an exceeded silence budget on a later loss without closing the socket itself", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(socket.close).not.toHaveBeenCalled();
+        socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+        expect(getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0]).toMatchObject({
+          code: 1006, silenceExceeded: true, receiveAgeMs: 15_000,
+        });
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("captures loss during a reconnect handshake and marks the retry chain gave-up", async () => {
+      vi.useFakeTimers();
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        socket.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const retrySocket = MockWebSocket.last!;
+        retrySocket.dispatchSynthetic("close", undefined, new CloseEvent("close", {
+          code: 1013, reason: "Server shutdown", wasClean: true,
+        }));
+        const loss = getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0];
+        expect(loss).toMatchObject({ code: 1013, reason: "server shutdown", reconnectAttempt: 1, outcome: "pending" });
+        await vi.advanceTimersByTimeAsync(135_000);
+        expect(getDiagnosticHistory().find((entry) => entry.diagnosticId === loss.diagnosticId)).toMatchObject({ outcome: "gave-up" });
+      } finally {
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("still captures native closure when a transport error consumer disposes first", async () => {
+      const { subject, socket } = await liveReconnectFixture();
+      subject.onEvent((event) => { if (event.type === "error") subject.dispose(); });
+      socket.onerror?.();
+      socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+      expect(getDiagnosticHistory().find((entry) => entry.diagnosticId === diagnosticIdFor(socket))).toMatchObject({
+        kind: "websocket-loss", code: 1006, wasClean: false, silenceExceeded: false, outcome: "not-attempted",
+      });
+      subject.dispose();
+    });
+
+    it("does not close legacy servers during sixty seconds of visible AI silence", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture(SERVER_HELLO);
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(socket.close).not.toHaveBeenCalled();
+        expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Ping"'));
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("uses the advertised silence budget for the diagnostic and never closes on silence", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const hello = JSON.parse(HEARTBEAT_HELLO);
+      hello.data.heartbeat.silence_budget_ms = 30_000;
+      // Each probe silences a fresh live socket for `ms`, then drops it and
+      // reads the loss record that drop produced.
+      const lossAfterSilence = async (ms: number) => {
+        const { subject, socket } = await liveReconnectFixture(JSON.stringify(hello));
+        try {
+          await vi.advanceTimersByTimeAsync(ms);
+          expect(socket.close).not.toHaveBeenCalled();
+          socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006 }));
+          return getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0];
+        } finally {
+          subject.dispose();
+        }
+      };
+      try {
+        expect(await lossAfterSilence(20_000)).toMatchObject({ silenceExceeded: false });
+        expect(await lossAfterSilence(120_000)).toMatchObject({ silenceExceeded: true });
+      } finally {
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([0, -1, "45000", null])(
+      "treats a malformed advertised silence budget (%s) as no budget",
+      async (budget) => {
+        vi.useFakeTimers();
+        const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+        const hello = JSON.parse(HEARTBEAT_HELLO);
+        hello.data.heartbeat.silence_budget_ms = budget;
+        const { subject, socket } = await liveReconnectFixture(JSON.stringify(hello));
+        try {
+          await vi.advanceTimersByTimeAsync(60_000);
+          expect(socket.close).not.toHaveBeenCalled();
+        } finally {
+          subject.dispose();
+          visibility.mockRestore();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each(["timeout", "ws_error", "closed"] as const)(
+      "continues reconnecting after a %s handshake failure",
+      async (failure) => {
+        acceptFullReplyOwnershipSession(adapter, ws);
+        vi.useFakeTimers();
+        try {
+          ws.dispatchSynthetic("close");
+          await vi.advanceTimersByTimeAsync(1000);
+          const failedSocket = MockWebSocket.last!;
+          expect(failedSocket).not.toBe(ws);
+          if (failure === "timeout") {
+            await vi.advanceTimersByTimeAsync(5000);
+          } else if (failure === "ws_error") {
+            failedSocket.onerror?.();
+          } else {
+            failedSocket.dispatchSynthetic("close");
+          }
+          await vi.advanceTimersByTimeAsync(6000);
+          expect(MockWebSocket.last).not.toBe(failedSocket);
+          const recoveredSocket = await completeHandshake(adapter);
+          expect(recoveredSocket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+    it("keeps retrying throughout the server grace and eventually stops", async () => {
+      vi.useFakeTimers();
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("close");
+        let previous = socket;
+        for (let second = 0; second < 120; second++) {
+          await vi.advanceTimersByTimeAsync(1000);
+          if (MockWebSocket.last !== previous) {
+            previous = await completeHandshake(subject);
+            previous.dispatchSynthetic("close");
+          }
+        }
+        expect(events).not.toHaveBeenCalledWith({ type: "reconnectFailed" });
+        await vi.advanceTimersByTimeAsync(15000);
+        expect(events).toHaveBeenCalledWith({ type: "reconnectFailed" });
+      } finally {
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    // Fails each redial the moment it is dialed. Returns the elapsed fake time at
+    // which `done` first holds. Fixed jitter makes the schedule deterministic.
+    async function failEveryRedial(done: () => boolean, limitMs = 200_000): Promise<number> {
+      const stepMs = 100;
+      let previous = MockWebSocket.last;
+      let elapsed = 0;
+      while (!done() && elapsed < limitMs) {
+        await vi.advanceTimersByTimeAsync(stepMs);
+        elapsed += stepMs;
+        if (MockWebSocket.last !== previous) {
+          previous = MockWebSocket.last;
+          previous!.dispatchSynthetic("close");
+        }
+      }
+      return elapsed;
+    }
+
+    it("ends a remote reconnect episode without scheduling an attempt that cannot dial", async () => {
+      vi.useFakeTimers();
+      const random = vi.spyOn(Math, "random").mockReturnValue(1);
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("close");
+        const failedAt = await failEveryRedial(
+          () => events.mock.calls.some(([event]) => (event as { type: string }).type === "reconnectFailed"),
+        );
+        // Redials fire at 1, 3, 7, 12, ... 122 s; the next would fire at 127 s,
+        // past the 125 s budget. The episode ends at 122 s, not at the 125 s edge.
+        expect(failedAt).toBeGreaterThan(120_000);
+        expect(failedAt).toBeLessThan(124_000);
+        const attempts = events.mock.calls
+          .map(([event]) => event as { type: string; attempt?: number })
+          .filter((event) => event.type === "reconnecting");
+        expect(attempts).toHaveLength(26);
+      } finally {
+        random.mockRestore();
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("reports no attempt denominator for a remote episode bounded by time", async () => {
+      vi.useFakeTimers();
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("close");
+        expect(events).toHaveBeenCalledWith({ type: "reconnecting", attempt: 1, maxAttempts: 0 });
+      } finally {
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the loopback sidecar's original 8-attempt, ~32 s reconnect budget", async () => {
+      vi.useFakeTimers();
+      const random = vi.spyOn(Math, "random").mockReturnValue(1);
+      MockWebSocket.last = null;
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine", "host", { main_deck: [], sideboard: [] },
+        undefined, undefined, undefined, "Player",
+        {
+          nativeAi: {
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            aiSeats: [],
+            playerCount: 2,
+          },
+        },
+      );
+      try {
+        const initialized = nativeAdapter.initialize();
+        const nativeSocket = await completeHandshake(nativeAdapter);
+        nativeSocket.dispatchSynthetic("message", JSON.stringify({
+          type: "GameCreated",
+          data: { game_code: "ABCD", player_token: "tok", full_key: { game_code: "ABCD", generation: 1 } },
+        }));
+        nativeSocket.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }));
+        await initialized;
+        const events = vi.fn();
+        nativeAdapter.onEvent(events);
+        nativeSocket.dispatchSynthetic("close");
+        const failedAt = await failEveryRedial(
+          () => events.mock.calls.some(([event]) => (event as { type: string }).type === "reconnectFailed"),
+        );
+        // 1 + 2 + 4 + 5 * 5 = 32 s of backoff across 8 attempts, then give up
+        // rather than carry on for the remote server's 120 s grace.
+        expect(failedAt).toBeGreaterThanOrEqual(31_000);
+        expect(failedAt).toBeLessThanOrEqual(34_000);
+        const attempts = events.mock.calls
+          .map(([event]) => event as { type: string; attempt?: number; maxAttempts?: number })
+          .filter((event) => event.type === "reconnecting");
+        expect(attempts).toHaveLength(8);
+        expect(attempts.every((event) => event.maxAttempts === 8)).toBe(true);
+      } finally {
+        random.mockRestore();
+        nativeAdapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("fully ends the reconnect episode when a reconnect is answered with PasswordRequired", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const retry = await completeHandshake(adapter);
+        retry.dispatchSynthetic("message", JSON.stringify({
+          type: "PasswordRequired", data: { game_code: "GAME01" },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "reconnectFailed" });
+        // The lifecycle listeners are gone and the budget is reset: neither a
+        // network resume nor a later manual reconnect inherits a dead episode.
+        const dialed = MockWebSocket.last;
+        window.dispatchEvent(new Event("online"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(MockWebSocket.last).toBe(dialed);
+        expect((adapter as unknown as { reconnectStartedAt: number | null }).reconnectStartedAt).toBeNull();
+      } finally {
+        adapter.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["online", "visible"] as const)("retries a backed-off session immediately on %s", async (resume) => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      try {
+        ws.dispatchSynthetic("close");
+        if (resume === "online") window.dispatchEvent(new Event("online"));
+        else document.dispatchEvent(new Event("visibilitychange"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(MockWebSocket.last).not.toBe(ws);
+        const recovered = await completeHandshake(adapter);
+        expect(recovered.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
+        adapter.dispose();
+        const disposedSocket = MockWebSocket.last;
+        window.dispatchEvent(new Event("online"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        await vi.advanceTimersByTimeAsync(6000);
+        expect(MockWebSocket.last).toBe(disposedSocket);
+      } finally {
+        adapter.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not spend reconnect attempts on resume notifications that never dial", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        for (let i = 0; i < 70; i++) window.dispatchEvent(new Event("online"));
+        expect(events).not.toHaveBeenCalledWith({ type: "reconnectFailed" });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(MockWebSocket.last).not.toBe(ws);
+        expect(events).toHaveBeenLastCalledWith(expect.objectContaining({ type: "reconnecting", attempt: 1 }));
+      } finally {
+        adapter.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("ends the reconnect episode when a hosting reconnect is answered with GameCreated", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const hosting = await completeHandshake(adapter);
+        hosting.dispatchSynthetic("message", JSON.stringify({
+          type: "GameCreated",
+          data: { game_code: "GAME01", player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: false });
+        // Waiting in the lobby past the old budget must not doom the next drop.
+        await vi.advanceTimersByTimeAsync(130_000);
+        hosting.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(events).not.toHaveBeenCalledWith({ type: "reconnectFailed" });
+        expect(MockWebSocket.last).not.toBe(hosting);
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("reports a reconnect answered with GameStarted as back in the game", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const resumed = await completeHandshake(adapter);
+        resumed.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 2, state: createMockState(), your_player: 0,
+            player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true });
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("ignores a late error from a retired socket once its replacement is live", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const events = vi.fn();
+      adapter.onEvent(events);
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const replacement = await completeHandshake(adapter);
+        events.mockClear();
+        ws.onerror?.();
+        expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+        replacement.onerror?.();
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a visible silent socket open; a real transport close still reconnects", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(socket.close).not.toHaveBeenCalled();
+        expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Ping"'));
+        socket.dispatchSynthetic("close");
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "reconnecting" }));
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["Pong", "StateUpdate"] as const)("uses inbound %s as liveness evidence", async (type) => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(10000);
+        socket.dispatchSynthetic("message", JSON.stringify({
+          type,
+          data: type === "Pong" ? { timestamp: Date.now() } : {
+            state_revision: 2, state: createMockState(), events: [], full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        await vi.advanceTimersByTimeAsync(10000);
+        // 20 s of wall time but only 10 s since the inbound frame: within the 15 s budget.
+        socket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006 }));
+        expect(getDiagnosticHistory().filter((entry) => entry.kind === "websocket-loss").slice(-1)[0])
+          .toMatchObject({ silenceExceeded: false });
+        expect(socket.close).not.toHaveBeenCalled();
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not mistake background throttling or a local clock gap for a dead peer", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      const { subject, socket } = await liveReconnectFixture();
+      try {
+        await vi.advanceTimersByTimeAsync(30000);
+        expect(socket.close).not.toHaveBeenCalled();
+        visibility.mockReturnValue("visible");
+        document.dispatchEvent(new Event("visibilitychange"));
+        vi.setSystemTime(Date.now() + 60000);
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(socket.close).not.toHaveBeenCalled();
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it("reconnects with the persisted session after socket close", async () => {
       MockWebSocket.last = null;
       const reconnectingAdapter = new WebSocketAdapter(
@@ -1653,13 +2391,498 @@ describe("WebSocketAdapter", () => {
     });
   });
 
+  it("refuses a server host bring-up outside the lobby without opening a socket", async () => {
+    MockWebSocket.last = null;
+    const hostAdapter = new WebSocketAdapter(
+      "ws://localhost:9374/ws",
+      "host",
+      { main_deck: [], sideboard: [] },
+    );
+
+    const outcome = trackRejection(hostAdapter.initialize());
+
+    await expect(outcome()).resolves.toMatchObject({ code: "WS_ERROR", recoverable: false });
+    expect(MockWebSocket.last).toBeNull();
+  });
+
+  describe("negotiated game-command correlation", () => {
+    let subject: WebSocketAdapter;
+    let socket: MockWebSocket;
+
+    beforeEach(async () => {
+      subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const initialized = subject.initialize();
+      socket = await completeHandshake(subject, CORRELATED_HELLO);
+      acceptFullReplyOwnershipSession(subject, socket);
+      await initialized;
+    });
+
+    afterEach(() => subject.dispose());
+
+    it("keeps all four simultaneous mulligan submissions owned when a peer advances", async () => {
+      const seats = [{ subject, socket }];
+      const keep: GameAction = { type: "MulliganDecision", data: { choice: { type: "Keep" } } };
+      const pending = Array.from({ length: 4 }, (_, player) => ({
+        player, mulligan_count: 0, phase: { type: "Declare" as const },
+      }));
+      const mulliganState: GameState = {
+        ...createMockState(),
+        waiting_for: { type: "MulliganDecision", data: { pending, free_first_mulligan: true } },
+      };
+      try {
+        for (let player = 0; player < 4; player++) {
+          let initialized: Promise<void> | undefined;
+          if (player !== 0) {
+            const next = new WebSocketAdapter(
+              "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+            );
+            initialized = next.initialize();
+            seats.push({ subject: next, socket: await completeHandshake(next, CORRELATED_HELLO) });
+          }
+          seats[player].socket.dispatchSynthetic("message", JSON.stringify({
+            type: "GameStarted",
+            data: {
+              state_revision: 1, state: mulliganState, your_player: player,
+              legal_actions: [keep], full_key: REPLY_OWNERSHIP_FULL_KEY,
+              player_token: player === 0 ? "accepted-full-session-token" : `seat-token-${player}`,
+            },
+          }));
+          if (initialized) await initialized;
+        }
+        const outcomes = seats.map((seat, player) => trackRejection(seat.subject.submitAction(keep, player)));
+        const ids = seats.map((seat) => lastSubmissionCommandId(seat.socket));
+        const publishKeep = (owner: number) => {
+          seats.forEach((seat, player) => seat.socket.dispatchSynthetic("message", JSON.stringify({
+            type: "StateUpdate",
+            command_id: player === owner ? ids[owner] : undefined,
+            data: {
+              state_revision: owner + 2,
+              state: {
+                ...mulliganState,
+                waiting_for: {
+                  type: "MulliganDecision",
+                  data: { pending: pending.slice(owner + 1), free_first_mulligan: true },
+                },
+              },
+              events: [{ marker: `keep-${owner}` }], log_entries: [],
+              legal_actions: player > owner ? [keep] : [],
+              full_key: REPLY_OWNERSHIP_FULL_KEY,
+            },
+          })));
+        };
+        publishKeep(0);
+        const first = await Promise.all(outcomes.map((read) => read()));
+        expect(deliveredEventMarker(first[0])).toBe("keep-0");
+        // This is the old any-StateUpdate ACK failure: three peers must remain pending.
+        expect(first.slice(1)).toEqual(["never settled", "never settled", "never settled"]);
+        expect(ids).toEqual([expect.any(Number), expect.any(Number), expect.any(Number), expect.any(Number)]);
+        for (let player = 1; player < 4; player++) {
+          await expect(seats[player].subject.submitAction(keep, player)).rejects.toMatchObject({
+            code: AdapterErrorCode.ACTION_NOT_SENT,
+          });
+          expect(submissionTypes(seats[player].socket)).toEqual(["Action"]);
+          publishKeep(player);
+          expect(deliveredEventMarker(await outcomes[player]())).toBe(`keep-${player}`);
+        }
+      } finally {
+        seats.forEach((seat) => seat.subject.dispose());
+      }
+    });
+
+    it("renders peer updates without settling on missing or mismatched completion IDs", async () => {
+      const events = vi.fn();
+      subject.onEvent(events);
+      const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      const commandId = lastSubmissionCommandId(socket);
+      deliverOwnershipStateUpdate(socket, "peer-update", 2);
+      expect(await outcome()).toBe("never settled");
+      expect(events).toHaveBeenCalledWith(expect.objectContaining({
+        type: "stateChanged", serverRevision: 2,
+      }));
+      if (typeof commandId !== "number") throw new Error("Expected a numeric command ID");
+      const data = {
+        message: "Another request failed",
+        rejection: { code: "invalid_action", disposition: "invalid", message: "Other rejection", related_object_ids: [] },
+      };
+      const surfaced = (type: string) => events.mock.calls.filter(([event]) => event.type === type).length;
+      for (const type of ["ActionNoOp", "ActionRejected", "ActionFailed"]) {
+        // An id-less frame is not an answer to this command, so it never settles it.
+        socket.dispatchSynthetic("message", JSON.stringify({ type, data }));
+      }
+      // ...but an id-less failure still surfaces, exactly once each, without releasing the slot.
+      expect(surfaced("requestRejected")).toBe(1);
+      expect(surfaced("operationFailed")).toBe(1);
+      expect(events).toHaveBeenCalledWith({ type: "requestRejected", reason: "Other rejection" });
+      expect(events).toHaveBeenCalledWith({ type: "operationFailed", message: "Another request failed" });
+      for (const type of ["ActionNoOp", "ActionRejected", "ActionFailed"]) {
+        // A frame carrying another command's id belongs to that command: swallowed entirely.
+        socket.dispatchSynthetic("message", JSON.stringify({ type, data, command_id: commandId + 1 }));
+      }
+      expect(surfaced("requestRejected")).toBe(1);
+      expect(surfaced("operationFailed")).toBe(1);
+      expect(await outcome()).toBe("never settled");
+      expect(events).not.toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      socket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: commandId }));
+      await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+    });
+
+    it("settles its own correlated completion even when that frame's revision is stale", async () => {
+      const events = vi.fn();
+      subject.onEvent(events);
+      deliverOwnershipStateUpdate(socket, "newer-peer-update", 5);
+      const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      const commandId = lastSubmissionCommandId(socket);
+      events.mockClear();
+      deliverOwnershipStateUpdate(socket, "own-stale-completion", 4, commandId);
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [{ marker: "own-stale-completion" }], log_entries: [] },
+      });
+      expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      // The stale snapshot itself is never applied.
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    });
+
+    it.each(["ActionRejected", "ActionFailed"] as const)(
+      "owns a matching %s but ignores its late echo during the next interaction",
+      async (type) => {
+        const first = subject.submitAction({ type: "PassPriority" }, 0);
+        const commandId = lastSubmissionCommandId(socket);
+        socket.dispatchSynthetic("message", JSON.stringify({
+          type, command_id: commandId,
+          data: {
+            message: "Command failed",
+            rejection: { code: "invalid_action", disposition: "invalid", message: "Command rejected", related_object_ids: [] },
+          },
+        }));
+        await expect(first).rejects.toMatchObject({
+          code: type === "ActionRejected" ? "ACTION_REJECTED" : "WS_ERROR",
+        });
+        const next = trackRejection(subject.submitInteraction(interactionSubmission("correlated-next"), 0));
+        const nextId = lastSubmissionCommandId(socket);
+        socket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: commandId }));
+        expect(await next()).toBe("never settled");
+        expect(nextId).not.toEqual(commandId);
+        socket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: nextId }));
+        await expect(next()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+      },
+    );
+
+    it("keeps the AI fault latch across matching late replies and a same-game bootstrap", async () => {
+      const pendingAction = subject.submitAction({ type: "PassPriority" }, 0);
+      const commandId = lastSubmissionCommandId(socket);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }));
+      await expect(pendingAction).rejects.toMatchObject({ code: "WS_ERROR", recoverable: false });
+      acceptFullReplyOwnershipSession(subject, socket);
+      deliverOwnershipStateUpdate(socket, "late-before-fault-replay", 4, commandId);
+      await expect(subject.submitInteraction(interactionSubmission("fault-remains"), 0)).rejects.toMatchObject({
+        code: "WS_ERROR", recoverable: false,
+      });
+      expect(submissionTypes(socket)).toEqual([]);
+    });
+
+    it("ignores a completion carrying a pre-resume command id after resume", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        const oldAction = subject.submitAction({ type: "PassPriority" }, 0);
+        const oldId = lastSubmissionCommandId(socket);
+        const closed = expect(oldAction).rejects.toMatchObject({ code: "WS_CLOSED" });
+        socket.dispatchSynthetic("close");
+        await closed;
+        window.dispatchEvent(new Event("online"));
+        await vi.advanceTimersByTimeAsync(0);
+        const resumed = await completeHandshake(subject, CORRELATED_HELLO);
+        acceptFullReplyOwnershipSession(subject, resumed);
+        expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true });
+        let settled = false;
+        const next = subject.submitInteraction(interactionSubmission("after-resume"), 0);
+        void next.then(() => { settled = true; }, () => { settled = true; });
+        const nextId = lastSubmissionCommandId(resumed);
+        deliverOwnershipStateUpdate(resumed, "old-command-reply", 2, oldId);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toBe(false);
+        expect(nextId).not.toEqual(oldId);
+        deliverOwnershipStateUpdate(resumed, "resumed-own-reply", 3, nextId);
+        await expect(next).resolves.toMatchObject({ events: [{ marker: "resumed-own-reply" }] });
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("records silence without closing or acknowledging an outstanding correlated command", async () => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const silent = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const initialized = silent.initialize();
+      const silentSocket = await completeHandshake(silent, CORRELATED_HELLO);
+      acceptFullReplyOwnershipSession(silent, silentSocket);
+      await initialized;
+      try {
+        let settled = false;
+        const pendingAction = silent.submitAction({ type: "PassPriority" }, 0);
+        void pendingAction.then(() => { settled = true; }, () => { settled = true; });
+        const closed = expect(pendingAction).rejects.toMatchObject({ code: "WS_CLOSED" });
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(settled).toBe(false);
+        expect(silentSocket.close).not.toHaveBeenCalled();
+        silentSocket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006 }));
+        await closed;
+        expect(getDiagnosticHistory().find((entry) => entry.diagnosticId === diagnosticIdFor(silentSocket))).toMatchObject({
+          kind: "websocket-loss", silenceExceeded: true,
+        });
+      } finally {
+        silent.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("pending-indicator bookkeeping", () => {
+    let subject: WebSocketAdapter;
+    let socket: MockWebSocket;
+    let events: Array<{ type: string; pending?: boolean }>;
+
+    beforeEach(async () => {
+      subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const initialized = subject.initialize();
+      socket = await completeHandshake(subject, CORRELATED_HELLO);
+      acceptFullReplyOwnershipSession(subject, socket);
+      await initialized;
+      events = [];
+      subject.onEvent((event) => { events.push(event as { type: string; pending?: boolean }); });
+    });
+
+    afterEach(() => subject.dispose());
+
+    it("frees the slot when a listener throws while the submission is announced", async () => {
+      let armed = true;
+      subject.onEvent((event) => {
+        if (event.type === "actionPendingChanged" && event.pending && armed) {
+          armed = false;
+          throw new Error("listener failed");
+        }
+      });
+      await expect(subject.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow("listener failed");
+      expect(submissionTypes(socket)).toEqual([]);
+
+      const next = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      expect(submissionTypes(socket)).toEqual(["Action"]);
+      deliverOwnershipStateUpdate(socket, "after-throw", 2, lastSubmissionCommandId(socket));
+      expect(deliveredEventMarker(await next())).toBe("after-throw");
+    });
+
+    it.each(["close", "dispose"] as const)(
+      "sends nothing when a listener ends the connection with %s while the submission is announced",
+      async (ending) => {
+        subject.onEvent((event) => {
+          if (event.type !== "actionPendingChanged" || !event.pending) return;
+          if (ending === "close") {
+            socket.readyState = 3; // CLOSED
+            socket.dispatchSynthetic("close");
+          } else {
+            subject.dispose();
+          }
+        });
+        const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+        expect(await outcome()).toMatchObject({ code: "WS_CLOSED" });
+        expect(submissionTypes(socket)).toEqual([]);
+        // A send attempted against the ended connection would also report a transport error.
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+      },
+    );
+
+    it("announces the released indicator when the socket closes under a pending submission", async () => {
+      const pending = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: true });
+      events.length = 0;
+      socket.readyState = 3; // CLOSED
+      socket.dispatchSynthetic("close");
+      expect(await pending()).toMatchObject({ code: "WS_CLOSED" });
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    });
+
+    it("clears the slot when the AI driver faults", async () => {
+      // The fault latch refuses every later submit for this game before the slot is
+      // consulted, so the slot itself is the only observable proof it was cleared.
+      const slot = (subject as unknown as { submission: { occupied: boolean } }).submission;
+      const pending = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      expect(slot.occupied).toBe(true);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }));
+      expect(await pending()).toMatchObject({ code: "WS_ERROR", recoverable: false });
+      expect(slot.occupied).toBe(false);
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    });
+  });
+
+  describe("servers without command correlation", () => {
+    it("sends no command_id and keeps settling on the first completion frame", async () => {
+      const legacy = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      const initialized = legacy.initialize();
+      const legacySocket = await completeHandshake(legacy, HEARTBEAT_HELLO);
+      acceptFullReplyOwnershipSession(legacy, legacySocket);
+      await initialized;
+      try {
+        const events = vi.fn();
+        legacy.onEvent(events);
+        const outcome = trackRejection(legacy.submitAction({ type: "PassPriority" }, 0));
+        expect(lastSubmissionCommandId(legacySocket)).toBeUndefined();
+        // A completion frame with an unrelated ID is still the legacy ACK.
+        legacySocket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: 99 }));
+        await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        // With nothing pending, legacy still releases the indicator.
+        events.mockClear();
+        legacySocket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        // An ActionRejected with nothing pending releases the indicator and surfaces too.
+        events.mockClear();
+        legacySocket.dispatchSynthetic("message", JSON.stringify({
+          type: "ActionRejected",
+          data: { rejection: { code: "invalid_action", disposition: "invalid", message: "Nothing pending", related_object_ids: [] } },
+        }));
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        expect(events).toHaveBeenCalledWith({ type: "requestRejected", reason: "Nothing pending" });
+      } finally {
+        legacy.dispose();
+      }
+    });
+  });
+
+  describe("Issue #9319 pending submission reply ownership", () => {
+    beforeEach(() => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+    });
+
+    it("issue #9319 Action then Interaction keeps the first StateUpdate with its owner", async () => {
+      await exerciseOverlappingSubmissionOwnership(
+        ws,
+        () => adapter.submitAction({ type: "PassPriority" }, 0),
+        () => adapter.submitInteraction(interactionSubmission("overlap-interaction"), 0),
+      );
+    });
+
+    it("issue #9319 Interaction then Interaction keeps the first StateUpdate with its owner", async () => {
+      await exerciseOverlappingSubmissionOwnership(
+        ws,
+        () => adapter.submitInteraction(interactionSubmission("overlap-first"), 0),
+        () => adapter.submitInteraction(interactionSubmission("overlap-second"), 0),
+      );
+    });
+
+    it("claims the submission slot before pending notifications can re-enter", async () => {
+      let reentrant: Promise<SubmitResult> | undefined;
+      let didReenter = false;
+      adapter.onEvent((event) => {
+        if (event.type === "actionPendingChanged" && event.pending && !didReenter) {
+          didReenter = true;
+          reentrant = adapter.submitInteraction(interactionSubmission("reentrant"), 0);
+        }
+      });
+
+      const first = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      const second = trackRejection(reentrant!);
+      deliverOwnershipStateUpdate(ws, "reply-A", 2);
+      const [firstResult, secondResult] = await Promise.all([first(), second()]);
+
+      expect(submissionTypes(ws)).toEqual(["Action"]);
+      expect(deliveredEventMarker(firstResult)).toBe("reply-A");
+      expect(secondResult).toMatchObject({ code: AdapterErrorCode.ACTION_NOT_SENT });
+    });
+
+    it("releases the slot after an engine rejection", async () => {
+      const first = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "ActionRejected",
+        data: { rejection: { code: "invalid_action", disposition: "invalid", message: "Action rejected", related_object_ids: [] } },
+      }));
+      await expect(first).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+
+      const next = trackRejection(adapter.submitInteraction(interactionSubmission("after-rejection"), 0));
+      expect(submissionTypes(ws)).toEqual(["Action", "Interaction"]);
+      deliverOwnershipStateUpdate(ws, "reply-after-rejection", 2);
+      await expect(next()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-after-rejection" }] },
+      });
+    });
+
+    it("issue #9319 sequential Action and Interaction submissions remain usable", async () => {
+      const action = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      deliverOwnershipStateUpdate(ws, "reply-A", 2);
+      await expect(action()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-A" }] },
+      });
+
+      const interaction = trackRejection(adapter.submitInteraction(interactionSubmission("sequential-one"), 0));
+      deliverOwnershipStateUpdate(ws, "reply-B", 3);
+      await expect(interaction()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-B" }] },
+      });
+
+      const nextInteraction = trackRejection(adapter.submitInteraction(interactionSubmission("sequential-two"), 0));
+      deliverOwnershipStateUpdate(ws, "reply-C", 4);
+      await expect(nextInteraction()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-C" }] },
+      });
+    });
+  });
+
   describe("send() error handling", () => {
+    it.each(["ActionFailed", "Error"] as const)("keeps unsolicited %s off the transport error channel", async (type) => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      const events = vi.fn();
+      adapter.onEvent(events);
+      ws.dispatchSynthetic("message", JSON.stringify({ type, data: { message: "Operation declined" } }));
+      expect(events).toHaveBeenCalledWith({ type: "operationFailed", message: "Operation declined" });
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      const next = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", data: { full_key: REPLY_OWNERSHIP_FULL_KEY } }));
+      await expect(next).resolves.toEqual({ events: [], log_entries: [] });
+    });
+
+    it("reports an AI driver fault, then a terminal error so the game cannot continue", () => {
+      const events = vi.fn();
+      adapter.onEvent(events);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 4, after_state_revision: 10, cause: {} } },
+      }));
+      const types = events.mock.calls.map(([event]) => (event as { type: string }).type);
+      expect(types.filter((type) => type === "aiDriverFault")).toHaveLength(1);
+      expect(types.filter((type) => type === "error")).toHaveLength(1);
+      expect(types.indexOf("aiDriverFault")).toBeLessThan(types.indexOf("error"));
+      expect(events).toHaveBeenCalledWith({
+        type: "error",
+        message: "Native AI driver stopped; this game can no longer advance.",
+      });
+      expect(ws.close).not.toHaveBeenCalled();
+    });
+
     it("rejects initialize when the post-handshake setup frame cannot be sent", async () => {
       MockWebSocket.last = null;
       const setupFailingAdapter = new WebSocketAdapter(
         "ws://localhost:9374/ws",
-        "host",
+        "join",
         { main_deck: [], sideboard: [] },
+        "ABC123",
       );
       const initPromise = setupFailingAdapter.initialize();
       await Promise.resolve();
@@ -1813,6 +3036,19 @@ describe("WebSocketAdapter", () => {
       );
     });
 
+    it("sends only the compact replacement selector and settles ActionNoOp", async () => {
+      const selector = `r${"a".repeat(64)}`;
+      const action: GameAction = { type: "SetReplacementAutoChoice", data: { selector } };
+      ws.send.mockClear();
+      const pending = adapter.submitAction(action, 0);
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "Action",
+        data: { action: { type: "SetReplacementAutoChoice", data: { selector } } },
+      });
+      ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
+      await pending;
+    });
+
     it.each(["Card", "Token"] as const)(
       "preserves the %s creation kind in a nonzero debug CreateCard action frame",
       async (creationKind) => {
@@ -1905,6 +3141,12 @@ describe("WebSocketAdapter", () => {
       expect(listener).toHaveBeenCalledWith(
         expect.objectContaining({ type: "error" }),
       );
+
+      const next = trackRejection(adapter.submitInteraction(interactionSubmission("after-send-failure"), 0));
+      deliverOwnershipStateUpdate(ws, "after-send-failure", 2);
+      await expect(next()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "after-send-failure" }] },
+      });
     });
 
     it("rejects an in-flight action when the native AI driver faults", async () => {
@@ -1928,6 +3170,61 @@ describe("WebSocketAdapter", () => {
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "aiDriverFault" }));
     });
 
+    it("fails later submissions fast once the native AI driver has faulted", async () => {
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "AiDriverFault",
+          data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+        }),
+      );
+      ws.send.mockClear();
+
+      await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
+        recoverable: false,
+      });
+      await expect(adapter.submitInteraction(interactionSubmission("after-fault"), 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
+      });
+      expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"Action"'));
+    });
+
+    it("keeps a fault fence across a same-game GameStarted, before the replayed fault arrives", async () => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }));
+      // A reconnect snapshot precedes the server's fault replay; nothing may slip through between them.
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state_revision: 4, state: createMockState(), your_player: 0,
+          player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      }));
+      ws.send.mockClear();
+
+      await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({ code: "WS_ERROR" });
+      expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"Action"'));
+    });
+
+    it("does not fence a different game with an earlier game's fault", async () => {
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "AiDriverFault",
+        data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }));
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "GameCreated",
+        data: { game_code: "GAME02", player_token: "next-game-token" },
+      }));
+      ws.send.mockClear();
+
+      void adapter.submitAction({ type: "PassPriority" }, 0).catch(() => undefined);
+      expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Action"'));
+    });
+
     // `dispose()` used to null the submission handles instead of rejecting
     // them, so the caller — which holds the module-level dispatch mutex —
     // waited forever on a reply the closed socket could never deliver.
@@ -1940,6 +3237,9 @@ describe("WebSocketAdapter", () => {
         code: "WS_CLOSED",
         message: "Adapter disposed during action",
         recoverable: true,
+      });
+      await expect(adapter.submitInteraction(interactionSubmission("after-dispose"), 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
       });
     });
 
@@ -1970,11 +3270,15 @@ describe("WebSocketAdapter", () => {
         type: "Action",
         data: { action: { type: "PassPriority" } },
       }));
+      ws.readyState = 3; // CLOSED
       ws.dispatchSynthetic("close");
 
       expect(await pending()).toMatchObject({
         code: "WS_CLOSED",
         message: "Connection closed during action",
+      });
+      await expect(adapter.submitInteraction(interactionSubmission("after-close"), 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
       });
     });
 
@@ -2217,4 +3521,30 @@ it.each(["resolve", "reject"] as const)("disposes during a pending LAN probe bef
   } finally {
     lanGate.probe.mockReset().mockResolvedValue(false);
   }
+});
+
+describe("WebSocketAdapter dispose during the handshake", () => {
+  it.each(["before ServerHello", "after ServerHello settles"] as const)(
+    "sends nothing after dispose and closes the socket (%s)",
+    async (order) => {
+      MockWebSocket.last = null;
+      const adapter = new WebSocketAdapter("wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01");
+      void adapter.initialize().catch(() => {});
+      await Promise.resolve();
+      const socket = MockWebSocket.last!;
+      let sentAtDispose: number;
+      if (order === "before ServerHello") {
+        sentAtDispose = socket.send.mock.calls.length;
+        adapter.dispose();
+        socket.dispatchSynthetic("message", SERVER_HELLO);
+      } else {
+        socket.dispatchSynthetic("message", SERVER_HELLO);
+        sentAtDispose = socket.send.mock.calls.length;
+        adapter.dispose();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(socket.send.mock.calls.slice(sentAtDispose)).toEqual([]);
+      expect(socket.close).toHaveBeenCalledOnce();
+    },
+  );
 });

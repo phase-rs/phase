@@ -20,12 +20,6 @@ interface GameListItemProps {
   entry: LobbyGameEntry;
   onJoin: (entry: LobbyGameEntry) => void;
   /**
-   * When false, the row is visible but disabled with a tooltip explaining
-   * the mismatch. Computed by the parent from the server's `build_commit`
-   * vs the client's `__BUILD_HASH__`.
-   */
-  compatible?: boolean;
-  /**
    * Game code of the current player's hosted game. Used to prevent the host
    * from joining their own hosted game.
    */
@@ -65,7 +59,6 @@ function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string 
 export function GameListItem({
   entry,
   onJoin,
-  compatible = true,
   hostGameCode,
   healthHint,
 }: GameListItemProps) {
@@ -89,7 +82,7 @@ export function GameListItem({
 
   const isCurrentPlayerHost = Boolean(hostGameCode && game.game_code === hostGameCode);
 
-  const disabled = !compatible || isFull || isCurrentPlayerHost;
+  const disabled = isFull || isCurrentPlayerHost;
 
   // Built-in sources show their picker label ("Official", "Self-hosted") so
   // an official row reads the same as it did before the list became
@@ -105,16 +98,11 @@ export function GameListItem({
         ? t("gameListItem.kindLobbyOnly")
         : "";
 
-  const disabledTitle = !compatible
-    ? t("gameListItem.buildMismatchTitle", {
-        version: game.host_version || "?",
-        commit: game.host_build_commit || "?",
-      })
-    : isFull
-      ? t("gameListItem.gameFull")
-      : isCurrentPlayerHost
-        ? t("gameListItem.youAreHosting")
-        : undefined;
+  const disabledTitle = isFull
+    ? t("gameListItem.gameFull")
+    : isCurrentPlayerHost
+      ? t("gameListItem.youAreHosting")
+      : undefined;
 
   return (
     <>

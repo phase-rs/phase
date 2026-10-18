@@ -73,6 +73,15 @@ const config: StorybookConfig = {
       // then creates it in separate steps, so the two races and the loser fails
       // the build with `EEXIST` on whichever nested directory it reached second.
       publicDir: false,
+      // The engine Web Worker imports the bundle's bindings by name, and a
+      // static build bundles that worker for any story whose imports reach
+      // its client, even though no story starts it. The stub exports only
+      // `init`, so the worker's other names are shimmed as `undefined`
+      // instead of failing the build; its first call, `init`, still throws.
+      worker: {
+        ...viteConfig.worker,
+        rollupOptions: { ...viteConfig.worker?.rollupOptions, shimMissingExports: true },
+      },
       resolve: {
         ...viteConfig.resolve,
         // Storybook's entries come first, because Vite takes the first

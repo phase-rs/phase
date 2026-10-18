@@ -17,7 +17,7 @@ pub struct StickerLocator {
 }
 
 /// Sticker state carried by an object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AppliedSticker {
     /// `position` stores how many words were before the sticker when it was
@@ -64,6 +64,14 @@ impl AppliedSticker {
             | Self::Ability { locator, .. }
             | Self::PowerToughness { locator, .. }
             | Self::Art { locator, .. } => locator,
+        }
+    }
+
+    /// CR 123.6d + CR 123.6e: The text printed on a name sticker; `None` for every other sticker kind.
+    pub fn name_text(&self) -> Option<&str> {
+        match self {
+            Self::Name { text, .. } => Some(text),
+            Self::Ability { .. } | Self::PowerToughness { .. } | Self::Art { .. } => None,
         }
     }
 }

@@ -206,10 +206,10 @@ fn zero_toughness_etching_exiles_a_simultaneously_lethal_creature() {
         "CR 704.3 keeps a zero-toughness Etching present while the simultaneous lethal death consults replacements"
     );
     assert!(events.iter().any(
-        |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == victim)
+        |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == victim)
     ));
     assert!(!events.iter().any(
-        |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == etching)
+        |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == etching)
     ));
 }
 

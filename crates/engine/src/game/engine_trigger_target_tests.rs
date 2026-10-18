@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{TargetEffectDetail, TargetSelectionConstraint};
-use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggerFiring};
 
 /// Completes the CR 603.3c test fixture for a trigger whose choices are still
 /// being made. Production construction retains the same firing in both the
@@ -947,6 +947,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
         amount: 3,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     };
     // CR 603.3c + CR 603.3d "Push first" contract migration.
     let pending = crate::game::triggers::PendingTrigger {
@@ -1179,12 +1180,14 @@ fn all_modes_exhausted_clears_pending_trigger() {
         ..Default::default()
     };
 
-    // Mark both modes as already chosen this turn.
-    state.modal_modes_chosen_this_turn.insert((source_id, 0));
-    state.modal_modes_chosen_this_turn.insert((source_id, 1));
+    // Mark both modes as already chosen this turn by the trigger's source
+    // incarnation (CR 400.7: history is keyed by the exact object).
+    let source = ObjectIncarnationRef::of(source_id, 0);
+    state.modal_modes_chosen_this_turn.insert((source, 0));
+    state.modal_modes_chosen_this_turn.insert((source, 1));
 
     // CR 603.3c + CR 603.3d "Push first" contract migration.
-    let pending = crate::game::triggers::PendingTrigger {
+    let mut pending = crate::game::triggers::PendingTrigger {
         source_id,
         controller: PlayerId(0),
         condition: None,
@@ -1224,6 +1227,10 @@ fn all_modes_exhausted_clears_pending_trigger() {
         die_result: None,
         provenance: None,
     };
+    // The trigger captured its source at incarnation 0 (CR 603.10a).
+    pending
+        .ability
+        .set_test_trigger_source_recursive(0, CardId(50));
     let pending_for_state = pending.clone();
     let stack_before = state.stack.len();
     let mut setup_events = Vec::new();
@@ -1257,10 +1264,10 @@ fn modal_mode_tracking_resets_on_new_turn() {
     state.turn_number = 1;
     state.phase = Phase::PreCombatMain;
 
-    let source_id = ObjectId(50);
-    state.modal_modes_chosen_this_turn.insert((source_id, 0));
-    state.modal_modes_chosen_this_turn.insert((source_id, 1));
-    state.modal_modes_chosen_this_game.insert((source_id, 0));
+    let source = ObjectIncarnationRef::of(ObjectId(50), 0);
+    state.modal_modes_chosen_this_turn.insert((source, 0));
+    state.modal_modes_chosen_this_turn.insert((source, 1));
+    state.modal_modes_chosen_this_game.insert((source, 0));
 
     // Simulate new turn.
     let mut events = Vec::new();
@@ -1269,7 +1276,7 @@ fn modal_mode_tracking_resets_on_new_turn() {
     // Turn-scoped should be cleared.
     assert!(state.modal_modes_chosen_this_turn.is_empty());
     // Game-scoped should persist.
-    assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 0)));
+    assert!(state.modal_modes_chosen_this_game.contains(&(source, 0)));
 }
 
 /// CR 603.3d: "If a choice is required when the triggered ability goes on the

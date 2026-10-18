@@ -34,7 +34,63 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // option's `additional_cost`, and the announced graveyard permission (the
 // option's `authority`, the slot prompt's `permission`, the latched terms).
 // v91 retypes PendingManaAbility's required chosen-counter count (#9207).
+// v92 serializes the reveal-until whiff verdict (ParentTargetMissingReason).
 // v93 adds the SacrificedForCost reduction provenance.
+// v97 adds TargetReadOrigin instruction provenance.
+// v99 adds the GraveyardCastPermission pool.
+// v100 replaces `AdditionalPhase.phase` with a `TurnSegment` `segment`,
+// retypes `followed_by` to `TurnSegment`, and replaces
+// `AdditionalPhase.target` with an `ExtraPhaseRecipient` `recipient`.
+// v101 adds `ActivatedAbilityKind::Mana` (mana-ability activations now emit
+// `GameEvent::AbilityActivated`), the event's `departed_source_lki`, and
+// `AbilityActivationRecord.source_zone`.
+// v109 carries the CR 201.5a granter binding (ObjectScope + granting_object).
+// v110 adds deferred spell delivery after a free-cast window and the
+// spell-copy order choice.
+// v111 adds the `Dandan` GameFormat name.
+// v112 adds the `SubstituteTextWord` text-changing modification (CR 612.1).
+// v113 adds `ResolvedZoneChangeCommand.rebound_from` (the Dandan hand-entry
+// ownership rebind).
+// v114 adds `WaitingFor::MulliganDecision.declared` (the CR 103.5 declare round).
+// v115 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind` (the Dandan
+// free reveal mulligan).
+// v116 adds the simultaneous-draw dealer to the multi-draw resolution frame
+// (`RESOLUTION_STATE_WIRE_VERSION` 5).
+// v117 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// v118 retypes the `ManaColorSpent` color of `AbilityCondition` and `TriggerCondition`
+// to `SpentColor` (word versus symbol provenance, CR 612.2).
+// v124 admits a land-play `rebound_from` in the resolved-rules journal
+// (Library/Graveyard/Exile -> Battlefield).
+// v127 folds FilterProp's attachment-referent siblings into
+// `FilterProp::AttachedTo { to: AttachmentReferent }`, and makes retarget
+// picks positional (`RetargetSpell` nullable picks, copy-walk keep fields).
+// v129 splits the shortcut schema's measured bound from its deliverable
+// capacity, stamps the minting road on shortcut offers, adds the mana ability
+// payment window, drops the recorded loop-action sequence, and adds the
+// confirmed period's reach and the periodic delta's cleanup pair.
+// v131 adds `PlayerFilter::AnyOf` / `PlayerFilter::TargetPlayer` to ability player
+// scopes in GameState.
+// v132 adds the CR 614.12a pre-entry as-enters choice (`NamedChoiceSourceBinding::
+// PendingEntry`, `ZoneChange.enter_with_choices`, `PendingReplacement.delivery_boundary`).
+// v139 adds the CR 702.122c per-turn crew relation (`GameState.crew_history_this_turn`,
+// `FilterProp::CrewedThisTurn`).
+// v140 adds `AttackSubject::EventAttackers` (the attacked players of a trigger's attack
+// event) to ability player scopes in GameState.
+// v151 carries populated Bestow restoration payloads (object instead of boolean).
+// v141 adds `ExileLinkKind::CastCost` (CR 607.2q cast-cost exile links) to GameState.
+// v142 adds `LinkedExileSnapshot.incarnation` (CR 400.7) to GameState's linked-exile snapshots.
+// v143 retypes GameState's modal no-repeat history keys to `ObjectIncarnationRef` (CR 400.7).
+// v146 adds `ConfirmedPeriod.counted_by` (CR 732.2a counted loop offers) and `ConfirmedPeriod.performance` to GameState.
+// v147 reshapes the cast-this-way gains rider's serialized payload: the ExileWithAltCost
+// permission's `enters_with_modifications` becomes a `PendingEntersModifications` object
+// (was a `ContinuousModification` array) and `Effect::AddPendingEntersModifications`
+// carries its `rider` object in place of the required `modifications` array.
+// v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
+// v147 adds the Eye to Eye / Mouth to Mouth physical contest.
+// v148 adds Timesifter's top-card exile contest (`Effect::ExileTopCardContest`,
+// `BatchCompletion::TopCardContestRoundComplete`).
+// v149 moves the CR 608.2n owed final part of a paused spell onto the resolution
+// carrier (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -56,11 +112,86 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +21: the v92 serialized ParentTargetMissingReason carrier and its
 // RevealUntil reveal-until whiff verdict.
 // +22: the v93 SacrificedForCost reduction provenance.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 22;
+// +23: the v94 phase-delayed departure look-back carrier
+// (SpellContext.creation_lookback_event) and TriggerSourceContext.mana_cost.
+// +24: the v95 FilterProp::BlockStatus reshape (Unblocked → BlockStatus { status }).
+// +25: the v96 QuantityRef::NameStickerLetterCount tagged quantity.
+// +26: the v97 serialized TargetReadOrigin (`target_reads`) instruction
+// provenance.
+// +27: the v98 PerPlayerScope::Opponents value, the PerPlayerChoiceOrder and
+// SubstituteChooser chooser purposes, and the per-player frame's current and
+// nominee fields.
+// +28: the v99 GraveyardCastPermission pool (from any graveyard).
+// +29: the v100 additional-phase segment and recipient parse bump.
+// +30: the v101 mana-ability activation kind and departed-source LKI.
+// +31: v102 adds the tagged SharedCardTypes quantity.
+// +32: v103 removes FormatConfig.allow_experimental_dungeons for the format-derived dungeon pool.
+// +33: v104 moves delve fuel to total-cost payment (PendingCast.delved_cards,
+// the FinalizeDelvedCast completion; DelveManaPayment removed).
+// +34: v105 adds the nominal base quantity to deferred mana-source selections.
+// +35: v106 adds exact replacement-choice preferences and remembered response actions.
+// +36: v107 adds the counted exile-until loop and the ParentTargets zone choice.
+// +37: v108 adds serialized IllegalTargetsDisposition.StillResolves.
+// +38: the v109 CR 201.5a granter binding.
+// +39: v110 adds the deferred spell delivery after a free-cast window and the
+//      spell-copy order choice.
+// +40: the v111 `Dandan` GameFormat name.
+// +41: the v112 `SubstituteTextWord` text-changing modification.
+// +42: v113 adds `ResolvedZoneChangeCommand.rebound_from`.
+// +43: v114 adds `WaitingFor::MulliganDecision.declared`.
+// +44: v115 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind`.
+// +45: v116 adds the simultaneous-draw dealer to the multi-draw resolution frame.
+// +46: v117 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// +47: v118 retypes the `ManaColorSpent` color to `SpentColor` (word versus symbol).
+// (+48, v119, is reserved for the Legends of Jidoor PR.)
+// +49: the v120 CR 601.2a spell announcement (GameObject.spell_announcement,
+// GameState.next_spell_announcement) and the BecomesTarget targeter.
+// +50: v121 records the actual receiving player with successful trigger mana.
+// +51: v122 adds the `TriggeringSourceController` permission grantee and the
+//      damage-source incarnations on damage events.
+// +52: v123 adds FilterProp::PrepareSpell, the BecomePrepared/BecomeUnprepared
+// scope field, SpellCastRecord.prepared_copy_source, CopiableValues.prepare_face
+// and GameObject.copied_prepare_face.
+// +53: v124 admits a land-play `rebound_from` in the resolved-rules journal.
+// +54: v125 adds `free_reveals_taken` to `MulliganDecisionEntry` and `MulliganDeclaration`.
+// +55: v126 adds `arrival` (owner and controller held by the destination object) to `ZoneChangeRecord`.
+// +56: v127 folds the FilterProp attachment-referent siblings into
+//      FilterProp::AttachedTo and makes retarget picks positional (reserved as
+//      v119 and then v121 while under review; it landed after v126).
+// +57: v128 adds the TargetFilter::DeclaredPlayer reference.
+// +58: v129 carries the ShortcutDecisionSchema capacity split, the offer road
+//      stamp, the mana ability payment window, the retired loop-action sequence,
+//      and the period reach and cleanup pair.
+// +59: v130 bounds each `GameState::linked_exile_lki` entry to its departure's incarnations (`LinkedExileLki`).
+// +60: v131 adds PlayerFilter AnyOf / TargetPlayer to ability player scopes in GameState.
+// +61: v132 stamps `GameObject::exile_from_stack_linked_source` with the rider's incarnation (`ObjectIncarnationRef`).
+// +62: v133 adds the CR 614.12a pre-entry as-enters choice carriers.
+// +68: v139 adds the CR 702.122c per-turn crew relation.
+// +69: v140 adds `AttackSubject::EventAttackers` to ability player scopes in GameState.
+// +70: v141 adds `ExileLinkKind::CastCost` to `GameState.exile_links`.
+// +71: v142 adds `LinkedExileSnapshot.incarnation` to GameState's linked-exile snapshots.
+// +72: v143 retypes `GameState.modal_modes_chosen_this_{turn,game}` keys to `ObjectIncarnationRef`.
+// +63: v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
+// +73: v144 adds one-time boon tags (CreateBoon, NoteNumber, HasBoon,
+// ChooseTokenHost) and retypes the perpetual P/T edit to QuantityExpr.
+// +74: v145 adds ParentTargetMissingReason::SearchLibrary on parked ResolvedAbility continuations.
+// +76: v147 adds the Eye to Eye / Mouth to Mouth contest (`WaitingFor::PhysicalContest`,
+//      `Effect::PhysicalContest`, two GameEvents, `ClientMessage::ContestClick`,
+//      `ServerMessage::ContestProgress`).
+// +75: v146 adds `ConfirmedPeriod.counted_by` and `.performance` to loop offers in GameState.
+// +77: v148 adds Timesifter's `Effect::ExileTopCardContest` and its parked
+//      `BatchCompletion::TopCardContestRoundComplete`.
+// +78: v149 moves the owed final part of a paused spell onto the resolution carrier
+//      (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
+// +79: v150 reshapes the cast-this-way gains rider's serialized payload (the permission's
+//      `enters_with_modifications` object and the effect's `rider` key), neither parseable
+//      by a v149 peer.
+// +80: v151 carries populated Bestow restoration payloads.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 80;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 14;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 16;
 // The capability FLOOR for correlated tournament settlement — a different kind
 // of number from the other version constants here, and the reason it is pinned
 // separately. Those track a surface's current version; this one is frozen at the
@@ -101,7 +232,68 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +19: wire 73 moves with full-game v91 for the counter-count retype.
 // +20: wire 74 moves with full-game v92 for the serialized reveal-until verdict.
 // +21: wire 75 moves with full-game v93 for the SacrificedForCost provenance.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 21;
+// +22: wire 76 moves with full-game v94 for the departure look-back carrier.
+// +23: wire 77 moves with full-game v95 for the FilterProp::BlockStatus reshape.
+// +24: wire 78 moves with full-game v96 for name-sticker quantities.
+// +25: wire 79 moves with full-game v97 for the serialized TargetReadOrigin.
+// +26: wire 80 moves with full-game v98 for per-player choice order and
+// PerPlayerScope::Opponents.
+// +27: wire 81 moves with full-game v99 for the graveyard permission pool.
+// +28: wire 82 moves with full-game v100 for the additional-phase segment and
+// recipient.
+// +29: wire 83 moves with full-game v101 for the mana-ability activation kind.
+// +30: wire 84 moves with full-game v102 for SharedCardTypes.
+// +31: wire 85 moves with full-game v103 for the format-derived dungeon pool.
+// +32: wire 86 moves with full-game v104 for the delve payment state shape.
+// +33: wire 87 moves with full-game v105 for deferred mana-source quantities.
+// +34: wire 88 moves with full-game v106 for remembered replacement choices.
+// +35: wire 89 moves with full-game v107 for the counted exile-until loop.
+// +36: wire 90 moves with full-game v108 for illegal-target resolution disposition.
+// +37: wire 91 moves with full-game v109 for the CR 201.5a granter binding.
+// +38: wire 92 moves with full-game v110 for the deferred spell delivery and
+//      the spell-copy order choice.
+// +39: wire 93 moves with full-game v111 for the `Dandan` GameFormat name.
+// +40: wire 94 moves with full-game v112 for the `SubstituteTextWord` modification.
+// +41: wire 95 moves with full-game v113 for the journaled `rebound_from`.
+// +42: wire 96 moves with full-game v114 for `MulliganDecision.declared`.
+// +43: wire 97 moves with full-game v115 for the free reveal mulligan.
+// +44: wire 98 moves with full-game v116 for the simultaneous-draw dealer.
+// +45: wire 99 moves with full-game v117 for `DerivedViews.shared_piles`.
+// +46: wire 100 moves with full-game v118 for `SpentColor` on `ManaColorSpent`.
+// (+47, wire 101, is reserved for the Legends of Jidoor PR.)
+// +48: wire 102 moves with full-game v120 for the spell announcement and targeter.
+// +49: wire 103 moves with full-game v121 for player-relative trigger mana.
+// +50: wire 104 moves with full-game v122 for the `TriggeringSourceController` grantee.
+// +51: wire 105 moves with full-game v123 for the prepared-spell qualifier, mass-prepare scope, prepared-copy source and copiable prepare face.
+// +52: wire 106 moves with full-game v124 for the land-play journal `rebound_from`.
+// +53: wire 107 moves with full-game v125 for the mulligan free-reveal count.
+// +54: wire 108 moves with full-game v126 for the zone-change record's arrival identity.
+// +55: wire 109 moves with full-game v127 for the FilterProp::AttachedTo reshape.
+// +56: wire 110 moves with full-game v128 for TargetFilter::DeclaredPlayer.
+// +57: wire 111 moves with full-game v129 for the shortcut schema capacity split,
+//      the offer road stamp, the mana ability payment window, the retired
+//      loop-action sequence, and the period reach and cleanup pair.
+// +58: wire 112 moves with full-game v130 for the incarnation-bounded linked-exile LKI.
+// +59: wire 113 moves with full-game v131 for PlayerFilter AnyOf / TargetPlayer.
+// +60: wire 114 moves with full-game v132 for the stack-exile rider's incarnation.
+// +61: wire 115 moves with full-game v133 for the pre-entry as-enters choice.
+// +67: wire 121 moves with full-game v139 for the per-turn crew relation.
+// +68: wire 122 moves with full-game v140 for `AttackSubject::EventAttackers`.
+// +69: wire 123 moves with full-game v141 for `ExileLinkKind::CastCost`.
+// +70: wire 124 moves with full-game v142 for `LinkedExileSnapshot.incarnation`.
+// +71: wire 125 moves with full-game v143 for incarnation-keyed modal history.
+// +62: wire 116 moves with full-game v134 for `AbilityActivated.stack_entry`.
+// +72: wire 126 moves with full-game v144 for one-time boons.
+// +73: wire 127 moves with full-game v145 for the SearchLibrary missing-referent tag.
+// +75: wire 129 moves with full-game v147 for the physical contest and its `contest_click` frame.
+// +74: wire 128 moves with full-game v146 for `ConfirmedPeriod.counted_by` and `.performance`.
+// +76: wire 130 moves with full-game v148 for Timesifter's top-card exile contest.
+// +77: wire 131 moves with full-game v149 for the carrier-owned final-part marker.
+// +78: wire 132 moves with full-game v150 for the cast-this-way gains rider's serialized
+//      payload reshape (the permission's `enters_with_modifications` object and the
+//      effect's `rider` key).
+// +79: wire 133 moves with full-game v151 for populated Bestow payloads.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 79;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
@@ -253,6 +445,8 @@ const AUTHORED_LITERALS = [
     "MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION",
     // Client-only frozen floor for the format names lobby 11 introduced; no Rust mirror.
     "MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS",
+    // Client-only frozen floor for the format name lobby 16 introduced; no Rust mirror.
+    "MIN_LOBBY_PROTOCOL_FOR_DANDAN",
     "MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL",
     "PROTOCOL_VERSION",
   ]],

@@ -25,9 +25,9 @@
 //!    now prunes `SpecificObject` grants on every zone exit but two: to the
 //!    stack (CR 400.7g), and a permanent spell's stack → battlefield (CR 400.7a).
 //!
-//! Corpus (`client/public/card-data.json`): of the 20 counter heads carrying
-//! the exile rider, Delay is the only one whose rider names counters, and its
-//! tail is the only conditioned tail; 21 of the 33 `AddCounter` replacements
+//! Corpus (`client/public/card-data.json`): of the counter heads carrying
+//! the exile rider, Delay is the only one whose rider names counters, and at
+//! #8795 its tail was the only conditioned tail; 21 of the 33 `AddCounter` replacements
 //! carry a zone-less type description in `valid_card`, 9 carry no `valid_card`
 //! and read as a permanent (or a player).
 

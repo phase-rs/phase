@@ -735,5 +735,13 @@
     "slotTraditional": "Traditional-Draft",
     "slotCommanderDraft": "Commander-Draft",
     "slotWinston": "Winston-Draft"
+  },
+  "llmDrafters": {
+    "label": "KI-Drafter",
+    "picking": "Wählt",
+    "ready": "Gewählt",
+    "fallback": "Engine-Wahl",
+    "waiting": "Warte darauf, dass alle Spieler gewählt haben…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }

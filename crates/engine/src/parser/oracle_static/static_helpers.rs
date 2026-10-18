@@ -5,7 +5,6 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerScope;
-use nom::character::complete::multispace0;
 
 /// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
 /// the chosen name" subject phrase and map it to `TargetFilter::HasChosenName`.
@@ -203,16 +202,28 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     )))
     .parse(base);
 
-    let (base_part, qual_props) = if let Ok((_, (before, suffix))) = that_split {
+    let (base_part, qual_props, qual_type) = if let Ok((_, (before, suffix))) = that_split {
         let suffix = suffix.trim_start();
-        let (props, consumed) =
-            crate::parser::oracle_target::parse_that_clause_suffix(suffix, None)?;
-        if !suffix[consumed..].trim().is_empty() {
-            return None;
+        // CR 205.3 + CR 601.2f: "Each spell you cast that's a Demon, Horror, or
+        // Nightmare" (Ancient Cellarspawn) — a subtype, "X or Y", or an
+        // Oxford-comma list read whole by the shared relative-subtype parser.
+        // Without this the subtype clause matched nothing below and the
+        // modifier fell back to reducing EVERY spell.
+        if let Some((subtype_filter, _)) =
+            crate::parser::oracle_target::parse_that_is_subtype_suffix(suffix)
+                .filter(|(_, consumed)| suffix[*consumed..].trim().is_empty())
+        {
+            (before.trim(), Vec::new(), Some(subtype_filter))
+        } else {
+            let (props, consumed) =
+                crate::parser::oracle_target::parse_that_clause_suffix(suffix, None)?;
+            if !suffix[consumed..].trim().is_empty() {
+                return None;
+            }
+            (before.trim(), props, None)
         }
-        (before.trim(), props)
     } else {
-        (base, Vec::new())
+        (base, Vec::new(), None)
     };
 
     let base_part = strip_cost_mod_cast_scope_suffix(base_part);
@@ -244,6 +255,25 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             }
             _ => None,
         }
+    };
+
+    // CR 205.3: a relative subtype clause narrows the subject's type, AND-merged
+    // with whatever the subject phrase itself named.
+    let typed_filter = match (typed_filter, qual_type) {
+        (filter, None) => filter,
+        (Some(TargetFilter::Typed(mut tf)), Some(subtype_filter)) => {
+            tf.type_filters.push(subtype_filter);
+            Some(TargetFilter::Typed(tf))
+        }
+        (Some(other), Some(subtype_filter)) => Some(TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::card().with_type(subtype_filter)),
+            ],
+        }),
+        (None, Some(subtype_filter)) => Some(TargetFilter::Typed(
+            TypedFilter::card().with_type(subtype_filter),
+        )),
     };
 
     let filter = match (typed_filter, qual_props.is_empty()) {
@@ -491,6 +521,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DeclaredPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
@@ -527,8 +558,15 @@ pub(crate) fn try_parse_cost_modification(
     casting_as_variant: Option<crate::types::game_state::CastingVariant>,
 ) -> Option<StaticDefinition> {
     let original_text = text;
-    let (cost_text, leading_condition) =
+    let (cost_text, leading_gate) =
         peel_leading_cost_modifier_condition(TextPair::new(text, lower));
+    // CR 601.2f: a leading "If <condition>, …" gate the typed surface cannot carry
+    // fails closed rather than shipping an unconditional modifier.
+    let leading_condition = match leading_gate {
+        LeadingGate::Absent => None,
+        LeadingGate::Parsed(condition) => Some(condition),
+        LeadingGate::Unparsed => return None,
+    };
     let text = cost_text.original;
     let lower = cost_text.lower;
 
@@ -634,8 +672,17 @@ pub(crate) fn try_parse_cost_modification(
     // Extract spell type filter from the text before "cost"
     // E.g., "Creature spells you cast" → Creature, "Instant and sorcery spells" → AnyOf(Instant, Sorcery)
     let mut during_your_turn_scope = None;
-    let spell_filter = if is_self_spell {
+    // CR 601.2f + CR 115.9b: a self-spell "if it targets …" gate is lowered into
+    // `spell_filter`. One decision, two readers: the filter below and the
+    // trailing-gate check, which must not treat the lowered gate as dropped.
+    let self_spell_targets_gate = if is_self_spell {
         parse_self_spell_target_cost_filter(lower)
+    } else {
+        None
+    };
+    let targets_gate_consumed = self_spell_targets_gate.is_some();
+    let spell_filter = if is_self_spell {
+        self_spell_targets_gate
     } else if let Some(filter) = nth_qualified_spell_filter.cloned() {
         Some(filter)
     // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -888,6 +935,7 @@ pub(crate) fn try_parse_cost_modification(
             // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DeclaredPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
@@ -937,65 +985,45 @@ pub(crate) fn try_parse_cost_modification(
         (None, None) => None,
     };
 
-    // Extract trailing "if [condition]" / "as long as [condition]" clause from
-    // cost modification lines.
+    // Trailing "if [condition]" / "as long as [condition]" gate after the cost verb.
     // Patterns:
     // - "This spell costs {N} less to cast if you control a Wizard."
     // - "Spells you cast cost {1} less to cast as long as there are three or more Lesson cards in your graveyard."
-    // Uses the shared nom condition combinator to handle the full class of conditions.
-    if definition.condition.is_none() {
-        if let Some((cond_pos, marker)) = [" as long as ", " if "]
-            .into_iter()
-            .filter_map(|marker| lower.rfind(marker).map(|pos| (pos, marker)))
-            .max_by_key(|(pos, _)| *pos)
-        {
-            let cond_text = lower[cond_pos + marker.len()..]
-                .trim()
-                .trim_end_matches('.');
-            // CR 601.2f + CR 611.3a: try the cost-specific predicates first, then
-            // fall back to the shared static-condition grammar so board-state
-            // gates ("if there are ten or more nonland permanents on the
-            // battlefield", Hour of Revelation) attach instead of being swallowed.
-            if let Some(sc) = parse_cost_modifier_condition(cond_text)
-                .or_else(|| parse_static_condition(cond_text))
-            {
-                definition.condition = Some(sc);
-            } else if let Ok((rest, sc)) = nom_condition::parse_inner_condition(cond_text) {
-                if rest.trim().is_empty() || rest.trim() == "." {
-                    definition.condition = Some(sc);
-                }
-            } else if is_nested_stack_target_condition(cond_text) {
-                let filter = parse_it_targets_that_targets_spell_filter(cond_text)?;
-                // CR 115.9b: "if it targets a spell or ability that targets a [type]
-                // you control [with power N or greater]" — wire the parsed nested
-                // target filter into spell_filter so the reduction only applies when
-                // NOOW's target is a qualifying stack object (e.g. "Not of This World").
-                if let StaticMode::ModifyCost { spell_filter, .. } = &mut definition.mode {
-                    *spell_filter = Some(filter);
+    // CR 601.2f: a printed gate on a cost modifier is part of cost determination;
+    // a gate the typed surface cannot carry fails closed (`Effect::unimplemented`),
+    // never ships as an unconditional modifier.
+    match extract_trailing_cost_modifier_gate(lower) {
+        TrailingGate::Absent => {}
+        TrailingGate::Several => return None,
+        TrailingGate::One(gate_text) => {
+            let gate_is_targets_clause = alt((
+                tag::<_, _, OracleError<'_>>("it targets "),
+                tag("this spell targets "),
+            ))
+            .parse(gate_text)
+            .is_ok();
+            if targets_gate_consumed && gate_is_targets_clause {
+                // Lowered into `spell_filter` above.
+            } else if definition.condition.is_some() {
+                // A leading/branch gate plus a trailing gate: the single condition
+                // slot cannot carry both faithfully — fail closed.
+                return None;
+            } else {
+                match classify_cost_modifier_gate(gate_text) {
+                    CostModifierGate::Parsed(condition) => definition.condition = Some(condition),
+                    // CR 115.9b: "if it targets a spell or ability that targets a
+                    // [type] you control [with power N or greater]" — the nested
+                    // target filter gates the reduction through `spell_filter` so it
+                    // only applies when the spell's target is a qualifying stack
+                    // object (Not of This World).
+                    CostModifierGate::NestedStackTarget(filter) => {
+                        if let StaticMode::ModifyCost { spell_filter, .. } = &mut definition.mode {
+                            *spell_filter = Some(filter);
+                        }
+                    }
+                    CostModifierGate::Unparsed => return None,
                 }
             }
-        }
-    }
-
-    // CR 601.2f: Leading-condition form — "If [condition], this spell costs
-    // {N} less to cast." The trailing scan above misses this because the "if"
-    // is at the start of the line (no preceding space), so `rfind(" if ")`
-    // never matches it. Consume the condition with the shared combinator and
-    // accept it only when followed by the comma separating it from the
-    // already-parsed cost clause. The Avatar cycle (Avatar of
-    // Fury/Hope/Might/Will/Woe) and "If you weren't the starting player, this
-    // spell costs {1} less" cards use this form.
-    if definition.condition.is_none() {
-        if let Ok((_rest, sc)) = preceded(
-            tag("if "),
-            terminated(
-                nom_condition::parse_inner_condition,
-                (multispace0, tag(",")),
-            ),
-        )
-        .parse(lower)
-        {
-            definition.condition = Some(sc);
         }
     }
 
@@ -1014,9 +1042,19 @@ pub(crate) fn try_parse_cost_modification(
     Some(definition)
 }
 
-fn peel_leading_cost_modifier_condition<'a>(
-    pair: TextPair<'a>,
-) -> (TextPair<'a>, Option<StaticCondition>) {
+/// CR 601.2f: the leading "If <condition>, …" / turn-scope gate of a cost line.
+/// Distinct from `CostModifierGate` because its payload set differs (no nested
+/// stack-target form).
+enum LeadingGate {
+    /// No leading gate — the line is returned unchanged.
+    Absent,
+    /// A recognized gate; the returned text is the cost clause after it.
+    Parsed(StaticCondition),
+    /// A leading "if …, " gate on a cost clause whose condition cannot be carried.
+    Unparsed,
+}
+
+fn peel_leading_cost_modifier_condition<'a>(pair: TextPair<'a>) -> (TextPair<'a>, LeadingGate) {
     let trimmed = pair.trim_start();
     if let Ok((remainder, condition)) = parse_leading_turn_scope(trimmed.lower) {
         let consumed = trimmed.lower.len() - remainder.len();
@@ -1026,23 +1064,23 @@ fn peel_leading_cost_modifier_condition<'a>(
             || nom_primitives::scan_contains(cost_clause.lower, "less to activate")
             || nom_primitives::scan_contains(cost_clause.lower, "more to activate")
         {
-            return (cost_clause, Some(condition));
+            return (cost_clause, LeadingGate::Parsed(condition));
         }
     }
 
     let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(trimmed.lower) else {
-        return (pair, None);
+        return (pair, LeadingGate::Absent);
     };
     let rest = trimmed.slice(trimmed.lower.len() - after_if.len(), trimmed.lower.len());
     let Some((condition, cost_clause)) = rest.split_around(", ") else {
-        return (pair, None);
+        return (pair, LeadingGate::Absent);
     };
     if !(nom_primitives::scan_contains(cost_clause.lower, "less to cast")
         || nom_primitives::scan_contains(cost_clause.lower, "more to cast")
         || nom_primitives::scan_contains(cost_clause.lower, "less to activate")
         || nom_primitives::scan_contains(cost_clause.lower, "more to activate"))
     {
-        return (pair, None);
+        return (pair, LeadingGate::Absent);
     }
 
     let cond_text = condition.lower.trim().trim_end_matches('.');
@@ -1052,9 +1090,82 @@ fn peel_leading_cost_modifier_condition<'a>(
     });
 
     match parsed {
-        Some(condition) => (cost_clause.trim_start(), Some(condition)),
-        None => (pair, None),
+        Some(condition) => (cost_clause.trim_start(), LeadingGate::Parsed(condition)),
+        None => (pair, LeadingGate::Unparsed),
     }
+}
+
+/// CR 601.2f: where the trailing gate of a cost-modifier line sits, counted over
+/// the whole remainder after the first cost verb.
+enum TrailingGate<'a> {
+    /// No gate marker after the cost verb.
+    Absent,
+    /// Exactly one gate marker; the gate text after it.
+    One(&'a str),
+    /// Two or more gate markers — two gated modifiers or a disjunction this
+    /// single-condition static cannot carry.
+    Several,
+}
+
+/// CR 601.2f: Find the gate after the FIRST cost verb ("less/more to
+/// cast/activate"). Markers ("if ", "as long as ") are counted over the whole
+/// post-verb remainder of the line, with no sentence window: a line that prints
+/// two gated reductions is two cost modifiers, and this static surface carries
+/// one — fail closed rather than ship one gate for two.
+fn extract_trailing_cost_modifier_gate(lower: &str) -> TrailingGate<'_> {
+    let Some((_, _, after_verb)) = nom_primitives::scan_preceded(lower, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("less to cast"),
+            tag("more to cast"),
+            tag("less to activate"),
+            tag("more to activate"),
+        ))
+        .parse(i)
+    }) else {
+        return TrailingGate::Absent;
+    };
+    let gate_marker = |i| alt((tag::<_, _, OracleError<'_>>("as long as "), tag("if "))).parse(i);
+    let Some((_, _, first_rest)) = nom_primitives::scan_preceded(after_verb, gate_marker) else {
+        return TrailingGate::Absent;
+    };
+    match nom_primitives::scan_preceded(first_rest, gate_marker) {
+        Some(_) => TrailingGate::Several,
+        None => TrailingGate::One(first_rest.trim().trim_end_matches('.')),
+    }
+}
+
+/// CR 601.2f: the typed reading of a cost-modifier gate.
+enum CostModifierGate {
+    /// A cost-determination condition for `StaticDefinition.condition`.
+    Parsed(StaticCondition),
+    /// CR 115.9b: a nested stack-target gate, carried by `spell_filter`.
+    NestedStackTarget(TargetFilter),
+    /// A gate the typed surface cannot carry — the caller fails closed.
+    Unparsed,
+}
+
+/// CR 601.2f + CR 611.3a: classify a cost-modifier gate. Cost-specific predicates
+/// first, then the shared static-condition grammar so board-state gates ("if
+/// there are ten or more nonland permanents on the battlefield", Hour of
+/// Revelation) attach, then the nested stack-target form.
+fn classify_cost_modifier_gate(gate_text: &str) -> CostModifierGate {
+    if let Some(condition) =
+        parse_cost_modifier_condition(gate_text).or_else(|| parse_static_condition(gate_text))
+    {
+        return CostModifierGate::Parsed(condition);
+    }
+    if let Ok((rest, condition)) = nom_condition::parse_inner_condition(gate_text) {
+        if rest.trim().is_empty() || rest.trim() == "." {
+            return CostModifierGate::Parsed(condition);
+        }
+    }
+    if is_nested_stack_target_condition(gate_text) {
+        return parse_it_targets_that_targets_spell_filter(gate_text).map_or(
+            CostModifierGate::Unparsed,
+            CostModifierGate::NestedStackTarget,
+        );
+    }
+    CostModifierGate::Unparsed
 }
 
 /// Structural pre-check for the "it targets [stack object] that targets […]"
@@ -1094,11 +1205,12 @@ fn is_nested_stack_target_condition(cond_text: &str) -> bool {
 }
 
 pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
-    // CR 702.166a: "This spell costs {N} less to cast if it's bargained" — route the
-    // bargained predicate to the cost-determination StaticCondition. Checked ahead of
-    // the "another spell" delegation and the parse_inner_condition fallback so the
-    // bargained arm wins.
-    if let Some(sc) = parse_bargained_condition(cond_text) {
+    // CR 702.166a + CR 701.59c: "This spell costs {N} less to cast if it's
+    // bargained / if evidence was collected" — route the linked-additional-cost
+    // predicate to the cost-determination StaticCondition. Checked ahead of the
+    // "another spell" delegation and the parse_inner_condition fallback so the
+    // linked-additional-cost arm wins.
+    if let Some(sc) = parse_additional_cost_paid_condition(cond_text) {
         return Some(sc);
     }
     let (rest, filter) = parse_cost_modifier_another_spell_condition(cond_text).ok()?;
@@ -1121,16 +1233,19 @@ pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCon
     })
 }
 
-/// CR 702.166a: Match the bargained predicate of a self-spell cost-reduction line
-/// ("This spell costs {N} less to cast if it's bargained"). `cond_text` is already
-/// lowercase. Returns `StaticCondition::AdditionalCostPaid` — Bargain's optional
-/// sacrifice sets `additional_cost_paid` on the in-flight cast.
-pub(crate) fn parse_bargained_condition(cond_text: &str) -> Option<StaticCondition> {
+/// CR 702.166a (Bargain) + CR 701.59a + CR 701.59c (collect evidence): the
+/// cost-determination gate on a linked optional additional cost — "if it's
+/// bargained", "if evidence was collected" — lowers to
+/// `StaticCondition::AdditionalCostPaid`, read from the in-flight cast's
+/// `additional_cost_paid`. `cond_text` is already lowercase.
+pub(crate) fn parse_additional_cost_paid_condition(cond_text: &str) -> Option<StaticCondition> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's bargained"),
         tag("it is bargained"),
         tag("it was bargained"),
         tag("this spell is bargained"),
+        tag("evidence was collected"),
+        tag("evidence has been collected"),
     ))
     .parse(cond_text)
     .ok()?;
@@ -1698,6 +1813,13 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
                 *player = antecedent.clone();
             }
         }
+        // Digital-only Alchemy (no CR entry): same scoped-subject rebind as
+        // the monarch arm above.
+        StaticCondition::HasBoon { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
         // Only boolean structure carries nested static conditions. Quantities
         // and filters are separate scopes, so this clause does not rebind them.
         StaticCondition::DevotionGE { .. }
@@ -1755,6 +1877,7 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => {}
     }

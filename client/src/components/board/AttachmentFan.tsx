@@ -146,7 +146,9 @@ export function AttachmentFan() {
       const submission = submissionById.get(id);
       if (submission) {
         if (!viewerInteraction?.canSubmit) return;
-        void dispatchInteraction(submission).then(close).catch(() => undefined);
+        void dispatchInteraction(submission).then((outcome) => {
+          if (outcome.status === "applied") close();
+        }).catch(() => undefined);
         return;
       }
       // Mode 2 — no prompt is open, so the fan is a reachability surface for the

@@ -1292,8 +1292,34 @@ fn next_nested_ability_quote_span(body: &str, search_from: usize) -> Option<(usi
     }
     let open_quote = next_open?;
     let content_start = open_quote + 1;
-    let rel_close = body[content_start..].find('\'')?;
-    let close_quote = content_start + rel_close;
+    // Digital-only Alchemy (no CR entry): the closer is the next `'` that is
+    // NOT a mid-word apostrophe. A naive first-quote close breaks on
+    // contractions inside the granted ability (Bloodrage Alpha's boon: "…
+    // you don't control.'" closed at "don", corrupting the granted trigger
+    // and stranding "t control.'"). A `'` with word characters on BOTH sides
+    // is always an apostrophe, never a delimiter; the genuine closer follows
+    // sentence punctuation (`.'`) or whitespace.
+    let bytes = body.as_bytes();
+    let mut rel_close = None;
+    for (i, ch) in body[content_start..].char_indices() {
+        if ch != '\'' {
+            continue;
+        }
+        let abs = content_start + i;
+        let prev_word = abs
+            .checked_sub(1)
+            .and_then(|p| bytes.get(p))
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+        let next_word = bytes
+            .get(abs + 1)
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+        if prev_word && next_word {
+            continue;
+        }
+        rel_close = Some(i);
+        break;
+    }
+    let close_quote = content_start + rel_close?;
     Some((open_quote, close_quote))
 }
 
@@ -1604,7 +1630,7 @@ pub(crate) fn parse_quoted_rule_static_modifications(
     // activated ability, not the outer static line — mask quoted spans before
     // testing so the static grant path is not skipped (Roar of the Fifth People
     // chapter II, #5978).
-    if find_cost_separator(&strip_quoted_segments(text)).is_some() {
+    if unquoted_cost_separator(text).is_some() {
         return None;
     }
 
@@ -1794,6 +1820,25 @@ pub(crate) fn find_cost_separator(text: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// CR 602.1: Activated abilities have a cost and an effect and are written as
+/// "[Cost]: [Effect]"; CR 602.1a puts the whole activation cost before the colon.
+/// CR 604.1: a static ability is written as a statement — never in that shape.
+/// So text carrying a cost separator OUTSIDE any quoted granted ability is an
+/// activated ability, not a static one.
+///
+/// Quoted spans are masked first (CR 602.1: inside a granted ability the colon
+/// belongs to the INNER ability, e.g. `Creatures you control have "{T}: Add
+/// {R}."`), so masking keeps that line a static grant.
+/// This is the single authority for the rule; `parse_static_line_inner` and
+/// `parse_quoted_rule_static_modifications` both consult it.
+///
+/// The returned offset is an index into the QUOTE-MASKED text, not into `text`
+/// (masking also trims a trailing ` and`/` or` connector, so the masked string is
+/// shorter); every caller uses `.is_some()`.
+pub(crate) fn unquoted_cost_separator(text: &str) -> Option<usize> {
+    find_cost_separator(&strip_quoted_segments(text))
 }
 
 /// Check if a prefix string looks like a text-based activated ability cost.
@@ -2071,37 +2116,40 @@ pub(crate) fn parse_basic_landwalk_qualifier(input: &str) -> OracleResult<'_, &'
     .parse(input)
 }
 
-/// CR 601.3 + CR 113.6b: Parse the affected-card filter of a graveyard
+/// CR 601.3 + CR 604.6: Parse the affected-card filter of a graveyard
 /// cast-permission ability. When the filter text is a self-reference phrase
 /// ("this card", "this creature", "this permanent", ...), the permission
 /// applies only to the source card itself, so it lowers to
 /// `TargetFilter::SelfRef`. The returned `bool` is the `self_ref_permission`
-/// flag: when `true`, the caller restricts the static to
-/// `active_zones: [Graveyard]` (CR 113.6b — a zone-restricted ability functions
-/// only from the zones it names). A non-self-reference filter (e.g. a creature
+/// flag: when `true`, the caller sets the static's `active_zones` to the zones its
+/// permission names (CR 604.6 — the permission applies while the card is in a zone
+/// it could be cast from). A non-self-reference filter (e.g. a creature
 /// type) falls through to `parse_type_phrase_folding` and is not zone-restricted here.
 pub(crate) fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
-    // The self-reference token `~` is substituted for type phrases ("this
-    // creature", "this permanent", ...) by `normalize_self_references` before
-    // this parser runs; `SELF_REF_PARSE_ONLY_PHRASES` (e.g. "this card") are
-    // *excluded* from that normalization and reach this function verbatim. Both
-    // forms denote the permission's own source card.
-    for phrase in std::iter::once("~").chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied()) {
-        if all_consuming(tag::<_, _, OracleError<'_>>(phrase))
-            .parse(input)
-            .is_ok()
-        {
-            return (TargetFilter::SelfRef, true);
-        }
+    if all_consuming(parse_self_subject).parse(input).is_ok() {
+        return (TargetFilter::SelfRef, true);
     }
     let (filter, _) = parse_type_phrase_folding(input);
     (filter, false)
 }
 
-/// CR 601.3 + CR 113.6b: Parse the trailing condition gate on a graveyard
+/// The permission's own source card as a cast-permission subject.
+pub(crate) fn parse_self_subject(input: &str) -> OracleResult<'_, &str> {
+    // `normalize_self_references` substitutes `~` for type phrases ("this
+    // creature", ...) but leaves `SELF_REF_PARSE_ONLY_PHRASES` ("this card")
+    // verbatim, so both forms denote the source card.
+    for phrase in std::iter::once("~").chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied()) {
+        if let Ok(parsed) = tag::<_, _, OracleError<'_>>(phrase).parse(input) {
+            return Ok(parsed);
+        }
+    }
+    Err(crate::parser::oracle_nom::error::oracle_err(input))
+}
+
+/// CR 601.3 + CR 604.6: Parse the trailing condition gate on a graveyard
 /// cast-permission ability ("You may cast this card from your graveyard
 /// [as long as|if] [condition]"). The permission is a zone-restricted ability
-/// (CR 113.6b) that allows a cast under CR 601.3; the condition restricts when
+/// (CR 604.6) that allows a cast under CR 601.3; the condition restricts when
 /// the permission applies. Both the durative "as long as" form and the
 /// turn-history "if" form (Oathsworn Vampire — "if you gained life this turn")
 /// are evaluated when the permission is queried, so they share the same

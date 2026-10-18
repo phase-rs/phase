@@ -79,6 +79,15 @@ pub(crate) fn resolve_fight_fighters(
         })
         .collect();
 
+    // CR 701.14b + CR 608.2b: resolution validation stamped one of THIS node's
+    // own declared fighters illegal ("If one or both creatures are illegal
+    // targets for a resolving spell or ability that instructs them to fight,
+    // neither of them fights or deals damage"). Its declared shape is known, so
+    // it must not fall through to the root-slot pair below, which would read
+    // another instruction's targets as the fighters.
+    if !ability.illegal_local_target_slots.is_empty() {
+        return Ok(None);
+    }
     // CR 701.14a + CR 608.2c: "those creatures fight each other" — a two-fighter
     // chain (Malamet/Longstalk/Duel) whose declared fighters live in the two
     // earliest chain slots. Under most-recent-only chain propagation the Fight
@@ -118,6 +127,12 @@ pub(crate) fn resolve_fight_fighters(
         if crate::game::ability_utils::fight_subject_needs_target_slot(subject) {
             // CR 701.14a: Dual-target fights require both chosen fighters; do
             // not reinterpret a lone survivor as "~ fights target creature".
+            return Ok(None);
+        }
+        // CR 701.14b + CR 400.7: "~ fights …" whose source left and returned
+        // before resolution — the fighter is no longer on the battlefield (the
+        // returned permanent is a new object), so neither creature fights.
+        if !refers_to_attached(subject) && ability.self_ref_binding(state).is_none() {
             return Ok(None);
         }
     }
@@ -793,6 +808,7 @@ mod tests {
             }],
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
 
         // Accept the replacement for bear → wolf (first direction).

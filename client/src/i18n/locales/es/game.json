@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Elige una fuente de maná",
     "description": "Esta habilidad de maná requiere sacrificar un permanente.",
+    "baseOutput_one": "Producción base: {{count}} maná",
+    "baseOutput_other": "Producción base: {{count}} manás",
+    "baseOutputVariable": "La cantidad base se determina al activar",
     "sacrifice": "Sacrificar",
     "back": "Volver al pago de maná",
     "unknownSource": "Fuente de maná"
@@ -102,6 +105,24 @@
     "subtitle": "Todos los jugadores deben aprobar antes de que el motor resuelva un prefijo seguro de la pila.",
     "grant": "Aprobar",
     "decline": "Conservar prioridad"
+  },
+  "sandboxLifeCorrection": {
+    "open": "Corregir vidas",
+    "title": "Corrección de vidas de Sandbox",
+    "description": "Usa los controles normales de la mano y la pila para lanzar y resolver una criatura. Este panel envía la acción SetLife de Sandbox mediante el adaptador de juego existente.",
+    "scopeNote": "Corrige las vidas mediante la ruta de edición de jugadores del motor; no representa daño ni un efecto de carta. Esta versión no incluye revelar manos ocultas, descartar según las reglas ni deshacer antes de lanzar con acuerdo previo.",
+    "target": "Jugador",
+    "player": "{{name}} (jugador {{seat}})",
+    "you": "Tú",
+    "opponent": "Oponente",
+    "currentLife": "Vidas actuales",
+    "newLife": "Nuevas vidas",
+    "submit": "Aplicar corrección",
+    "submitting": "Corrección enviada; cerrar este panel no la cancela.",
+    "applied": "Vidas actuales confirmadas para {{player}}: {{life}}.",
+    "notApplied": "El motor no confirmó esta corrección. Comprueba el snapshot actual antes de volver a intentarlo.",
+    "failed": "No se pudo enviar la corrección.",
+    "stale": "La partida cambió durante la edición. Cierra y vuelve a abrir este panel para empezar desde el snapshot actual."
   },
   "debugCreate": {
     "copies": "Copias",
@@ -565,9 +586,6 @@
     "pendingCheaper": "El próximo hechizo cuesta {{amount}} menos",
     "companion": "Compañero",
     "unboundedTooltip": "{{resource}} ilimitado (∞)",
-    "unboundedScheduledTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; se elegirá una cantidad finita",
-    "unboundedScheduledYouTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; tú indicarás la cantidad",
-    "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; esto puede seguir siendo ilimitado",
     "unboundedConditionalYouTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; esto puede seguir siendo ilimitado y, si no, tú indicarás la cantidad",
     "unboundedMixedTooltip": "{{resource}} ilimitado (∞) — parte de este grupo tiene un colapso pendiente; parte sigue siendo ilimitada",
@@ -650,6 +668,7 @@
     "libraryCount_one": "Biblioteca ({{count}} carta)",
     "libraryCount_other": "Biblioteca ({{count}} cartas)",
     "playFromTop": "Juega {{name}} desde la parte superior de la biblioteca",
+    "activateFromTop": "Activa {{name}} desde la parte superior de la biblioteca",
     "topOfLibrary": "la parte superior de la biblioteca",
     "indicatorOpponentPrefix": "Op ",
     "graveyardLower": "cementerio",
@@ -657,6 +676,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "No hay cartas en {{zone}}",
     "castFromZone": "Lanzar desde {{zone}}: {{name}}",
+    "activateFromZone": "Activar desde {{zone}}: {{name}}",
     "viewCount": "Ver {{count}}",
     "castableCount": "{{zone}} — {{count}} lanzables"
   },
@@ -788,7 +808,16 @@
     "defendingPlayerTrample": "Jugador defensor (Arrollar)",
     "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Pila",
     "collapsePanel": "Contraer el panel de la pila",
     "expandPanel": "Expandir el panel de la pila",
@@ -840,8 +869,10 @@
     "chooseNewTargetForCopy": "Elige un nuevo objetivo para la copia",
     "chooseTargetForCopy": "Elige objetivo para la copia",
     "chooseCreatureToExplore": "Elige qué criatura explora a continuación",
+    "chooseCreatureToEquip": "Elige una criatura para equipar",
     "chooseCreatureTokenToPopulate": "Elige una ficha de criatura para poblar",
     "chooseReturnAsAuraTarget": "Elige un permanente para encantar",
+    "chooseTokenHost": "Elige un anfitrión para la ficha",
     "tapUntappedCreatures_one": "Gira {{count}} criatura sin girar",
     "tapUntappedCreatures_other": "Gira {{count}} criaturas sin girar",
     "chooseTargetOf": "Elige el objetivo {{current}} de {{total}}",
@@ -875,6 +906,7 @@
     },
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
+    "keepCurrentTarget": "Conservar este objetivo",
     "skip": "Omitir",
     "opponentChoice": "(elección del oponente)",
     "chooseNewTarget": "Elige el nuevo objetivo del hechizo",
@@ -1131,6 +1163,8 @@
       "usePowder": "Usar {{name}}",
       "powderDescription": "Exilia todas las cartas de la mano, roba el mismo número — no es un mulligan",
       "powderTooltip": "Exilia todas las cartas de tu mano y roba el mismo número. No es un mulligan — el recuento y los fondos no se ven afectados.",
+      "freeReveal": "Revelar y robar de nuevo (gratis)",
+      "freeRevealDescription": "Revela tu mano, barájala y roba 7 — gratis, sin cartas al fondo, no es un mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londres",
       "eyebrowOpening": "Mano inicial · Mulligan de Londres",
       "reviewTitle": "Revisa tu mano inicial",
@@ -1348,8 +1382,6 @@
     },
     "config": {
       "startingLife": "Vida inicial",
-      "experimentalDungeons": "Mazmorras experimentales",
-      "experimentalDungeonsHelp": "Ofrecer Baldur's Gate Wilderness en las opciones de mazmorra y al tomar la iniciativa. Experimental y no oficial.",
       "players": "Jugadores",
       "whoGoesFirst": "Quién empieza",
       "firstPlayer": {
@@ -1698,6 +1730,10 @@
       "title": "Potenciar a Jace",
       "subtitle": "Elige una ficha de Jace que controles para que obtenga +{{count}} de lealtad"
     },
+    "spellCopyOrder": {
+      "title": "Ordenar las copias",
+      "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
+    },
     "collectEvidence": {
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
@@ -2008,7 +2044,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Elegir oponente",
-    "subtitle": "Elige qué oponente hace la elección."
+    "subtitle": "Elige qué oponente hace la elección.",
+    "orderTitle": "Elegir siguiente jugador",
+    "orderSubtitle": "Elige para quién harás la siguiente selección.",
+    "substituteTitle": "Elegir jugador",
+    "substituteSubtitle": "Elige quién hace esta elección."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2266,7 +2306,9 @@
     "accept": "Sí",
     "decline": "No",
     "sourceFallback": "Efecto",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
+    "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efecto",
@@ -2346,6 +2388,8 @@
     "confirm": "Confirmar"
   },
   "replacement": {
+    "remember": "Recordar esta elección durante esta partida",
+    "savedChoice": "Reemplazo: {{choice}}",
     "eyebrow": "Orden de resolución",
     "title": "Efectos de reemplazo",
     "orderSubtitle": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para establecer el orden en que se aplican: el último aplicado es el que surte efecto (CR 616.1).",
@@ -2372,7 +2416,8 @@
     "confirm": "Confirmar",
     "badgeNewTarget": "Nuevo objetivo",
     "slotLabel": "Objetivo {{index}}: {{current}} → {{chosen}}",
-    "unselected": "sin cambios"
+    "unselected": "sin cambios",
+    "keep": "Conservar"
   },
   "separatePiles": {
     "chooserName": "Jugador {{number}}",
@@ -2589,8 +2634,8 @@
     "close": "Cerrar la superposición de decisión de IA"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Tu prioridad",
+    "yourPriorityReason": "Tu prioridad — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2634,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Concurso de miradas",
+      "breathHolding": "Concurso de aguantar la respiración"
+    },
+    "versus": "{{first}} contra {{second}}",
+    "instructions": "Sigue haciendo clic, tocando o pulsando la barra espaciadora todo el tiempo que puedas. El primer jugador que pare durante {{seconds}} segundos pierde.",
+    "status": {
+      "pending": "Esperando a que empiece el concurso…",
+      "preparing": "Prepárate…",
+      "go": "¡YA! ¡Sigue haciendo clic!",
+      "paused": "Concurso en pausa mientras un jugador se reconecta…",
+      "spectating": "Viendo el concurso…",
+      "resolving": "Decidiendo el resultado…"
+    },
+    "button": {
+      "wait": "Espera al YA…",
+      "active": "¡Sigue haciendo clic!"
+    },
+    "you": "Tú",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "¡Has ganado el concurso!",
+      "lost": "Has perdido el concurso.",
+      "winner": "{{name}} ha ganado el concurso.",
+      "tie": "Empate: no pasa nada.",
+      "cancelled": "El concurso se canceló: no pasa nada."
+    }
   }
 }

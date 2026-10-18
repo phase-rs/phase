@@ -1,5 +1,5 @@
 import { connectionFailureSnapshot, fetchFreshTurnConfig, PEER_CONNECT_OPTIONS, safeConnectionError, safePeerError, TurnCredentialError } from "./connection";
-import { createPeer } from "./transport";
+import { createPeer, selectPeerTransportFactory } from "./transport";
 import type { TransportConnection, TransportPeer } from "./transport";
 import { boundedDiagnosticProbe, projectCandidateStats, type DiagnosticProbeEvidence, type DiagnosticResult } from "../services/troubleshooting";
 
@@ -7,6 +7,13 @@ const CHALLENGE = "phase-relay-check-v1";
 const CREDENTIAL_TIMEOUT_MS = 8_000;
 const SIGNALING_TIMEOUT_MS = 10_000;
 const RELAY_TIMEOUT_MS = 15_000;
+
+class DiagnosticStageTimeout extends Error {
+  constructor() {
+    super("timeout");
+    this.name = "DiagnosticStageTimeout";
+  }
+}
 
 /** An isolated PeerJS/BinaryPack round trip, using the game's signaling defaults. */
 export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<DiagnosticResult[]> {
@@ -56,7 +63,7 @@ export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<D
     let finished = false;
     const finish = (done: () => void) => { if (finished || stopped) return; finished = true; clearTimeout(timer); done(); };
     failStage = (error) => finish(() => reject(error));
-    timer = setTimeout(() => failStage(new Error("timeout")), timeoutMs);
+    timer = setTimeout(() => failStage(new DiagnosticStageTimeout()), timeoutMs);
     try { signal.throwIfAborted(); start((value) => finish(() => resolve(value)), failStage); }
     catch (error) { failStage(error); }
   });
@@ -71,8 +78,12 @@ export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<D
     let registered = 0;
     try {
       await stage<void>(SIGNALING_TIMEOUT_MS, (resolve, reject) => {
-        for (const id of ids) {
-          const peer = createPeer(id, { config: { ...config, iceTransportPolicy: "relay" } });
+        for (const [index, id] of ids.entries()) {
+          const factory = selectPeerTransportFactory({
+            role: index === 0 ? "guest" : "host",
+            hostPeerId: ids[1],
+          });
+          const peer = createPeer(id, { config: { ...config, iceTransportPolicy: "relay" } }, factory);
           peers.push(peer);
           const onError = (error: unknown) => {
             const type = safePeerError(error);
@@ -96,7 +107,7 @@ export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<D
       add("signaling", "pass", "signalingReady", signalingStarted);
     } catch (error) {
       signal.throwIfAborted();
-      add("signaling", "error", registered < 2 && !signalingFailure && error instanceof Error && error.message === "timeout" ? "signalingTimeout" : "signalingFailed", signalingStarted, { peerError: signalingFailure ?? safePeerError(error) });
+      add("signaling", "error", registered < 2 && !signalingFailure && error instanceof DiagnosticStageTimeout ? "signalingTimeout" : "signalingFailed", signalingStarted, { peerError: signalingFailure ?? safePeerError(error) });
       add("relay", "unavailable", "prerequisiteFailed", Date.now());
       return results;
     }

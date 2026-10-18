@@ -25,7 +25,8 @@
 use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
-use engine::types::events::GameEvent;
+use engine::types::events::{ActivatedAbilityKind, GameEvent};
+use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -85,18 +86,80 @@ fn chromatic_sphere_produces_mana_and_draws_through_the_stack() {
     // The ROUTE itself, which the three assertions above cannot see: all of them
     // hold identically on the off-stack mana fast path, so without this the test
     // would pass unchanged if the Sphere were still classified as a mana
-    // ability. `GameEvent::AbilityActivated` is documented on the variant as
-    // never emitted for mana abilities (CR 605.3b — they resolve immediately on
-    // a separate path that never reaches the emission site), so its presence is
-    // the discriminator between the stack path and the fast path.
+    // ability. Mana abilities emit `AbilityActivated` too (kind `Mana`, CR
+    // 605.3), so the discriminator is the activation's kind: an ordinary
+    // (stack-using) activation, never a mana one.
     assert!(
-        outcome
-            .events()
-            .iter()
-            .any(|event| matches!(event, GameEvent::AbilityActivated { .. })),
-        "CR 605.3b: no longer a mana ability, so the activation must use the \
-         stack and emit AbilityActivated (events: {:?})",
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                kind: ActivatedAbilityKind::Normal,
+                ..
+            } if *source_id == sphere
+        )),
+        "CR 605.3b: no longer a mana ability, so the activation is an ordinary \
+         stack-using one (events: {:?})",
         outcome.events()
+    );
+    assert!(
+        !outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                kind: ActivatedAbilityKind::Mana,
+                ..
+            }
+        )),
+        "the Sphere's activation is never a mana activation"
+    );
+}
+
+/// **V14 (route)** — after the Sphere's activation, before anything resolves,
+/// its ability is ON THE STACK and has produced nothing: its mana and its draw
+/// both wait for resolution (CR 605.3b no longer applies to it).
+#[test]
+fn chromatic_sphere_waits_on_the_stack_before_producing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Library Bottom"]);
+    scenario.with_mana_pool(P0, vec![generic_unit()]);
+    let sphere = scenario
+        .add_creature(P0, "Chromatic Sphere", 0, 0)
+        .as_artifact()
+        .from_oracle_text(CHROMATIC_SPHERE)
+        .id();
+    let mut runner = scenario.build();
+    let hand_before = runner.state().players[0].hand.len();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: sphere,
+            ability_index: 0,
+        })
+        .expect("activation accepted");
+    for _ in 0..4 {
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pay {1} from the pool");
+        }
+    }
+    assert!(
+        runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::ActivatedAbility { source_id, .. } if *source_id == sphere
+        )),
+        "the activation is on the stack: {:?}",
+        runner.state().stack
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "nothing produced before resolution (the {{1}} was spent)"
+    );
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before,
+        "no draw yet"
     );
 }
 

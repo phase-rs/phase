@@ -356,3 +356,96 @@ fn urgency_constants_are_ordered() {
         );
     }
 }
+
+// ─── shared library (Dandan) ────────────────────────────────────────────────
+
+fn integration_card_db() -> engine::database::card_db::CardDatabase {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../engine/tests/fixtures/integration_cards.json.gz");
+    let file = std::fs::File::open(path).expect("integration fixture should open");
+    let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+    engine::database::card_db::CardDatabase::from_export_reader(decoder)
+        .expect("integration fixture should load")
+}
+
+/// Predict cast by `ai` on a Dandan state whose shared pile holds `pile` cards.
+fn predict_verdict_on_pile(ai: PlayerId, pile: usize) -> PolicyReason {
+    use engine::game::scenario::GameScenario;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::format::FormatConfig;
+
+    let db = integration_card_db();
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 7);
+    let predict = scenario.add_real_card(ai, "Predict", Zone::Hand, &db);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    for i in 0..pile {
+        create_object(
+            state,
+            CardId(1000 + i as u64),
+            AI,
+            format!("Pile Card {i}"),
+            Zone::Library,
+        );
+    }
+    assert_eq!(
+        state.library_of(OPPONENT).len(),
+        pile,
+        "reach: pile is shared"
+    );
+    assert_eq!(state.library_of(AI).len(), pile);
+    assert!(
+        state.players[1].library.is_empty(),
+        "reach: the pile is held by the canonical seat"
+    );
+
+    let candidate = CandidateAction {
+        action: GameAction::CastSpell {
+            object_id: predict,
+            card_id: CardId(predict.0),
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::default(),
+        },
+        metadata: ActionMetadata::for_actor(Some(ai), TacticalClass::Spell),
+    };
+    let decision = decision();
+    let (context, config) = ai_context(1.0);
+    let ctx = PolicyContext {
+        ai_player: ai,
+        ..ctx(state, &candidate, &decision, &context, &config)
+    };
+    let (_, reason) = score_of(policy().verdict(&ctx));
+    reason
+}
+
+#[test]
+fn shared_pile_size_is_seen_from_both_seats() {
+    use crate::policies::payoff::{LIBRARY_THRESHOLD_ELEVATED, URGENCY_SCALE_NORMAL};
+    let pile = LIBRARY_THRESHOLD_ELEVATED + 5;
+    for ai in [AI, OPPONENT] {
+        let reason = predict_verdict_on_pile(ai, pile);
+        assert_eq!(
+            reason.kind, "mill_cast",
+            "reach: Predict is an opponent mill"
+        );
+        assert_eq!(fact(&reason, "library_remaining"), pile as i64);
+        assert_eq!(
+            fact(&reason, "urgency_x10"),
+            (URGENCY_SCALE_NORMAL * 10.0) as i64
+        );
+    }
+}
+
+#[test]
+fn small_shared_pile_is_urgent_from_both_seats() {
+    use crate::policies::payoff::{LIBRARY_THRESHOLD_URGENT, URGENCY_SCALE_HIGH};
+    let pile = LIBRARY_THRESHOLD_URGENT - 1;
+    for ai in [AI, OPPONENT] {
+        let reason = predict_verdict_on_pile(ai, pile);
+        assert_eq!(fact(&reason, "library_remaining"), pile as i64);
+        assert_eq!(
+            fact(&reason, "urgency_x10"),
+            (URGENCY_SCALE_HIGH * 10.0) as i64
+        );
+    }
+}

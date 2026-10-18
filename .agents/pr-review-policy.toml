@@ -82,6 +82,7 @@ patterns = [
 [path_classes.engine]
 patterns = [
   "crates/engine/**",
+  "crates/engine-wasm/**",
   "crates/phase-ai/**",
   "crates/phase-server/**",
 ]

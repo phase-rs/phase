@@ -380,13 +380,14 @@ fn overlapping_exile_grant_pays_the_selected_permissions_cost_not_a_sibling_gran
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: EtbTapState::Unspecified,
             },
         );
         // The Inside Information cast (X=3) fully drained P0's pool. Top it
         // back up with exactly spell_a's real printed cost ({R}{2} = 3 mana
         // units) so a normal-mana cast through the plain grant is affordable.
-        state.players[0].mana_pool.mana.extend(vec![
+        for unit in [
             ManaUnit::new(
                 ManaType::Red,
                 engine::types::identifiers::ObjectId(9_994),
@@ -405,7 +406,9 @@ fn overlapping_exile_grant_pays_the_selected_permissions_cost_not_a_sibling_gran
                 false,
                 vec![],
             ),
-        ]);
+        ] {
+            state.players[0].mana_pool.add(unit);
+        }
     }
 
     let cast = runner.cast(rig.spell_a).resolve();

@@ -10,7 +10,7 @@ use crate::game::functioning_abilities::active_replacements;
 use crate::game::replacement::{find_applicable_replacements, replacement_registry};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Duration, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
+    AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
     ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
@@ -514,12 +514,15 @@ fn instruction_writes(
         // CR 701.25a: surveil moves cards from its player's library to their
         // graveyard, where no replacement effect may apply to that move.
         Effect::Surveil { target, .. } => {
-            let player = super::resolve_player_for_context_ref(board, ability, target);
+            // CR 608.2b: a declared player whose target was illegal is not affected.
+            let Some(player) = super::resolve_player_for_context_ref(board, ability, target) else {
+                return Some(Written::default());
+            };
             let moves: Vec<ProposedEvent> = board
                 .players
                 .iter()
                 .filter(|candidate| candidate.id == player)
-                .flat_map(|player| player.library.iter())
+                .flat_map(|candidate| board.library_of(candidate.id).iter())
                 .map(|id| {
                     ProposedEvent::zone_change(
                         *id,
@@ -650,18 +653,18 @@ fn handed_child<'c>(
         return Some(Cow::Borrowed(child));
     }
     // CR 608.2c: the ordinary descent hands an undeclared child
-    // `inherited_parent_targets`; a descent that waits on a player's choice
+    // `inherited_parent_occurrences`; a descent that waits on a player's choice
     // first hands it the parent's targets where `should_propagate_parent_targets`
     // holds. Answer only where the two agree.
-    let inherited = super::inherited_parent_targets(parent, child);
+    let inherited = super::inherited_parent_occurrences(parent, child);
     let after_a_choice = if super::should_propagate_parent_targets(parent, child) {
-        parent.targets.clone()
+        parent.target_occurrences()
     } else {
         Vec::new()
     };
     (inherited == after_a_choice).then(|| {
         let mut handed = child.clone();
-        handed.targets = inherited;
+        handed.replace_target_occurrences(inherited);
         Cow::Owned(handed)
     })
 }
@@ -927,13 +930,11 @@ fn node_acted_on(
         {
             Vec::new()
         }
-        // CR 610.3b: an object whose "until" event already happened does not
+        // CR 610.3a / CR 610.3b: an object whose "until" event already happened does not
         // move.
         Effect::ChangeZone { .. }
             if bound
-                .duration
-                .as_ref()
-                .and_then(Duration::zone_change_event)
+                .bounded_zone_change_event()
                 .is_some_and(|event| bound.context.duration_events.contains(&event)) =>
         {
             Vec::new()
@@ -969,12 +970,16 @@ fn node_acted_on(
                 )))
                 .collect()
         }
-        Effect::LoseLife { target, .. } => vec![TargetRef::Player(
-            super::life::resolve_life_loss_target(state, bound, target.as_ref()),
-        )],
-        Effect::Mill { target, .. } => vec![TargetRef::Player(
-            super::resolve_player_for_context_ref(state, bound, target),
-        )],
+        Effect::LoseLife { target, .. } => {
+            super::life::resolve_life_loss_target(state, bound, target.as_ref())
+                .into_iter()
+                .map(TargetRef::Player)
+                .collect()
+        }
+        Effect::Mill { target, .. } => super::resolve_player_for_context_ref(state, bound, target)
+            .into_iter()
+            .map(TargetRef::Player)
+            .collect(),
         // These resolvers bind inline rather than through a function shared
         // here: a node that declared targets is answered with them, and one
         // that would inherit its parent's is answered with nothing.
@@ -982,5 +987,51 @@ fn node_acted_on(
             declared.live_object_targets(state)
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 701.25a + CR 400.1: a surveil by the non-canonical seat moves the
+    /// shared pile, so a replacement that applies to a pile card's move counts.
+    #[test]
+    fn surveil_moves_come_from_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let p1 = PlayerId(1);
+        create_object(&mut state, CardId(1), p1, "Island".into(), Zone::Library);
+        let rest = create_object(&mut state, CardId(2), p1, "Rest".into(), Zone::Battlefield);
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Rest",
+        )
+        .expect("a graveyard-entry replacement parses");
+        state
+            .objects
+            .get_mut(&rest)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+        let surveil = ResolvedAbility::new(
+            Effect::Surveil {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            p1,
+        );
+
+        let written = instruction_writes(&state, &surveil, &[], &Written::default());
+
+        assert!(
+            written.is_none(),
+            "the replacement applies to the pile card's move"
+        );
     }
 }

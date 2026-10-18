@@ -222,6 +222,8 @@ fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
+        // "note <number>" evaluates its operand silently — no player prompt.
+        Effect::NoteNumber { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -357,6 +359,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -426,6 +429,11 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        // Digital-only Alchemy (no CR entry): installing the boon opens no
+        // prompt itself, but the granted body resolves later as its own
+        // ability and may prompt then (Valiant Batrider's "you may pay") —
+        // probe-worthy like a delayed body.
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -476,6 +484,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -593,16 +602,21 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice
         trigger_source: _, // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
+        delayed_origin: _, // delayed-trigger identity, no choice
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
-        selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
+        target_pins: _, // CR 400.7 selected-target pins, no choice
+        legacy_selected_target_incarnations: _,
+        chosen_target_slots: _,  // CR 115.1 announced-target record, no choice
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
-        controller: _, // player id
-        original_controller: _, // player id
-        scoped_player: _, // player id (iteration binding)
-        kind: _,      // AbilityKind tag (no payload)
-        context: _,   // SpellContext: cast-time fact snapshot, not a live choice
-        description: _, // display string
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
+        controller: _,           // player id
+        original_controller: _,  // player id
+        scoped_player: _,        // player id (iteration binding)
+        kind: _,                 // AbilityKind tag (no payload)
+        context: _,              // SpellContext: cast-time fact snapshot, not a live choice
+        description: _,          // display string
         selected_mode_labels: _, // display strings, no resolution-time choice
         // CR 700.2 + CR 700.2a: mode-root position marker. The modes were CHOSEN
         // at announcement (`modal` / `mode_abilities`, folded into the verdict
@@ -614,6 +628,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         detached_remainder: _,
         min_x_value: _,                  // u32
         cant_be_copied: _,               // bool
+        illegal_targets_disposition: _,  // CR 608.2b resolution disposition, offers no choice
         copy_count_status: _,            // status tag
         forward_result: _,               // bool
         chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
@@ -627,6 +642,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _, // SubAbilityLink kind tag
+        target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
@@ -1086,6 +1102,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         assert!(
             !matches!(base.waiting_for, WaitingFor::ReplacementChoice { .. }),

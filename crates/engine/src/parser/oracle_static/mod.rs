@@ -68,8 +68,9 @@ mod prelude {
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
-        ExileCastGrantee, ExileCastTiming, HandSizeModification, ProhibitionScope,
-        RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+        ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
+        ProhibitionScope, RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -94,6 +95,7 @@ mod shared;
 mod static_helpers;
 mod type_change;
 
+pub(crate) use shared::add_property;
 pub(crate) use shared::parse_commander_subject_filter_prefix;
 pub(crate) use shared::peel_color_quality_prefix;
 
@@ -135,8 +137,9 @@ mod support {
         with_protection_does_not_remove, RuleStaticPredicate,
     };
     pub(super) use super::restriction::{
-        parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
-        parse_relative_count_typed_cast_prohibitions, strip_casting_prohibition_subject,
+        parse_cant_be_activated_exemption_in_text, parse_cant_draw_cards_or_gain_life,
+        parse_cast_and_activate_only_during, parse_relative_count_typed_cast_prohibitions,
+        strip_casting_prohibition_subject,
     };
     pub(super) use super::shared::*;
     pub(super) use super::static_helpers::*;

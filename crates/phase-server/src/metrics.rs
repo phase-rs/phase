@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::extract::State;
 use axum::response::IntoResponse;
 
+use crate::socket_disconnect::Cause as DisconnectCause;
 use crate::{AppState, ServerMode};
 
 /// Prometheus' text exposition content type (the format this module writes).
@@ -59,6 +60,79 @@ impl RejectReason {
     }
 }
 
+/// How a `/jev/systemone` relay request ended. The first four are the
+/// upstream's own answer passed through; the rest are answered by the relay.
+///
+/// A typed outcome rather than a `&str` label for the same reason as
+/// [`RejectReason`]: the increment site and the exposition cannot disagree
+/// about the spelling of a label value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JevRelayStatus {
+    /// The upstream answered with a 2xx status, passed through.
+    Upstream2xx,
+    /// The upstream answered with a 4xx status, passed through.
+    Upstream4xx,
+    /// The upstream answered with a 5xx status, passed through.
+    Upstream5xx,
+    /// The upstream answered with any other status (1xx, 3xx), passed through.
+    UpstreamOther,
+    /// The relay refused a body that is not a valid envelope.
+    BadRequest,
+    /// The relay refused a body over its size limit.
+    PayloadTooLarge,
+    /// The relay refused a request because its in-flight cap was reached.
+    Busy,
+    /// The upstream did not answer within the relay's timeout.
+    UpstreamTimeout,
+    /// The upstream could not be reached, or its answer could not be read.
+    UpstreamUnreachable,
+}
+
+impl JevRelayStatus {
+    /// Every variant, in exposition order. Exhaustively matched in
+    /// [`ServerMetrics::jev_relay_count`], so a new variant fails to compile
+    /// until it is counted and listed here.
+    pub const ALL: [Self; 9] = [
+        Self::Upstream2xx,
+        Self::Upstream4xx,
+        Self::Upstream5xx,
+        Self::UpstreamOther,
+        Self::BadRequest,
+        Self::PayloadTooLarge,
+        Self::Busy,
+        Self::UpstreamTimeout,
+        Self::UpstreamUnreachable,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Upstream2xx => "upstream_2xx",
+            Self::Upstream4xx => "upstream_4xx",
+            Self::Upstream5xx => "upstream_5xx",
+            Self::UpstreamOther => "upstream_other",
+            Self::BadRequest => "bad_request",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::Busy => "busy",
+            Self::UpstreamTimeout => "upstream_timeout",
+            Self::UpstreamUnreachable => "upstream_unreachable",
+        }
+    }
+
+    /// Classify an upstream answer that the relay passes through, by status
+    /// class.
+    pub fn from_upstream(status: http::StatusCode) -> Self {
+        if status.is_success() {
+            Self::Upstream2xx
+        } else if status.is_client_error() {
+            Self::Upstream4xx
+        } else if status.is_server_error() {
+            Self::Upstream5xx
+        } else {
+            Self::UpstreamOther
+        }
+    }
+}
+
 /// Process-wide counters that cannot be recovered by reading live state.
 ///
 /// Everything else in [`Snapshot`] is sampled from the session/connection maps
@@ -68,6 +142,17 @@ pub struct ServerMetrics {
     connection_limit: AtomicU64,
     game_limit: AtomicU64,
     origin_not_allowed: AtomicU64,
+    jev_upstream_2xx: AtomicU64,
+    jev_upstream_4xx: AtomicU64,
+    jev_upstream_5xx: AtomicU64,
+    jev_upstream_other: AtomicU64,
+    jev_bad_request: AtomicU64,
+    jev_payload_too_large: AtomicU64,
+    jev_busy: AtomicU64,
+    jev_upstream_timeout: AtomicU64,
+    jev_upstream_unreachable: AtomicU64,
+    ws_disconnects: [AtomicU64; DisconnectCause::ALL.len()],
+    ws_quota_discards: AtomicU64,
 }
 
 impl ServerMetrics {
@@ -85,6 +170,45 @@ impl ServerMetrics {
 
     pub fn reject_count(&self, reason: RejectReason) -> u64 {
         self.counter(reason).load(Ordering::Relaxed)
+    }
+
+    fn jev_relay_counter(&self, status: JevRelayStatus) -> &AtomicU64 {
+        match status {
+            JevRelayStatus::Upstream2xx => &self.jev_upstream_2xx,
+            JevRelayStatus::Upstream4xx => &self.jev_upstream_4xx,
+            JevRelayStatus::Upstream5xx => &self.jev_upstream_5xx,
+            JevRelayStatus::UpstreamOther => &self.jev_upstream_other,
+            JevRelayStatus::BadRequest => &self.jev_bad_request,
+            JevRelayStatus::PayloadTooLarge => &self.jev_payload_too_large,
+            JevRelayStatus::Busy => &self.jev_busy,
+            JevRelayStatus::UpstreamTimeout => &self.jev_upstream_timeout,
+            JevRelayStatus::UpstreamUnreachable => &self.jev_upstream_unreachable,
+        }
+    }
+
+    pub fn record_jev_relay(&self, status: JevRelayStatus) {
+        self.jev_relay_counter(status)
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn jev_relay_count(&self, status: JevRelayStatus) -> u64 {
+        self.jev_relay_counter(status).load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_ws_disconnect(&self, cause: DisconnectCause) {
+        self.ws_disconnects[cause.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_disconnect_count(&self, cause: DisconnectCause) -> u64 {
+        self.ws_disconnects[cause.index()].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_ws_quota_discard(&self) {
+        self.ws_quota_discards.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_quota_discard_count(&self) -> u64 {
+        self.ws_quota_discards.load(Ordering::Relaxed)
     }
 }
 
@@ -109,8 +233,8 @@ impl BuildInfo {
     }
 }
 
-/// One scrape's worth of values. Separated from both collection and rendering
-/// so the exposition can be asserted byte-for-byte against known numbers.
+/// One scrape's worth of values, allowing collection and public exposition
+/// to be checked independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub connections: u32,
@@ -125,6 +249,11 @@ pub struct Snapshot {
     /// no ordinal, and emitting a placeholder would make "ordinal 0" ambiguous.
     pub replica_ordinal: Option<u32>,
     pub rejects: Vec<(RejectReason, u64)>,
+    /// `/jev/systemone` relay requests by outcome.
+    pub jev_relay: Vec<(JevRelayStatus, u64)>,
+    /// First-observed transport failures, using a fixed label set.
+    pub ws_disconnects: [u64; DisconnectCause::ALL.len()],
+    pub ws_discarded_frames: u64,
     pub build: BuildInfo,
 }
 
@@ -198,6 +327,13 @@ pub async fn collect(app: &AppState) -> Snapshot {
             .iter()
             .map(|&reason| (reason, app.context.metrics.reject_count(reason)))
             .collect(),
+        jev_relay: JevRelayStatus::ALL
+            .iter()
+            .map(|&status| (status, app.context.metrics.jev_relay_count(status)))
+            .collect(),
+        ws_disconnects: DisconnectCause::ALL
+            .map(|cause| app.context.metrics.ws_disconnect_count(cause)),
+        ws_discarded_frames: app.context.metrics.ws_quota_discard_count(),
         build: BuildInfo::current(app.mode),
     }
 }
@@ -288,6 +424,28 @@ pub fn render(snapshot: &Snapshot) -> String {
         );
     }
 
+    let _ =
+        writeln!(&mut out,
+        "# HELP phase_ws_disconnects_total WebSocket transports closed by first-observed cause.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_disconnects_total counter");
+    for (cause, count) in DisconnectCause::ALL
+        .into_iter()
+        .zip(snapshot.ws_disconnects)
+    {
+        let _ = writeln!(
+            &mut out,
+            "phase_ws_disconnects_total{{cause=\"{}\"}} {count}",
+            cause.label()
+        );
+    }
+    let _ = writeln!(&mut out, "# HELP phase_ws_discarded_frames_total WebSocket frames discarded by bounded ingress policy.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_discarded_frames_total counter");
+    let _ = writeln!(
+        &mut out,
+        "phase_ws_discarded_frames_total{{reason=\"quota_exhausted\"}} {}",
+        snapshot.ws_discarded_frames
+    );
+
     let _ = writeln!(
         &mut out,
         "# HELP phase_admission_rejects_total Connections and games refused at admission."
@@ -298,6 +456,19 @@ pub fn render(snapshot: &Snapshot) -> String {
             &mut out,
             "phase_admission_rejects_total{{reason=\"{}\"}} {count}",
             reason.label()
+        );
+    }
+
+    let _ = writeln!(
+        &mut out,
+        "# HELP phase_jev_relay_requests_total Requests answered by the /jev/systemone relay, by outcome."
+    );
+    let _ = writeln!(&mut out, "# TYPE phase_jev_relay_requests_total counter");
+    for (status, count) in &snapshot.jev_relay {
+        let _ = writeln!(
+            &mut out,
+            "phase_jev_relay_requests_total{{status=\"{}\"}} {count}",
+            status.label()
         );
     }
 
@@ -329,6 +500,8 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         Snapshot {
+            ws_disconnects: Default::default(),
+            ws_discarded_frames: 12,
             connections: 7,
             connections_capacity: 200,
             games_active: 4,
@@ -342,6 +515,17 @@ mod tests {
                 (RejectReason::GameLimit, 0),
                 (RejectReason::OriginNotAllowed, 2),
             ],
+            jev_relay: vec![
+                (JevRelayStatus::Upstream2xx, 11),
+                (JevRelayStatus::Upstream4xx, 0),
+                (JevRelayStatus::Upstream5xx, 0),
+                (JevRelayStatus::UpstreamOther, 0),
+                (JevRelayStatus::BadRequest, 4),
+                (JevRelayStatus::PayloadTooLarge, 0),
+                (JevRelayStatus::Busy, 0),
+                (JevRelayStatus::UpstreamTimeout, 1),
+                (JevRelayStatus::UpstreamUnreachable, 0),
+            ],
             build: BuildInfo {
                 version: "1.2.3".to_string(),
                 commit: "abc123".to_string(),
@@ -350,47 +534,50 @@ mod tests {
         }
     }
 
-    /// The exposition is a wire contract a scraper parses, so assert the whole
-    /// body rather than probing for substrings: a renamed metric, a dropped
-    /// TYPE line or a value read from the wrong field all fail here.
+    /// Scrapers depend on family names, types, labels and values, not HELP
+    /// prose or the order in which independent metric families are rendered.
     #[test]
-    fn render_emits_every_family_with_its_values() {
-        let expected = concat!(
-            "# HELP phase_connections Currently open WebSocket connections.\n",
-            "# TYPE phase_connections gauge\n",
-            "phase_connections 7\n",
-            "# HELP phase_connections_capacity Connections this process admits before refusing upgrades.\n",
-            "# TYPE phase_connections_capacity gauge\n",
-            "phase_connections_capacity 200\n",
-            "# HELP phase_games_active Game sessions held by this process.\n",
-            "# TYPE phase_games_active gauge\n",
-            "phase_games_active 4\n",
-            "# HELP phase_games_with_connected_humans Game sessions with at least one live player or spectator socket.\n",
-            "# TYPE phase_games_with_connected_humans gauge\n",
-            "phase_games_with_connected_humans 2\n",
-            "# HELP phase_games_capacity Game sessions this process admits before refusing CreateGame.\n",
-            "# TYPE phase_games_capacity gauge\n",
-            "phase_games_capacity 100\n",
-            "# HELP phase_drafts_active Draft sessions held by this process.\n",
-            "# TYPE phase_drafts_active gauge\n",
-            "phase_drafts_active 1\n",
-            "# HELP phase_drafts_with_connected_humans Draft sessions with at least one connected seat or live spectator socket.\n",
-            "# TYPE phase_drafts_with_connected_humans gauge\n",
-            "phase_drafts_with_connected_humans 1\n",
-            "# HELP phase_replica_ordinal Ordinal of this replica within its StatefulSet.\n",
-            "# TYPE phase_replica_ordinal gauge\n",
-            "phase_replica_ordinal 3\n",
-            "# HELP phase_admission_rejects_total Connections and games refused at admission.\n",
-            "# TYPE phase_admission_rejects_total counter\n",
-            "phase_admission_rejects_total{reason=\"connection_limit\"} 5\n",
-            "phase_admission_rejects_total{reason=\"game_limit\"} 0\n",
-            "phase_admission_rejects_total{reason=\"origin_not_allowed\"} 2\n",
-            "# HELP phase_build_info Build identity of this process; the value is always 1.\n",
-            "# TYPE phase_build_info gauge\n",
-            "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1\n",
-        );
-
-        assert_eq!(render(&snapshot()), expected);
+    fn render_preserves_scraper_types_labels_and_values() {
+        let mut fixture = snapshot();
+        fixture.ws_disconnects[DisconnectCause::QuotaRefusalOverflow.index()] = 9;
+        fixture.ws_disconnects[DisconnectCause::QuotaDiscardOverflow.index()] = 2;
+        let body = render(&fixture);
+        for expected in [
+            "# TYPE phase_connections gauge",
+            "phase_connections 7",
+            "# TYPE phase_connections_capacity gauge",
+            "phase_connections_capacity 200",
+            "# TYPE phase_games_active gauge",
+            "phase_games_active 4",
+            "# TYPE phase_games_with_connected_humans gauge",
+            "phase_games_with_connected_humans 2",
+            "# TYPE phase_games_capacity gauge",
+            "phase_games_capacity 100",
+            "# TYPE phase_drafts_active gauge",
+            "phase_drafts_active 1",
+            "# TYPE phase_drafts_with_connected_humans gauge",
+            "phase_drafts_with_connected_humans 1",
+            "# TYPE phase_replica_ordinal gauge",
+            "phase_replica_ordinal 3",
+            "# TYPE phase_ws_disconnects_total counter",
+            "phase_ws_disconnects_total{cause=\"quota_refusal_overflow\"} 9",
+            "phase_ws_disconnects_total{cause=\"quota_discard_overflow\"} 2",
+            "phase_ws_disconnects_total{cause=\"peer_close\"} 0",
+            "# TYPE phase_ws_discarded_frames_total counter",
+            "phase_ws_discarded_frames_total{reason=\"quota_exhausted\"} 12",
+            "# TYPE phase_admission_rejects_total counter",
+            "phase_admission_rejects_total{reason=\"connection_limit\"} 5",
+            "# TYPE phase_jev_relay_requests_total counter",
+            "phase_jev_relay_requests_total{status=\"upstream_2xx\"} 11",
+            "# TYPE phase_build_info gauge",
+            "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1",
+        ] {
+            assert_eq!(
+                body.lines().filter(|line| *line == expected).count(),
+                1,
+                "missing or duplicated scraper contract: {expected}\n{body}",
+            );
+        }
     }
 
     /// `None` must drop the family entirely. Emitting `phase_replica_ordinal 0`
@@ -486,5 +673,91 @@ mod tests {
         // Untouched reasons must not move: one shared counter behind all three
         // labels would still pass the two assertions above.
         assert_eq!(metrics.reject_count(RejectReason::GameLimit), 0);
+    }
+
+    #[test]
+    fn every_jev_relay_status_gets_its_own_line_in_the_render() {
+        // Same reminder as for `RejectReason`: adding a variant stops
+        // compiling here until it is also listed in `ALL`.
+        match JevRelayStatus::Upstream2xx {
+            JevRelayStatus::Upstream2xx
+            | JevRelayStatus::Upstream4xx
+            | JevRelayStatus::Upstream5xx
+            | JevRelayStatus::UpstreamOther
+            | JevRelayStatus::BadRequest
+            | JevRelayStatus::PayloadTooLarge
+            | JevRelayStatus::Busy
+            | JevRelayStatus::UpstreamTimeout
+            | JevRelayStatus::UpstreamUnreachable => {}
+        }
+        assert_eq!(JevRelayStatus::ALL.len(), 9);
+
+        let body = render(&Snapshot {
+            jev_relay: JevRelayStatus::ALL
+                .iter()
+                .map(|status| (*status, 0))
+                .collect(),
+            ..snapshot()
+        });
+
+        for status in JevRelayStatus::ALL {
+            let line = format!(
+                "phase_jev_relay_requests_total{{status=\"{}\"}} 0",
+                status.label()
+            );
+            assert_eq!(
+                body.matches(&line).count(),
+                1,
+                "{} should appear exactly once in:\n{body}",
+                status.label()
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_jev_relay_requests_are_counted_per_status() {
+        let metrics = ServerMetrics::default();
+        metrics.record_jev_relay(JevRelayStatus::Upstream2xx);
+        metrics.record_jev_relay(JevRelayStatus::Upstream2xx);
+        metrics.record_jev_relay(JevRelayStatus::Busy);
+
+        assert_eq!(metrics.jev_relay_count(JevRelayStatus::Upstream2xx), 2);
+        assert_eq!(metrics.jev_relay_count(JevRelayStatus::Busy), 1);
+        // Untouched statuses must not move: one shared counter behind every
+        // label would still pass the two assertions above.
+        for status in JevRelayStatus::ALL {
+            if !matches!(status, JevRelayStatus::Upstream2xx | JevRelayStatus::Busy) {
+                assert_eq!(metrics.jev_relay_count(status), 0, "{}", status.label());
+            }
+        }
+    }
+
+    #[test]
+    fn from_upstream_classifies_by_status_class() {
+        use http::StatusCode;
+        for (status, want) in [
+            (StatusCode::OK, JevRelayStatus::Upstream2xx),
+            (StatusCode::NO_CONTENT, JevRelayStatus::Upstream2xx),
+            (StatusCode::UNAUTHORIZED, JevRelayStatus::Upstream4xx),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                JevRelayStatus::Upstream4xx,
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JevRelayStatus::Upstream5xx,
+            ),
+            (StatusCode::SERVICE_UNAVAILABLE, JevRelayStatus::Upstream5xx),
+            (
+                StatusCode::SWITCHING_PROTOCOLS,
+                JevRelayStatus::UpstreamOther,
+            ),
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                JevRelayStatus::UpstreamOther,
+            ),
+        ] {
+            assert_eq!(JevRelayStatus::from_upstream(status), want, "{status}");
+        }
     }
 }

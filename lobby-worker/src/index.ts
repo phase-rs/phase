@@ -7,6 +7,7 @@ import {
   type IngestLimiter,
 } from "./directory";
 import { handleImportDeck, type ImportDeckEnv } from "./import-deck";
+import { handleJevRelay, type JevRelayEnv } from "./jev-relay";
 import { handleTurnCredentials, type TurnEnv } from "./turn";
 import { sanitizeTelemetryBatch, toDataPoint } from "./telemetry";
 
@@ -17,7 +18,7 @@ export { LobbyDO };
 // `TELEMETRY?` now lives on `LobbyDoEnv` — the DO reads it too, for the
 // server-probe mirror — and is inherited here, so the binding list has one
 // home. `handleTelemetry` is unchanged.
-interface Env extends TurnEnv, ImportDeckEnv, LobbyDoEnv {
+interface Env extends TurnEnv, ImportDeckEnv, JevRelayEnv, LobbyDoEnv {
   LOBBY: DurableObjectNamespace;
   // Per-IP rate limiters for the two directory write endpoints. Optional like
   // TELEMETRY: a deploy without the binding still serves, and the gate
@@ -121,6 +122,15 @@ export default {
     // hot deck costs one upstream call.
     if (url.pathname === "/import-deck") {
       return handleImportDeck(request, env, ctx);
+    }
+
+    // Relay to TypeSafe's Jev System One API, which refuses browser CORS. The
+    // official lobby hostnames are served by this Worker, and the client's
+    // default relay is the server it connects to, so the route must exist here
+    // as well as in the Rust server. Stateless and DO-free: routed before the
+    // DO catch-all, which would answer it with the version document.
+    if (url.pathname === "/jev/systemone") {
+      return handleJevRelay(request, env);
     }
 
     // Client telemetry ingest (Analytics Engine). Routed BEFORE the DO

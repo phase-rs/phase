@@ -618,9 +618,12 @@ fn parse_keyword_counter_name(input: &str) -> OracleResult<'_, &str> {
 /// Returns the matched slice verbatim so the caller can canonicalize it through
 /// `types::counter::parse_counter_type` (single authority). Names without a
 /// dedicated `CounterType` variant map to `CounterType::Generic(name)`.
+///
+/// CR 122.1: a counter is identified by its name, so a named tag must match the whole word ("lorem" is not a lore counter).
+/// Because the boundary guard runs after the combined alt commits, no entry in either alt group may be a prefix of any later entry in either group; list longer names first.
 fn parse_named_counter_type(input: &str) -> OracleResult<'_, &str> {
     // Split into two alt groups to stay within nom's 21-arm tuple limit.
-    alt((
+    let named = alt((
         tag("loyalty"),
         tag("charge"),
         tag("lore"),
@@ -654,7 +657,14 @@ fn parse_named_counter_type(input: &str) -> OracleResult<'_, &str> {
         tag("pupa"),
         tag("net"),
         tag("stun"),
-    )))
+    )));
+    terminated(
+        named,
+        peek(alt((
+            value((), eof),
+            value((), satisfy(|c: char| !c.is_alphanumeric())),
+        ))),
+    )
     .parse(input)
 }
 
@@ -1704,6 +1714,40 @@ mod tests {
     fn test_parse_strict_counter_type_rejects_unrecognized() {
         assert!(parse_strict_counter_type("menace").is_ok());
         assert!(parse_strict_counter_type("red").is_err());
+    }
+
+    /// CR 122.1: a named counter tag matches only a whole word. A longer word
+    /// that merely starts with a named tag ("lorem" vs "lore") is not that
+    /// counter: the typed parser falls to its open-ended arm and keeps the
+    /// whole word, and the strict parser rejects it.
+    #[test]
+    fn named_counter_type_requires_word_boundary() {
+        assert_eq!(
+            parse_counter_type_typed("lorem ipsum").unwrap(),
+            (" ipsum", crate::types::counter::parse_counter_type("lorem"))
+        );
+        // Reach guards: the named arm still fires at every boundary shape.
+        assert_eq!(
+            parse_counter_type_typed("lore counter").unwrap(),
+            (" counter", CounterType::Lore)
+        );
+        assert_eq!(
+            parse_counter_type_typed("time counters").unwrap(),
+            (" counters", CounterType::Time)
+        );
+        assert_eq!(
+            parse_counter_type_typed("stun.").unwrap(),
+            (".", CounterType::Stun)
+        );
+        assert_eq!(
+            parse_counter_type_typed("loyalty").unwrap(),
+            ("", CounterType::Loyalty)
+        );
+        assert!(parse_strict_counter_type("lorem").is_err());
+        assert_eq!(
+            parse_strict_counter_type("lore").unwrap(),
+            ("", CounterType::Lore)
+        );
     }
 
     /// "one hundred" must be tried BEFORE "one" so "one hundred cards"

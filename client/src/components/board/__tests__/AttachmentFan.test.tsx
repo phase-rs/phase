@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameAction, GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
+import type { EngineAdapter, EngineSnapshot, GameAction, GameObject, GameState, SubmitResult, WaitingFor } from "../../../adapter/types.ts";
+import { nextSnapshotSeq } from "../../../adapter/types.ts";
 import type {
   InteractionChoiceId,
   InteractionId,
@@ -10,12 +11,15 @@ import type {
 import { dispatchAction, dispatchInteraction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildEngineAdapterMock } from "../../../test/factories/engineAdapterFactory.ts";
 import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
+  buildLegalActionsResult,
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
+import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
 import { AttachmentFan } from "../AttachmentFan.tsx";
 
 /**
@@ -58,6 +62,10 @@ vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
   dispatchInteraction: vi.fn(),
 }));
+
+const actualDispatch = await vi.importActual<{ dispatchInteraction: typeof dispatchInteraction }>(
+  "../../../game/dispatch.ts",
+);
 
 // Deliberately NOT re-emitting the object name: `FanCard` owns the
 // `aria-label`, so a mock that also emitted it would label every card twice and
@@ -242,7 +250,7 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
     vi.mocked(dispatchAction).mockReset();
     vi.mocked(dispatchAction).mockResolvedValue(undefined);
     vi.mocked(dispatchInteraction).mockReset();
-    vi.mocked(dispatchInteraction).mockResolvedValue(undefined);
+    vi.mocked(dispatchInteraction).mockResolvedValue({ status: "applied" });
   });
 
   afterEach(() => {
@@ -398,6 +406,144 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
     expect(dispatchAction).not.toHaveBeenCalled();
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
   });
+
+  it("closes the fan after an applied interaction reply", async () => {
+    seed({ viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }) });
+
+    fireEvent.click(fanCard("Freed from the Real"));
+    expect(dispatchInteraction).toHaveBeenCalledOnce();
+    await act(async () => {
+      await vi.mocked(dispatchInteraction).mock.results[0]?.value;
+    });
+
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    expect(document.querySelector("[data-attachment-fan]")).toBeNull();
+  });
+
+  it("keeps a replacement fan open when the old interaction reply is discarded", async () => {
+    let settleOldReply!: (outcome: Awaited<ReturnType<typeof dispatchInteraction>>) => void;
+    vi.mocked(dispatchInteraction).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        settleOldReply = resolve;
+      }),
+    );
+    seed({ viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }) });
+
+    fireEvent.click(fanCard("Freed from the Real"));
+    expect(dispatchInteraction).toHaveBeenCalledOnce();
+
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null });
+    });
+    expect(document.querySelector("[data-attachment-fan]")).toBeNull();
+
+    act(() => {
+      useGameStore.setState({
+        gameState: makeState({ attachments: [BOOTS_ID] }),
+        viewerInteraction: projection([BOOTS_ID], { published: [BOOTS_ID] }),
+      });
+      useUiStore.setState({ attachmentFanHostId: HOST_ID });
+    });
+    expect(isSelectable("Swiftfoot Boots")).toBe(true);
+
+    await act(async () => {
+      settleOldReply({ status: "stale" });
+    });
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(HOST_ID);
+    expect(isSelectable("Swiftfoot Boots")).toBe(true);
+  });
+
+  it.each(["stale", "applied"] as const)(
+    "reports a %s same-session snapshot through the real dispatcher and preserves the fan contract",
+    async (status) => {
+      useGameStore.getState().reset();
+      vi.mocked(dispatchInteraction).mockImplementation(actualDispatch.dispatchInteraction);
+      const oldSnapshot: EngineSnapshot = {
+        state: makeState(),
+        legalResult: buildLegalActionsResult({
+          viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }),
+        }),
+        seq: nextSnapshotSeq(),
+      };
+      const result: SubmitResult = {
+        events: [{ type: "LifeChanged", data: { player_id: 0, amount: 1 } }],
+        log_entries: [{
+          seq: 99,
+          turn: 1,
+          phase: "PreCombatMain",
+          category: "Life",
+          segments: [{ type: "Text", value: "Interaction completed" }],
+        }],
+      };
+      let releaseSnapshot!: (snapshot: EngineSnapshot) => void;
+      const getSnapshot = vi.fn<EngineAdapter["getSnapshot"]>(
+        () => new Promise((resolve) => {
+          releaseSnapshot = resolve;
+        }),
+      );
+      const submitInteraction = vi.fn<NonNullable<EngineAdapter["submitInteraction"]>>()
+        .mockResolvedValue(result);
+      const adapter = buildEngineAdapterMock(oldSnapshot.state, { submitInteraction, getSnapshot });
+      setGameStoreForTest({ adapter });
+      seed({ viewerInteraction: oldSnapshot.legalResult.viewerInteraction });
+      const generation = useGameStore.getState().gameSessionGeneration;
+
+      fireEvent.click(screen.getByLabelText("Freed from the Real"));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(submitInteraction).toHaveBeenCalledWith({
+        interactionId: "fan-interaction",
+        response: { type: "choose", data: { choiceId: "fan-408" } },
+      }, 0);
+      expect(getSnapshot).toHaveBeenCalledOnce();
+      expect(dispatchInteraction).toHaveBeenCalledOnce();
+
+      const newerSnapshot: EngineSnapshot = {
+        state: makeState({ attachments: [BOOTS_ID] }),
+        legalResult: buildLegalActionsResult({
+          viewerInteraction: projection([BOOTS_ID], { published: [BOOTS_ID] }),
+        }),
+        seq: nextSnapshotSeq(),
+      };
+      act(() => {
+        expect(useGameStore.getState().commitEngineSnapshot(newerSnapshot)).toBe(true);
+        useUiStore.getState().setAttachmentFanHost(HOST_ID);
+      });
+      expect(screen.getByLabelText("Swiftfoot Boots")).toBeInTheDocument();
+      expect(useGameStore.getState().adapter).toBe(adapter);
+      expect(useGameStore.getState().gameSessionGeneration).toBe(generation);
+
+      const reply = status === "stale"
+        ? oldSnapshot
+        : { ...newerSnapshot, seq: nextSnapshotSeq() };
+      await act(async () => {
+        releaseSnapshot(reply);
+        await expect(vi.mocked(dispatchInteraction).mock.results[0]?.value)
+          .resolves.toEqual({ status });
+      });
+
+      expect(useGameStore.getState().gameState).toEqual(newerSnapshot.state);
+      expect(useGameStore.getState().lastCommittedSeq)
+        .toBe(status === "stale" ? newerSnapshot.seq : reply.seq);
+      expect(useGameStore.getState().adapter).toBe(adapter);
+      expect(useGameStore.getState().gameSessionGeneration).toBe(generation);
+      expect(useGameStore.getState().events).toEqual(result.events);
+      expect(useGameStore.getState().eventHistory).toEqual(result.events);
+      expect(useGameStore.getState().logHistory).toEqual([{ ...result.log_entries![0], seq: 0 }]);
+
+      if (status === "stale") {
+        expect(useUiStore.getState().attachmentFanHostId).toBe(HOST_ID);
+        expect(screen.getByLabelText("Swiftfoot Boots")).toBeInTheDocument();
+      } else {
+        expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+        await waitFor(() =>
+          expect(screen.queryByLabelText("Swiftfoot Boots")).not.toBeInTheDocument(),
+        );
+      }
+    },
+  );
 
   it("leaves the fan open when the centralized interaction dispatcher rejects", async () => {
     const rejection = new Error("Engine error: invalid attachment choice");

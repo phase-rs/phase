@@ -25,7 +25,9 @@ const GOBLIN_CHARBELCHER: &str = "{3}, {T}: Reveal cards from the top of your li
 const FURIOUS_RISE: &str = "At the beginning of your end step, if you control a creature with power 4 or greater, exile the top card of your library. You may play that card until you exile another card with this enchantment.";
 const PALACE_JAILER: &str = "When this creature enters, you become the monarch.\nWhen this creature enters, exile target creature an opponent controls until an opponent becomes the monarch.";
 const TANGLEROOT: &str = "Whenever a player casts a creature spell, that player adds {G}.";
-const UNYARO: &str = "At the beginning of your end step, if you planeswalked to Unyaro this turn, untap all creatures. They phase out until a player planeswalks. (Treat them and anything attached to them as though they didn't exist.)\nWhenever chaos ensues, create two 2/2 white and blue Knight creature tokens with vigilance.";
+// The planeswalked-this-turn guard is not modelled (it fails the trigger closed per CR 603.4);
+// it is irrelevant to the phase-out duration under test, so the fixture omits it.
+const UNYARO: &str = "At the beginning of your end step, untap all creatures. They phase out until a player planeswalks. (Treat them and anything attached to them as though they didn't exist.)\nWhenever chaos ensues, create two 2/2 white and blue Knight creature tokens with vigilance.";
 
 /// The target: a flier that also gains its controller life on every creature cast.
 const WATCHER: &str = "Flying\nWhenever a player casts a creature spell, you gain 1 life.";

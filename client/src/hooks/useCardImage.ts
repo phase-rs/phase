@@ -14,6 +14,7 @@ import {
   isLocaleArtReady,
   imageUrlSize,
   loadLocaleArt,
+  loadScryfallData,
   resolveFaceIndexSync,
   resolveOracleIdSync,
   resolvePrintingImageUrl,
@@ -21,6 +22,10 @@ import {
 import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
 import type { CardImageAsset } from "../services/scryfall.ts";
 import { applyChain } from "../services/artSelection.ts";
+import {
+  decodeTokenFilterKeywords,
+  encodeTokenFilterKeywords,
+} from "../services/cardImageLookup.ts";
 import type { TokenImageRef } from "../adapter/types.ts";
 import {
   cardBackCandidate,
@@ -571,6 +576,7 @@ function imagePresentationKey(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
@@ -601,6 +607,7 @@ function imagePresentationKey(
     filterColors,
     filterSubtypes,
     String(filterHasAbilities),
+    filterKeywords,
     tokenImageRefKey,
     artLocaleKey,
     repositoryRevision,
@@ -621,6 +628,7 @@ function imageRequestKey(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
@@ -644,6 +652,7 @@ function imageRequestKey(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -678,6 +687,7 @@ async function acquireCachedImageSrc(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRef: TokenImageRef | null,
   oracleId: string,
   faceName: string,
@@ -717,6 +727,9 @@ async function acquireCachedImageSrc(
         colors: filterColors ? filterColors.split(",") : undefined,
         subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
         hasAbilities: filterHasAbilities ?? undefined,
+        keywords: filterKeywords
+          ? decodeTokenFilterKeywords(filterKeywords)
+          : undefined,
       });
       asset = remoteAsset(
         remoteSrc,
@@ -812,6 +825,11 @@ export function useCardImage(
   const filterSubtypes = tokenFilters?.subtypes?.join(",") ?? "";
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
   const filterHasAbilities = tokenFilters?.hasAbilities ?? null;
+  // JSON codec (not comma-joined): an `Unknown` keyword payload is an
+  // arbitrary string that may itself contain commas.
+  const filterKeywords = tokenFilters?.keywords
+    ? encodeTokenFilterKeywords(tokenFilters.keywords)
+    : "";
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);
@@ -836,7 +854,7 @@ export function useCardImage(
     generation: "",
     values: new Set(),
   });
-  const [, rerenderForArtCacheEvent] = useState(0);
+  const [, rerenderForMetadata] = useState(0);
   const remoteContinuation = useRef<RemoteContinuation>({
     generation: "",
     promise: null,
@@ -865,7 +883,7 @@ export function useCardImage(
       // global invalidation match. All in-tree dispatchers send a CustomEvent
       // with detail; this is defensive against future callers.
       if (detail && detail !== target) return;
-      rerenderForArtCacheEvent((generation) => generation + 1);
+      rerenderForMetadata((generation) => generation + 1);
     };
     artCacheEvents.addEventListener("update", handler);
     return () => artCacheEvents.removeEventListener("update", handler);
@@ -899,6 +917,7 @@ export function useCardImage(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -922,6 +941,7 @@ export function useCardImage(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -985,7 +1005,8 @@ export function useCardImage(
       setSources(nextSources);
       setSourceIndex(0);
       setSrc(displayedSrc);
-      const nextIsRotated = imageAsset?.isRotated ?? isCardImageRotatedSync(resolvedOracleId, cardName);
+      const nextIsRotated = imageAsset?.isRotated
+        ?? isCardImageRotatedSync(resolvedOracleId, cardName, resolvedFaceIndex);
       const nextIsFlip = isCardImageFlipLayoutSync(resolvedOracleId, cardName);
       setIsRotated(nextIsRotated);
       setIsFlip(nextIsFlip);
@@ -1065,7 +1086,7 @@ export function useCardImage(
               faceIndex: resolvedFaceIndex,
               alias: cardName.toLowerCase().normalize("NFC"),
             },
-            isCardImageRotatedSync(resolvedOracleId, cardName),
+            isCardImageRotatedSync(resolvedOracleId, cardName, resolvedFaceIndex),
           )
         : null;
     };
@@ -1081,6 +1102,21 @@ export function useCardImage(
         loadLocaleArtInBackground(language);
         try {
           let imageAsset = selectedRemoteOverride();
+          if (!isToken) {
+            const metadata = await loadScryfallData();
+            if (cancelled) return;
+            if (metadata) {
+              const nextOracleId = oracleId || resolveOracleIdSync(cardName) || "";
+              const nextFaceIndex = resolveFaceIndexSync(nextOracleId, faceName) ?? faceIndex;
+              if (nextOracleId !== resolvedOracleId || nextFaceIndex !== resolvedFaceIndex) {
+                rerenderForMetadata((generation) => generation + 1);
+                return;
+              }
+            }
+            // Printings can finish first and invalidate an awaiting request.
+            // Every active override binds its face and orientation after this load.
+            imageAsset = selectedRemoteOverride();
+          }
           if (!imageAsset) {
             acquiredRemoteCache = true;
             imageAsset = await acquireCachedImageSrc(
@@ -1094,6 +1130,7 @@ export function useCardImage(
               filterColors,
               filterSubtypes,
               filterHasAbilities,
+              filterKeywords,
               stableTokenImageRef,
               oracleId,
               faceName,
@@ -1156,6 +1193,24 @@ export function useCardImage(
       const installed = nextSources.some((source) => source.kind === "installed");
       const settled = installed || effectiveOffline || !canResolveRemotely;
       publish(nextSources, undefined, settled);
+      if (installed && !isToken && !effectiveOffline) {
+        // Metadata readiness does not change the availability of installed art
+        // or take ownership of its installed-to-remote continuation.
+        const metadata = await loadScryfallData();
+        if (cancelled || !metadata) return;
+        const nextOracleId = oracleId || resolveOracleIdSync(cardName) || "";
+        const nextFaceIndex = resolveFaceIndexSync(nextOracleId, faceName) ?? faceIndex;
+        if (nextOracleId !== resolvedOracleId || nextFaceIndex !== resolvedFaceIndex) {
+          rerenderForMetadata((generation) => generation + 1);
+          return;
+        }
+        const survivingSources = nextSources.filter((source) =>
+          source.src === null || !failedSources.current.values.has(source.src));
+        if (!continuation.promise && survivingSources.some((source) => source.kind === "installed")) {
+          publish(survivingSources);
+        }
+        return;
+      }
       if (settled) return;
       void continuation.start?.();
     }

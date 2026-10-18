@@ -12,7 +12,8 @@ use crate::types::actions::{GameAction, ResolveAllScope};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastingVariant, StackResolutionBudget, StackResolutionPolicy, TurnBoundary,
+    CastingVariant, PriorityPassingMode, StackResolutionBudget, StackResolutionPolicy,
+    TurnBoundary, YieldTarget,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaColor;
@@ -2103,7 +2104,8 @@ fn priority_probe_false_when_only_pass_available() {
 #[test]
 fn verified_ai_pass_installs_rechecking_session_and_pauses_for_unverified_priority() {
     let mut state = priority_state();
-    push_simple_stack_entry(&mut state, 30_101, PlayerId(1));
+    // P0's own entries: P1 has no standing pass over them (`priority::standing_priority_pass`).
+    push_simple_stack_entry(&mut state, 30_101, PlayerId(0));
     let contract = AiDecisionContract::issue(&state, PlayerId(0));
 
     let result = apply_verified_ai_priority_pass(
@@ -2191,8 +2193,9 @@ fn resolve_all_supersedes_a_rechecking_ai_session_and_retains_auto_pass_baseline
 #[test]
 fn verified_ai_pass_cache_never_passes_an_unverified_representative() {
     let mut state = priority_state();
-    push_simple_stack_entry(&mut state, 30_110, PlayerId(1));
-    push_simple_stack_entry(&mut state, 30_111, PlayerId(1));
+    // P0's own entries: P1 has no standing pass over them (`priority::standing_priority_pass`).
+    push_simple_stack_entry(&mut state, 30_110, PlayerId(0));
+    push_simple_stack_entry(&mut state, 30_111, PlayerId(0));
     let contract = AiDecisionContract::issue(&state, PlayerId(0));
 
     crate::game::perf_counters::reset();
@@ -2282,8 +2285,9 @@ fn verified_ai_pass_rejects_foreign_and_nonpass_submissions_without_mutation() {
 #[test]
 fn another_canonical_representative_can_continue_a_rechecking_session() {
     let mut state = priority_state();
-    push_simple_stack_entry(&mut state, 30_106, PlayerId(1));
-    push_simple_stack_entry(&mut state, 30_107, PlayerId(1));
+    // P0's own entries: P1 has no standing pass over them (`priority::standing_priority_pass`).
+    push_simple_stack_entry(&mut state, 30_106, PlayerId(0));
+    push_simple_stack_entry(&mut state, 30_107, PlayerId(0));
     add_non_mana_activated_artifact(&mut state, PlayerId(0));
     add_non_mana_activated_artifact(&mut state, PlayerId(1));
     let first_contract = AiDecisionContract::issue(&state, PlayerId(0));
@@ -2354,6 +2358,241 @@ fn explicit_pass_advances_the_recheck_session_cursor_at_one_resolution_boundary(
         WaitingFor::Priority {
             player: PlayerId(0)
         }
+    ));
+}
+
+/// Installs a rechecking session over the whole stack with both seats as
+/// representatives and `verified` as the seats whose verified pass is cached.
+fn install_recheck_session(state: &mut GameState, verified: &[PlayerId]) {
+    install_stack_resolution_session(
+        state,
+        BTreeSet::from([PlayerId(0), PlayerId(1)]),
+        StackResolutionBudget::Unlimited,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        BTreeMap::new(),
+    );
+    state
+        .stack_resolution_session
+        .as_mut()
+        .expect("the session was just installed")
+        .verified_pass_representatives
+        .extend(verified.iter().copied());
+}
+
+/// P1's entry at the bottom, P0's three entries above it (top last).
+fn own_run_above_an_opponent_entry() -> GameState {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_201, PlayerId(1));
+    for id in 30_202..=30_204 {
+        push_simple_stack_entry(&mut state, id, PlayerId(0));
+    }
+    state
+}
+
+/// CR 117.3b + CR 117.4 + CR 732.2b: each skipped window is authorized against
+/// its own top. P0's standing pass covers the windows over its own entries but
+/// not the window over P1's entry, so the boundary stops before it.
+#[test]
+fn authorized_limit_stops_before_a_window_a_participant_has_not_authorized() {
+    let mut state = own_run_above_an_opponent_entry();
+    install_recheck_session(&mut state, &[PlayerId(1)]);
+    assert_eq!(stack_resolution_session_authorized_limit(&state), Some(3));
+
+    // Sibling: with P0 verified too, the bottom window is authorized as well.
+    let mut both_verified = own_run_above_an_opponent_entry();
+    install_recheck_session(&mut both_verified, &[PlayerId(0), PlayerId(1)]);
+    assert_eq!(
+        stack_resolution_session_authorized_limit(&both_verified),
+        Some(4)
+    );
+
+    // CR 117.1: Full Control withholds every window of that seat, own or not.
+    let mut p0_full_control = own_run_above_an_opponent_entry();
+    install_recheck_session(&mut p0_full_control, &[PlayerId(1)]);
+    p0_full_control
+        .priority_passing_modes
+        .insert(PlayerId(0), PriorityPassingMode::FullControl);
+    assert_eq!(
+        stack_resolution_session_authorized_limit(&p0_full_control),
+        Some(1)
+    );
+
+    let mut p1_full_control = own_run_above_an_opponent_entry();
+    install_recheck_session(&mut p1_full_control, &[PlayerId(0), PlayerId(1)]);
+    p1_full_control
+        .priority_passing_modes
+        .insert(PlayerId(1), PriorityPassingMode::FullControl);
+    assert_eq!(
+        stack_resolution_session_authorized_limit(&p1_full_control),
+        Some(1)
+    );
+}
+
+/// CR 117.3d: the live window of an unverified representative is passed when
+/// its standing pass covers the top — its own entry — and paused otherwise.
+#[test]
+fn recheck_live_window_decision_follows_the_standing_pass() {
+    let mut state = own_run_above_an_opponent_entry();
+    install_recheck_session(&mut state, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut state,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 3 }
+    ));
+
+    // P1 controls the top: P0 has no standing pass over it.
+    let mut opponent_top = priority_state();
+    for id in 30_202..=30_203 {
+        push_simple_stack_entry(&mut opponent_top, id, PlayerId(0));
+    }
+    push_simple_stack_entry(&mut opponent_top, 30_204, PlayerId(1));
+    install_recheck_session(&mut opponent_top, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut opponent_top,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::PauseRetained
+    ));
+
+    // CR 117.1: Full Control keeps the live window under the existing gate,
+    // and the session survives for an explicit decision.
+    let mut full_control = own_run_above_an_opponent_entry();
+    install_recheck_session(&mut full_control, &[PlayerId(1)]);
+    full_control
+        .priority_passing_modes
+        .insert(PlayerId(0), PriorityPassingMode::FullControl);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut full_control,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Pause
+    ));
+    assert!(full_control.stack_resolution_session.is_some());
+}
+
+/// P1's Landfall trigger from a source with card id 77, alone on the stack,
+/// under a rechecking session in which only P1 has verified.
+fn opponent_trigger_under_recheck(yield_target: Option<YieldTarget>) -> GameState {
+    let mut state = priority_state();
+    let source = ObjectId(30_301);
+    let mut ability = draw_ability(source, PlayerId(1));
+    ability.set_test_trigger_source_recursive(2, CardId(77));
+    state.stack.push_back(StackEntry {
+        id: ObjectId(30_302),
+        source_id: source,
+        controller: PlayerId(1),
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: source,
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: Some("Landfall".to_string()),
+            source_name: "Yielded source".to_string(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    });
+    if let Some(target) = yield_target {
+        state.add_priority_yield(PlayerId(0), target);
+    }
+    install_recheck_session(&mut state, &[PlayerId(1)]);
+    state
+}
+
+/// CR 117.3d: a yield to the top triggered ability is a standing pass, so the
+/// session passes the yielding representative's live window.
+#[test]
+fn standing_pass_over_a_yielded_trigger_authorizes_the_window() {
+    let mut yielded = opponent_trigger_under_recheck(Some(YieldTarget::AllCopies {
+        card_id: CardId(77),
+        trigger_description: None,
+    }));
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut yielded,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+    ));
+
+    let mut not_yielded = opponent_trigger_under_recheck(None);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut not_yielded,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::PauseRetained
+    ));
+
+    // Yield precision: a yield to a different trigger of the same card does
+    // not cover this one.
+    let mut other_trigger = opponent_trigger_under_recheck(Some(YieldTarget::AllCopies {
+        card_id: CardId(77),
+        trigger_description: Some("Upkeep".to_string()),
+    }));
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut other_trigger,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::PauseRetained
+    ));
+}
+
+/// Committed sessions keep their non-representative rule: the live window of a
+/// non-representative is rechecked for a meaningful action, and the standing
+/// pass over its own top does not override that.
+#[test]
+fn committed_session_is_unchanged_by_the_standing_pass() {
+    let committed_state = |with_action: bool| {
+        let mut state = priority_state();
+        push_simple_stack_entry(&mut state, 30_401, PlayerId(1));
+        if with_action {
+            add_non_mana_activated_artifact(&mut state, PlayerId(1));
+        }
+        install_stack_resolution_session(
+            &mut state,
+            BTreeSet::from([PlayerId(0)]),
+            StackResolutionBudget::Unlimited,
+            StackResolutionPolicy::Committed,
+            BTreeMap::new(),
+        );
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state
+    };
+
+    let mut holding_action = committed_state(true);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut holding_action,
+            PlayerId(1),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Pause
+    ));
+
+    let mut no_action = committed_state(false);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut no_action,
+            PlayerId(1),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
     ));
 }
 

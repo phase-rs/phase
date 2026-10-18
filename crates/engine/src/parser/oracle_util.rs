@@ -1,11 +1,15 @@
 use nom::Parser;
+use std::collections::BTreeSet;
 
+use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_quantity::parse_cda_quantity;
-use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, RoundingMode, TargetFilter};
+use super::oracle_quantity::{parse_cda_quantity, parse_cda_quantity_with_context};
+use crate::types::ability::{
+    Comparator, ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
+};
 use crate::types::card_type::{
     fixed_noncreature_subtypes, noncreature_subtype_set, CoreType, SubtypeSet,
 };
@@ -13,7 +17,7 @@ use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{alpha1, anychar, space1};
-use nom::combinator::{eof, map_res, opt, peek, recognize, value, verify};
+use nom::combinator::{all_consuming, eof, map_res, opt, peek, recognize, value, verify};
 use nom::multi::many_till;
 use nom::sequence::{preceded, terminated};
 
@@ -152,6 +156,42 @@ impl<'a> TextPair<'a> {
             original: &self.original[start..end],
             lower: &self.lower[start..end],
         }
+    }
+
+    /// Map a lowercase remainder slice back to its original-case counterpart.
+    ///
+    /// `lower_rest` must be a suffix of `self.lower` (typically a nom remainder
+    /// from a lowercase-only parse, e.g. `parse_perpetual_self_subject`'s
+    /// return). Walks original-case chars and sums each char's lowercase byte
+    /// length until the consumed prefix is accounted for, so the boundary stays
+    /// correct even when Unicode lowercasing changed byte length (e.g. U+0130
+    /// `İ`, 2 bytes, lowercases to 3-byte `i̇`) — the case the naive
+    /// `original[lower.len() - rest.len()..]` slice gets wrong.
+    ///
+    /// Returns `None` when `lower_rest` is not a suffix of `self.lower`, or
+    /// when the boundary falls mid-expansion of a single original char (no
+    /// original boundary corresponds) — callers fail the arm closed.
+    pub fn original_remainder(&self, lower_rest: &str) -> Option<&'a str> {
+        let lower_start = self.lower.as_ptr() as usize;
+        let rest_start = lower_rest.as_ptr() as usize;
+        let lower_end = lower_start + self.lower.len();
+        if rest_start < lower_start || rest_start + lower_rest.len() != lower_end {
+            return None;
+        }
+        let consumed_lower = rest_start - lower_start;
+        let mut accounted = 0;
+        for (idx, c) in self.original.char_indices() {
+            if accounted == consumed_lower {
+                return Some(&self.original[idx..]);
+            }
+            accounted += c.to_lowercase().map(|lc| lc.len_utf8()).sum::<usize>();
+            if accounted > consumed_lower {
+                // The lower-side boundary splits one original char's
+                // lowercased expansion — no original boundary corresponds.
+                return None;
+            }
+        }
+        (accounted == consumed_lower).then_some(&self.original[self.original.len()..])
     }
 
     /// Find `needle` in the lowered text and return both slices advanced past it.
@@ -492,11 +532,13 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
 
-    // CR 608.2c: "that many" / "that much" — an anaphoric back-reference to the
-    // previous effect's count (read the whole text and apply the rules of
-    // English). Resolves to `EventContextAmount` (which falls back to
-    // `state.last_effect_count` for chained sub-ability
-    // continuations). Composes with the "twice"/"three times" multipliers
+    // CR 608.2c: "that many" / "that much" / "that number of" — an
+    // anaphoric back-reference to the previous effect's count (read the whole
+    // text and apply the rules of English). Resolves to `EventContextAmount`
+    // (which falls back to `state.last_effect_count` for chained sub-ability
+    // continuations); a governing gate that measured the antecedent later
+    // rebinds the placeholder to its own `QuantityRef`. Composes with the
+    // "twice"/"three times" multipliers
     // above so "twice that many cards" parses as Multiply{2, EventContextAmount}.
     if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
         nom::combinator::value(
@@ -504,6 +546,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
             nom::branch::alt((
                 nom::bytes::complete::tag::<_, _, OracleError<'_>>("that many"),
                 nom::bytes::complete::tag("that much"),
+                nom::bytes::complete::tag("that number of"),
             )),
         )
         .parse(i)
@@ -817,6 +860,332 @@ pub(crate) fn parse_count_expr_with_exclusion(
     Some((expr, rest, CountWord::Plain))
 }
 
+/// A verb's count position as read by [`parse_count_slot`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CountSlot<'a> {
+    /// The typed count.
+    pub count: QuantityExpr,
+    /// The span between the count head and its binder (or the clause end), case
+    /// preserved. The verb consumes it whole with its own noun grammar
+    /// ("cards", "life", "cards from their hand").
+    pub noun: &'a str,
+    /// CR 107.3c: what the "where X is" binder defines X as, when that binder
+    /// bound this count. An X the noun prints (a token's "X/X") is the same X.
+    pub where_x: Option<QuantityExpr>,
+}
+
+/// How a count position opens.
+pub(crate) enum CountHead {
+    /// "a number of" — the count is bound later in the clause, or by the caller.
+    Deferred,
+    /// No count word ("cards equal to …").
+    Absent,
+    /// A count word that carries X ("X cards", "X plus 1 life").
+    VariableX(QuantityExpr),
+    /// Any other count word ("two", "a", "that many", "half your library").
+    Counted(QuantityExpr),
+}
+
+/// The clause that binds a count position's quantity.
+#[derive(Debug, Clone, Copy)]
+enum CountBinder {
+    EqualTo,
+    WhereX,
+    ForEach,
+}
+
+impl CountHead {
+    /// Whether `binder` defines this head's count. An ineligible binder stays in
+    /// the noun ("an X/X green Ooze creature token, where X is …" binds the
+    /// token's P/T, not the count).
+    fn is_bound_by(&self, binder: CountBinder) -> bool {
+        match (self, binder) {
+            (CountHead::Deferred | CountHead::Absent, CountBinder::EqualTo)
+            | (CountHead::VariableX(_), CountBinder::WhereX)
+            | (CountHead::Counted(_) | CountHead::VariableX(_), CountBinder::ForEach) => true,
+            (CountHead::Counted(_) | CountHead::VariableX(_), CountBinder::EqualTo)
+            | (
+                CountHead::Deferred | CountHead::Absent | CountHead::Counted(_),
+                CountBinder::WhereX,
+            )
+            | (CountHead::Deferred | CountHead::Absent, CountBinder::ForEach) => false,
+        }
+    }
+}
+
+fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
+    alt((
+        value(CountBinder::EqualTo, tag("equal to ")),
+        value(CountBinder::WhereX, tag("where x is ")),
+        value(CountBinder::ForEach, tag("for each ")),
+    ))
+    .parse(input)
+}
+
+/// The head of a count position ("a number of", a count word, or none) and the
+/// text after it.
+pub(crate) fn parse_count_head(text: &str) -> (CountHead, &str) {
+    let lower = text.to_lowercase();
+    if let Some(((), rest)) =
+        nom_on_lower(text, &lower, |i| value((), tag("a number of ")).parse(i))
+    {
+        return (CountHead::Deferred, rest);
+    }
+    match parse_count_expr(text) {
+        Some((count, rest))
+            if count
+                .any_ref(&mut |r| matches!(r, QuantityRef::Variable { name } if name == "X")) =>
+        {
+            (CountHead::VariableX(count), rest)
+        }
+        Some((count, rest)) => (CountHead::Counted(count), rest),
+        None => (CountHead::Absent, text),
+    }
+}
+
+/// The one count position every verb shares (draw, mill, scry, surveil,
+/// discard, gain/lose life, reveal from hand, token creation).
+///
+/// CR 107.1 + CR 107.3a / CR 107.3c + CR 608.2h: reads `<head> <noun>
+/// [<binder> <quantity>]`, where the head is "a number of", a count word, or
+/// absent, and the binder is "equal to", "where X is" or "for each". Returns the
+/// typed count and the noun the verb must consume. Returns `None` — the clause
+/// then fails closed as `Effect::Unimplemented` — when a binder's quantity does
+/// not parse in full, or when a "a number of" / absent head has no binder and
+/// no caller-bound count (`ParseContext::caller_bound_count`). It never falls
+/// back to a literal.
+pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<CountSlot<'a>> {
+    let text = normalize_count_slot_text(text);
+    let (head, after_head) = parse_count_head(text);
+
+    let Some((binder_start, binder, quantity_start)) = find_count_binder(&head, after_head) else {
+        let count = match head {
+            CountHead::Deferred | CountHead::Absent => ctx.caller_bound_count.clone()?,
+            CountHead::VariableX(count) | CountHead::Counted(count) => count,
+        };
+        // CR 614.1a + CR 107.1: "that much/many <noun> plus|minus N" is decided by
+        // `parse_event_context_quantity`'s existing offset arm; the entry only
+        // locates the noun span that arm validated (its noun dimension holds no
+        // "plus"/"minus" word).
+        if matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        ) {
+            if let Some(offset @ QuantityExpr::Offset { .. }) =
+                super::oracle_quantity::parse_event_context_quantity(text)
+            {
+                let after_lower = after_head.to_lowercase();
+                let (noun, _, _) = nom_primitives::scan_preceded(&after_lower, |i| {
+                    alt((tag("plus "), tag("minus "))).parse(i)
+                })?;
+                return Some(CountSlot {
+                    count: offset,
+                    noun: after_head[..noun.len()].trim_end(),
+                    where_x: None,
+                });
+            }
+        }
+        let (count, noun) = apply_rounding_postmodifier(count, after_head.trim());
+        return Some(CountSlot {
+            count,
+            noun,
+            where_x: None,
+        });
+    };
+
+    let noun = after_head[..binder_start]
+        .trim_end()
+        .trim_end_matches(',')
+        .trim_end();
+    let quantity = after_head[quantity_start..].trim();
+    let (count, where_x) = match binder {
+        CountBinder::EqualTo => (parse_equal_to_count(quantity, ctx)?, None),
+        // CR 107.3c: the where-X clause defines X. The where-X authority binds X
+        // inside any composite ("X plus 1"); a bare X falls back to the cda
+        // grammar, as the token where-X binder does ("the number of times …").
+        CountBinder::WhereX => {
+            let CountHead::VariableX(count) = head else {
+                return None;
+            };
+            let x = super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
+                .or_else(|| {
+                    parse_cda_quantity_with_context(quantity, &mut ctx.clone_player_antecedents())
+                })?;
+            let bare_x = matches!(
+                &count,
+                QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X"
+            );
+            let count = if bare_x {
+                x.clone()
+            } else {
+                super::oracle_effect::lower::apply_where_x_quantity_expression(
+                    count,
+                    Some(quantity),
+                )?
+            };
+            (count, Some(x))
+        }
+        // "<N> <noun> for each <filter>" multiplies the head count by the for-each quantity.
+        CountBinder::ForEach => {
+            let (CountHead::Counted(count) | CountHead::VariableX(count)) = head else {
+                return None;
+            };
+            let for_each = super::oracle_quantity::parse_for_each_clause_expr_with_context(
+                &quantity.to_lowercase(),
+                ctx,
+            )?;
+            (
+                super::oracle_ir::ast::replace_fixed_quantity(count, for_each),
+                None,
+            )
+        }
+    };
+    let (count, noun) = apply_rounding_postmodifier(count, noun);
+    Some(CountSlot {
+        count,
+        noun,
+        where_x,
+    })
+}
+
+/// CR 614.1a: the count position's text without its trailing period and one
+/// trailing " instead" — the replacement marker belongs to neither the count
+/// nor the noun.
+pub(crate) fn normalize_count_slot_text(text: &str) -> &str {
+    let text = text.trim();
+    // allow-noncombinator: trailing sentence punctuation cleanup, not dispatch.
+    let text = text.strip_suffix('.').unwrap_or(text).trim_end();
+    let lower = text.to_lowercase();
+    let body_len = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" instead"),
+        tag(" instead"),
+    ))
+    .parse(lower.as_str())
+    .map_or(text.len(), |(_, body)| body.len());
+    &text[..body_len]
+}
+
+/// The first binder after a count head that defines that head's count, as
+/// `(binder start, binder, quantity start)` byte offsets into `after_head`.
+/// Double-quoted spans and an anchored single-quoted granted ability are masked
+/// first, so a "for each" inside a token's granted ability never binds the
+/// token count (Urza's Saga).
+fn find_count_binder(head: &CountHead, after_head: &str) -> Option<(usize, CountBinder, usize)> {
+    let lower = after_head.to_lowercase();
+    let mut masked = nom_primitives::mask_double_quoted_spans_preserving_len(&lower).into_owned();
+    if let Some(span) = super::oracle_effect::token::find_anchored_single_quoted_span(&lower) {
+        let start = span.as_ptr() as usize - lower.as_ptr() as usize;
+        masked.replace_range(start..start + span.len(), &" ".repeat(span.len()));
+    }
+    let mut from = 0;
+    while let Some((before, binder, rest)) =
+        nom_primitives::scan_preceded(&masked[from..], parse_count_binder)
+    {
+        let quantity_start = masked.len() - rest.len();
+        if head.is_bound_by(binder) {
+            return Some((from + before.len(), binder, quantity_start));
+        }
+        from = quantity_start;
+    }
+    None
+}
+
+/// CR 107.1a: a fractional head's rounding postmodifier separated from the head
+/// by the noun ("half X life, rounded down"). Applies only to a
+/// `DivideRounded` count; the postmodifier leaves the noun.
+fn apply_rounding_postmodifier(count: QuantityExpr, noun: &str) -> (QuantityExpr, &str) {
+    let QuantityExpr::DivideRounded {
+        inner,
+        divisor,
+        rounding,
+    } = count
+    else {
+        return (count, noun);
+    };
+    let lower = noun.to_lowercase();
+    let (noun, rounding) = all_consuming((
+        take_until::<_, _, OracleError<'_>>(", round"),
+        super::oracle_nom::quantity::parse_explicit_rounding_suffix,
+    ))
+    .parse(lower.as_str())
+    .map_or((noun, rounding), |(_, (body, postmodifier))| {
+        (&noun[..body.len()], postmodifier)
+    });
+    (
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        },
+        noun,
+    )
+}
+
+/// The one "equal to <quantity>" chain every count position shares.
+///
+/// CR 608.2c / CR 608.2k: the rungs run in one written order — the event
+/// context ("that much", "the damage prevented this way"), the cda grammar, the
+/// chunk's bare-card aggregate ("those cards"), the where-X core (without the
+/// printed-name possessive arm), then the "the difference" placeholder that
+/// only the token carrier rebinds. A `Sum` whose operands read different object
+/// pronouns is a miss (the operand-anaphor guard).
+pub(crate) fn parse_equal_to_count(quantity: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
+    let lower = quantity
+        .trim()
+        .trim_end_matches(['.', ','])
+        .trim()
+        .to_lowercase();
+    let count = super::oracle_quantity::parse_event_context_quantity(&lower)
+        .or_else(|| super::oracle_quantity::parse_cda_quantity_with_context(&lower, ctx))
+        .or_else(|| {
+            let source = ctx.bare_card_aggregate_source?;
+            let (_, qty) = all_consuming(|i| {
+                super::oracle_nom::quantity::parse_contextual_bare_card_aggregate_ref(i, source)
+            })
+            .parse(lower.as_str())
+            .ok()?;
+            Some(QuantityExpr::Ref { qty })
+        })
+        .or_else(|| super::oracle_effect::lower::parse_where_x_quantity_core(&lower))
+        .or_else(|| {
+            all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+                .parse(lower.as_str())
+                .is_ok()
+                .then(super::oracle_effect::difference_anaphor_placeholder)
+        })?;
+    (!mixed_operand_scopes(&count)).then_some(count)
+}
+
+/// Operand-anaphor guard: `true` when a `Sum`'s object-stat operands
+/// (power / toughness / mana value, through `Multiply` and `Offset`) read
+/// different object scopes ("that creature's power plus its toughness").
+fn mixed_operand_scopes(count: &QuantityExpr) -> bool {
+    fn collect_scopes(expr: &QuantityExpr, scopes: &mut Vec<ObjectScope>) {
+        match expr {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::Power { scope }
+                    | QuantityRef::Toughness { scope }
+                    | QuantityRef::ObjectManaValue { scope },
+            } => scopes.push(*scope),
+            QuantityExpr::Multiply { inner, .. } | QuantityExpr::Offset { inner, .. } => {
+                collect_scopes(inner, scopes)
+            }
+            _ => {}
+        }
+    }
+    let QuantityExpr::Sum { exprs } = count else {
+        return false;
+    };
+    let mut scopes = Vec::new();
+    for expr in exprs {
+        collect_scopes(expr, &mut scopes);
+    }
+    scopes.windows(2).any(|pair| pair[0] != pair[1])
+}
+
 /// CR 107.3a: Strip a trailing "[, ]where x is " binder clause from the
 /// (already-lowercased) text following a bare `X`, returning the lowercase
 /// description that defines the variable. Shared by every count-position
@@ -957,10 +1326,24 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
 ///
 /// "this spell" — `oracle_casting.rs` matches literal "this spell" for alternative costs/restrictions.
 /// "this card" — context-dependent in costs, conditions, and static abilities.
+/// "this sorcery" / "this instant" — spell-subject self-reference ("This
+/// sorcery deals 4 damage …", Mephit's Enthusiasm / Molten Impact). Parse-only
+/// like "this spell": a spell subject must stay literal so possessive tails
+/// ("this spell's mana cost") keep matching.
+/// "this boon" — Digital-only Alchemy (no CR entry): the granted one-time
+/// boon as a damage subject ("this boon deals damage …", Molten Impact).
+/// Binds `SelfRef` (the ability source — the granting card); the damage
+/// resolver attributes the damage to the resolving holder through it.
 ///
 /// Used by: `parse_target` (target recognition), `subject.rs` (subject stripping).
 /// NOT used by: `normalize_card_name_refs` (must not replace these with `~`).
-pub const SELF_REF_PARSE_ONLY_PHRASES: &[&str] = &["this spell", "this card"];
+pub const SELF_REF_PARSE_ONLY_PHRASES: &[&str] = &[
+    "this spell",
+    "this card",
+    "this sorcery",
+    "this instant",
+    "this boon",
+];
 
 /// Test whether `text` matches `"{prefix} {word} {suffix}"` for any word in `variants`,
 /// using the given match strategy.
@@ -2252,7 +2635,7 @@ fn unmask_keyword_action_walker_names(text: String, originals: &[String]) -> Str
 ///
 /// * the TYPED channel — `parse_self_reference` (`oracle_nom/target.rs`) and the
 ///   cost self-ref combinators map it to `TargetFilter::GrantingObject`,
-///   concretized to the granting object at each Layer-6 grant; and
+///   bound to the granting object by each Layer-6 grant's stamp; and
 /// * the DISPLAY channel — [`render_granting_self_reference`], invoked from the
 ///   two production parse entry points `parser::oracle::parse_oracle_text` and
 ///   `game::effects::token::catalog_rules_text_abilities`, which renders the
@@ -2265,7 +2648,7 @@ fn unmask_keyword_action_walker_names(text: String, originals: &[String]) -> Str
 /// reds it), `parser::oracle::tests::render_net_reaches_every_nested_description_carrier`
 /// (a new description-bearing FIELD on an existing carrier reds it), and the
 /// corpus-wide `serde_json` leak guards.
-pub(crate) const GRANTING_SELF_PLACEHOLDER: &str = "\u{E0002}";
+pub(crate) const GRANTING_SELF_PLACEHOLDER: &str = "\u{E0004}";
 
 /// CR 201.5a + CR 201.5c: Render a granting-object self-reference for DISPLAY.
 ///
@@ -2280,10 +2663,10 @@ pub(crate) const GRANTING_SELF_PLACEHOLDER: &str = "\u{E0002}";
 ///
 /// WHY PARSE TIME, NOT THE LAYER-6 GRANT (CR 201.5a, last sentence — "This is
 /// also true if the second ability is copied onto a new object"):
-/// `GrantAllActivatedAbilitiesOf` is expanded at continuous-effect collection
-/// time into one synthesized `GrantAbility` per donated ability, each emitted
+/// `GrantAllActivatedAbilitiesOf` is retained until layer 6, then expanded
+/// into one synthesized `GrantAbility` per donated ability, each emitted
 /// with `source_id: recipient_id` (`game::layers::expand_granted_activated_abilities`).
-/// Layer 6 concretizes against that `source_id`, so a live name lookup there
+/// Layer 6 stamps against that `source_id`, so a live name lookup there
 /// would stamp the RE-GRANTING object's name rather than the original granter's.
 /// The printed name resolved once, here, travels through the copy correctly.
 ///
@@ -2307,49 +2690,68 @@ pub(crate) fn render_granting_self_reference(text: &str, card_name: &str) -> Str
     text.replace(GRANTING_SELF_PLACEHOLDER, printed)
 }
 
-/// CR 201.5a: Self-reference verb-object trigger phrases — the positions whose
-/// downstream combinator (`parse_cost_self_reference` in `oracle_cost.rs` /
-/// `parse_self_reference` in `oracle_nom/target.rs`) actually CONSUMES the
-/// placeholder as `TargetFilter::GrantingObject`. The masker is an ALLOWLIST: an
-/// in-quote name occurrence is marked ONLY when its immediately-preceding text
-/// ends with one of these. This keeps the placeholder confined to positions that
-/// consume it (so it never survives unconsumed) and leaves every other position
-/// — QuantityRef, condition, damage-source, exclusion, name-filter (`named
-/// <name>`), and nullary self-costs (`unattach`/`tap` <name>) — to normalize to
-/// `~` exactly as before, preserving byte-identical pre-fix parse output.
-///
-/// Singular `counter on ` (PutCounter target: "put a <kind> counter on <name>")
-/// is included; plural `counters on ` (QuantityRef: "number of <kind> counters
-/// on <name>") is deliberately NOT a prefix of it, so the two are distinguished.
+/// CR 201.5a: The positions in which a granted quoted body's own card name names
+/// the GRANTING object. The masker is an ALLOWLIST: an in-quote name occurrence
+/// is marked only when the text before it ends, on a word boundary, in one of
+/// these; every other occurrence normalizes to `~` (the host). Each entry's
+/// downstream consumer turns the placeholder into a granter symbol
+/// (`TargetFilter::GrantingObject`, `ObjectScope::GrantingObject` or
+/// `FilterProp::DistinctFrom`), except where the parser drops the consuming
+/// clause (as in some `other than ` and `attach ` bodies) and the placeholder is
+/// dropped with it.
 const GRANTER_SELF_REF_VERB_PREFIXES: &[&str] = &[
-    "sacrifice ",  // Sacrifice cost
-    "exile ",      // Exile cost
-    "return ",     // ReturnToHand cost / Bounce effect
-    "counter on ", // PutCounter target ("put a <kind> counter on <name>")
+    "sacrifice ",     // Sacrifice cost
+    "exile ",         // Exile cost
+    "return ",        // ReturnToHand cost / Bounce effect
+    "counter on ",    // PutCounter target ("put a <kind> counter on <name>")
+    "counters on ",   // CountersOn quantity / plural PutCounter target
+    "counter from ",  // RemoveCounter target ("remove a <kind> counter from <name>")
+    "counters from ", // RemoveCounter cost ("remove all <kind> counters from <name>")
+    "destroy ",       // Destroy target
+    "fight ",         // Fight target
+    "attach ",        // Attach object ("attach <name> to …")
+    "tap ",           // Tap cost ("tap <name>")
+    "other than ",    // DistinctFrom exclusion ("an artifact other than <name>")
+    "who cast ",      // Caster reference ("the player who cast <name>")
 ];
-// Deliberately excluded: `destroy ` / `control of ` — no measured class card
-// references its own name cleanly in those positions (Shuriken's "gains control
-// of Shuriken unless it was unattached from a Ninja" carries an unless-rider that
-// parses to `Unimplemented`, so masking it would leak the placeholder rather than
-// producing GrantingObject). Add such a verb only with a card that provably
-// consumes the placeholder there. Nullary self-costs (`unattach`/`tap <name>`)
-// are also excluded — they carry no TargetFilter and expect `~`.
+// Refused positions, which stay `~`:
+// - `by `: a damage source ("dealt … by <name>").
+// - `named `: a name filter ("permanents named <name>").
+// - `unattach `: a nullary host cost; the word boundary keeps `attach ` off it.
+// - `control of `: a control change carrying an unless-rider.
+// - `exiled with `: a linked-exile reference.
+// - `'s controller`: a possessive player reference, not an object position.
+// - `and `: a conjunction, which names no position of its own.
+
+/// CR 114.2 + CR 607.1d: an emblem body's "exiled with <name>" is linked to the emblem's
+/// creator, which the emblem latches, so the name is no granter reference.
+const EMBLEM_LINKED_PREFIXES: &[&str] = &["exiled with "];
+
+/// Whether `text` ends, on a word boundary, in one of `phrases`.
+fn ends_in_position(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|p| {
+        // allow-noncombinator: word-bounded lookbehind over a runtime array prefix
+        text.strip_suffix(p)
+            .is_some_and(|head| !head.chars().next_back().is_some_and(char::is_alphanumeric))
+    })
+}
 
 /// CR 201.5a: Within each double-quoted region of `text`, replace occurrences of
 /// the card's own name with [`GRANTING_SELF_PLACEHOLDER`] ONLY in a
-/// self-reference verb-object position (see [`GRANTER_SELF_REF_VERB_PREFIXES`]),
-/// so a granted ability's by-name reference to its GRANTING object survives
-/// distinct from the host self-reference (`~`, "this creature").
+/// granter position (see [`GRANTER_SELF_REF_VERB_PREFIXES`]), so a granted
+/// ability's by-name reference to its GRANTING object survives distinct from the
+/// host self-reference (`~`, "this creature").
 ///
-/// Bounded to quoted regions and to consumer-taught verb-object positions:
-/// everywhere else (outside quotes, or in-quote QuantityRef / condition /
-/// damage-source / exclusion / name-filter positions) the card name still
-/// normalizes to `~` (host self-ref), byte-identical to pre-fix. Only the
+/// Bounded to quoted regions and to allowlisted positions: everywhere else the
+/// card name still normalizes to `~` (host self-ref). Only the
 /// deterministic proper-noun variants (full multi-word name, comma-separated
 /// short name, and guarded compound first/last short name) are masked, mirroring
 /// `normalize_card_name_refs`; the risky single-word / of-short fallbacks are
 /// skipped to avoid matching English words.
-fn mask_granting_self_reference_in_quotes(text: &str, card_name: &str) -> String {
+fn mask_granting_self_reference_in_quotes(
+    text: &str,
+    card_name: &str,
+) -> (String, BTreeSet<usize>) {
     // allow-noncombinator: structural masking of a card-name self-reference
     // before `~` normalization (mirrors `mask_card_name_keyword_action`), not
     // parsing dispatch.
@@ -2380,11 +2782,15 @@ fn mask_granting_self_reference_in_quotes(text: &str, card_name: &str) -> String
             variants.push((compound, false));
         }
     }
+    // CR 201.5a: the lines where a quoted name was refused and so normalizes to the host.
+    let mut refused_lines = BTreeSet::new();
     if variants.is_empty() {
-        return text.to_string();
+        return (text.to_string(), refused_lines);
     }
     // Segments split on `"`: odd indices are inside a quoted region.
     let mut result = String::with_capacity(text.len());
+    let mut line = 0;
+    let mut linked: &[&str] = &[];
     for (seg_idx, segment) in text.split('"').enumerate() {
         if seg_idx > 0 {
             result.push('"');
@@ -2392,21 +2798,37 @@ fn mask_granting_self_reference_in_quotes(text: &str, card_name: &str) -> String
         if seg_idx % 2 == 1 {
             let mut masked = segment.to_string();
             for (name, case_sensitive) in &variants {
-                masked = mask_name_occurrences_in_segment(&masked, name, *case_sensitive);
+                let (next, refused) =
+                    mask_name_occurrences_in_segment(&masked, name, *case_sensitive, linked);
+                if refused {
+                    refused_lines.insert(line);
+                }
+                masked = next;
             }
             result.push_str(&masked);
         } else {
             result.push_str(segment);
+            linked = if ends_in_position(&segment.to_ascii_lowercase(), &["emblem with "]) {
+                EMBLEM_LINKED_PREFIXES
+            } else {
+                &[]
+            };
         }
+        line += segment.matches('\n').count();
     }
-    result
+    (result, refused_lines)
 }
 
 /// Word-boundary-aware, case-insensitive replacement of `name` occurrences with
 /// [`GRANTING_SELF_PLACEHOLDER`] within a single (already inside-quotes)
-/// `segment`, masking ONLY occurrences in a self-reference verb-object position
+/// `segment`, masking ONLY occurrences in an allowlisted granter position
 /// ([`GRANTER_SELF_REF_VERB_PREFIXES`]).
-fn mask_name_occurrences_in_segment(segment: &str, name: &str, case_sensitive: bool) -> String {
+fn mask_name_occurrences_in_segment(
+    segment: &str,
+    name: &str,
+    case_sensitive: bool,
+    linked: &[&str],
+) -> (String, bool) {
     // allow-noncombinator: structural occurrence masking mirroring
     // `mask_card_name_keyword_action`, not parsing dispatch.
     let lower_seg = segment.to_ascii_lowercase();
@@ -2420,6 +2842,7 @@ fn mask_name_occurrences_in_segment(segment: &str, name: &str, case_sensitive: b
         (lower_seg.as_str(), lower_name.as_str())
     };
     let mut out = String::with_capacity(segment.len());
+    let mut refused = false;
     let mut rest = segment;
     let mut hay_rest = haystack;
     while let Some(idx) = hay_rest.find(needle) {
@@ -2438,41 +2861,36 @@ fn mask_name_occurrences_in_segment(segment: &str, name: &str, case_sensitive: b
         // this occurrence is recoverable for the verb-object lookbehind.
         let abs_start = segment.len() - rest.len() + idx;
         let prefix_lower = segment[..abs_start].to_ascii_lowercase();
-        // CR 201.5a: mask (→ GrantingObject) ONLY in a self-reference verb-object
-        // position a downstream self-ref combinator consumes. Positions NOT in the
-        // allowlist — QuantityRef ("... counters on <name>"), condition,
-        // damage-source ("dealt ... by <name>"), exclusion ("other than <name>"),
-        // name-filter ("named <name>"), nullary self-costs ("unattach/tap <name>")
-        // — are left to normalize to `~` (host), byte-identical to pre-fix.
-        //
-        // KNOWN CR 201.5a FOLLOW-UP: the declined non-verb-object granter-name
-        // references (QuantityRef / condition / damage-source / exclusion) host-bind
-        // today but per CR 201.5a should bind to the GRANTER — e.g. Gutter Grime's
-        // token counting "slime counters on Gutter Grime" should count the granting
-        // enchantment's counters, not the token's. Restoring the host binding here
-        // is not a new regression (it is the pre-fix behavior); the correct
-        // granter binding for these channels is a deferred fix-sweep, and this
-        // guard is the boundary that sweep must extend.
-        // allow-noncombinator: verb-object lookbehind (structural masking, not parsing dispatch)
+        // CR 201.5a: mask only in an allowlisted position; the text before the
+        // matched entry must end on a non-alphanumeric so `unattach ` never reads
+        // as `attach `.
         let is_self_ref_object = before_ok
             && after_ok
-            && GRANTER_SELF_REF_VERB_PREFIXES
-                .iter()
-                .any(|p| prefix_lower.ends_with(p));
+            && ends_in_position(&prefix_lower, GRANTER_SELF_REF_VERB_PREFIXES);
         if is_self_ref_object {
             out.push_str(&rest[..idx]);
             out.push_str(GRANTING_SELF_PLACEHOLDER);
         } else {
+            refused |= before_ok && after_ok && !ends_in_position(&prefix_lower, linked);
             out.push_str(&rest[..after]);
         }
         rest = &rest[after..];
         hay_rest = &hay_rest[after..];
     }
     out.push_str(rest);
-    out
+    (out, refused)
 }
 
 pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
+    normalize_card_name_refs_reporting(text, card_name).0
+}
+
+/// [`normalize_card_name_refs`], also returning the lines where the granter masker refused
+/// a quoted name.
+pub fn normalize_card_name_refs_reporting(
+    text: &str,
+    card_name: &str,
+) -> (String, BTreeSet<usize>) {
     let pre = mask_ring_tempts_you_phrase(text);
     // CR 701.40a/701.58a/701.62a: protect the keyword-action body verb on cards
     // named after a keyword action ("Manifest Dread", "Cloak") so it survives
@@ -2496,7 +2914,8 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // granting-object self-reference (GRANTING_SELF_PLACEHOLDER) BEFORE it
     // collapses to `~` below. Bounded to quoted regions and skips `named <name>`
     // filter positions, so only a granter self-ref is marked.
-    result = mask_granting_self_reference_in_quotes(&result, card_name);
+    let (masked, refused_lines) = mask_granting_self_reference_in_quotes(&result, card_name);
+    result = masked;
     // allow-noncombinator: structural detection of MTGJSON A-/a- card-name prefix (not parsing)
     if card_name.starts_with("A-") || card_name.starts_with("a-") {
         let prefixed_upper = format!("A-{effective_name}");
@@ -2550,8 +2969,20 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // Part-Time Mutant" (full form, inside an except clause). The earlier
     // `replace_all_words` is word-boundary-aware, so re-running on the
     // residue cannot re-touch a `~` produced by the prior pass.
+    //
+    // CR 201.5c: only instances of the shortened name used to refer to the
+    // card are treated as its name. A single-word short name is matched
+    // case-sensitively, like a single-word full name above, so the same word in
+    // another case stays ordinary rules text, such as a step name ("an
+    // additional untap step" on Untap, Upkeep, Draw) or a keyword ("has storm"
+    // on Storm, Force of Nature; CR 702.40a). A multi-word short name stays
+    // case-insensitive, like a multi-word full name.
     if let Some(short_name) = comma_short_self_name(card_name) {
-        result = replace_all_words(&result, short_name, "~");
+        result = if short_name.contains(' ') {
+            replace_all_words(&result, short_name, "~")
+        } else {
+            replace_all_words_case_sensitive(&result, short_name, "~")
+        };
     }
 
     // "Of"-based short name: "Rosie Cotton of South Lane" → "Rosie Cotton"
@@ -2731,7 +3162,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     result = unmask_keyword_action_walker_names(result, &walker_originals);
     result = unmask_card_named_literal_spans(result, &card_named_originals);
     result = unmask_card_name_keyword_action(result, &kw_action_originals);
-    unmask_ring_tempts_you_phrase(result)
+    (unmask_ring_tempts_you_phrase(result), refused_lines)
 }
 
 /// Strip a comparator prefix from a comparison clause, returning (Comparator, remainder).
@@ -2819,6 +3250,40 @@ mod tests {
 
     fn tp(text: &str) -> (String, String) {
         (text.to_string(), text.to_lowercase())
+    }
+
+    #[test]
+    fn original_remainder_maps_lower_suffix_to_original_case() {
+        // ASCII: the boundary is a plain byte offset.
+        let (o, l) = tp("Ab \"Quoted\"");
+        let pair = TextPair::new(&o, &l);
+        assert_eq!(pair.original_remainder(&l[3..]), Some("\"Quoted\""));
+        assert_eq!(pair.original_remainder(&l[..]), Some(&o[..]));
+        assert_eq!(pair.original_remainder(&l[l.len()..]), Some(""));
+        // A non-suffix (even an empty one from another allocation) fails closed.
+        assert_eq!(pair.original_remainder(""), None);
+        assert_eq!(pair.original_remainder("quoted"), None);
+    }
+
+    #[test]
+    fn original_remainder_survives_unicode_lowercase_expansion() {
+        // U+0130 `İ` (2 bytes) lowercases to 3-byte `i̇`, so the lower/upper
+        // byte lengths differ and a naive lower-derived offset lands mid-word
+        // (`original[5..]` is "est", not "rest"). `TextPair::new`'s
+        // equal-length debug assert cannot construct this pair, so build it
+        // literally — the mapper (unlike the struct's other slicers) makes no
+        // equal-length assumption.
+        let original = "Aİ rest";
+        let lower = original.to_lowercase();
+        assert_eq!(lower, "ai̇ rest");
+        let pair = TextPair {
+            original,
+            lower: &lower,
+        };
+        assert_eq!(pair.original_remainder(&lower[5..]), Some("rest"));
+        // A lower-side boundary mid-expansion of one original char (between
+        // the `i` and its combining dot) has no original counterpart.
+        assert_eq!(pair.original_remainder(&lower[2..]), None);
     }
 
     /// CR 604.1: the building block, exercised across its documented contract
@@ -3418,6 +3883,67 @@ mod tests {
         );
     }
 
+    /// CR 201.5c + CR 702.40a: a single-word comma short name is matched only
+    /// in its printed case; the same word in lowercase is the storm keyword and
+    /// stays.
+    #[test]
+    fn single_word_comma_short_name_keeps_a_lowercase_keyword() {
+        // Reach guard in the same input: the printed "Storm" becomes `~`.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever Storm deals combat damage to a player, the next instant or sorcery spell you cast this turn has storm.",
+                "Storm, Force of Nature",
+            ),
+            "Whenever ~ deals combat damage to a player, the next instant or sorcery spell you cast this turn has storm."
+        );
+    }
+
+    /// CR 201.5c: a single-word comma short name in lowercase that names a
+    /// step is rules text and stays.
+    #[test]
+    fn single_word_comma_short_name_keeps_a_lowercase_step_name() {
+        // Reach guard: this name has the single-word short name "Untap", so
+        // the unchanged text below is not the absence of a short name.
+        assert_eq!(comma_short_self_name("Untap, Upkeep, Draw"), Some("Untap"));
+        const UNTAP_UPKEEP_DRAW: &str = "Choose one —\n\
+            • After this phase, there is an additional untap step.\n\
+            • After this phase, there is an additional upkeep step.\n\
+            • After this phase, there is an additional draw step.\n\
+            Entwine {3} (Choose all of them if you pay the entwine cost.)";
+        assert_eq!(
+            normalize_card_name_refs(UNTAP_UPKEEP_DRAW, "Untap, Upkeep, Draw"),
+            UNTAP_UPKEEP_DRAW
+        );
+    }
+
+    /// CR 201.5c: the sibling name forms keep their case rules. A multi-word
+    /// comma short name matches in any case; a single-word full name matches
+    /// only as printed.
+    #[test]
+    fn multi_word_comma_short_name_and_single_word_full_name_keep_their_case_rules() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever Agrus Kos attacks, attacking red creatures get +2/+0 and attacking white creatures get +0/+2 until end of turn.",
+                "Agrus Kos, Wojek Veteran",
+            ),
+            "Whenever ~ attacks, attacking red creatures get +2/+0 and attacking white creatures get +0/+2 until end of turn."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever agrus kos attacks, draw a card.",
+                "Agrus Kos, Wojek Veteran",
+            ),
+            "Whenever ~ attacks, draw a card."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever a player says \"sorry\" at any other time, Sorry deals 2 damage to that player.",
+                "Sorry",
+            ),
+            "Whenever a player says \"sorry\" at any other time, ~ deals 2 damage to that player."
+        );
+    }
+
     #[test]
     fn normalize_compound_printed_short_names() {
         // CR 201.5c: printed shortened names are the same object reference.
@@ -3493,6 +4019,40 @@ mod tests {
                 "Creatures you control have \"Sacrifice {GRANTING_SELF_PLACEHOLDER}: Draw a card.\" Whenever ~ attacks, draw a card."
             )
         );
+    }
+
+    /// CR 201.5a: an allowlist entry matches only on a word boundary.
+    #[test]
+    fn granter_lookbehind_is_word_bounded() {
+        let normalized = normalize_card_name_refs(
+            "Equipped creature has \"{T}, Unattach Foo Bar: Attach Foo Bar to target creature.\"",
+            "Foo Bar",
+        );
+        assert_eq!(
+            normalized,
+            format!(
+                "Equipped creature has \"{{T}}, Unattach ~: Attach {GRANTING_SELF_PLACEHOLDER} to target creature.\""
+            )
+        );
+    }
+
+    /// CR 201.5a: a granter reference ahead of a named-token literal keeps its own marker,
+    /// and the literal is restored in place.
+    #[test]
+    fn granter_reference_before_a_named_literal_restores_both() {
+        for verb in ["Tap", "Sacrifice"] {
+            assert_eq!(
+                normalize_card_name_refs(
+                    &format!(
+                        "Equipped creature has \"{verb} Foo Bar: Create a Treasure token named Gold.\""
+                    ),
+                    "Foo Bar",
+                ),
+                format!(
+                    "Equipped creature has \"{verb} {GRANTING_SELF_PLACEHOLDER}: Create a Treasure token named Gold.\""
+                )
+            );
+        }
     }
 
     /// H1 — CR 201.5b: a host self-reference (`~`) is NOT a granter reference and
@@ -4305,6 +4865,32 @@ mod tests {
         assert_eq!(rest, "stun counters");
     }
 
+    /// CR 608.2c: the demonstrative count phrases — "that many", "that much",
+    /// and "that number of" — all parse to the unbound `EventContextAmount`
+    /// placeholder and leave the counted noun as the remainder.
+    #[test]
+    fn parse_count_expr_demonstrative_count_phrases() {
+        for (text, expected_rest) in [
+            (
+                "that number of +1/+1 counters on target creature",
+                "+1/+1 counters on target creature",
+            ),
+            ("that many +1/+1 counters", "+1/+1 counters"),
+            ("that much life", "life"),
+        ] {
+            let (qty, rest) = parse_count_expr(text)
+                .unwrap_or_else(|| panic!("{text:?} must parse as a count expression"));
+            assert_eq!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                "{text:?} must be the EventContextAmount placeholder"
+            );
+            assert_eq!(rest, expected_rest, "{text:?} must leave the noun phrase");
+        }
+    }
+
     /// CR 107.1b: "equal to" in count positions must compose full quantity
     /// expressions, not just bare `QuantityRef` leaves (Tormented Thoughts /
     /// Ulamog enter-with-counters class).
@@ -5077,5 +5663,341 @@ mod tests {
             out2.contains("becomes a Coward in addition to its other types"),
             "subtype occurrence must stay literal, got: {out2}"
         );
+    }
+
+    fn slot(text: &str) -> Option<(QuantityExpr, String)> {
+        parse_count_slot(text, &mut ParseContext::default())
+            .map(|slot| (slot.count, slot.noun.to_string()))
+    }
+
+    fn event_context_offset(offset: i32) -> QuantityExpr {
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            offset,
+        }
+    }
+
+    /// CR 107.1 + CR 107.3c + CR 608.2h: the count position pairs each head
+    /// ("a number of", absent, X, a count word) only with the binder that
+    /// defines it, and fails closed when no quantity grammar reads the binder.
+    #[test]
+    fn count_slot_head_binder_cells() {
+        assert_eq!(
+            slot("a number of cards equal to the result"),
+            Some((
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                "cards".to_string()
+            ))
+        );
+        assert_eq!(
+            slot("cards equal to the sacrificed creature's power"),
+            Some((
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                "cards".to_string()
+            ))
+        );
+        let (count, noun) =
+            slot("X cards from their hand, where X is the number of Goblins you control").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "cards from their hand");
+        let (count, noun) = slot("2 life for each creature you control").unwrap();
+        assert!(
+            matches!(
+                &count,
+                QuantityExpr::Multiply { factor: 2, inner }
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "life");
+
+        // Fail closed: an unread for-each, and a binder-less "cards" with no
+        // caller-bound count.
+        assert_eq!(slot("2 life for each gorbleflux you control"), None);
+        assert_eq!(slot("cards"), None);
+        // An ineligible binder stays in the noun: a counted head's where-X
+        // binds the token's P/T, not its count.
+        let text =
+            "an X/X green Ooze creature token, where X is the number of creatures you control";
+        assert_eq!(
+            slot(text),
+            Some((
+                QuantityExpr::Fixed { value: 1 },
+                "X/X green Ooze creature token, where X is the number of creatures you control"
+                    .to_string()
+            ))
+        );
+    }
+
+    /// CR 701.38a + CR 608.2c: a caller-bound count answers only a binder-less
+    /// "a number of" / absent head; an in-text binder wins over it.
+    #[test]
+    fn count_slot_caller_bound_cells() {
+        let bound = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 0 },
+        };
+        let mut ctx = ParseContext {
+            caller_bound_count: Some(bound.clone()),
+            ..Default::default()
+        };
+        let cards = parse_count_slot("cards", &mut ctx).unwrap();
+        assert_eq!((cards.count, cards.noun), (bound.clone(), "cards"));
+        let tokens = parse_count_slot("a number of Treasure tokens", &mut ctx).unwrap();
+        assert_eq!(
+            (tokens.count, tokens.noun),
+            (bound.clone(), "Treasure tokens")
+        );
+        let in_text = parse_count_slot(
+            "a number of Treasure tokens equal to the number of creatures you control",
+            &mut ctx,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                in_text.count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "the in-text binder must win, got {:?}",
+            in_text.count
+        );
+        // Read, not taken: the bound count is still staged for the caller.
+        assert_eq!(ctx.caller_bound_count, Some(bound));
+
+        assert_eq!(slot("a number of Treasure tokens"), None);
+    }
+
+    /// CR 107.3c: the where-X binder binds X inside a composed head through the
+    /// where-X authority, and falls back to the cda grammar for a bare X.
+    #[test]
+    fn count_slot_where_x_cells() {
+        let (count, noun) =
+            slot("X plus 1 life, where X is the number of green creatures on the battlefield")
+                .unwrap();
+        assert!(
+            matches!(
+                &count,
+                QuantityExpr::Offset { inner, offset: 1 }
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
+            ),
+            "An-Havva Inn: {count:?}"
+        );
+        assert_eq!(noun, "life");
+        let (count, noun) = slot(
+            "X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn",
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn { .. }
+                }
+            ),
+            "The Mycotyrant: {count:?}"
+        );
+        assert_eq!(
+            noun,
+            "1/1 black Fungus creature tokens with \"This token can't block,\""
+        );
+        assert_eq!(slot("X cards, where X is the gorbleflux"), None);
+
+        // The binder's X travels with the slot: the count for a bare X head,
+        // the X inside a composite head ("X plus 1").
+        let ooze = parse_count_slot(
+            "X X/X green Ooze creature tokens, where X is the number of lands you control",
+            &mut ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ooze.noun, "X/X green Ooze creature tokens");
+        assert!(
+            matches!(
+                ooze.count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{ooze:?}"
+        );
+        assert_eq!(ooze.where_x, Some(ooze.count.clone()));
+        let inn = parse_count_slot(
+            "X plus 1 life, where X is the number of green creatures on the battlefield",
+            &mut ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                (&inn.count, &inn.where_x),
+                (QuantityExpr::Offset { inner, offset: 1 }, Some(x)) if **inner == *x
+            ),
+            "{inn:?}"
+        );
+        assert_eq!(
+            parse_count_slot("two cards", &mut ParseContext::default())
+                .unwrap()
+                .where_x,
+            None
+        );
+    }
+
+    /// CR 107.1a: a rounding postmodifier after the noun sets the fractional
+    /// head's rounding and leaves the noun.
+    #[test]
+    fn count_slot_rounding_cells() {
+        let (count, noun) = slot("half X cards, rounded up").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Up,
+                    ..
+                }
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "cards");
+        let (count, noun) = slot("half X life, rounded down").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::DivideRounded {
+                    rounding: RoundingMode::Down,
+                    ..
+                }
+            ),
+            "Brass Infiniscope: {count:?}"
+        );
+        assert_eq!(noun, "life");
+        // Rounding inside the head is the head grammar's own.
+        let (count, _) = slot("half your library, rounded up").unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::DivideRounded {
+                    rounding: RoundingMode::Up,
+                    ..
+                }
+            ),
+            "{count:?}"
+        );
+    }
+
+    /// A "for each" inside a token's granted ability (single- or double-quoted)
+    /// is the token's ability, not the token count (Urza's Saga).
+    #[test]
+    fn count_slot_masks_granted_abilities() {
+        for text in [
+            "a 0/0 colorless Construct artifact creature token with 'This token gets +1/+1 for each artifact you control.'",
+            "a 0/0 colorless Construct artifact creature token with \"This token gets +1/+1 for each artifact you control.\"",
+        ] {
+            let (count, noun) = slot(text).unwrap();
+            assert_eq!(count, QuantityExpr::Fixed { value: 1 }, "{text}");
+            assert_eq!(noun, &text["a ".len()..], "{text}");
+        }
+        // The same for-each outside the quotes binds the count.
+        let (count, noun) =
+            slot("a 1/1 colorless Construct artifact creature token for each artifact you control")
+                .unwrap();
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{count:?}"
+        );
+        assert_eq!(noun, "1/1 colorless Construct artifact creature token");
+    }
+
+    /// The operand-anaphor guard declines a `Sum` that mixes object pronouns
+    /// (Predator's Rapport); the bare "the difference" is the deferred
+    /// placeholder only a carrier verb accepts.
+    #[test]
+    fn count_slot_guard_and_difference_cells() {
+        assert_eq!(
+            slot("life equal to that creature's power plus its toughness"),
+            None
+        );
+        let (count, noun) = slot("life equal to its power plus its toughness").unwrap();
+        assert!(matches!(count, QuantityExpr::Sum { .. }), "{count:?}");
+        assert_eq!(noun, "life");
+        let (count, _) = slot("a number of Treasure tokens equal to the difference").unwrap();
+        assert!(
+            crate::parser::oracle_effect::is_difference_anaphor_placeholder(&count),
+            "{count:?}"
+        );
+    }
+
+    /// CR 614.1a + CR 107.1: "that much/many <noun> plus|minus N" is read by the
+    /// existing event-context offset arm for every verb; " instead" is removed
+    /// once, before the arm runs.
+    #[test]
+    fn count_slot_event_context_offset_cells() {
+        for (text, count, noun) in [
+            ("that many cards plus one", event_context_offset(1), "cards"),
+            (
+                "that many cards plus one instead.",
+                event_context_offset(1),
+                "cards",
+            ),
+            (
+                "that much life plus 1 instead",
+                event_context_offset(1),
+                "life",
+            ),
+            ("that many plus one", event_context_offset(1), ""),
+            (
+                "that many cards minus one",
+                event_context_offset(-1),
+                "cards",
+            ),
+            (
+                "that much life",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "life",
+            ),
+            (
+                "twice that many cards",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                },
+                "cards",
+            ),
+            // The arm declines a tail it does not own; the noun keeps it, so the
+            // verb's noun grammar rejects the clause.
+            (
+                "that many cards plus one, or this creature deals damage",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "cards plus one, or this creature deals damage",
+            ),
+        ] {
+            assert_eq!(slot(text), Some((count, noun.to_string())), "{text}");
+        }
     }
 }

@@ -39,6 +39,9 @@ pub(super) fn finalize_trigger_target_selection(
         &assigned_targets,
         trigger.source_id,
         trigger.controller,
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Triggered,
+        )),
         events,
     );
 
@@ -420,7 +423,7 @@ pub(super) fn handle_multi_target_selection(
     }
 
     let mut ability = pending_ability;
-    ability.targets = selected.iter().map(|&id| TargetRef::Object(id)).collect();
+    ability.set_unpinned_targets(selected.iter().map(|&id| TargetRef::Object(id)).collect());
 
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;

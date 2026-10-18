@@ -1,7 +1,7 @@
 //! Regression: a snow permanent's mana ability must PRODUCE snow mana so that
 //! {S} costs (CR 107.4h) become payable.
 //!
-//! The {S} CONSUME path (`spend_snow_unit`, `ManaUnit::is_snow`) was already
+//! The {S} CONSUME path (`spend_snow_unit`, `ManaShape::is_snow`) was already
 //! complete, but the PRODUCE path never stamped `ManaUnit.supertype =
 //! Some(ManaSupertype::Snow)`: mana produced by a Snow-Covered basic was
 //! indistinguishable from ordinary mana, so {S} could never be paid. The fix
@@ -18,7 +18,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::Supertype;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaShape};
 use engine::types::phase::Phase;
 
 /// A bare `{S}` cost (one mana from a snow source, CR 107.4h).
@@ -67,7 +67,7 @@ fn snow_source_produces_snow_mana() {
         "reach-guard: the mana ability must have produced mana (found none)",
     );
     assert!(
-        pool.mana.iter().any(|u| u.is_snow()),
+        pool.count_where(ManaShape::is_snow) > 0,
         "mana produced by a snow source must be snow mana (CR 107.4h); the \
          produce site must stamp ManaSupertype::Snow",
     );
@@ -143,7 +143,7 @@ fn nonsnow_source_produces_nonsnow_mana_and_cannot_pay_snow() {
         "reach-guard: the mana ability must have produced mana (found none)",
     );
     assert!(
-        pool.mana.iter().all(|u| !u.is_snow()),
+        pool.count_where(ManaShape::is_snow) == 0,
         "mana produced by a nonsnow source must NOT be snow mana (CR 205.4g)",
     );
     assert!(

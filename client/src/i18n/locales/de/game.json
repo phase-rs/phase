@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Manaquelle wählen",
     "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.",
+    "baseOutput_one": "Grundmenge: {{count}} Mana",
+    "baseOutput_other": "Grundmenge: {{count}} Mana",
+    "baseOutputVariable": "Grundmenge wird bei Aktivierung bestimmt",
     "sacrifice": "Opfern",
     "back": "Zurück zur Manabezahlung",
     "unknownSource": "Manaquelle"
@@ -102,6 +105,24 @@
     "subtitle": "Alle Spieler müssen zustimmen, bevor die Engine einen sicheren Stapelpräfix auflöst.",
     "grant": "Genehmigen",
     "decline": "Priorität behalten"
+  },
+  "sandboxLifeCorrection": {
+    "open": "Leben korrigieren",
+    "title": "Sandbox-Lebenskorrektur",
+    "description": "Nutze die normalen Hand- und Stapelsteuerungen, um eine Kreatur zu wirken und zu verrechnen. Dieses Feld sendet die Sandbox-Aktion SetLife über den vorhandenen Spieladapter.",
+    "scopeNote": "Die Lebenspunkte werden über den Spielerbearbeitungspfad der Engine korrigiert; dies ist weder Schaden noch ein Karteneffekt. Aufdecken einer verborgenen Hand, regelgerechtes Abwerfen und ein vorab vereinbartes Undo vor dem Wirken sind nicht Teil dieses Umfangs.",
+    "target": "Spieler",
+    "player": "{{name}} (Spieler {{seat}})",
+    "you": "Du",
+    "opponent": "Gegner",
+    "currentLife": "Aktuelle Lebenspunkte",
+    "newLife": "Neue Lebenspunkte",
+    "submit": "Korrektur anwenden",
+    "submitting": "Korrektur gesendet; das Schließen dieses Felds bricht sie nicht ab.",
+    "applied": "Bestätigter aktueller Lebensstand für {{player}}: {{life}}.",
+    "notApplied": "Die Engine hat diese Korrektur nicht bestätigt. Prüfe den aktuellen Snapshot, bevor du es erneut versuchst.",
+    "failed": "Die Korrektur konnte nicht gesendet werden.",
+    "stale": "Das Spiel hat sich während der Bearbeitung geändert. Schließe dieses Feld und öffne es erneut, um mit dem aktuellen Snapshot zu beginnen."
   },
   "debugCreate": {
     "copies": "Kopien",
@@ -565,9 +586,6 @@
     "pendingCheaper": "Nächster Zauber kostet {{amount}} weniger",
     "companion": "Gefährte",
     "unboundedTooltip": "Unbegrenzt: {{resource}} (∞)",
-    "unboundedScheduledTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; eine endliche Anzahl wird gewählt",
-    "unboundedScheduledYouTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; du nennst die Anzahl",
-    "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben",
     "unboundedConditionalYouTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben, und andernfalls nennst du die Anzahl",
     "unboundedMixedTooltip": "Unbegrenzt: {{resource}} (∞) — ein Teil dieser Gruppe hat eine ausstehende Auflösung; ein Teil bleibt unbegrenzt",
@@ -650,6 +668,7 @@
     "libraryCount_one": "Bibliothek ({{count}} Karte)",
     "libraryCount_other": "Bibliothek ({{count}} Karten)",
     "playFromTop": "{{name}} von oben aus der Bibliothek spielen",
+    "activateFromTop": "{{name}} von oben aus der Bibliothek aktivieren",
     "topOfLibrary": "oberste Karte der Bibliothek",
     "indicatorOpponentPrefix": "Geg ",
     "graveyardLower": "Friedhof",
@@ -657,6 +676,7 @@
     "zoneTitle": "{{zone}} ({{count}})",
     "noCardsIn": "Keine Karten in {{zone}}",
     "castFromZone": "Aus {{zone}} wirken: {{name}}",
+    "activateFromZone": "Aus {{zone}} aktivieren: {{name}}",
     "viewCount": "{{count}} ansehen",
     "castableCount": "{{zone}} — {{count}} wirkbar"
   },
@@ -788,7 +808,16 @@
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
     "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stapel",
     "collapsePanel": "Stapelleiste einklappen",
     "expandPanel": "Stapelleiste ausklappen",
@@ -840,8 +869,10 @@
     "chooseNewTargetForCopy": "Wähle ein neues Ziel für die Kopie",
     "chooseTargetForCopy": "Wähle ein Ziel für die Kopie",
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
+    "chooseCreatureToEquip": "Wähle eine Kreatur zum Ausrüsten",
     "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
+    "chooseTokenHost": "Wähle, woran der Spielstein angelegt wird",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
@@ -875,6 +906,7 @@
     },
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
+    "keepCurrentTarget": "Dieses Ziel behalten",
     "skip": "Überspringen",
     "opponentChoice": "(nach Wahl des Gegners)",
     "chooseNewTarget": "Wähle das neue Ziel des Zauberspruchs",
@@ -1131,6 +1163,8 @@
       "usePowder": "{{name}} verwenden",
       "powderDescription": "Schicke jede Karte auf der Hand ins Exil, ziehe die gleiche Anzahl — kein Mulligan",
       "powderTooltip": "Schicke jede Karte auf deiner Hand ins Exil und ziehe die gleiche Anzahl. Kein Mulligan — Anzahl und unter die Bibliothek zu legende Karten bleiben unberührt.",
+      "freeReveal": "Aufdecken und neu ziehen (gratis)",
+      "freeRevealDescription": "Decke deine Hand auf, mische sie zurück und ziehe 7 — gratis, keine Karten unter die Bibliothek, kein Mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Starthand · London-Mulligan",
       "reviewTitle": "Überprüfe deine Starthand",
@@ -1348,8 +1382,6 @@
     },
     "config": {
       "startingLife": "Startleben",
-      "experimentalDungeons": "Experimentelle Dungeons",
-      "experimentalDungeonsHelp": "Baldur's Gate Wilderness bei Dungeon-Optionen und Initiative anbieten. Experimentell und inoffiziell.",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {
@@ -1698,6 +1730,10 @@
       "title": "Jace stärken",
       "subtitle": "Wähle einen Jace-Spielstein, den du kontrollierst, für +{{count}} Loyalität"
     },
+    "spellCopyOrder": {
+      "title": "Kopien ordnen",
+      "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
+    },
     "collectEvidence": {
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"
@@ -2008,7 +2044,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Gegner wählen",
-    "subtitle": "Wähle, welcher Gegner die Wahl trifft."
+    "subtitle": "Wähle, welcher Gegner die Wahl trifft.",
+    "orderTitle": "Nächsten Spieler wählen",
+    "orderSubtitle": "Wähle, für wen du als Nächstes auswählst.",
+    "substituteTitle": "Spieler wählen",
+    "substituteSubtitle": "Wähle, wer diese Wahl trifft."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2266,7 +2306,9 @@
     "accept": "Ja",
     "decline": "Nein",
     "sourceFallback": "Effekt",
-    "entryLabel": "{{source}} – {{decision}}"
+    "entryLabel": "{{source}} – {{decision}}",
+    "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
+    "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effekt",
@@ -2346,6 +2388,8 @@
     "confirm": "Bestätigen"
   },
   "replacement": {
+    "remember": "Diese Wahl für dieses Spiel merken",
+    "savedChoice": "Ersatzeffekt: {{choice}}",
     "eyebrow": "Auflösungsreihenfolge",
     "title": "Ersatzeffekte",
     "orderSubtitle": "Diese Effekte ändern alle, wie dieses Ereignis abläuft. Ziehe, um die Reihenfolge festzulegen — der zuletzt angewendete Effekt ist der wirksame (CR 616.1).",
@@ -2372,7 +2416,8 @@
     "confirm": "Bestätigen",
     "badgeNewTarget": "Neues Ziel",
     "slotLabel": "Ziel {{index}}: {{current}} → {{chosen}}",
-    "unselected": "unverändert"
+    "unselected": "unverändert",
+    "keep": "Behalten"
   },
   "separatePiles": {
     "chooserName": "Spieler {{number}}",
@@ -2589,8 +2634,8 @@
     "close": "KI-Entscheidungsfenster schließen"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Du hast Priorität",
+    "yourPriorityReason": "Du hast Priorität — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2634,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Anstarr-Wettbewerb",
+      "breathHolding": "Luftanhalte-Wettbewerb"
+    },
+    "versus": "{{first}} gegen {{second}}",
+    "instructions": "Klicke, tippe oder drücke die Leertaste, so lange du kannst. Wer zuerst {{seconds}} Sekunden lang aufhört, verliert.",
+    "status": {
+      "pending": "Warten auf den Beginn des Wettbewerbs…",
+      "preparing": "Mach dich bereit…",
+      "go": "LOS! Weiterklicken!",
+      "paused": "Wettbewerb pausiert, bis ein Spieler sich wieder verbindet…",
+      "spectating": "Du siehst dem Wettbewerb zu…",
+      "resolving": "Ergebnis wird ermittelt…"
+    },
+    "button": {
+      "wait": "Auf LOS warten…",
+      "active": "Weiterklicken!"
+    },
+    "you": "Du",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "Du hast den Wettbewerb gewonnen!",
+      "lost": "Du hast den Wettbewerb verloren.",
+      "winner": "{{name}} hat den Wettbewerb gewonnen.",
+      "tie": "Unentschieden – nichts passiert.",
+      "cancelled": "Der Wettbewerb wurde abgebrochen – nichts passiert."
+    }
   }
 }

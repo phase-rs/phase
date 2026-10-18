@@ -78,8 +78,9 @@ describe("shared adapter contract fixtures", () => {
     const fixture = readFixture<{ type: "GameStarted"; data: { state: GameState } }>("game_started.json");
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
-      "host",
+      "join",
       { main_deck: [], sideboard: [] },
+      "ABC123",
     );
     const listener = vi.fn();
     adapter.onEvent(listener);
@@ -107,8 +108,9 @@ describe("shared adapter contract fixtures", () => {
 
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
-      "host",
+      "join",
       { main_deck: [], sideboard: [] },
+      "ABC123",
     );
     const listener = vi.fn();
     adapter.onEvent(listener);

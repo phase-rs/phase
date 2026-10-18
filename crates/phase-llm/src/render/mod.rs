@@ -8,4 +8,5 @@ pub mod action;
 #[cfg(feature = "draft")]
 pub mod draft;
 pub mod game;
+pub mod history;
 pub mod text;

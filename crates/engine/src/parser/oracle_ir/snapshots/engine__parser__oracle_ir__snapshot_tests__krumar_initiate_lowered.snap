@@ -1,0 +1,70 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Endure",
+        "amount": {
+          "type": "Ref",
+          "qty": {
+            "type": "Variable",
+            "name": "X"
+          }
+        },
+        "subject": {
+          "type": "SelfRef"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "X",
+                "Black"
+              ],
+              "generic": 0
+            }
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "PayLife",
+            "amount": {
+              "type": "Ref",
+              "qty": {
+                "type": "Variable",
+                "name": "X"
+              }
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{X}{B}, {T}, Pay X life: ~ endures X. Activate only as a sorcery.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

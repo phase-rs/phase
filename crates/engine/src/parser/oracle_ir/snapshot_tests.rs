@@ -12,10 +12,11 @@ use crate::parser::oracle_ir::trigger::TriggerNodeIr;
 use crate::parser::{parse_oracle_text, parse_oracle_text_traced};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, TargetChoiceTiming,
-    TargetFilter, TriggerCondition, TypedFilter,
+    AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, QuantityExpr,
+    QuantityRef, TargetChoiceTiming, TargetFilter, TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::DistributionUnit;
+use crate::types::mana::{ManaCost, ManaCostShard};
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
     matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
@@ -757,25 +758,27 @@ fn trigger_die_table_scanner_preserves_non_table_and_unsupported_rows() {
 /// to give it a private one. `OracleDocIr.diagnostics` is the single warning
 /// channel; `parse_warnings` is a copy of it.
 ///
-/// Fixture is pool-verified, not synthetic: Boing!'s Oracle text is verbatim
-/// MTGJSON, and it carries a live `DynamicQty` swallowed-clause warning — "scry
-/// a number of cards equal to the result" lowers to a fixed `Scry` count, so
-/// the die-result-dependent quantity is genuinely dropped from the parse. A
-/// synthetic fixture could go vacuously green if the detector stopped firing;
-/// this one cannot without that separately-tracked defect being fixed.
+/// Fixture is pool-verified, not synthetic: Hinder's Oracle text is verbatim
+/// MTGJSON, and it carries a live `Replacement_Instead` swallowed-clause warning —
+/// "put that card on your choice of the top or bottom of its owner's library
+/// instead of into that player's graveyard" has no modeled countered-spell
+/// destination, so the redirect is genuinely dropped from the parse. A synthetic
+/// fixture could go vacuously green if the detector stopped firing; this one
+/// cannot without that separately-tracked defect being fixed.
 ///
-/// (Intermediate Chirography previously served as this fixture, but issue
+/// (Boing! previously served as this fixture, until its "scry a number of cards
+/// equal to the result" stopped swallowing: the count position now reads or
+/// fails closed. Intermediate Chirography served before that, until issue
 /// #5638's fix taught `parse_class_oracle_text` to compose a level-gated
 /// trigger's printed intervening-if with its `ClassLevelGE` condition instead
-/// of overwriting it — the card's `Duration_ThisTurn` warning was that
-/// overwrite silently dropping the "this turn" scoped condition, and is gone
-/// now that the condition survives.)
+/// of overwriting it.)
 #[test]
 fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
     let (ir, lowered) = parse_two_layer(
-        "Return target creature to its owner's hand, then roll a six-sided die. \
-         If the result is 3 or less, scry a number of cards equal to the result.",
-        "Boing!",
+        "Counter target spell. If that spell is countered this way, put that card on your \
+         choice of the top or bottom of its owner's library instead of into that player's \
+         graveyard.",
+        "Hinder",
         &["Instant"],
         &[],
     );
@@ -2214,9 +2217,10 @@ fn evils_thrall() {
     insta::assert_json_snapshot!("evils_thrall_lowered", &lowered);
 }
 
-// CR 608.2c: KeywordOverride — a "TargetHasKeywordInstead"-conditioned clause
-// builds its def from the parsed effect + condition and attaches as the prior
-// def's `sub_ability` (Conformer Shuriken's granted attack trigger).
+// CR 208.1 + CR 608.2c: a typed "if that creature has greater power than ~"
+// gate (QuantityCheck) on the tap's chained clause, linked to the tap's target
+// through `TargetReadOrigin::ParentAnnouncement`, with "the difference" bound
+// to the gate's operands (Conformer Shuriken's granted attack trigger).
 #[test]
 fn conformer_shuriken() {
     let (ir, lowered) = parse_two_layer(
@@ -3333,4 +3337,50 @@ fn druid_of_the_emerald_grove_trigger_owns_all_three_printed_rows() {
          lower bound 0, because CR 706.2 selects on the post-modifier result and \
          `apply_modifier` clamps it to 0) and the open-ended \"20+\" (u8::MAX)"
     );
+}
+
+// SHAPE: CR 107.3a + CR 602.5d + CR 701.63a: the full printed activation
+// keeps the same X in mana, life payment and Endure, with sorcery timing.
+#[test]
+fn krumar_initiate_preserves_full_activation_in_both_layers() {
+    let (ir, lowered) = parse_two_layer(
+        "{X}{B}, {T}, Pay X life: This creature endures X. Activate only as a sorcery. (Put X +1/+1 counters on it or create an X/X white Spirit creature token.)",
+        "Krumar Initiate", &["Creature"], &["Human", "Cleric"],
+    );
+    assert_eq!(ir.items.len(), 1);
+    assert_eq!(lowered.abilities.len(), 1);
+    let def = &lowered.abilities[0];
+    assert!(matches!(def.effect.as_ref(), Effect::Endure {
+        amount: QuantityExpr::Ref { qty: QuantityRef::Variable { name } }, subject: TargetFilter::SelfRef,
+    } if name == "X"));
+    assert_eq!(
+        def.cost,
+        Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X, ManaCostShard::Black],
+                        generic: 0
+                    }
+                },
+                AbilityCost::Tap,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        }
+                    }
+                },
+            ]
+        })
+    );
+    assert_eq!(
+        def.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery]
+    );
+    assert!(!ability_has_unimplemented(def));
+    assert!(def.sub_ability.is_none());
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("krumar_initiate_ir", &ir);
+    insta::assert_json_snapshot!("krumar_initiate_lowered", &lowered);
 }

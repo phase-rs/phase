@@ -31,6 +31,29 @@ fn abandon_as_enters_choice_for_scenario_setup(
     state: &mut GameState,
     controller: PlayerId,
 ) -> bool {
+    // CR 614.12a: a pre-entry as-enters choice parks the entry itself. Finish
+    // the entry with nothing chosen: mark the choice applied and resume the
+    // parked delivery through the shared replacement resume.
+    if crate::game::replacement::pending_entry_named_choice_is_live(state) {
+        let pending = state
+            .pending_replacement
+            .as_mut()
+            .expect("a live pre-entry choice owns the pending replacement");
+        pending.pin_delivery_boundary();
+        let rid = pending.candidates[0];
+        pending.proposed.mark_applied(rid);
+        let mut events = Vec::new();
+        if crate::game::engine_replacement::handle_replacement_choice(state, 0, &mut events)
+            .is_err()
+        {
+            return false;
+        }
+        // Another as-enters prompt of the same entry is abandoned the same way.
+        if !abandon_as_enters_choice_for_scenario_setup(state, controller) {
+            state.waiting_for = WaitingFor::Priority { player: controller };
+        }
+        return true;
+    }
     if !matches!(
         state.waiting_for,
         WaitingFor::NamedChoice { .. } | WaitingFor::ChooseOneOfBranch { .. }

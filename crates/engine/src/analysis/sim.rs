@@ -286,11 +286,13 @@ mod tests {
                 amount: 2,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(9), 3)],
                 total_damage: 3,
+                source_incarnations: vec![],
             },
             GameEvent::TokenCreated {
                 object_id: ObjectId(20),

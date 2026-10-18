@@ -7203,6 +7203,42 @@ scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
 preset_id = "05d9cd8a-966d-5502-a296-62da2690493d"
 
 [[token]]
+id = "05eb3cff-0ceb-5d8f-81f5-43379f2da399"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Inscription of Insight",
+    "Skyclave Apparition",
+]
+set_code = "PLST"
+set_name = "The List"
+collector_number = "TM3C-6"
+released_at = "2020-09-26"
+type_line = "Token Creature — Illusion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
+[token.body]
+display_name = "Illusion"
+core_types = ["Creature"]
+subtypes = ["Illusion"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Skyclave Apparition"
+scryfall_oracle_id = "d90af00a-d322-4265-9954-7b1e80702e18"
+scryfall_id = "5865cede-e19e-4132-8060-862b00c1052a"
+
+[token.token_image_ref]
+scryfall_id = "4f4c6c9f-2cb5-4450-b1be-aeb50cb7cbe0"
+scryfall_oracle_id = "ec406831-a1d0-4e41-bd09-f76d0ba206ae"
+preset_id = "05eb3cff-0ceb-5d8f-81f5-43379f2da399"
+
+[[token]]
 id = "0628f530-1f4d-5171-b7d0-da2a155273e6"
 category = "Creature"
 fidelity = "Full"
@@ -8623,6 +8659,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -17914,6 +17951,11 @@ colors = ["Red"]
 keywords = []
 
 [[token.source_card_refs]]
+card_name = "Goblin Rabblemaster"
+scryfall_oracle_id = "24661b81-6bee-4ad8-b3ab-53cb65005c51"
+scryfall_id = "cba7f673-4dde-4165-80ef-be3ad967a6a6"
+
+[[token.source_card_refs]]
 card_name = "Sling-Gang Lieutenant"
 scryfall_oracle_id = "4e93b23c-a7f7-4bdd-bbca-0dc48bb5c223"
 scryfall_id = "36633f10-ea38-421c-ab80-9862eb18d6da"
@@ -22236,6 +22278,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -22269,11 +22312,6 @@ subtypes = [
 supertypes = []
 colors = ["Black"]
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Nettlecyst"
-scryfall_oracle_id = "04c7f4fe-2098-4311-866d-6733c08d5178"
-scryfall_id = "91ef92af-de6b-4dc4-81ab-8e527cb96fdd"
 
 [[token.source_card_refs]]
 card_name = "Bonehoard"
@@ -22384,11 +22422,6 @@ scryfall_id = "62f449cc-461e-4e89-8cd2-83e539bb40f4"
 card_name = "Batterskull"
 scryfall_oracle_id = "d12e5ce0-5705-4c35-9a93-b883db52c80c"
 scryfall_id = "2abc5ac8-b944-4b71-b022-c78183eb92c3"
-
-[[token.source_card_refs]]
-card_name = "Tangleweave Armor"
-scryfall_oracle_id = "b9cec31a-9891-414f-b528-954612168832"
-scryfall_id = "9fd7ac91-8f76-4fd1-afc5-9a3fd5ce6894"
 
 [[token.source_card_refs]]
 card_name = "Batterskull"
@@ -28156,6 +28189,42 @@ scryfall_oracle_id = "3c27a325-4490-44e6-aa9a-b591697486c8"
 preset_id = "1f94e698-6428-5165-9437-8a45a5d824f4"
 
 [[token]]
+id = "1fa8e302-484f-5ace-a6d2-15fb044295a9"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Profane Transfusion"]
+set_code = "PLST"
+set_name = "The List"
+collector_number = "TC18-22"
+released_at = "2020-09-26"
+type_line = "Token Artifact Creature — Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
+[token.body]
+display_name = "Horror"
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Horror"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Profane Transfusion"
+scryfall_oracle_id = "2eaee808-b72a-4950-ab4f-ab8e8d12f838"
+scryfall_id = "67d5197d-031d-4b6b-8aa2-be34d6ca2d9c"
+
+[token.token_image_ref]
+scryfall_id = "c6244ae8-5676-4f6c-b488-f47dd4709dac"
+scryfall_oracle_id = "7f03946b-e602-4624-bf1e-ed240b883fca"
+preset_id = "1fa8e302-484f-5ace-a6d2-15fb044295a9"
+
+[[token]]
 id = "1fb16f1b-36a5-5421-968c-19c83c42fdca"
 category = "Creature"
 fidelity = "Full"
@@ -33145,6 +33214,31 @@ scryfall_id = "24ca1567-2a12-4c31-adb9-3c71f1cfd51b"
 scryfall_id = "e8ae8c31-70cb-44e1-a105-f4d29f1f9356"
 scryfall_oracle_id = "445f23a7-2a2a-4fa5-9810-560501e08748"
 preset_id = "24eb5aaf-70f4-5d91-8762-0c027557b192"
+
+[[token]]
+id = "2511f6ea-5698-56d9-b96d-fd1917eaf4a8"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "9"
+released_at = "2027-04-09"
+type_line = "Token Creature — Missing"
+
+[token.body]
+display_name = "Mindless-One"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Missing"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "21d44eef-8dbc-4f2f-9be3-d6c43d4b405c"
+scryfall_oracle_id = "1a0d84f7-d7fd-4794-b6ca-565fc111d701"
+preset_id = "2511f6ea-5698-56d9-b96d-fd1917eaf4a8"
 
 [[token]]
 id = "2549f082-332d-5da3-a920-fb2d0fdf3632"
@@ -53230,6 +53324,43 @@ scryfall_oracle_id = "ff86d8fc-5242-405e-b5e3-f9ff73296794"
 preset_id = "3e43a418-8c17-5ed2-b92b-42dbe4c96b4b"
 
 [[token]]
+id = "3e43ea41-fe1d-53dc-9c31-d9017d90aa4e"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Incubation // Incongruity",
+    "Rapid Hybridization",
+]
+set_code = "PLST"
+set_name = "The List"
+collector_number = "TLCC-13"
+released_at = "2020-09-26"
+type_line = "Token Creature — Frog Lizard"
+
+[token.body]
+display_name = "Frog Lizard"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Frog",
+    "Lizard",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Rapid Hybridization"
+scryfall_oracle_id = "06692cd9-ac2f-4a32-8fd1-043ba3c0fe71"
+scryfall_id = "1dd85561-28b9-464c-a1b5-81c3a43a4f38"
+
+[token.token_image_ref]
+scryfall_id = "b14352e0-98c8-4dbe-bee7-569ff5b439e3"
+scryfall_oracle_id = "8653c69b-99a9-4881-a14c-68ba928c34d5"
+preset_id = "3e43ea41-fe1d-53dc-9c31-d9017d90aa4e"
+
+[[token]]
 id = "3e61718a-ebb5-5b67-929d-1eafdafd1388"
 category = "Creature"
 fidelity = "Full"
@@ -54553,6 +54684,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -62059,6 +62191,422 @@ scryfall_oracle_id = "eac25f12-6459-438c-a09e-93e23d2cf80d"
 preset_id = "48db8a3b-57f9-5eae-8344-4b46db06f111"
 
 [[token]]
+id = "4936a471-c34f-536c-bac9-dfdaf15fdba9"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "Alicia Masters, Skilled Sculptor",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ant-Man's Army",
+    "Ant-Man, Elusive Avenger",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Avengers: Under Siege",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Bejeweled Warg",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo's Gambit",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "Chira, All In",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Hero",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Crossover Collaboration",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Death to Our Enemies",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dori, Bearer of Friends",
+    "Dragon-Cursed Halls",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Gleaming Splendor",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Heroes for Hire",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Long-Bodied Grey Dog",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orcrist, Goblin-cleaver",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "Puppet Master, String Puller",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smaug the Impenetrable",
+    "Smaug the Magnificent",
+    "Smaug, Wicked Worm",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Stark Industries Executive",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Matrix of Time",
+    "The Misty Mountains Cold",
+    "The Reaver Cleaver",
+    "The Sackville-Bagginses",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Thorin, Company's Leader",
+    "Thorin, King of Durin's Folk",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Typhoid Mary, Fractured",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "PLST"
+set_name = "The List"
+collector_number = "TSNC-17"
+released_at = "2020-09-26"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Smuggler's Share"
+scryfall_oracle_id = "17b29350-4f37-4552-8192-4856b15345f9"
+scryfall_id = "b835e0c3-7d63-402e-8752-7e55e974b777"
+
+[[token.source_card_refs]]
+card_name = "Excavation Technique"
+scryfall_oracle_id = "bcd3e6a1-7b76-408d-9236-3791c3e1064a"
+scryfall_id = "ff1f6e62-eb7b-4d9b-8034-f227f655431f"
+
+[[token.source_card_refs]]
+card_name = "Prosperous Innkeeper"
+scryfall_oracle_id = "da785227-cf8a-4d44-9e7c-fc909ea868f2"
+scryfall_id = "ef5793d2-58e7-4da2-9777-8db45abc09c0"
+
+[token.token_image_ref]
+scryfall_id = "a23b05a9-5476-493d-8de7-7c14e726e9be"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "4936a471-c34f-536c-bac9-dfdaf15fdba9"
+
+[[token]]
 id = "49481296-5e87-500b-9d95-8011f432466a"
 category = "Creature"
 fidelity = "Full"
@@ -65516,6 +66064,140 @@ scryfall_id = "213bdaac-8044-4af3-b568-2859e3087082"
 scryfall_id = "48c184d8-159a-47e3-8107-c7e7c5788e1d"
 scryfall_oracle_id = "8653c69b-99a9-4881-a14c-68ba928c34d5"
 preset_id = "4d6fd4f9-afa8-5996-a766-89c7b5909751"
+
+[[token]]
+id = "4d898e29-351c-5524-b56a-75ceed720223"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Acererak the Archlich",
+    "Aphemia, the Cacophony",
+    "Archdemon of Unx",
+    "Army of the Damned",
+    "Assemble the Rank and Vile",
+    "Awaken the Erstwhile",
+    "Bone Miser",
+    "Boneclad Necromancer",
+    "Bridge from Below",
+    "Captive Audience",
+    "Cellar Door",
+    "Cemetery Reaper",
+    "Cradle of the Accursed",
+    "Cryptbreaker",
+    "Cryptcaller Chariot",
+    "Curse of Disturbance",
+    "Curse of Shallow Graves",
+    "Dark Salvation",
+    "Death Tyrant",
+    "Diregraf Colossus",
+    "Doomed Dissenter",
+    "Drana's Chosen",
+    "Dread Summons",
+    "Drunau Corpse Trawler",
+    "Dunes of the Dead",
+    "Dying to Serve",
+    "Embalmed Ascendant",
+    "Empty the Pits",
+    "Endless Ranks of the Dead",
+    "Feast or Famine",
+    "Field of the Dead",
+    "From Under the Floorboards",
+    "Ghoulcaller Gisa",
+    "Ghoulcaller's Accomplice",
+    "Gisa's Bidding",
+    "Graf Harvest",
+    "Grave Titan",
+    "Gravedig",
+    "Graveyard Marshal",
+    "Grim Reaper's Scythe",
+    "Grixis Slavedriver",
+    "Havengul Runebinder",
+    "Headless Rider",
+    "Hildibrand Manderville // Gentleman's Rise",
+    "Hour of Promise",
+    "Hour of Victory",
+    "Invasion of Innistrad // Deluge of the Dead",
+    "Kalitas, Traitor of Ghet",
+    "Lair of the Ashen Idol",
+    "Liliana's Devotee",
+    "Liliana's Mastery",
+    "Liliana's Reaver",
+    "Liliana, Death's Majesty",
+    "Liliana, Dreadhorde General",
+    "Liliana, Heretical Healer // Liliana, Defiant Necromancer",
+    "Liliana, the Last Hope",
+    "Liliana, the Last Hope Emblem",
+    "Maalfeld Twins",
+    "Magus of the Bridge",
+    "Midnight Ritual",
+    "Moan of the Unhallowed",
+    "Necromancer's Covenant",
+    "Necromancer's Stockpile",
+    "Necromaster Dragon",
+    "Necromentia",
+    "Necrotic Hex",
+    "Never // Return",
+    "Nevinyrral, Urborg Tyrant",
+    "Noosegraf Mob",
+    "Null Caller",
+    "Oath of Liliana",
+    "Oglor, Devoted Assistant",
+    "Open the Graves",
+    "Overseer of the Damned",
+    "Rakshasa Gravecaller",
+    "Rank Officer",
+    "Reap the Seagraf",
+    "Rise from the Tides",
+    "Risen Necroregent",
+    "Rotlung Reanimator",
+    "Rotted Ones, Lay Siege",
+    "Sarcomancy",
+    "Shamble Back",
+    "Sidisi, Brood Tyrant",
+    "Skull Skaab",
+    "Stir the Sands",
+    "Suspicious Shambler",
+    "Syphon Flesh",
+    "The Book of Vile Darkness",
+    "The Fourth Sphere",
+    "The Necrobloom",
+    "Thomil, the Destroyer",
+    "Tobias, Doomed Conqueror",
+    "Tormod, the Desecrator",
+    "Tymaret Calls the Dead",
+    "Undead Alchemist",
+    "Undead Servant",
+    "Unscythe, Killer of Kings",
+    "Varina, Lich Queen",
+    "Vile Rebirth",
+    "Wakedancer",
+    "Wand of Orcus",
+    "Waste Not",
+    "Wight",
+    "Xathrid Necromancer",
+    "Zahur, Glory's Past",
+    "Zombie Infestation",
+]
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "10"
+released_at = "2027-04-09"
+type_line = "Token Creature — Zombie"
+
+[token.body]
+display_name = "Zombie"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Zombie"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "5e16386a-d478-475b-8e9b-edef62cae02b"
+scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
+preset_id = "4d898e29-351c-5524-b56a-75ceed720223"
 
 [[token]]
 id = "4d9f640b-caf7-50df-8538-9d516c0f9847"
@@ -88638,6 +89320,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -88874,6 +89557,40 @@ scryfall_id = "d05b3f79-74d0-4756-b7e7-1cd17685bbb7"
 scryfall_id = "277c8c56-11a6-4aff-aaee-b9572cc7c6ef"
 scryfall_oracle_id = "ebddf9b8-fd1a-4a6b-bec8-3a63485e36c0"
 preset_id = "6549d606-ded2-5c18-9057-c511e0e0d75a"
+
+[[token]]
+id = "656cbc76-bc35-593e-ba4f-026f97b49be2"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Nadir Kraken",
+    "The Watcher in the Water",
+]
+set_code = "PLST"
+set_name = "The List"
+collector_number = "TMKC-9"
+released_at = "2020-09-26"
+type_line = "Token Creature — Tentacle"
+
+[token.body]
+display_name = "Tentacle"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Tentacle"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Nadir Kraken"
+scryfall_oracle_id = "5a73d439-bd78-42e1-90ae-eedd30536881"
+scryfall_id = "81690a2f-29a7-4476-a245-e6c8a9d19757"
+
+[token.token_image_ref]
+scryfall_id = "ac0260f4-9d56-4590-b944-66a9171a22d0"
+scryfall_oracle_id = "82adaeee-e011-49db-af53-fda6c2b192d5"
+preset_id = "656cbc76-bc35-593e-ba4f-026f97b49be2"
 
 [[token]]
 id = "658683d1-697c-5e43-b45c-37f98fb74631"
@@ -91760,6 +92477,38 @@ scryfall_id = "c84db1e2-855c-4169-a9cc-a54c73c14e0c"
 scryfall_id = "2770f887-7e96-44d1-864a-8c0504a39785"
 scryfall_oracle_id = "180881c9-5ae7-4810-a17a-06b5994a48a1"
 preset_id = "68fddd02-839b-556e-abc3-c1ec59dcf867"
+
+[[token]]
+id = "68ff6437-ab9e-5fc6-812a-4a9ea70662d9"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "8"
+released_at = "2027-04-09"
+type_line = "Token Enchantment Creature — Spirit Sorcerer"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Spirit Sorcerer Token"
+power = 3
+toughness = 3
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = [
+    "Spirit",
+    "Sorcerer",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[token.token_image_ref]
+scryfall_id = "3b9c4950-9890-4977-87a0-6eba840e1f66"
+scryfall_oracle_id = "9c3c0e04-b222-4bc9-adbe-a3b37cc8c44e"
+preset_id = "68ff6437-ab9e-5fc6-812a-4a9ea70662d9"
 
 [[token]]
 id = "69130850-421b-513c-a689-31b3e7b2e49a"
@@ -99178,6 +99927,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -101107,6 +101857,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -117209,6 +117960,34 @@ scryfall_id = "cae61a9d-39fc-4c25-adec-d578d57c2903"
 scryfall_id = "a4cd989d-e274-4058-876f-3c20f28def0d"
 scryfall_oracle_id = "b2224843-8274-4872-a7ca-2adf69cc066b"
 preset_id = "81684c2e-dac4-5a01-8043-979f261b7960"
+
+[[token]]
+id = "8178df93-47e0-59a4-946d-4d3a740c7f77"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "12"
+released_at = "2027-04-09"
+type_line = "Token Creature — Giant"
+
+[token.body]
+display_name = "Giant"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Giant"]
+supertypes = []
+colors = [
+    "Red",
+    "Blue",
+]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "0689b1b8-84be-4cc8-be4b-4461fefa885b"
+scryfall_oracle_id = "22be49fa-33a6-47fa-9bfc-f06e044d3cdc"
+preset_id = "8178df93-47e0-59a4-946d-4d3a740c7f77"
 
 [[token]]
 id = "818314a8-e3ad-595d-8913-2c1df4e162af"
@@ -139205,11 +139984,6 @@ scryfall_oracle_id = "da93264e-4e04-401a-9809-e4e1056cf604"
 scryfall_id = "5e1c14a0-cd68-45fc-a127-422ca6113048"
 
 [[token.source_card_refs]]
-card_name = "Shadrix Silverquill"
-scryfall_oracle_id = "2143f413-7baa-4fd6-a7ca-32f52bfa553f"
-scryfall_id = "cf3e5f36-b024-4342-846d-2cf1d4965ca1"
-
-[[token.source_card_refs]]
 card_name = "Fain, the Broker"
 scryfall_oracle_id = "31b990e3-9bad-4b0a-a9d5-f5b9ed2ad0b0"
 scryfall_id = "f5829ea0-1f41-46ba-a5e6-b7bd7051a591"
@@ -152500,9 +153274,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Loot Dispute",
     "Rite of the Dragoncaller",
@@ -155099,6 +155875,11 @@ subtypes = ["Snake"]
 supertypes = []
 colors = ["Black"]
 keywords = ["Deathtouch"]
+
+[[token.source_card_refs]]
+card_name = "Ophiomancer"
+scryfall_oracle_id = "55eca80c-dcd8-4c2f-aa0f-fb0aec7b80f7"
+scryfall_id = "da04690b-82e2-48e5-bb80-55d6ae28be94"
 
 [[token.source_card_refs]]
 card_name = "Ophiomancer"
@@ -160082,6 +160863,7 @@ source_card_names = [
     "Tireless Provisioner",
     "Tivit, Seller of Secrets",
     "Tokka & Rahzar, Unsupervised",
+    "Treasure",
     "Treasure Chest",
     "Treasure Cove",
     "Treasure Dredger",
@@ -160324,11 +161106,6 @@ scryfall_oracle_id = "1e9b0fd6-5aae-401a-8df5-d94ce6442696"
 scryfall_id = "35cd0122-0b38-4aae-84cd-4d5a8e2ae2f5"
 
 [[token.source_card_refs]]
-card_name = "Excavation Technique"
-scryfall_oracle_id = "bcd3e6a1-7b76-408d-9236-3791c3e1064a"
-scryfall_id = "ff1f6e62-eb7b-4d9b-8034-f227f655431f"
-
-[[token.source_card_refs]]
 card_name = "The Reaver Cleaver"
 scryfall_oracle_id = "37a2a31d-51e6-4c07-b4c2-b206ad40eb42"
 scryfall_id = "10e6f41c-cb5a-48ea-9ae6-86249bcce629"
@@ -160343,11 +161120,6 @@ card_name = "Young Red Dragon // Bathe in Gold"
 face_name = "Bathe in Gold"
 scryfall_oracle_id = "2f865ae9-9328-4f6f-924f-d5e0a65aaa96"
 scryfall_id = "2e391516-e04f-4432-aaa2-ee90ee564330"
-
-[[token.source_card_refs]]
-card_name = "Prosperous Innkeeper"
-scryfall_oracle_id = "da785227-cf8a-4d44-9e7c-fc909ea868f2"
-scryfall_id = "ef5793d2-58e7-4da2-9777-8db45abc09c0"
 
 [[token.source_card_refs]]
 card_name = "Xorn"
@@ -162039,6 +162811,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -164951,6 +165724,35 @@ scryfall_id = "9f12381b-822f-4e45-bb53-fade9e51f10e"
 scryfall_id = "d27b3b91-8bef-4d3c-84ef-5015ca9e472c"
 scryfall_oracle_id = "bfa57f61-3811-43da-b73e-90e3e5b0b2c2"
 preset_id = "b73ea419-17f3-538f-a806-124a03513cf3"
+
+[[token]]
+id = "b73fc05b-1b5f-5843-9386-261cd34f06c9"
+category = "Creature"
+fidelity = "Full"
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "3"
+released_at = "2027-04-09"
+type_line = "Token Creature — Angel"
+rules_text = "Flying, vigilance"
+
+[token.body]
+display_name = "Angel"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = [
+    "Flying",
+    "Vigilance",
+]
+
+[token.token_image_ref]
+scryfall_id = "481ff636-8343-4eb2-93cf-48b94c9ecfdb"
+scryfall_oracle_id = "9d256142-cae2-45d2-ab8f-5b390b403481"
+preset_id = "b73fc05b-1b5f-5843-9386-261cd34f06c9"
 
 [[token]]
 id = "b753c514-001a-5b68-8410-63ccf2c36ed1"
@@ -170941,6 +171743,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -173300,6 +174103,11 @@ keywords = ["Decayed"]
 [[token.source_card_refs]]
 card_name = "Wilhelt, the Rotcleaver"
 scryfall_oracle_id = "eada96a1-4964-4ad0-b0e3-2df08d6ae188"
+scryfall_id = "a90a9691-b131-44e9-b39a-c68ef10b18d3"
+
+[[token.source_card_refs]]
+card_name = "Wilhelt, the Rotcleaver"
+scryfall_oracle_id = "eada96a1-4964-4ad0-b0e3-2df08d6ae188"
 scryfall_id = "82471687-46fa-4ccf-a792-180db0a5dd22"
 
 [[token.source_card_refs]]
@@ -175211,6 +176019,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -181140,26 +181949,62 @@ preset_id = "c8ed3fa4-d351-5519-8864-725442d760a3"
 id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Phyrexian Germ"]
+source_card_names = [
+    "Batterbone",
+    "Batterskull",
+    "Bitterthorn, Nissa's Animus",
+    "Bonehoard",
+    "Colossal Dreadmask",
+    "Cranial Ram",
+    "Drossclaw",
+    "Ekthi, Contaminator Priest",
+    "Flayer Husk",
+    "Germ",
+    "Grip of Phyresis",
+    "Kaldra Compleat",
+    "Lashwrithe",
+    "Mandibular Kite",
+    "Mortarpod",
+    "Necropouncer",
+    "Nettlecyst",
+    "Scytheclaw",
+    "Sickleslicer",
+    "Skinwing",
+    "Strandwalker",
+    "Tangleweave Armor",
+]
 set_code = "FDC"
 set_name = "Foundations Commander"
 collector_number = "4"
 released_at = "2024-11-15"
-type_line = "Token Creature — Germ"
+type_line = "Token Creature — Phyrexian Germ"
 
 [token.body]
-display_name = "Germ"
+display_name = "Phyrexian Germ"
 power = 0
 toughness = 0
 core_types = ["Creature"]
-subtypes = ["Germ"]
+subtypes = [
+    "Phyrexian",
+    "Germ",
+]
 supertypes = []
 colors = ["Black"]
 keywords = []
 
+[[token.source_card_refs]]
+card_name = "Nettlecyst"
+scryfall_oracle_id = "04c7f4fe-2098-4311-866d-6733c08d5178"
+scryfall_id = "91ef92af-de6b-4dc4-81ab-8e527cb96fdd"
+
+[[token.source_card_refs]]
+card_name = "Tangleweave Armor"
+scryfall_oracle_id = "b9cec31a-9891-414f-b528-954612168832"
+scryfall_id = "9fd7ac91-8f76-4fd1-afc5-9a3fd5ce6894"
+
 [token.token_image_ref]
 scryfall_id = "53c05e53-84c7-4796-ae02-d778faa5afa6"
-scryfall_oracle_id = "bb549594-35f6-4ac6-9f1f-cfb35784d99e"
+scryfall_oracle_id = "a1c2af93-83c0-4974-b4db-abf95981d4e3"
 preset_id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
 
 [[token]]
@@ -185156,6 +186001,11 @@ card_name = "Field of the Dead"
 scryfall_oracle_id = "aa959340-c869-4caa-92c7-572bd8d23eef"
 scryfall_id = "0b7acd81-1fcb-4758-95f4-e64cb696c9d2"
 
+[[token.source_card_refs]]
+card_name = "Varina, Lich Queen"
+scryfall_oracle_id = "9859fbca-60c3-4a57-a377-51b56f03894f"
+scryfall_id = "9ad062ce-9ab3-4d40-8ec7-ce95e8ce318f"
+
 [token.token_image_ref]
 scryfall_id = "8150833a-9c83-4d00-ae2f-470088700fdb"
 scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
@@ -186281,6 +187131,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -188395,9 +189246,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -195299,6 +196153,11 @@ scryfall_id = "b2d1219f-fadb-4427-8627-e5aef3589600"
 [[token.source_card_refs]]
 card_name = "Swan Song"
 scryfall_oracle_id = "8ddfc283-c9b4-41a5-af88-cf0068e986cc"
+scryfall_id = "6c156edc-bc88-431c-901b-fda8d4804d20"
+
+[[token.source_card_refs]]
+card_name = "Swan Song"
+scryfall_oracle_id = "8ddfc283-c9b4-41a5-af88-cf0068e986cc"
 scryfall_id = "40fc6412-df1c-4bfa-842b-8c3a6f14e19d"
 
 [[token.source_card_refs]]
@@ -197475,6 +198334,65 @@ scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
 preset_id = "da17551b-098e-5199-a273-1d85aa31c2af"
 
 [[token]]
+id = "da34eaa9-643f-5fcd-b5ad-50c02f9038d7"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Ambassador Oak",
+    "Battle for Bretagard",
+    "Dwynen's Elite",
+    "Elderleaf Mentor",
+    "Elfsworn Giant",
+    "Elven Ambush",
+    "Elven Bow",
+    "Elvish Promenade",
+    "Elvish Warmaster",
+    "Exquisite Huntmaster",
+    "Eyeblight Cullers",
+    "Flourishing Defenses",
+    "Galadhrim Ambush",
+    "Gilt-Leaf Ambush",
+    "Hunting Triad",
+    "Imperious Perfect",
+    "Lathril, Blade of the Elves",
+    "Lys Alana Huntmaster",
+    "Nadier, Agent of the Duskenel",
+    "Nath of the Gilt-Leaf",
+    "Presence of Gond",
+    "Prowess of the Fair",
+    "Return Upon the Tide",
+    "Skemfar Elderhall",
+    "Sylvan Offering",
+    "Thorn Lieutenant",
+    "Tyvar Kell",
+    "Windswift Slice",
+    "Wolverine Riders",
+]
+set_code = "MDD"
+set_name = "Marvel: Darkhold Destiny"
+collector_number = "11"
+released_at = "2027-04-09"
+type_line = "Token Creature — Elf Warrior"
+
+[token.body]
+display_name = "Elf Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "72ac66e9-4b4b-4540-b310-e7b3dc04c305"
+scryfall_oracle_id = "dac8a765-6845-4b57-bb79-4ec463436f92"
+preset_id = "da34eaa9-643f-5fcd-b5ad-50c02f9038d7"
+
+[[token]]
 id = "da3796c8-1666-58fd-b962-3e960cd28bdd"
 category = "Creature"
 fidelity = "Full"
@@ -198218,6 +199136,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -198754,6 +199673,37 @@ scryfall_id = "3287775f-7bec-4e8f-bb8d-daf5ce92e4a8"
 scryfall_id = "7b997fe7-69f3-4ccd-b3a7-ef5e0cb7db46"
 scryfall_oracle_id = "67f21c0c-2083-4eda-9dc3-cc8aee42289f"
 preset_id = "db984bd7-474c-5634-81ab-d5a23a73b29b"
+
+[[token]]
+id = "dba7c9be-15ad-5b29-92c4-0109d3037fc2"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Toxrill, the Corrosive"]
+set_code = "PLST"
+set_name = "The List"
+collector_number = "TVOW-6"
+released_at = "2020-09-26"
+type_line = "Token Creature — Slug"
+
+[token.body]
+display_name = "Slug"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Slug"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Toxrill, the Corrosive"
+scryfall_oracle_id = "c71b2325-bde6-4364-a93b-8477ffeb25d8"
+scryfall_id = "d8f8567a-7fb3-43f5-88c8-f403cc85fc25"
+
+[token.token_image_ref]
+scryfall_id = "381c156f-7a9b-45df-b09e-6559c8c36280"
+scryfall_oracle_id = "dfa4ad2d-3ef2-4863-a9d7-340d8ca8d3d9"
+preset_id = "dba7c9be-15ad-5b29-92c4-0109d3037fc2"
 
 [[token]]
 id = "dbcdc2ad-8a30-56df-840b-e8db8edf53cc"
@@ -205396,6 +206346,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -220452,6 +221403,7 @@ source_card_names = [
     "Colossal Dreadmask",
     "Cranial Ram",
     "Drossclaw",
+    "Ekthi, Contaminator Priest",
     "Flayer Husk",
     "Germ",
     "Grip of Phyresis",
@@ -223237,9 +224189,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -227774,6 +228729,54 @@ scryfall_id = "7813d04e-98f5-49cc-832d-ce3fea4b3798"
 scryfall_id = "745947b6-e611-4472-9cbc-ec0805a8b63b"
 scryfall_oracle_id = "bd386399-69f0-4653-96a1-fd05b8fd148c"
 preset_id = "fb4b4216-add5-5e47-b8d8-efe9986e3c5c"
+
+[[token]]
+id = "fb4be947-36aa-5b25-9fad-b65eb281959b"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Blot Out the Sky",
+    "Combat Calligrapher",
+    "Dramatic Finale",
+    "Fain, the Broker",
+    "Felisa, Fang of Silverquill",
+    "Forum Filibuster",
+    "Inkling Summoning",
+    "Inkshield",
+    "Intermediate Chirography",
+    "Mascot Exhibition",
+    "Shadrix Silverquill",
+    "Umbral Juke",
+]
+set_code = "PLST"
+set_name = "The List"
+collector_number = "TSTX-4"
+released_at = "2020-09-26"
+type_line = "Token Creature — Inkling"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Inkling"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Inkling"]
+supertypes = []
+colors = [
+    "Black",
+    "White",
+]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Shadrix Silverquill"
+scryfall_oracle_id = "2143f413-7baa-4fd6-a7ca-32f52bfa553f"
+scryfall_id = "cf3e5f36-b024-4342-846d-2cf1d4965ca1"
+
+[token.token_image_ref]
+scryfall_id = "6bd5937e-115c-411f-b3f0-ab3410726b98"
+scryfall_oracle_id = "fbdbff76-c1ea-47ea-bfcc-7c64c23dad70"
+preset_id = "fb4be947-36aa-5b25-9fad-b65eb281959b"
 
 [[token]]
 id = "fb4ee9b2-1eb8-5465-9fcc-7c7089627d36"

@@ -440,7 +440,8 @@ mod tests {
     use crate::game::layers::evaluate_layers;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, FilterProp, PtValue, QuantityRef, TargetFilter, TargetRef, TypedFilter,
+        ControllerRef, FilterProp, PtValue, QuantityRef, StaticCondition, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1234,5 +1235,65 @@ mod tests {
         // Opponent creature untouched.
         assert_eq!(state.objects[&opp].power, Some(3));
         assert_eq!(state.objects[&opp].toughness, Some(3));
+    }
+
+    /// CR 611.2b: a "for as long as" pump whose condition is false as the
+    /// ability resolves never starts — even when the pump itself would make the
+    /// condition true on the board it derives. A pump that starts on a true
+    /// condition still applies through the same resolver.
+    #[test]
+    fn for_as_long_as_pump_that_would_satisfy_its_own_condition_never_starts() {
+        let pump = |obj_id, duration| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Pump {
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(0),
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(obj_id)],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.duration = Some(duration);
+            ability
+        };
+        let while_power_exceeds_base = Duration::ForAsLongAs {
+            condition: StaticCondition::RecipientMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::PowerExceedsBase]),
+                ),
+            },
+        };
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let mut events = Vec::new();
+
+        resolve(
+            &mut state,
+            &pump(bear, while_power_exceeds_base.clone()),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(state.transient_continuous_effects.is_empty());
+        assert_eq!(state.objects[&bear].power, Some(2));
+
+        resolve(
+            &mut state,
+            &pump(bear, Duration::UntilEndOfTurn),
+            &mut events,
+        )
+        .unwrap();
+        resolve(
+            &mut state,
+            &pump(bear, while_power_exceeds_base),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.transient_continuous_effects.len(), 2);
+        assert_eq!(state.objects[&bear].power, Some(4));
     }
 }

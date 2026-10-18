@@ -40,7 +40,12 @@ pub fn resolve(
     // must consult state slots, not `ability.targets`. Otherwise a chained
     // sub-ability's "exile the top N cards of your library" would inherit the
     // parent's Player target and exile from the wrong library.
-    let target_player = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    let Some(target_player) = super::resolve_player_for_context_ref(state, ability, &player_filter)
+    else {
+        // CR 608.2b + CR 609.3: a missing player exiles nothing, the same verdict an empty library hands on.
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ExileTop);
+        return Ok(());
+    };
     // CR 608.2c: the player performing this exile — the controller unless the
     // instruction names its subject ("that player exiles that card"), who is
     // the player whose library it is. Rides each move request so the delivery
@@ -61,13 +66,14 @@ pub fn resolve(
         .iter()
         .find(|p| p.id == target_player)
         .ok_or(EffectError::PlayerNotFound)?;
-    let count = count.min(player.library.len());
+    let library = state.library_of(player.id);
+    let count = count.min(library.len());
     let top_cards: Vec<_> = match position {
         // CR 401.2 + CR 701.13a: top/bottom are the two library edges an
         // exile instruction may name. Bottom iteration is bottommost-first,
         // preserving selected-pile order through the zone pipeline.
-        LibraryPosition::Top => player.library.iter().take(count).copied().collect(),
-        LibraryPosition::Bottom => player.library.iter().rev().take(count).copied().collect(),
+        LibraryPosition::Top => library.iter().take(count).copied().collect(),
+        LibraryPosition::Bottom => library.iter().rev().take(count).copied().collect(),
         LibraryPosition::NthFromTop { .. }
         | LibraryPosition::BeneathTop { .. }
         | LibraryPosition::RandomWithinTop { .. } => {

@@ -34,6 +34,11 @@
     "autoPass": "自動パス",
     "skipLowUsePriorityWindows": "使用頻度の低い優先権ウィンドウをスキップ（実験的）",
     "skipLowUsePriorityWindowsDescription": "スタックが空のとき、自分のアップキープ・ドロー・終了ステップの優先権を自動でパスします。フェイズ停止とフルコントロールの設定は優先されます。",
+    "priorityAlerts": "優先権の通知",
+    "priorityAlertVisual": "発光",
+    "priorityAlertSound": "通知音",
+    "priorityAlertTitle": "タブのタイトル",
+    "priorityAlertsDescription": "待機のあとで優先権が戻ってきたときに通知します。通知音は、別のタブやウィンドウを見ているとき、または対戦相手のターン中のウィンドウが{{seconds}}秒間対応されないままのときに鳴り、そのとき光も強くなります。",
     "logDockSide": "ゲームログの位置",
     "spellPayment": "呪文の支払い",
     "manualManaPayment": "呪文のマナを手動で支払う",
@@ -76,6 +81,7 @@
   "visual": {
     "title": "表示",
     "vfxQuality": "視覚効果の品質",
+    "cardAnimationStyle": "カードアニメーション",
     "keywordStrip": "キーワード帯",
     "showKeywords": "戦場のカードにキーワードを表示",
     "opponentHoverPreview": "対戦相手のホバープレビュー",
@@ -122,7 +128,13 @@
       "full": "完全",
       "reduced": "低減",
       "minimal": "最小"
-    }
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "新スタイル",
+      "classic": "クラシック"
+    },
+    "cardAnimationPreviewHintHover": "ホバーでプレビュー",
+    "cardAnimationPreviewHintTap": "タップでプレビュー"
   },
   "flexLayout": {
     "title": "フレックスレイアウト",
@@ -498,14 +510,28 @@
     "modelPlaceholder": "モデルID（例：gpt-5、claude-sonnet-5）",
     "endpoint": "エンドポイント",
     "endpointPlaceholder": "https://your-server/v1",
+    "jevEndpointPlaceholder": "既定ではマルチプレイヤーサーバー",
+    "jevEndpointHint": "Jev は phase のマルチプレイヤーサーバーを経由して利用され、サーバーが各リクエストを TypeSafe に中継します。キーはそのリクエスト内でのみ送信され、サーバーには保存されません。",
     "apiKey": "APIキー",
     "apiKeyPlaceholder": "APIキーを貼り付け",
     "apiKeyOptional": "ローカルサーバーでは任意",
+    "apiKeyMissing": "APIキーをもう一度入力してください。キーは再読み込み後に保持されず、入力するまでこのプロバイダーはAI席やドラフトボットに使用されません。",
     "apiKeyStorage": "APIキーは、このブラウザーのセッション中のみメモリに保持されます。ディスクには保存されず、バックアップのエクスポートやクラウド同期にも含まれないため、再読み込み後は再入力が必要です。また、サーバーがlocalhostで動作している場合を除き、APIキーを使うにはhttps://のエンドポイントが必要です。",
     "apiKeyGet": "キーを取得",
     "test": "接続をテスト",
     "testing": "テスト中…",
     "testOk": "接続しました。",
+    "defaultPrompt": {
+      "connected": "接続しました。デフォルトの対戦相手として使用しますか？",
+      "ready": "このプロバイダーをデフォルトの対戦相手として使用しますか？",
+      "action": "デフォルトにする",
+      "badge": "デフォルトの対戦相手"
+    },
+    "defaultOpponent": {
+      "label": "デフォルトの対戦相手",
+      "hint": "対戦のセットアップで席ごとに別のプロバイダーを選ばない限り、AI対戦相手はこのプロバイダーを使用します。ドラフト後の対戦相手にも適用されます。",
+      "engine": "内蔵エンジンAI"
+    },
     "draftToggle": {
       "label": "ドラフトのボットに使用",
       "hint": "ドラフト・ポッドのボットが、フォーマットのセット情報を参照してモデルでピックします。",

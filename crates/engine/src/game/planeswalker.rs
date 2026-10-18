@@ -8,8 +8,9 @@ use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, declared_targets_in_chain, random_select_targets_for_ability,
+    assign_selected_slots_in_chain, auto_select_targets_for_ability,
+    begin_target_selection_for_ability, build_target_slots, declared_targets_in_chain,
+    random_select_targets_for_ability,
 };
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
@@ -17,29 +18,6 @@ use super::priority;
 use super::stack;
 
 use crate::types::ability::ResolvedAbility;
-use crate::types::events::ActivatedAbilityKind;
-
-/// CR 602.2 + CR 606.2: Classify an activated ability as `Loyalty` or `Normal`
-/// by inspecting the source object's ability definition at `ability_index`. A
-/// loyalty ability (CR 606.1) is one whose cost adds or removes loyalty counters.
-/// Used to populate `GameEvent::AbilityActivated { kind, .. }` at the activation
-/// sites that know the source object and ability index. Returns `Normal` when the
-/// object or ability cannot be found, or when the cost is not a loyalty cost.
-pub(crate) fn activated_ability_kind(
-    state: &GameState,
-    source_id: ObjectId,
-    ability_index: usize,
-) -> ActivatedAbilityKind {
-    state
-        .objects
-        .get(&source_id)
-        .and_then(|o| o.abilities.get(ability_index))
-        .and_then(|a| a.cost.as_ref())
-        .filter(|c| crate::types::ability::is_loyalty_ability_cost(c))
-        .map_or(ActivatedAbilityKind::Normal, |_| {
-            ActivatedAbilityKind::Loyalty
-        })
-}
 
 /// CR 306.5d + CR 606.3: Loyalty abilities may only be activated once per turn.
 /// CR 606.1: Loyalty abilities are activated abilities with a loyalty symbol in their cost.
@@ -119,15 +97,35 @@ fn can_activate_loyalty_ability_impl(
 
     // CR 606.3: Only if no player has previously activated a loyalty ability of
     // that permanent that turn. The per-permanent activation count is the
-    // authoritative gate; effects like `Effect::GrantExtraLoyaltyActivations`
-    // (The Chain Veil class) raise the per-planeswalker cap for the controller
-    // by adding to `extra_loyalty_activations_this_turn[controller]`.
+    // authoritative gate; `ModifyActivationLimit { keyword: "loyalty" }` statics
+    // (Oath of Teferi class, read live per CR 611.3a) SET the base cap via max
+    // semantics, while effects like `Effect::GrantExtraLoyaltyActivations`
+    // (The Chain Veil class) ADD to it via
+    // `extra_loyalty_activations_this_turn[controller]`.
     let extra_grants = state
         .extra_loyalty_activations_this_turn
         .get(&player)
         .copied()
         .unwrap_or(0);
-    let cap = 1u32.saturating_add(extra_grants);
+    // CR 606.3: static `ModifyActivationLimit` terms only RAISE the cap above
+    // the `1 + extra_grants` base (max semantics, floor 1), so when the count
+    // is already below the base cap the static scan cannot change the outcome
+    // and is skipped. Besides saving the walk, this keeps priority loyalty
+    // candidate production at a single exact static scan (the ActivateAsInstant
+    // permission consult): the pre-flush `all_present` presence default would
+    // otherwise fall through to a redundant exact scan here.
+    let base_cap = 1u32.saturating_add(extra_grants);
+    let cap = if obj.loyalty_activations_this_turn < base_cap {
+        base_cap
+    } else {
+        super::restrictions::loyalty_activation_cap_from_statics(
+            state,
+            player,
+            planeswalker_id,
+            restriction_gates,
+        )
+        .saturating_add(extra_grants)
+    };
     if obj.loyalty_activations_this_turn >= cap {
         return false;
     }
@@ -289,7 +287,7 @@ pub fn handle_activate_loyalty(
 
         if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             // CR 601.2c: the automatically chosen targets, captured before the
             // loyalty cost is paid.
             let captured = super::casting::capture_activation_record(
@@ -476,7 +474,16 @@ fn complete_loyalty_activation(
 
     let assigned_targets = declared_targets_in_chain(&resolved);
     let crime_candidate = super::casting::targets_commit_crime(state, &assigned_targets, player);
-    emit_targeting_events(state, &assigned_targets, pw_id, player, events);
+    emit_targeting_events(
+        state,
+        &assigned_targets,
+        pw_id,
+        player,
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Activated,
+        )),
+        events,
+    );
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -921,7 +928,7 @@ mod tests {
     /// `RemoveCounter { X loyalty counters }`, which `is_loyalty_ability_cost`
     /// recognizes. The X-cost path clears `pending.activation_cost` before the
     /// targeted finalize (casting_costs.rs), so the kind MUST be derived from the
-    /// stable printed cost via `activated_ability_kind` — reading the cleared
+    /// stable printed cost via `ActivatedAbilityKind::of_definition` — reading the cleared
     /// `pending.activation_cost` would mis-classify it `Normal` and the
     /// "whenever you activate a loyalty ability" trigger would miss this subclass.
     #[test]
@@ -938,7 +945,9 @@ mod tests {
             })],
         );
         assert_eq!(
-            activated_ability_kind(&state, pw, 0),
+            crate::types::events::ActivatedAbilityKind::of_definition(
+                &state.objects[&pw].abilities[0]
+            ),
             crate::types::events::ActivatedAbilityKind::Loyalty,
             "a [-X] loyalty ability's printed cost must classify as Loyalty"
         );
@@ -958,7 +967,9 @@ mod tests {
             )],
         );
         assert_eq!(
-            activated_ability_kind(&state, normal_pw, 0),
+            crate::types::events::ActivatedAbilityKind::of_definition(
+                &state.objects[&normal_pw].abilities[0]
+            ),
             crate::types::events::ActivatedAbilityKind::Normal,
         );
     }

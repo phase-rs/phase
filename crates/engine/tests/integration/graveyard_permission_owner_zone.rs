@@ -69,6 +69,7 @@ fn printed_graveyard_permission(
         extra_cost: None,
         enters_with_counter: None,
         required_cast_keyword: None,
+        pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(TargetFilter::Typed(TypedFilter {
         type_filters: types,

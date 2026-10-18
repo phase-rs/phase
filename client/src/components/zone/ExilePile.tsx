@@ -40,6 +40,7 @@ export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
       onClick={(event) => onClick(event.currentTarget)}
       className={`group relative cursor-pointer ${hasSelectableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={t("zone.exileTitle", { count })}
+      data-exile-pile={playerId}
       data-grouped-ids={visibleExileObjectIds.length > 0 ? visibleExileObjectIds.join(" ") : undefined}
       style={{ width: w, height: h }}
     >

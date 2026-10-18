@@ -46,6 +46,7 @@ let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 // The join/spectate origin the route carried, handed down as a provider prop.
 let capturedServerUrl: string | undefined;
+let capturedPile: string | undefined;
 
 const {
   mockCanActForWaitingState,
@@ -116,6 +117,7 @@ vi.mock("../../providers/GameProvider", () => ({
     onP2PEvent,
     formatConfig,
     serverUrl,
+    pile,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
@@ -123,12 +125,14 @@ vi.mock("../../providers/GameProvider", () => ({
     onP2PEvent?: (event: P2PAdapterEvent) => void;
     formatConfig?: FormatConfig;
     serverUrl?: string;
+    pile?: string;
   }) => {
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
     capturedOnP2PEvent = onP2PEvent;
     capturedFormatConfig = formatConfig;
     capturedServerUrl = serverUrl;
+    capturedPile = pile;
     return <>{children}</>;
   },
 }));
@@ -225,6 +229,9 @@ vi.mock("../../hooks/usePlayerId", () => ({
   // re-declared or the call throws. gameStore is mocked with waitingFor: null,
   // for which the real waitingPlayer returns null — mirror that here.
   waitingPlayer: () => null,
+  // The mounted priority-attention controller reaches `shouldAutoPass`, which
+  // reads the local seat through `getPlayerId`.
+  getPlayerId: () => 0,
 }));
 
 vi.mock("../../hooks/useIsMobile", () => ({
@@ -517,6 +524,15 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     renderGamePage("/game/test-game-123?mode=ai&format=TwoHeadedGiant&players=4");
 
     expect(capturedFormatConfig?.format).toBe("TwoHeadedGiant");
+  });
+
+  it("hands the URL's pile to GameProvider", () => {
+    renderGamePage("/game/test-game-123?mode=ai&format=Dandan&pile=Pile%20A");
+    expect(capturedPile).toBe("Pile A");
+    cleanup();
+
+    renderGamePage("/game/test-game-123?mode=ai&format=Dandan");
+    expect(capturedPile).toBeUndefined();
   });
 
   it("passes Planechase to GameProvider for a direct local URL", () => {
@@ -1249,6 +1265,25 @@ describe("GamePage — shared modal return targets", () => {
  * surfaces as `requestRejected`.
  */
 describe("GamePage — a refused request is survivable", () => {
+  it.each(["ai", "host", "p2p-join"] as const)("toasts an operation failure without locking the %s board", (mode) => {
+    const previousStatus = mockMultiplayerState.connectionStatus;
+    mockMultiplayerState.connectionStatus = "connected";
+    try {
+      renderGamePage(`/game/test-game-123?mode=${mode}`);
+      const event = { type: "operationFailed" as const, message: "Operation declined" };
+      act(() => {
+        if (mode === "p2p-join") capturedOnP2PEvent?.(event);
+        else capturedOnWsEvent?.(event);
+      });
+      expect(mockMultiplayerState.showToast).toHaveBeenCalledWith("Operation declined");
+      expect(mockMultiplayerState.connectionStatus).toBe("connected");
+      expect(screen.queryByText("Connection lost")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Return to Menu" })).toBeNull();
+    } finally {
+      mockMultiplayerState.connectionStatus = previousStatus;
+    }
+  });
+
   it("toasts a refused takeback without entering the terminal reconnect state", () => {
     renderGamePage("/game/test-game-123?mode=ai");
 

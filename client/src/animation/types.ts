@@ -1,6 +1,22 @@
-import type { GameEvent } from "../adapter/types";
+import type { GameEvent, GameState } from "../adapter/types";
+import { damageCauseOf } from "./damageCause";
 
+/** Visual effects tier.
+ *  - `full`: New-style card flights with a drop shadow, and landing dust when
+ *    a card lands on the battlefield. Pixel ratio is capped lower on touch
+ *    devices than on desktop.
+ *  - `reduced`: the same flights and paths, with no shadow or dust, at a pixel
+ *    ratio no higher than `full`'s touch cap.
+ *  - `minimal`: today's animations in either style; no overlay, canvas or
+ *    renderer is created.
+ *  Non-flight effects keep their own tier gates. */
 export type VfxQuality = "full" | "reduced" | "minimal";
+
+/** Card-animation style, independent of {@link VfxQuality}. `"webgl"` is the
+ *  New style: WebGL card effects drawn on the shared overlay. `"classic"` is the
+ *  pre-overlay DOM/framer-motion animations, the same path the New style falls
+ *  back to when WebGL is unavailable. */
+export type CardAnimationStyle = "webgl" | "classic";
 
 /** Continuous animation-speed multiplier. `0` short-circuits the wait entirely
  *  (the legacy "instant" mode). Values above 1 slow things down; below 1 speed
@@ -122,9 +138,17 @@ export function isPlayerDamageAnimationEvent(event: AnimationEvent, playerId: nu
   return event.type === "DamageDealt" && "Player" in event.data.target && event.data.target.Player === playerId;
 }
 
-export function impactDelayMsForAnimationEvent(event: AnimationEvent): number {
+/** How long a card VFX damage cause (a thrown fireball, a lightning strike)
+ *  takes to reach its target (ms, before speed multiplier). */
+export const DAMAGE_CAUSE_IMPACT_MS = 440;
+
+/** When `event`'s hit lands. `causeState` is the pre-event state when card VFX
+ *  present damage causes (`damageCauseOf`), else `null`. */
+export function impactDelayMsForAnimationEvent(event: AnimationEvent, causeState: GameState | null = null): number {
   if (event.type === "GroupedDamageFlurry") return GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS;
-  if (event.type === "DamageDealt" && "Player" in event.data.target) return CARD_SLAM_FLIGHT_MS;
+  if (event.type === "DamageDealt" && "Player" in event.data.target) {
+    return damageCauseOf(event, causeState) ? DAMAGE_CAUSE_IMPACT_MS : CARD_SLAM_FLIGHT_MS;
+  }
   return 0;
 }
 
@@ -132,8 +156,8 @@ export function impactDelayMsForAnimationEvent(event: AnimationEvent): number {
  * How long after its step begins a life change for `playerId` visually lands,
  * before the speed multiplier.
  *
- * A life change is presented by whatever hit caused it — a card slam for direct
- * player damage, the flurry for a collapsed swarm — so the delay comes from that
+ * A life change is presented by whatever hit caused it — a card slam or damage
+ * cause for direct player damage, the flurry for a collapsed swarm — so the delay comes from that
  * impact event, and is zero when the change has no hit behind it (a drain, a
  * paid cost). The displayed total, its flash, and the impact VFX must land
  * together, so every one of them resolves the delay here rather than each
@@ -143,6 +167,7 @@ export function lifeChangeImpactDelayMs(
   lifeEffect: StepEffect,
   effects: readonly StepEffect[],
   playerId: number,
+  causeState: GameState | null = null,
 ): number {
   const playerDamageEffect = effects.find(
     (effect) => isPlayerDamageAnimationEvent(effect.event, playerId),
@@ -151,7 +176,7 @@ export function lifeChangeImpactDelayMs(
     ? effects.find((effect) => effect.event.type === "GroupedDamageFlurry")
     : undefined;
   const impactEvent = playerDamageEffect?.event ?? groupedDamageEffect?.event;
-  return impactEvent ? impactDelayMsForAnimationEvent(impactEvent) : 0;
+  return impactEvent ? impactDelayMsForAnimationEvent(impactEvent, causeState) : 0;
 }
 
 /** Base "your turn / opponent's turn" banner display duration, before any

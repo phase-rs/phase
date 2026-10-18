@@ -1,8 +1,14 @@
+use super::ResolutionProgress;
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::{ClashResult, GameEvent};
-use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+
+pub(crate) struct ClashStep {
+    pub progress: ResolutionProgress,
+    pub result: Option<ClashResult>,
+}
 
 /// CR 701.30: Clash with an opponent.
 ///
@@ -16,14 +22,13 @@ use crate::types::player::PlayerId;
 /// CR 701.30c: Revealed simultaneously; choices in APNAP order.
 /// CR 701.30d: Higher mana value wins.
 ///
-/// Sets `optional_effect_performed` on the ability context so that sub-abilities
-/// gated by `AbilityCondition::effect_performed()` ("if you win the clash") execute only
-/// when the controller wins.
-pub fn resolve(
+/// Returns the result to `finish_clash_resolution`, which binds the
+/// result-aware tail context once the outcome is known.
+pub(crate) fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<ClashStep, EffectError> {
     let controller = ability.controller;
 
     // CR 701.30b: "Choose an opponent. You and that opponent each clash." — a CHOICE, not
@@ -42,7 +47,10 @@ pub fn resolve(
     // CR 701.30b: With no opponents there is no legal clash opponent. The
     // effect does nothing; any result-gated rider remains unperformed.
     if candidates.is_empty() {
-        return Ok(());
+        return Ok(ClashStep {
+            progress: ResolutionProgress::Complete,
+            result: None,
+        });
     }
 
     // CR 701.30b: With two or more opponents the choice is a genuine decision
@@ -54,7 +62,10 @@ pub fn resolve(
             candidates,
             ability: Box::new(ability.clone()),
         };
-        return Ok(());
+        return Ok(ClashStep {
+            progress: ResolutionProgress::Waiting,
+            result: None,
+        });
     }
 
     // CR 701.30b: One opponent — no decision to make. The single opponent is
@@ -67,12 +78,12 @@ pub fn resolve(
 /// both top cards, decide the result by mana value, and queue the APNAP
 /// top/bottom placement. Shared by the immediate (≤1 opponent) path and the
 /// resumed `WaitingFor::ClashChooseOpponent` path so both behave identically.
-pub fn perform_clash(
+pub(crate) fn perform_clash(
     state: &mut GameState,
     ability: &ResolvedAbility,
     opponent: PlayerId,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<ClashStep, EffectError> {
     let controller = ability.controller;
 
     // CR 701.30a: Reveal top card of each player's library.
@@ -113,79 +124,43 @@ pub fn perform_clash(
         subject: None,
     });
 
-    // Build the sub_ability chain with updated context for optional_effect_performed.
-    let original_sub = ability.sub_ability.as_ref().map(|sub| {
-        let mut sub_clone = sub.as_ref().clone();
-        sub_clone.context = ability.context.clone();
-        sub_clone.context.optional_effect_performed = result == ClashResult::Won;
-        sub_clone
-    });
-
-    // CR 701.30c: Each player puts their revealed card on top or bottom of their
-    // library. Choices are made in APNAP order (controller first, then opponent).
-    // ClashCardPlacement tracks the sequential choices; the engine handler advances
-    // through the remaining queue before popping the pending_continuation.
-    // Stash helper: ClashCardPlacement arms set pending_continuation manually
-    // (not via the automatic stash in resolve_ability_chain) because clash injects
-    // a modified context with optional_effect_performed set to the clash result.
-    // The early-exit in resolve_ability_chain detects pending_continuation and skips
-    // redundant sub_ability processing.
-    let stash_sub = |state: &mut GameState| {
-        if let Some(sub) = original_sub {
-            state.park_ability_continuation(PendingContinuation::new(Box::new(sub), state));
-        }
+    // CR 701.30c + CR 101.4: all participants reveal before choosing in
+    // APNAP order. Placement is committed only after the final answer.
+    let mut placements: Vec<_> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter_map(|player| {
+            if player == controller {
+                controller_top.map(|card| (player, card))
+            } else if player == opponent {
+                opponent_top.map(|card| (player, card))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let progress = if placements.is_empty() {
+        ResolutionProgress::Complete
+    } else {
+        let (player, card) = placements.remove(0);
+        state.waiting_for = WaitingFor::ClashCardPlacement {
+            player,
+            card,
+            remaining: placements,
+            bottom_cards: Vec::new(),
+        };
+        ResolutionProgress::Waiting
     };
-
-    match (controller_top, opponent_top) {
-        (Some(c_card), Some(o_card)) => {
-            // CR 701.30c + CR 101.4: APNAP — controller chooses first, opponent queued.
-            state.waiting_for = WaitingFor::ClashCardPlacement {
-                player: controller,
-                card: c_card,
-                remaining: vec![(opponent, o_card)],
-            };
-        }
-        (Some(c_card), None) => {
-            state.waiting_for = WaitingFor::ClashCardPlacement {
-                player: controller,
-                card: c_card,
-                remaining: vec![],
-            };
-        }
-        (None, Some(o_card)) => {
-            state.waiting_for = WaitingFor::ClashCardPlacement {
-                player: opponent,
-                card: o_card,
-                remaining: vec![],
-            };
-        }
-        (None, None) => {
-            // Both libraries empty — no cards to place. No ClashCardPlacement is
-            // queued; the stashed sub_ability is drained by the caller (the
-            // result is Tied → optional_effect_performed stays false, so any
-            // "if you win the clash" rider correctly does nothing).
-        }
-    }
-
-    // CR 701.30 + CR 609.3: Stash the result-aware sub_ability uniformly. With
-    // cards placed, the ClashCardPlacement handler drains it after the APNAP
-    // placement; with both libraries empty, the caller drains it directly. The
-    // early-exit in resolve_ability_chain detects this pending_continuation and
-    // skips redundant sub_ability processing on the immediate path.
-    stash_sub(state);
-
-    Ok(())
+    Ok(ClashStep {
+        progress,
+        result: Some(result),
+    })
 }
 
 /// Get the top card ObjectId of a player's library, if any.
 fn top_card_of_library(state: &GameState, player: PlayerId) -> Option<ObjectId> {
-    state
-        .players
-        .iter()
-        .find(|p| p.id == player)?
-        .library
-        .last()
-        .copied()
+    let seat = state.players.iter().find(|p| p.id == player)?.id;
+    // CR 701.30a: a clashing player reveals the top card, index 0.
+    state.library_of(seat).front().copied()
 }
 
 /// Get the mana value of a card by its object ID.

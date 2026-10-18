@@ -84,7 +84,10 @@ ENTRY_MARKER = re.compile(r"RequiredPlugin\s*\{")
 LIBRARY_FIELD = re.compile(r'library:\s*"([^"]+)"')
 PACKAGE_FIELD = re.compile(r'debian_package:\s*"([^"]+)"')
 # `${{ matrix.os == 'linux' }}` and the bare expression are the same condition.
-LINUX_ARM = re.compile(r"""matrix\.os\s*==\s*['"]linux['"]""")
+# Full matching matters: this line-scoped reader cannot evaluate a composite
+# Actions expression, even when it contains the Linux matrix comparison.
+LINUX_ARM = re.compile(
+    r"""(?:matrix\.os\s*==\s*(['"])linux\1|\$\{\{\s*matrix\.os\s*==\s*(['"])linux\2\s*\}\})""")
 # `apt-get install` / `apt install`, as a command rather than as prose.
 APT_INSTALL = re.compile(r"\bapt(?:-get)?\s+(?:-\S+\s+)*install\b")
 #: Shell control flow. A gate that reads lines cannot tell which of them run.
@@ -92,6 +95,9 @@ SHELL_CONTROL_FLOW = frozenset({
     "if", "then", "elif", "else", "fi", "case", "esac",
     "while", "until", "for", "do", "done",
 })
+SHELL_FUNCTION_DEFINITION = re.compile(
+    r"^\s*(?:function\s+[^\s(){};|&<>]+(?:\s*\(\s*\))?|"
+    r"[^\s(){};|&<>]+\s*\(\s*\))\s*(?:\{.*|\(.*|#.*|$)")
 PRIVILEGE_WRAPPERS = frozenset({"sudo", "env"})
 APT_COMMANDS = frozenset({"apt-get", "apt"})
 #: A Debian package name, optionally multi-arch qualified. Anything else on an
@@ -304,7 +310,7 @@ def appimage_apt_packages() -> set[str]:
                       "removed")
 
     condition = str(step.get("if", ""))
-    if not LINUX_ARM.search(condition):
+    if not LINUX_ARM.fullmatch(condition.strip()):
         raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' is guarded by "
                       f"{condition!r}, which is no longer the Linux matrix arm. "
                       "Packages declared on a step that does not run on the "
@@ -347,6 +353,22 @@ def appimage_apt_packages() -> set[str]:
                 "line at a time, so a line that does not stand on its own -- "
                 "an unbalanced quote opening a multi-line string, a dangling "
                 "escape -- would have its continuation read as commands") from exc
+        # Preserve quotes while finding command boundaries: a quoted ";"
+        # is prose, whereas an unquoted separator can precede a definition.
+        lexer = shlex.shlex(line, posix=False, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        command_tokens: list[str] = []
+        for token in [*lexer, ";"]:
+            if token in SHELL_OPERATORS:
+                if SHELL_FUNCTION_DEFINITION.match(" ".join(command_tokens)):
+                    raise Refusal(
+                        f"{SHELL_RELEASE}: step '{APT_STEP}' uses shell control "
+                        f"flow: {line.strip()!r}. This gate reads install lines "
+                        "one at a time and cannot tell whether a function containing "
+                        "an install is called, so it will not credit packages from it")
+                command_tokens.clear()
+            else:
+                command_tokens.append(token)
         # Only in command position. `shlex` strips quotes, so a whole-token
         # match would refuse `echo "done"` and any sentence containing a bare
         # `for` -- a false refusal on a tree that is entirely correct. A

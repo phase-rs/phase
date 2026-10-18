@@ -6,6 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { DraftRunState } from "../../services/quickDraftPersistence";
+import type { LlmProviderCatalogEntry } from "../../services/llm/types";
+
+const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
+vi.mock("../../services/llm/catalog", () => catalogMock);
+
+const CATALOG: LlmProviderCatalogEntry[] = [{
+  provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
+  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+}];
 
 /**
  * End-to-end pick workflow for an LLM-driven draft, exercised through the real
@@ -138,6 +147,7 @@ async function startDraft(): Promise<void> {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  catalogMock.loadProviderCatalog.mockResolvedValue(CATALOG);
   vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
   persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
   useDraftStore.getState().reset();
@@ -164,6 +174,66 @@ afterEach(() => {
 });
 
 describe("LLM draft pick workflow", () => {
+  it("skips catalog loading when drafting is not opted in", async () => {
+    useLlmStore.getState().setDraftEnabled(false);
+    wasm.submit_pick.mockReturnValue(view([card("picked")]));
+
+    await useDraftStore.getState().pickCard("picked");
+
+    expect(catalogMock.loadProviderCatalog).not.toHaveBeenCalled();
+    expect(wasm.submit_pick).toHaveBeenCalledWith("picked");
+  });
+
+  it("submits ordinarily when catalog metadata is unavailable", async () => {
+    catalogMock.loadProviderCatalog.mockResolvedValue([]);
+    wasm.submit_pick.mockReturnValue(view([card("picked")]));
+
+    await useDraftStore.getState().pickCard("picked");
+
+    expect(wasm.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(transport.executeLlmRequest).not.toHaveBeenCalled();
+    expect(wasm.submit_pick).toHaveBeenCalledWith("picked");
+  });
+
+  it("does not collect or submit after the draft changes during catalog loading", async () => {
+    let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+    catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+      resolveCatalog = resolve;
+    }));
+    const pick = useDraftStore.getState().pickCard("picked");
+    useDraftStore.getState().reset();
+    resolveCatalog(CATALOG);
+
+    expect(await pick).toEqual({ status: "ignored", reason: "stale" });
+    expect(wasm.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(transport.executeLlmRequest).not.toHaveBeenCalled();
+    expect(wasm.submitPickWithLlmBotPicks).not.toHaveBeenCalled();
+    expect(wasm.submit_pick).not.toHaveBeenCalled();
+  });
+
+  it("uses the current draft profile after catalog loading", async () => {
+    let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+    catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+      resolveCatalog = resolve;
+    }));
+    const nextId = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "new-key", baseUrl: "https://new.example/v1", enabled: true,
+    });
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: "{}" });
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("picked")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+    const pick = useDraftStore.getState().pickCard("picked");
+    useLlmStore.getState().setDraftProfileId(nextId);
+    resolveCatalog(CATALOG);
+
+    expect(await pick).toEqual({ status: "acknowledged" });
+    const [endpointJson] = wasm.buildLlmDraftPickRequests.mock.calls[0] as string[];
+    const endpoint = JSON.parse(endpointJson);
+    expect(endpoint).toMatchObject({ baseUrl: "https://new.example/v1", apiKey: "new-key" });
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalled();
+  });
+
   it("drives the engine, the breaker and the fallback from a rejected status-bearing response", async () => {
     // The provider answers, but with a 401 — bytes that are NOT a usable pick.
     transport.executeLlmRequest.mockResolvedValue({
@@ -235,6 +305,51 @@ describe("LLM draft pick workflow", () => {
     expect(wasm.submit_pick).not.toHaveBeenCalled();
   });
 
+  it("keeps submitting successful LLM picks through four acknowledged rounds", async () => {
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    const pool: DraftCardInstance[] = [];
+
+    for (let round = 0; round < 4; round += 1) {
+      const id = `pick-${round}`;
+      pool.push(card(id));
+      wasm.submitPickWithLlmBotPicks.mockReturnValueOnce({
+        view: view([...pool]), llmOutcomes: [{ seat: 1, used: true }],
+      });
+      expect(await useDraftStore.getState().pickCard(id)).toEqual({ status: "acknowledged" });
+      expect(useDraftStore.getState().view?.pool.map((picked) => picked.instance_id))
+        .toEqual(pool.map((picked) => picked.instance_id));
+      expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
+    }
+
+    expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(4);
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(4);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(4);
+    expect(wasm.submit_pick).not.toHaveBeenCalled();
+  });
+
+  it("resets consecutive refusals after a used pick and still calls the provider on round five", async () => {
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    const pool: DraftCardInstance[] = [];
+    const usedByRound = [false, false, true, false, false];
+
+    for (const [round, used] of usedByRound.entries()) {
+      const id = `mixed-${round}`;
+      pool.push(card(id));
+      wasm.submitPickWithLlmBotPicks.mockReturnValueOnce({
+        view: view([...pool]), llmOutcomes: [{ seat: 1, used }],
+      });
+      expect(await useDraftStore.getState().pickCard(id)).toEqual({ status: "acknowledged" });
+      expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
+    }
+
+    expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(5);
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(5);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(5);
+    expect(wasm.submit_pick).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().view?.pool.map((picked) => picked.instance_id))
+      .toEqual(pool.map((picked) => picked.instance_id));
+  });
+
   it("never asks the client for a seat list — the engine names its own bot seats", async () => {
     transport.executeLlmRequest.mockResolvedValue({
       status: 200,
@@ -250,5 +365,94 @@ describe("LLM draft pick workflow", () => {
     // Endpoint config and set names only: no seat indices cross the boundary.
     expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(1);
     expect(wasm.buildLlmDraftPickRequests.mock.calls[0]).toHaveLength(2);
+  });
+});
+
+describe("LLM picks start when the pack opens", () => {
+  function packView(pool: DraftCardInstance[], pack: DraftCardInstance[]): DraftPlayerView {
+    return { ...view(pool), current_pack: pack };
+  }
+
+  async function openPack(): Promise<void> {
+    wasm.start_quick_draft.mockReturnValue(packView([], [card("a"), card("b")]));
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+  }
+
+  it("asks the providers as soon as a pack is open, and the pick reuses those replies", async () => {
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    await openPack();
+
+    // Before the player has done anything, the drafter has already answered.
+    await vi.waitFor(() => {
+      expect(useDraftStore.getState().llmDrafters).toEqual([{ seat: 1, state: "ready" }]);
+    });
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(1);
+
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("a")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+    expect(await useDraftStore.getState().pickCard("a")).toEqual({ status: "acknowledged" });
+
+    // No second request for the same pack, and nothing to wait on.
+    expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(1);
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(1);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
+    // The next step starts with no chips from the pack that just passed.
+    expect(useDraftStore.getState().llmDrafters).toEqual([]);
+    expect(useDraftStore.getState().awaitingDrafters).toBe(false);
+  });
+
+  it("accepts the player's pick while a drafter is still picking, and holds the pack until it is done", async () => {
+    let release!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    transport.executeLlmRequest.mockImplementation(async () => {
+      await hung;
+      return { status: 200, body: '{"choice":0}' };
+    });
+    await openPack();
+    await vi.waitFor(() => {
+      expect(useDraftStore.getState().llmDrafters).toEqual([{ seat: 1, state: "picking" }]);
+    });
+
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("a")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+    const pick = useDraftStore.getState().pickCard("a");
+
+    await vi.waitFor(() => expect(useDraftStore.getState().awaitingDrafters).toBe(true));
+    expect(useDraftStore.getState().pendingPickIntent).toMatchObject({ instanceIds: ["a"] });
+    // The pack does not pass while a drafter is still picking.
+    expect(wasm.submitPickWithLlmBotPicks).not.toHaveBeenCalled();
+
+    release();
+    expect(await pick).toEqual({ status: "acknowledged" });
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
+    expect(useDraftStore.getState().awaitingDrafters).toBe(false);
+  });
+
+  it("starts the round at the pick when drafting is switched on after the pack opened", async () => {
+    useLlmStore.getState().setDraftEnabled(false);
+    await openPack();
+    useLlmStore.getState().setDraftEnabled(true);
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("a")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+
+    expect(await useDraftStore.getState().pickCard("a")).toEqual({ status: "acknowledged" });
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(1);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start a round for a pack when LLM drafting is off", async () => {
+    useLlmStore.getState().setDraftEnabled(false);
+    await openPack();
+    await Promise.resolve();
+
+    expect(catalogMock.loadProviderCatalog).not.toHaveBeenCalled();
+    expect(wasm.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().llmDrafters).toEqual([]);
   });
 });

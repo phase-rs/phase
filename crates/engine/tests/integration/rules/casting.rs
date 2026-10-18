@@ -1283,6 +1283,7 @@ fn play_land_from_graveyard_with_permission() {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1352,6 +1353,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1413,7 +1415,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
 
     // Source has Muldrotha-class permission (per-permanent-type per turn).
     let _source_id = scenario
-        .add_creature(P0, "Muldrotha, the Gravetide", 0, 0)
+        .add_creature(P0, "Muldrotha, the Gravetide", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
@@ -1422,6 +1424,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1432,7 +1435,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
     // Grant an additional land drop so the per-turn land cap doesn't mask
     // the per-permanent-type-slot enforcement.
     let _explore = scenario
-        .add_creature(P0, "Exploration", 0, 0)
+        .add_creature(P0, "Exploration", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
                 .affected(TargetFilter::Player),
@@ -1503,6 +1506,7 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1721,7 +1725,7 @@ fn zaffai_once_per_turn_hand_free_casts_with_no_mana() {
     // Zaffai-equivalent permission: "once during each of your turns, you may cast
     // an instant or sorcery spell from your hand without paying its mana cost".
     let source_id = scenario
-        .add_creature(P0, "Zaffai, Thunder Conductor", 0, 0)
+        .add_creature(P0, "Zaffai, Thunder Conductor", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
@@ -1852,7 +1856,7 @@ fn cast_spell_for_free_uses_the_named_permission_source() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let first_source = scenario
-        .add_creature(P0, "First Zaffai Stand-In", 0, 0)
+        .add_creature(P0, "First Zaffai Stand-In", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
@@ -1862,7 +1866,7 @@ fn cast_spell_for_free_uses_the_named_permission_source() {
         )
         .id();
     let second_source = scenario
-        .add_creature(P0, "Second Zaffai Stand-In", 0, 0)
+        .add_creature(P0, "Second Zaffai Stand-In", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
@@ -2364,7 +2368,7 @@ fn miracle_accept_casts_for_miracle_cost() {
     }
     // The {W} was paid — pool should be empty.
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "miracle cost of {{W}} should have consumed the white mana"
     );
 }
@@ -2559,9 +2563,9 @@ fn miracle_cost_is_reduced_by_medallion_static() {
         "spell should be on the stack via Miracle variant"
     );
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "the reduced miracle cost {{R}} should consume the single red mana, got {:?}",
-        runner.state().players[0].mana_pool.mana
+        runner.state().players[0].mana_pool
     );
 }
 
@@ -2805,7 +2809,7 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
     // As Foretold on the battlefield (only the alt-cost line matters here; time
     // counters are seeded directly). Hosted on a permanent via the full parser.
     let foretold_id = scenario
-        .add_creature(P0, "As Foretold", 0, 0)
+        .add_creature(P0, "As Foretold", 1, 1)
         .from_oracle_text(
             "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
              you cast with mana value X or less, where X is the number of time counters on ~.",
@@ -2894,7 +2898,7 @@ fn as_foretold_decline_printed_cost_does_not_consume_slot() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let foretold_id = scenario
-        .add_creature(P0, "As Foretold", 0, 0)
+        .add_creature(P0, "As Foretold", 1, 1)
         .from_oracle_text(
             "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
              you cast with mana value X or less, where X is the number of time counters on ~.",

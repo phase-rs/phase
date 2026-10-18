@@ -1,0 +1,254 @@
+{
+  "active_player": 0,
+  "all_creature_types": [],
+  "allows_cancel_cast": false,
+  "alt_cost_grant_permissions_used": [],
+  "attacked_defenders_this_turn": {},
+  "attacking_creatures_this_turn": {},
+  "battlefield": [],
+  "cancelled_casts": [],
+  "cards_discarded_this_turn_by_player": {},
+  "combat": null,
+  "combat_phase_skip_next_turn": [
+    {
+      "active": false,
+      "pending": 0
+    },
+    {
+      "active": false,
+      "pending": 0
+    }
+  ],
+  "command_zone": [],
+  "commander_cast_count": {},
+  "commander_damage": [],
+  "creature_attacked_defenders_this_turn": {},
+  "creature_blocked_attackers_this_turn": [],
+  "creatures_attacked_this_turn": [],
+  "creatures_blocked_this_turn": [],
+  "crew_activated_this_turn": [],
+  "crew_resolved_this_turn": [],
+  "current_combat_attacker_restriction": null,
+  "current_combat_attacker_restriction_source": null,
+  "current_starting_player": 0,
+  "damage_dealt_this_turn": [],
+  "day_night": null,
+  "debug_mode": false,
+  "debug_permitted": [],
+  "deck_pools": [],
+  "delayed_triggers": [],
+  "eliminated_players": [],
+  "exerted_this_turn": [],
+  "exile": [],
+  "exile_cast_permissions_used": [],
+  "exile_links": [],
+  "exile_play_permissions_used": [],
+  "exile_play_single_use_consumed": [],
+  "extra_loyalty_activations_this_turn": {},
+  "extra_phase_resume": [],
+  "extra_phases": [],
+  "extra_turn_sequence_anchor": null,
+  "extra_turns": [],
+  "format_config": {
+    "allow_debug_actions": false,
+    "command_zone": false,
+    "commander_damage_threshold": null,
+    "deck_size": {
+      "data": 60,
+      "type": "Minimum"
+    },
+    "default_deck_copy_limit": {
+      "data": 4,
+      "type": "UpTo"
+    },
+    "format": "Standard",
+    "max_players": 2,
+    "min_players": 2,
+    "range_of_influence": null,
+    "sideboard_policy": {
+      "data": 15,
+      "type": "Limited"
+    },
+    "singleton": false,
+    "starting_life": 20,
+    "supplies_fixed_deck": false,
+    "team_based": false,
+    "uses_commander": false
+  },
+  "game_number": 1,
+  "graveyard_cast_permissions_used": [],
+  "graveyard_cast_permissions_used_per_type": [],
+  "hand_cast_free_permissions_used": [],
+  "has_pending_cast": false,
+  "lands_played_this_turn": 0,
+  "lands_played_this_turn_by_player": {},
+  "last_vote_ballots": [],
+  "loop_detection": {
+    "type": "Off"
+  },
+  "loyalty_abilities_activated_this_turn": {},
+  "mana_spent_on_spells_this_turn": {},
+  "match_config": {
+    "match_type": "Bo1"
+  },
+  "match_phase": "InGame",
+  "match_score": {
+    "draws": 0,
+    "p0_wins": 0,
+    "p1_wins": 0
+  },
+  "max_lands_per_turn": 1,
+  "modal_modes_chosen_this_game": [],
+  "modal_modes_chosen_this_turn": [],
+  "next_continuous_effect_id": 1,
+  "next_delayed_trigger_instance": 1,
+  "next_delayed_trigger_token": 1,
+  "next_end_effect_group_id": 1,
+  "next_extra_phase_id": 1,
+  "next_game_chooser": null,
+  "next_logical_zone_change_group_id": 1,
+  "next_object_id": 1,
+  "next_pip_id": 1,
+  "next_resolution_cast_offer_id": 1,
+  "next_resolve_all_consent_epoch": 1,
+  "next_timestamp": 1,
+  "next_tracked_set_id": 1,
+  "objects": {},
+  "pending_replacement": null,
+  "pending_trigger": null,
+  "phase": "Untap",
+  "players": [
+    {
+      "attraction_deck": [],
+      "bending_types_this_turn": [],
+      "can_look_at_top_of_library": false,
+      "cards_drawn_this_step": 0,
+      "cards_drawn_this_turn": 0,
+      "commander_color_identity": [],
+      "contraption_crank_sprocket": 3,
+      "contraption_deck": [],
+      "crimes_committed_this_turn": 0,
+      "descended_this_turn": false,
+      "drew_from_empty_library": false,
+      "energy": 0,
+      "graveyard": [],
+      "hand": [],
+      "has_drawn_this_turn": false,
+      "id": 0,
+      "is_eliminated": false,
+      "lands_played_this_turn": 0,
+      "library": [],
+      "life": 20,
+      "life_gained_this_turn": 0,
+      "life_lost_last_turn": 0,
+      "life_lost_this_turn": 0,
+      "mana_pool": {
+        "mana": []
+      },
+      "poison_counters": 0,
+      "speed_trigger_used_this_turn": false,
+      "status": {
+        "type": "Active"
+      },
+      "turns_taken": 0
+    },
+    {
+      "attraction_deck": [],
+      "bending_types_this_turn": [],
+      "can_look_at_top_of_library": false,
+      "cards_drawn_this_step": 0,
+      "cards_drawn_this_turn": 0,
+      "commander_color_identity": [],
+      "contraption_crank_sprocket": 3,
+      "contraption_deck": [],
+      "crimes_committed_this_turn": 0,
+      "descended_this_turn": false,
+      "drew_from_empty_library": false,
+      "energy": 0,
+      "graveyard": [],
+      "hand": [],
+      "has_drawn_this_turn": false,
+      "id": 1,
+      "is_eliminated": false,
+      "lands_played_this_turn": 0,
+      "library": [],
+      "life": 20,
+      "life_gained_this_turn": 0,
+      "life_lost_last_turn": 0,
+      "life_lost_this_turn": 0,
+      "mana_pool": {
+        "mana": []
+      },
+      "poison_counters": 0,
+      "speed_trigger_used_this_turn": false,
+      "status": {
+        "type": "Active"
+      },
+      "turns_taken": 0
+    }
+  ],
+  "players_attacked_this_step": [],
+  "players_attacked_this_turn": [],
+  "players_who_created_token_this_turn": [],
+  "players_who_discarded_card_this_turn": [],
+  "players_who_sacrificed_artifact_this_turn": [],
+  "players_who_searched_library_this_turn": [],
+  "priority_pass_count": 0,
+  "priority_passes": [],
+  "priority_player": 0,
+  "public_revealed_cards": [],
+  "resolution_frames": {
+    "frames": [],
+    "last_post_replacement_frame_id": 0,
+    "next_discard_frame_id": 0,
+    "next_draw_sequence_frame_id": 0
+  },
+  "resolution_state_version": 3,
+  "resolved_rules_journal": {
+    "entries": [],
+    "next_command_ordinal": 0,
+    "next_settlement_node_ordinal": 0,
+    "nodes": [],
+    "produced_mana": [],
+    "spent_mana": []
+  },
+  "revealed_cards": [],
+  "ring_bearer": {},
+  "ring_level": {},
+  "rng_seed": 42,
+  "rng_word_pos": 0,
+  "scheduled_turn_controls": [],
+  "seat_order": [
+    0,
+    1
+  ],
+  "sideboard_submitted": [],
+  "spells_cast_last_turn": null,
+  "spells_cast_this_game": {},
+  "spells_cast_this_game_by_player": {},
+  "spells_cast_this_turn": 0,
+  "spells_cast_this_turn_by_player": {},
+  "stack": [],
+  "steps_to_skip": [
+    {},
+    {}
+  ],
+  "top_of_library_cast_permissions_used": [],
+  "tracked_object_sets": {},
+  "transient_continuous_effects": [],
+  "triggers_fired_this_game": [],
+  "triggers_fired_this_turn": [],
+  "triggers_fired_this_turn_per_opponent": [],
+  "turn_direction": "Normal",
+  "turn_number": 0,
+  "turns_to_skip": [
+    0,
+    0
+  ],
+  "waiting_for": {
+    "data": {
+      "player": 0
+    },
+    "type": "Priority"
+  }
+}

@@ -303,6 +303,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             GameEvent::PermanentTapped {
                 object_id,
                 caused_by,
+                ..
             } => {
                 mark_public_state_object_dirty(state, *object_id);
                 if let Some(cause) = caused_by {
@@ -444,7 +445,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *object_id);
                 mark_public_state_player_dirty(state, *player_id);
             }
-            GameEvent::CreatureDestroyed { object_id } => {
+            GameEvent::CreatureDestroyed { object_id, .. } => {
                 // Paired `ZoneChanged` to graveyard handles battlefield display.
                 mark_public_state_object_dirty(state, *object_id);
             }
@@ -583,6 +584,8 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::KeywordAbilityActivated { .. }
             | GameEvent::CreatureExploited { .. }
             | GameEvent::Clash { .. }
+            | GameEvent::PhysicalContestStarted { .. }
+            | GameEvent::PhysicalContestResolved { .. }
             | GameEvent::VoteCast { .. }
             | GameEvent::VoteResolved { .. }
             | GameEvent::PowerToughnessChanged { .. }

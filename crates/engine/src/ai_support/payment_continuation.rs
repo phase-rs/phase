@@ -14,8 +14,8 @@ use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, CostResume, DeferredLifeCostResume, GameState, ManaAbilityCostCursor,
-    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCostMoveResume, PendingManaAbility,
-    StackEntryKind, WaitingFor,
+    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingManaAbility, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
@@ -155,6 +155,10 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
             ..
         }
         | WaitingFor::PayManaAbilityMana {
+            pending_mana_ability: mana_ability,
+            ..
+        }
+        | WaitingFor::ManaAbilityManaPayment {
             pending_mana_ability: mana_ability,
             ..
         }
@@ -627,8 +631,13 @@ fn finalized_root_matches(
                     GameEvent::AbilityActivated {
                         player_id,
                         source_id: event_source_id,
+                        kind,
                         ..
-                    } if *player_id == *payer && *event_source_id == *source_id
+                    } if *player_id == *payer
+                        && *event_source_id == *source_id
+                        // CR 605.3b: a mana activation of the same source is not
+                        // the paid activation landing on the stack.
+                        && *kind != crate::types::events::ActivatedAbilityKind::Mana
                 )
             })
         }
@@ -674,9 +683,13 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
                 PaymentContinuationState::NotAffiliated
             }
         },
-        PendingCostMoveResume::DelveManaPayment { player, .. } => {
-            classify_global_root(state, *player)
-        }
+        // CR 601.2h: a Delve commit parked mid-exile still owns the cast's payment root.
+        PendingCostMoveResume::Cast {
+            pending: Some(pending),
+            player,
+            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+            ..
+        } => PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player)),
         // CR 602.2b: The parked mill leg retains the announced activation's
         // serialized payment root until the replacement choice completes.
         PendingCostMoveResume::ActivationMillPayment { player, pending } => {
@@ -740,6 +753,9 @@ fn classify_deferred_life_root(
                     PaymentContinuationUnsupported::PayerMismatch,
                 )
             }
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } => classify_pending_mana_ability(state, pending_mana_ability),
             ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => {
                 PaymentContinuationState::UnsupportedAffiliated(
@@ -840,6 +856,10 @@ fn record_root_from_resume(
         ManaAbilityResume::FinalizePendingManaPayment { player } => {
             Some(root_from_global(state, *player)?)
         }
+        // The outer mana ability's own root, if it pays a cast.
+        ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } => root_from_pending_mana_ability(state, pending_mana_ability)?,
         // Special actions and effect payments are not a CAST's payment root:
         // they carry their own typed continuation and never resume into a
         // pending cast (CR 116.1 — a special action does not use the stack).
@@ -891,6 +911,10 @@ fn waiting_for_contains_root(waiting_for: &WaitingFor, root: &PaymentContinuatio
             ..
         }
         | WaitingFor::PayManaAbilityMana {
+            pending_mana_ability: mana_ability,
+            ..
+        }
+        | WaitingFor::ManaAbilityManaPayment {
             pending_mana_ability: mana_ability,
             ..
         }
@@ -948,7 +972,6 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
-        | Some(PendingCostMoveResume::DelveManaPayment { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
         // CR 701.9b: holds no pending cast, so it can contain no root.
@@ -1009,6 +1032,12 @@ fn mana_resume_matches_root(resume: &ManaAbilityResume, root: &PaymentContinuati
             PaymentContinuationRoot::Spell { payer, .. }
             | PaymentContinuationRoot::Activation { payer, .. },
         ) => player == payer,
+        (
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            },
+            root,
+        ) => pending_mana_contains_root(pending_mana_ability, root),
         _ => false,
     }
 }

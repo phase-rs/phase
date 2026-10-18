@@ -2,7 +2,8 @@ import { useMemo } from "react";
 
 import type { GameObject, PlayerId } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
-import { collectObjectActions, isManaObjectAction } from "../viewmodel/cardActionChoice.ts";
+import { zoneSurfaceActionsForObject } from "../viewmodel/cardActionChoice.ts";
+import { resolvePileSeat } from "../viewmodel/gameStateView.ts";
 
 /**
  * Castable / activatable objects in a player's graveyard or exile — engine
@@ -32,7 +33,9 @@ export function useCastableZoneObjects(
 ): GameObject[] {
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  const graveyard = useGameStore((s) => s.gameState?.players[playerId]?.graveyard);
+  const graveyard = useGameStore(
+    (s) => s.gameState?.players[resolvePileSeat(s.gameState, "graveyard", playerId)]?.graveyard,
+  );
   const exile = useGameStore((s) => s.gameState?.exile);
 
   const zoneObjectIds = useMemo(() => {
@@ -50,9 +53,7 @@ export function useCastableZoneObjects(
         // Keep only cards the engine surfaces a genuine cast/play affordance
         // for. A lone mana-payment tap (delve/convoke) is excluded — see the
         // doc comment above.
-        return collectObjectActions(legalActionsByObject, obj.id).some(
-          (action) => !isManaObjectAction(action, obj),
-        );
+        return zoneSurfaceActionsForObject(legalActionsByObject, obj, obj.id).length > 0;
       });
   }, [zoneObjectIds, objects, legalActionsByObject]);
 }

@@ -32,6 +32,9 @@ fn begin_plunge_cast(runner: &mut GameRunner, plunge: ObjectId) {
 /// CR 601.2g + CR 605.3b + CR 605.3c: the Swamp's selected mana ability resolves before
 /// Twilight Mire's selected `{B/G}`-costed ability, making the Swamp's {B}
 /// available for that activation and allowing the single selected mode to cast.
+/// The cost is `{B}{B}` so only Mire's filter ability pays it; for `{1}{B}`
+/// auto-pay uses Mire's plain `{T}: Add {C}` instead
+/// (`mana_autotap_drawback_free_rows`).
 #[test]
 fn plunge_into_darkness_one_mode_autotaps_swamp_before_twilight_mire() {
     let mut scenario = GameScenario::new();
@@ -48,8 +51,8 @@ fn plunge_into_darkness_one_mode_autotaps_swamp_before_twilight_mire() {
             PLUNGE_INTO_DARKNESS_ORACLE,
         )
         .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Black],
-            generic: 1,
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 0,
         })
         .id();
     let mut runner = scenario.build();

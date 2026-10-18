@@ -126,10 +126,10 @@
 //! against. A new `events.push(GameEvent::TokenCreated { … })` written anywhere else tripped
 //! nothing.
 //!
-//! COUNT, MEASURED on this tree, not recalled: 38 anchor occurrences in `engine/src`, of which
-//! exactly TWO are production-scope constructions — the emitter (`effects/token.rs`, inside
-//! `push_committed_token_entry_events`) and the adjudicated `stack.rs` probe. The other 10
-//! constructions are `#[cfg(test)]`-scoped and the remaining 26 are consumer PATTERNS.
+//! Exactly ONE anchor occurrence in `engine/src` is a production-scope construction — the emitter
+//! (`effects/token.rs`, inside `push_committed_token_entry_events`). Every other construction is
+//! `#[cfg(test)]`-scoped and the remaining occurrences are consumer PATTERNS; the assertion below
+//! pins both counts.
 //!
 //! THE CONSTRUCTION PREDICATE IS DIFFERENT HERE, AND THAT DIFFERENCE IS THE POINT. `ZoneChanged`
 //! keys on an explicit `record:` initializer, so it cannot see a construction written entirely in
@@ -160,10 +160,9 @@
 //!   consumers of this surface, not members of it, and that tree is deliberately not walked.
 //!
 //! RESIDUAL, STATED RATHER THAN IMPLIED: the function-scope conjunct pins only the `token.rs`
-//! hit. A second production construction written inside `stack.rs` that ALSO deleted the probe
-//! would keep the multiset intact and pass. That is the same residual the `ZoneChanged` half
-//! carries for each of its three non-authority files; closing it would mean a per-file enclosing-fn
-//! pin on files whose hits are adjudicated survivors rather than authorities.
+//! hit. That is the same residual the `ZoneChanged` half carries for each of its non-authority
+//! files; closing it would mean a per-file enclosing-fn pin on files whose hits are adjudicated
+//! survivors rather than authorities.
 //!
 //! ── THIRD ANCHOR: the SINGLE-ID ANAPHORA PUBLISH ─────────────────────────────────────────────
 //!
@@ -1004,13 +1003,13 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (3, 12),
+        (3, 11),
         "the no-origin-zone battlefield-entry construction surface moved. Expected 3 production \
          constructions — the authority plus two adjudicated survivors:{ADJUDICATED_SURVIVORS}\
          A NEW production hit means a SEVENTH clone of the record/emit split was written: route it \
          through `zones::record_and_emit_entry_from_no_zone` instead. A REMOVED hit means the \
-         authority or a survivor moved. The 12 test-scoped hits include the `stack.rs` observer \
-         probe, the Saga entry-boundary regression, 7 other constructions spelled `from: None`, \
+         authority or a survivor moved. The 11 test-scoped hits include \
+         the Saga entry-boundary regression, 7 other constructions spelled `from: None`, \
          and 3 written in field-init shorthand \
          (`analysis/sim.rs`, `trigger_matchers.rs`, `targeting.rs`), which the shorthand branch of \
          `classify` is what sees. \
@@ -1066,7 +1065,7 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
         battlefield_files,
         vec!["engine/src/game/zones.rs"],
         "exactly one production window may name `to: Zone::Battlefield` literally — the \
-         authority. The `stack.rs` observer probe is test-scoped, `log.rs` binds a bare `to,` in a \
+         authority. `log.rs` binds a bare `to,` in a \
          pattern, and `merge.rs` uses the variable `dest`; either production survivor gaining the \
          literal is a new battlefield-entry writer.{ADJUDICATED_SURVIVORS}"
     );
@@ -1083,7 +1082,7 @@ fn every_token_created_construction_lives_in_the_single_emitter() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (1, 11),
+        (1, 10),
         "the `TokenCreated` construction surface moved. Expected one production construction — \
          `token::push_committed_token_entry_events`, the SINGLE emitter every one of its eight \
          callers inherits its `record.is_some()` gate from. \
@@ -1092,7 +1091,7 @@ fn every_token_created_construction_lives_in_the_single_emitter() {
          it, which makes `trigger_matchers::match_token_created` skip its CR 111.2 controller \
          filter and fire for a controller it should have rejected. Route it through \
          `token::push_committed_token_entry_events` instead. A REMOVED hit means the emitter moved. \
-         The 11 test-scoped constructions include the `stack.rs` observer probe, `analysis/sim.rs`, \
+         The 10 test-scoped constructions include `analysis/sim.rs`, \
          `game/log.rs`, `game/triggers.rs` x4, and `game/effects/destroy.rs` x4. \
          Production hits = {production:#?}"
     );
@@ -1383,7 +1382,7 @@ fn token_form_shorthand_construction() -> String {
     format!("events.push({needle}\n    object_id,\n    name,\n    source_id,\n}});")
 }
 
-/// The `stack.rs` probe's shape: the same three fields with explicit values, and a COMMENT inside
+/// An explicit-value shape: the same three fields with explicit values, and a COMMENT inside
 /// the literal (comments there must not knock a field off the completeness check).
 fn token_form_explicit_construction() -> String {
     let needle = token_anchor();
@@ -1449,7 +1448,7 @@ fn the_token_created_resolver_keys_on_cfg_scope_and_on_field_completeness() {
     assert_eq!(
         token_score(&at_both_scopes(&token_form_explicit_construction())),
         (1, 1),
-        "arm 4(ii): an explicit-value construction (the `stack.rs` probe's shape) must score the \
+        "arm 4(ii): an explicit-value construction must score the \
          same as the shorthand one, and an interleaved comment line must not hide a field from the \
          completeness check"
     );

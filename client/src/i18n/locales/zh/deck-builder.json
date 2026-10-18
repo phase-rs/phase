@@ -1,0 +1,303 @@
+{
+  "bracket": {
+    "aboutBrackets": "关于分级 ↗",
+    "addCommander": "添加指挥官以查看分级估算。",
+    "dataVersion": "数据：{{version}}",
+    "estimated": "估算：B{{tier}} {{label}}",
+    "estimatedChip": "估算：B{{tier}}",
+    "estimatedChipFull": "估算分级：B{{tier}} {{label}}",
+    "forced": "（强制 B{{tier}}）",
+    "hideBreakdown": "隐藏明细",
+    "hideBreakdownButton": "▲ 隐藏明细",
+    "manual": "手动：B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "申报分级：B{{tier}} {{label}}",
+    "mismatch": " ⚠ 不匹配",
+    "showBreakdown": "显示明细",
+    "showBreakdownButton": "▼ 显示明细",
+    "unavailable": "此版本不提供分级估算。"
+  },
+  "bracketPicker": {
+    "ariaLabel": "套牌分级",
+    "unrated": "未评级"
+  },
+  "card": {
+    "addOne": "添加一张{{name}}",
+    "alternateArtRightClick": "有可用的异画插画——右键点击以选择",
+    "alternateArtTap": "有可用的异画插画——点按以选择",
+    "chooseArtFor": "为{{name}}选择插画",
+    "copyLimit": "{{name}}已达同名牌张数上限",
+    "makeCommander": "将{{name}}设为指挥官",
+    "makeCommanderTitle": "将此牌设为我的指挥官",
+    "moveToMain": "将一张{{name}}移入主牌",
+    "moveToSideboard": "将一张{{name}}移入备牌",
+    "moveToTarget": "将一张{{name}}移入{{target}}",
+    "removeOne": "移除一张{{name}}",
+    "unsupportedExpand_one": "{{count}}个不受支持的机制；展开详情",
+    "unsupportedExpand_other": "{{count}}个不受支持的机制；展开详情",
+    "unsupportedTitle_one": "{{count}}个不受支持的机制——点击展开",
+    "unsupportedTitle_other": "{{count}}个不受支持的机制——点击展开"
+  },
+  "commanderPanel": {
+    "cardCount": "{{count}}/{{expected}}张牌",
+    "cardCountNoMinimum_few": "{{count}}张牌",
+    "cardCountNoMinimum_many": "{{count}}张牌",
+    "cardCountNoMinimum_one": "{{count}}张牌",
+    "cardCountNoMinimum_other": "{{count}}张牌",
+    "colorViolations": "标识色违规：{{cards}}",
+    "companion": {
+      "heading": "行侣",
+      "noCompanion": "未选择行侣",
+      "remove": "移除行侣"
+    },
+    "heading": "指挥官",
+    "identity": "标识色：",
+    "noCommander": "未选择指挥官",
+    "remove": "移除",
+    "setAsCommander": "设为指挥官：",
+    "signatureSpell": {
+      "heading": "标志性咒语",
+      "mustBeInstantOrSorcery": "标志性咒语必须是瞬间或法术",
+      "noSignatureSpell": "未选择标志性咒语",
+      "outsideColorIdentity": "{{name}}：超出 Oathbreaker 的标识色范围",
+      "remove": "移除标志性咒语",
+      "setAsSignatureSpell": "设为标志性咒语："
+    },
+    "singletonViolations": "违反单张限制：{{cards}}"
+  },
+  "contextMenu": {
+    "chooseArt": "选择插画…",
+    "clearOverride": "清除插画覆盖",
+    "noAlternates": "无其他印刷版本"
+  },
+  "deck": {
+    "backToDeck": "返回套牌",
+    "groupByColor": "按颜色分组",
+    "groupByType": "按类别分组",
+    "groupColor": "颜色",
+    "groupType": "类别",
+    "listView": "列表视图",
+    "stackView": "堆叠视图"
+  },
+  "deckList": {
+    "colorGroup": {
+      "Black": "黑",
+      "Blue": "蓝",
+      "Colorless": "无色",
+      "Green": "绿",
+      "Lands": "地",
+      "Multicolor": "多色",
+      "Red": "红",
+      "White": "白"
+    },
+    "commanderHeading": "指挥官",
+    "copied": "已复制！",
+    "copy": "复制",
+    "currentList": "当前列表",
+    "export": "导出",
+    "exportModalTitle": "导出套牌",
+    "exportTitle": "导出套牌",
+    "fromFile": "从文件",
+    "group": {
+      "Artifacts": "神器",
+      "Battles": "战役",
+      "Creatures": "生物",
+      "Enchantments": "结界",
+      "Instants": "瞬间",
+      "Lands": "地",
+      "Other": "其他",
+      "Planeswalkers": "鹏洛客",
+      "Sorceries": "法术"
+    },
+    "import": "导入",
+    "importModalTitle": "导入套牌",
+    "importTitle": "从文本导入套牌（MTGA 或 .dck 格式）",
+    "mainDeckHeading_one": "主牌（{{count}}张牌）",
+    "mainDeckHeading_other": "主牌（{{count}}张牌）",
+    "mainName": "主牌",
+    "mainTab": "主牌（{{count}}）",
+    "maybeboard": "备选牌（{{count}}）",
+    "maybeboardEmptyHint": "你正在考虑的牌张。点按套牌中牌张上的“→ 备选牌”即可暂存于此。",
+    "maybeboardName": "备选牌",
+    "maybeboardTab": "备选牌（{{count}}）",
+    "parse": "解析",
+    "parseError": "未找到任何牌张。请粘贴 MTGA 或 .dck 格式的套牌。",
+    "parsing": "解析中…",
+    "pastePlaceholder": "粘贴套牌列表（MTGA 或 .dck 格式）…",
+    "removeCommander": "取消{{name}}的指挥官身份",
+    "saveToFile": "保存到文件",
+    "sideboardEmptyHint": "点按套牌中牌张上的“→ 备牌”即可将其移到这里。",
+    "sideboardExceeds": "备牌超过{{max}}张上限",
+    "sideboardLimited": "备牌（{{count}}/{{max}}）",
+    "sideboardName": "备牌",
+    "sideboardTab": "备牌（{{count}}）",
+    "sideboardUnlimited": "备牌（{{count}}）"
+  },
+  "filters": {
+    "close": "关闭筛选",
+    "done": "完成",
+    "search": "搜索",
+    "title": "筛选"
+  },
+  "grid": {
+    "addCard": "添加{{name}}",
+    "allFormats": "全部",
+    "notFormat": "非{{format}}",
+    "notLegal": "{{name}} - 在{{format}}中不可用"
+  },
+  "legality": {
+    "banned": "禁用",
+    "legal": "可用",
+    "notLegal": "不可用",
+    "restricted": "限用"
+  },
+  "manaCurve": {
+    "colors": "颜色",
+    "title": "法术力曲线"
+  },
+  "moveList": {
+    "empty": "空"
+  },
+  "printingPicker": {
+    "countMatching_one": "{{count}}个印刷版本匹配“{{query}}”",
+    "countMatching_other": "{{count}}个印刷版本匹配“{{query}}”",
+    "count_one": "{{count}}个印刷版本",
+    "count_other": "{{count}}个印刷版本",
+    "filterAriaLabel": "筛选印刷版本",
+    "filterPlaceholder": "按系列或收藏编号筛选…",
+    "noImage": "无图片",
+    "noMatches": "没有印刷版本符合你的筛选条件。",
+    "noPrintings": "此牌张没有其他可用的印刷版本。",
+    "showMore_one": "显示更多（剩余{{count}}个）",
+    "showMore_other": "显示更多（剩余{{count}}个）",
+    "title": "选择插画",
+    "useDefault": "使用默认"
+  },
+  "saveConflict": {
+    "bodyChanged": "自本编辑器打开或上次保存以来，“{{name}}”已在别处被更改，因此未保存任何内容。加载已保存的版本以查看（这会放弃你未保存的更改），或仍保存你的版本。",
+    "bodyDeleted": "自本编辑器打开或上次保存以来，“{{name}}”已在别处被删除，因此未保存任何内容。仍保存你的版本。",
+    "loadSaved": "加载已保存的版本",
+    "saveMine": "保存我的版本",
+    "title": "套牌已在别处更改"
+  },
+  "search": {
+    "addSet": "添加",
+    "addSetPlaceholder": "添加系列代码…",
+    "allTypes": "所有类别",
+    "browseFormat": {
+      "all": "所有牌张"
+    },
+    "browseFormatFilter": "在赛制中可用",
+    "cardType": "牌张类别",
+    "cmcMax": "法术力值上限：",
+    "emptyHint": "添加筛选条件以开始浏览",
+    "removeSet": "移除{{name}}",
+    "reset": "重置",
+    "results_one": "{{count}}个结果",
+    "results_other": "{{count}}个结果",
+    "searchFailed": "搜索失败",
+    "searching": "搜索中…",
+    "sets": "系列",
+    "subtitle": "将牌张加入当前列表。",
+    "textPlaceholder": "搜索牌张…",
+    "title": "搜索"
+  },
+  "stack": {
+    "addOne": "添加一张{{name}}",
+    "cardCount_one": "{{count}}张牌",
+    "cardCount_other": "{{count}}张牌",
+    "colorGroup": {
+      "Black": "黑",
+      "Blue": "蓝",
+      "Colorless": "无色",
+      "Green": "绿",
+      "Lands": "地",
+      "Multicolor": "多色",
+      "Red": "红",
+      "White": "白"
+    },
+    "commanderBadge": "指挥官",
+    "commanderLane": "指挥官",
+    "copyLimit": "{{name}}已达同名牌张数上限",
+    "deckView": "套牌视图",
+    "emptyHint": "添加的牌张将在此处以错落堆叠的形式显示。",
+    "group": {
+      "Artifacts": "神器",
+      "Battles": "战役",
+      "Creatures": "生物",
+      "Enchantments": "结界",
+      "Instants": "瞬间",
+      "Lands": "地",
+      "Other": "其他",
+      "Planeswalkers": "鹏洛客",
+      "Sorceries": "法术"
+    },
+    "groupCards_one": "{{count}}张牌",
+    "groupCards_other": "{{count}}张牌",
+    "mainBadge": "主牌{{count}}",
+    "mainDeckLane": "主牌",
+    "mainEmpty": "主牌牌张将显示在这里。",
+    "mainMaybeBadge": "主牌{{main}} + 备选{{side}}",
+    "mainName": "主牌",
+    "mainSideBadge": "主牌{{main}} + 备牌{{side}}",
+    "maybeboardBadge": "备选牌{{count}}",
+    "maybeboardGroup": "备选牌",
+    "maybeboardName": "备选牌",
+    "noCommander": "未选择指挥官。",
+    "removeCommander": "取消{{name}}的指挥官身份",
+    "removeOne": "移除一张{{name}}",
+    "sideboardBadge": "备牌{{count}}",
+    "sideboardGroup": "备牌",
+    "sideboardName": "备牌",
+    "visualDeckStack": "可视化套牌堆叠"
+  },
+  "stats": {
+    "engineCoverage": "引擎覆盖率",
+    "formatLegality": "赛制合法性",
+    "unsupportedTitle": "不受支持：\n{{list}}"
+  },
+  "switcher": {
+    "noMatches": "没有匹配的套牌",
+    "searchPlaceholder": "搜索套牌…",
+    "starred": "已加星标",
+    "unfiled": "未归档"
+  },
+  "tabs": {
+    "ariaLabel": "套牌构建界面",
+    "deck": "套牌",
+    "info": "信息"
+  },
+  "toolbar": {
+    "bracket": "分级",
+    "clone": "克隆",
+    "cloneTitle": "以新名称保存副本",
+    "clonedToastDescription": "副本已保存为“{{name}}”。",
+    "clonedToastTitle": "套牌已克隆",
+    "deckBuilder": "套牌构建器",
+    "deckName": "套牌名称",
+    "format": "赛制",
+    "loadDeck": "加载套牌…",
+    "menu": "菜单",
+    "nameToSave": "为套牌命名以保存",
+    "saved": "已保存 ✓",
+    "savedToastDescription": "“{{name}}”已保存到你的套牌。",
+    "savedToastTitle": "套牌已保存",
+    "untitledDeck": "未命名套牌"
+  },
+  "unsaved": {
+    "bodyLeaving": "此套牌有未保存的更改。离开前要保存吗？",
+    "bodyLoading": "此套牌有未保存的更改。加载其他套牌前要保存吗？",
+    "discard": "放弃",
+    "dismiss": "关闭对话框",
+    "saveAndContinue": "保存并继续",
+    "title": "未保存的更改"
+  },
+  "warnings": {
+    "colorIdentity": "{{name}}：不在指挥官的标识色范围内",
+    "commanderCount": "套牌有{{count}}张牌（需要正好{{expected}}张）",
+    "companionInMain": "{{name}}是你的行侣，但同时也在主牌中——这违反了其组牌条件。请将其从主牌中移除，才能作为行侣使用。",
+    "maxCopies": "{{name}}：{{count}}张同名牌（最多4张）",
+    "minimumCount": "套牌有{{count}}张牌（至少60张）",
+    "singleton": "{{name}}：有多张同名牌（单张赛制）"
+  }
+}

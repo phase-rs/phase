@@ -93,6 +93,10 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
             mana_value: 2,
             controller: P1,
             owner: P1,
+            arrival: engine::types::game_state::ArrivalIdentity {
+                owner: P1,
+                controller: P1,
+            },
             from_zone: Some(Zone::Library),
             cast_from_zone: None,
             played_from_zone: None,

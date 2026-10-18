@@ -8,13 +8,12 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 use crate::support::shared_card_db;
 
@@ -29,8 +28,7 @@ fn red_mana(count: usize) -> Vec<ManaUnit> {
 fn mana_red_count(state: &engine::types::game_state::GameState) -> usize {
     state.players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.color == ManaType::Red)
         .count()
 }
@@ -66,7 +64,7 @@ fn cast_name_sticker_goblin(
     let state = committed.state_mut();
     state.rng_seed = seed;
     state.rng_word_pos = 0;
-    state.rng = ChaCha20Rng::seed_from_u64(seed);
+    state.rng = GameRng::seed_from_u64(seed);
     committed.resolve()
 }
 
@@ -138,7 +136,7 @@ fn name_sticker_goblin_rechecks_battlefield_intervening_if_at_resolution() {
     let state = goblin_cast.state_mut();
     state.rng_seed = 0;
     state.rng_word_pos = 0;
-    state.rng = ChaCha20Rng::seed_from_u64(0);
+    state.rng = GameRng::seed_from_u64(0);
 
     // Resolve the creature spell, but stop at the ordinary priority window with
     // its ETB trigger on the stack. This reach guard ensures the later no-mana

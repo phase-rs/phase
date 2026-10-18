@@ -158,6 +158,7 @@ expression: result
             "properties": []
           }
         },
+        "declares_chosen_group": 2147483648,
         "cost": null,
         "sub_ability": null,
         "duration": null,

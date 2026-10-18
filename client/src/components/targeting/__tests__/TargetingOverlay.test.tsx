@@ -466,6 +466,7 @@ describe("TargetingOverlay", () => {
       useGameStore.setState({
         gameState,
         waitingFor: gameState.waiting_for,
+        legalActions: [{ type: "CancelCast" as const }],
         dispatch,
       });
     });
@@ -572,9 +573,10 @@ describe("TargetingOverlay", () => {
           player: 0,
           copy_id: 233,
           target_slots: [
-            { current: { Player: 0 }, legal_alternatives: [{ Player: 0 }, { Player: 1 }] },
+            { current: { Player: 0 }, legal_alternatives: [{ Player: 1 }], can_keep: true },
           ],
           current_slot: 0,
+          can_keep_rest: true,
         },
       },
     });
@@ -595,6 +597,89 @@ describe("TargetingOverlay", () => {
 
     expect(dispatch).toHaveBeenCalledWith({
       type: "KeepAllCopyTargets",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep This Target" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: null },
+    });
+  });
+
+  it("hides both keep buttons when the engine does not offer keeping", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    // CR 115.7d: the current target is present, but keeping it has no legal
+    // completion, so the engine reports `can_keep: false` and
+    // `can_keep_rest: false`; the overlay must not offer either keep.
+    const gameState = createGameState({
+      waiting_for: {
+        type: "CopyRetarget",
+        data: {
+          player: 0,
+          copy_id: 234,
+          target_slots: [
+            { current: { Object: 61 }, legal_alternatives: [{ Object: 91 }], can_keep: false },
+          ],
+          current_slot: 0,
+          can_keep_rest: false,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    // Positive reach guard: the copy prompt itself rendered, so the absences
+    // below are the engine's permissions, not an overlay that never mounted.
+    expect(screen.getByText("Choose new target for copy")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Keep Current Targets" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Keep This Target" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+  });
+
+  it("shows Skip for a copy announcement slot the engine lets the player decline", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    // CR 115.6: an optional announcement slot ("up to two target creatures")
+    // may be declined; the engine reports it as `can_decline`, not as a keep.
+    const gameState = createGameState({
+      waiting_for: {
+        type: "CopyRetarget",
+        data: {
+          player: 0,
+          copy_id: 235,
+          target_slots: [
+            { legal_alternatives: [{ Object: 61 }, { Object: 91 }], can_decline: true },
+            { legal_alternatives: [{ Object: 61 }, { Object: 91 }] },
+          ],
+          current_slot: 0,
+          mode: "Announce",
+          can_keep_rest: false,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.queryByRole("button", { name: "Keep This Target" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: null },
     });
   });
 
@@ -971,6 +1056,30 @@ describe("TargetingOverlay", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the token-host prompt", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "ChooseTokenHost",
+        data: { player: 0, source_id: 1, legal_targets: [{ Object: 7 }, { Object: 8 }], pending_ability: null },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(
+      screen.getByText("Choose a host for the token"),
+    ).toBeInTheDocument();
+  });
+
   it("renders the plain prompt when no mode label is present", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
@@ -1340,6 +1449,323 @@ describe("TargetingOverlay", () => {
     render(<TargetingOverlay />);
 
     expect(screen.getByText("No legal targets available")).toBeInTheDocument();
+  });
+
+  it("cancels saddle selection back to priority when the engine offers it", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Rider",
+          power: 3,
+        }),
+      ),
+      waiting_for: {
+        type: "SaddleMount",
+        data: {
+          player: 0,
+          mount_id: 40,
+          saddle_power: 2,
+          eligible_creatures: [21],
+          contributions: [3],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [{ type: "CancelCast" as const }],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("cancels station selection back to priority when the engine offers it", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Station Crew",
+          power: 3,
+        }),
+      ),
+      waiting_for: {
+        type: "StationTarget",
+        data: {
+          player: 0,
+          spacecraft_id: 30,
+          eligible_creatures: [21],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [{ type: "CancelCast" as const }],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("cancels equip target selection when the engine offers it", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Artifact"], {
+          id: 10,
+          name: "Test Equipment",
+        }),
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Grizzly Bears",
+        }),
+      ),
+      waiting_for: {
+        type: "EquipTarget",
+        data: {
+          player: 0,
+          equipment_id: 10,
+          valid_targets: [21],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [{ type: "CancelCast" as const }],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("Choose a creature to equip")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("hides Cancel in every in-scope flow without an engine offer", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const objects = buildObjectMap(
+      buildGameObjectWithCoreTypes(["Artifact"], {
+        id: 20,
+        name: "Vehicle",
+      }),
+      buildGameObjectWithCoreTypes(["Creature"], {
+        id: 21,
+        name: "Pilot One",
+        power: 2,
+      }),
+    );
+    const cases: Array<[string, GameState["waiting_for"]]> = [
+      ["crew", {
+        type: "CrewVehicle",
+        data: {
+          player: 0,
+          vehicle_id: 20,
+          crew_power: 2,
+          eligible_creatures: [21],
+          contributions: [2],
+        },
+      }],
+      ["saddle", {
+        type: "SaddleMount",
+        data: {
+          player: 0,
+          mount_id: 40,
+          saddle_power: 2,
+          eligible_creatures: [21],
+          contributions: [2],
+        },
+      }],
+      ["station", {
+        type: "StationTarget",
+        data: {
+          player: 0,
+          spacecraft_id: 30,
+          eligible_creatures: [21],
+        },
+      }],
+      ["equip", {
+        type: "EquipTarget",
+        data: {
+          player: 0,
+          equipment_id: 20,
+          valid_targets: [21],
+        },
+      }],
+      ["spell targeting", {
+        type: "TargetSelection",
+        data: {
+          player: 0,
+          pending_cast: buildPendingCast({ object_id: 5, card_id: 10 }),
+          target_slots: [buildTargetSelectionSlot({ legal_targets: [{ Object: 21 }] })],
+          selection: buildTargetSelectionProgress({
+            current_legal_targets: [{ Object: 21 }],
+          }),
+        },
+      }],
+    ];
+
+    for (const [name, waiting_for] of cases) {
+      const gameState = createGameState({ objects, waiting_for });
+      act(() => {
+        useGameStore.setState({
+          gameState,
+          waitingFor: gameState.waiting_for,
+          legalActions: [],
+          dispatch,
+        });
+      });
+
+      const { unmount } = render(<TargetingOverlay />);
+
+      expect(
+        screen.queryByRole("button", { name: "Cancel" }),
+        `${name} must hide Cancel without an engine offer`,
+      ).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("renders nothing for another player's keyword prompt", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Rider",
+          power: 3,
+        }),
+      ),
+      waiting_for: {
+        type: "SaddleMount",
+        data: {
+          player: 1,
+          mount_id: 40,
+          saddle_power: 2,
+          eligible_creatures: [21],
+          contributions: [3],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [{ type: "CancelCast" as const }],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  });
+
+  it("keeps PayCost sacrifice-spell cancel without an engine offer", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 7,
+          name: "Memnite",
+        }),
+      ),
+      waiting_for: {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "Sacrifice" },
+          choices: [7],
+          count: 1,
+          min_count: 0,
+          resume: {
+            type: "Spell",
+            Spell: {
+              object_id: 5,
+              card_id: 10,
+              ability: { targets: [] },
+              cost: { type: "NoCost" },
+            },
+          },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("keeps BlightChoice cancel without an engine offer", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 7,
+          name: "Memnite",
+        }),
+      ),
+      waiting_for: {
+        type: "BlightChoice",
+        data: {
+          player: 0,
+          counters: 1,
+          creatures: [7],
+          pending_cast: buildPendingCast({ object_id: 5, card_id: 10 }),
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 });
 

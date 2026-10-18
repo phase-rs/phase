@@ -8,6 +8,7 @@ use super::{
     anthem::*, cda::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*, mana_transform::*,
     restriction::*, same_is_true::*, type_change::*,
 };
+use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use crate::types::statics::ProhibitionScope;
 
 /// CR 201.5: Consume a self-reference subject — `~` (produced by
@@ -755,15 +756,25 @@ fn filter_prop_has_power_comparison(prop: &FilterProp) -> bool {
 fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, ControllerRef)> {
     let rest = nom_tag_tp(tp, "all creatures attacking ")
         .or_else(|| nom_tag_tp(tp, "creatures attacking "))?;
-    // Longest-first so the "your opponents and/or …" long form wins before the
-    // bare "your opponents ", and "the last chosen player " before the shorter
+    // The "your opponents and/or …" long form is tried before the bare
+    // "your opponents " row; "you " cannot match "your".
+    if let Some((_, original_rest)) = nom_tag_tp(&rest, "your opponents and/or planeswalkers ")
+        .and_then(|after| {
+            nom_on_lower(after.original, after.lower, |i| {
+                terminated(
+                    controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+                    tag(" "),
+                )
+                .parse(i)
+            })
+        })
+    {
+        return Some((original_rest, ControllerRef::Opponent));
+    }
+    // Longest-first so "the last chosen player " wins before the shorter
     // "the chosen player ".
     for (phrase, defender) in [
         ("you ", ControllerRef::You),
-        (
-            "your opponents and/or planeswalkers they control ",
-            ControllerRef::Opponent,
-        ),
         ("your opponents ", ControllerRef::Opponent),
         ("enchanted player ", ControllerRef::EnchantedPlayer),
         ("the last chosen player ", ControllerRef::SourceChosenPlayer),
@@ -827,6 +838,21 @@ pub(crate) fn parse_static_line_inner(
 ) -> Option<StaticDefinition> {
     let raw_lower = text.to_lowercase();
     let text = strip_reminder_text(text);
+    // CR 602.1 + CR 604.1: "[Cost]: [Effect]" is an activated ability, not a static
+    // ability, so the static-line authority declines it. Callers that own activated
+    // abilities then claim it: the document router via `find_activated_colon`
+    // (oracle.rs Priority 4), the level preprocessor via `oracle_level.rs`, a
+    // token's quoted grant via `push_parsed_statics` → `classify_quoted_inner` →
+    // `parse_quoted_ability`, and the runtime token catalog via
+    // `catalog_rules_text_abilities` → `classify_quoted_inner`.
+    // Evaluated on the REMINDER-STRIPPED text so a
+    // parenthetical cost ("Equipped creature gets +2/+2. ({2}: Attach to target
+    // creature you control. Equip only as a sorcery.)") is not mistaken for one, and
+    // on the quote-masked text so a granted inner ability
+    // ("… have \"{T}: Add {G}.\"") is not either.
+    if super::grammar::unquoted_cost_separator(&text).is_some() {
+        return None;
+    }
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
 
@@ -913,6 +939,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 606.3: "You may activate [the] loyalty abilities of <subject> <count>
+    // each turn rather than only once" (Oath of Teferi / Urza, Planeswalker).
+    // Earliest point whose earlier arms provably return None on this shape, so
+    // it takes precedence over the later branches below.
+    if let Some(def) = parse_loyalty_activation_limit_static(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 510.1c: Attached-object conditional variants must precede the generic
     // inverted "As long as ..." rewrite so the condition binds to the
     // enchanted/equipped creature rather than becoming an unrecognized SelfRef
@@ -940,6 +974,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 510.1c + CR 609.4 + CR 611.3a: "[As long as <cond>, ]for each <creature class>
+    // you control, you may have that creature assign its combat damage as though it
+    // weren't blocked" (Siege Behemoth, Zilortha, Ruxa). Must run before the inverted
+    // "As long as" split below, which would otherwise cut the line at the first
+    // effect-subject comma and leave an `Unrecognized` gate.
+    if let Some(def) = parse_for_each_assign_damage_as_though_unblocked(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -950,6 +993,16 @@ pub(crate) fn parse_static_line_inner(
     if matches!(inverted, InvertedAsLongAs::Allow) {
         if let Some(split) = try_split_inverted_as_long_as(&tp) {
             if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
+                return Some(def);
+            }
+            // CR 611.3a + CR 607.2a: the persistent exile-cast permission reads
+            // its own leading gate (`strip_leading_permission_condition`) — "As
+            // long as <condition>, you may cast the exiled card, and mana of any
+            // type can be spent to cast that spell" (Null Summoner). The canonical
+            // rewrite below would put the gate after the concession conjunct,
+            // where no permission grammar reads it, and the generic fallback
+            // would keep only the gate.
+            if let Some(def) = try_parse_persistent_exile_play_permission(&text, &lower) {
                 return Some(def);
             }
             // CR 400.2 + CR 701.20a: "As long as <condition>, all players
@@ -1724,12 +1777,12 @@ pub(crate) fn parse_static_line_inner(
                 ),
                 rest,
             )
-        } else if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+        } else if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
             (
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![prop]),
+                        .properties(props),
                 ),
                 rest,
             )
@@ -1792,14 +1845,15 @@ pub(crate) fn parse_static_line_inner(
     // CR 613.7: "Other" excludes the source permanent itself via FilterProp::Another.
     if let Some(rest_tp) = nom_tag_tp(&tp, "other creatures you control ") {
         let after_prefix = rest_tp.original;
-        let (filter, predicate_text) = if let Some((prop, rest)) =
-            strip_counter_condition_prefix(after_prefix)
+        let (filter, predicate_text) = if let Some((mut props, rest)) =
+            strip_with_qualifier_prefix(after_prefix)
         {
+            props.push(FilterProp::Another);
             (
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![prop, FilterProp::Another]),
+                        .properties(props),
                 ),
                 rest,
             )
@@ -3889,6 +3943,29 @@ pub(crate) fn parse_static_line_inner(
         if let Some(filter) = parse_doubler_source_filter(tp.lower) {
             def = def.affected(filter);
         }
+        // CR 603.2d + CR 604.1: "…triggers while <condition>, that ability triggers
+        // an additional time" (Sanctum of All: "while you control six or more
+        // Shrines") gates the doubling on a game-state condition, evaluated live
+        // by `active_static_definitions`. `parse_static_condition` delegates to
+        // `parse_inner_condition`, the single condition authority.
+        if nom_primitives::scan_contains(tp.lower, "triggers while ") {
+            // A printed gate whose continuation is not the doubler's own must not
+            // degrade to an unconditional doubler: decline so the line stays a
+            // flagged gap.
+            let (_, condition_text, _) = nom_primitives::scan_preceded(tp.lower, |i| {
+                preceded(
+                    tag::<_, _, OracleError<'_>>("triggers while "),
+                    // Anchor on the doubler's own continuation so a condition that
+                    // itself contains a comma is not cut at its first ", ".
+                    terminated(
+                        take_until(", that ability trigger"),
+                        tag(", that ability trigger"),
+                    ),
+                )
+                .parse(i)
+            })?;
+            def.condition = Some(parse_static_condition(condition_text)?);
+        }
         return Some(def);
     }
 
@@ -4182,4 +4259,44 @@ fn parse_counters_cant_be_removed_static(
             .affected(filter)
             .description(text.to_string()),
     )
+}
+
+/// Structural-marker site: "your opponents and/or planeswalkers they control"
+/// reads "they control" as a marker; the defender is the opponents either way.
+#[cfg(test)]
+mod structural_marker_tests {
+    use super::*;
+
+    #[test]
+    fn attacking_defender_scope_marker() {
+        let parse = |controller: &str| {
+            let text = format!(
+                "Creatures attacking your opponents and/or planeswalkers {controller} get +1/+0."
+            );
+            let lower = text.to_lowercase();
+            parse_attacking_defender_scope(&TextPair::new(&text, &lower))
+                .map(|(rest, defender)| (rest.to_string(), defender))
+        };
+        assert_eq!(
+            parse("they control"),
+            Some(("get +1/+0.".to_string(), ControllerRef::Opponent))
+        );
+        // A declined controller phrase falls through to the bare "your opponents "
+        // row, which leaves "and/or planeswalkers …" unconsumed.
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert_eq!(
+                parse(declined),
+                Some((
+                    format!("and/or planeswalkers {declined} get +1/+0."),
+                    ControllerRef::Opponent
+                )),
+                "{declined:?}"
+            );
+        }
+    }
 }

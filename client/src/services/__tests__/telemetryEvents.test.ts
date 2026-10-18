@@ -15,7 +15,7 @@ vi.mock("../telemetry", () => ({
   trackEvent,
 }));
 
-import { installTelemetry } from "../telemetryEvents";
+import { installTelemetry, reportBoundaryError } from "../telemetryEvents";
 
 describe("telemetry game event tracking", () => {
   beforeEach(() => {
@@ -77,5 +77,55 @@ describe("telemetry game event tracking", () => {
         native_fallback_reason: "native_engine_unavailable",
       }),
     );
+  });
+});
+
+describe("js_error top_frame", () => {
+  beforeEach(() => {
+    trackEvent.mockClear();
+  });
+
+  function reportedTopFrame(stack: string): unknown {
+    const error = new TypeError("boom");
+    error.stack = stack;
+    reportBoundaryError(error);
+    return trackEvent.mock.calls[0][1].top_frame;
+  }
+
+  it.each([
+    [
+      "V8 (Chrome/Edge/desktop)",
+      "TypeError: boom\n    at render (https://phase-rs.dev/assets/index-a1.js:12:345)\n    at commit (https://phase-rs.dev/assets/index-a1.js:9:8)",
+      "at render (https://phase-rs.dev/assets/index-a1.js:12:345)",
+    ],
+    [
+      "SpiderMonkey (Firefox)",
+      "render@https://phase-rs.dev/assets/index-a1.js:12:345\ncommit@https://phase-rs.dev/assets/index-a1.js:9:8\n",
+      "render@https://phase-rs.dev/assets/index-a1.js:12:345",
+    ],
+    [
+      "JavaScriptCore (Safari) anonymous frame",
+      "@https://phase-rs.dev/assets/index-a1.js:12:345\nglobal code@https://phase-rs.dev/assets/index-a1.js:1:1",
+      "@https://phase-rs.dev/assets/index-a1.js:12:345",
+    ],
+    [
+      "JavaScriptCore (Safari) native frame",
+      "parse@[native code]\nload@https://phase-rs.dev/assets/index-a1.js:12:345",
+      "parse@[native code]",
+    ],
+  ])("reports the first frame of a %s stack", (_engine, stack, expected) => {
+    expect(reportedTopFrame(stack)).toBe(expected);
+  });
+
+  it("does not read a V8 header whose message contains an at-sign location as a frame", () => {
+    expect(
+      reportedTopFrame(
+        "Error: bad url user@host.example:12:34\n    at load (https://phase-rs.dev/assets/index-a1.js:1:2)",
+      ),
+    ).toBe("at load (https://phase-rs.dev/assets/index-a1.js:1:2)");
+  });
+
+  it("omits top_frame when the stack has no frames", () => {
+    expect(reportedTopFrame("TypeError: boom")).toBeUndefined();
   });
 });

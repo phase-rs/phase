@@ -35,6 +35,7 @@
 pub mod catalog;
 pub mod error;
 pub mod fingerprint;
+pub mod format_guidance;
 pub mod game_decision;
 pub mod probe;
 pub mod prompt;
@@ -45,20 +46,31 @@ pub mod wire;
 #[cfg(feature = "draft")]
 pub mod draft_decision;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use error::{LlmError, LlmResult};
+pub use format_guidance::game_format_brief;
 pub use game_decision::{
-    build_game_decision_prompt, decision_fingerprint, select_action, GameDecisionRequest,
-    LlmActionSelection,
+    build_game_decision_prompt, decision_fingerprint, select_action, select_action_from_response,
+    GameDecisionRequest, LlmActionSelection,
 };
 pub use probe::{connection_probe_prompt, validate_probe_response};
 pub use prompt::{difficulty_brief, LlmChoice, LlmPrompt};
 pub use provider::{
-    HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, WireProtocol,
+    HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, RedirectPolicy, WireProtocol,
     ACCEPTED_PROVIDER_LABELS,
 };
-pub use wire::{build_chat_request, completion_from_response, extract_completion_text};
+pub use wire::{
+    build_chat_request, completion_from_response, extract_completion_text, system_one_option_keys,
+    token_usage, LlmReply, TokenUsage,
+};
+
+#[cfg(feature = "draft")]
+pub use format_guidance::draft_format_brief;
 
 #[cfg(feature = "draft")]
 pub use draft_decision::{
-    build_draft_pick_prompt, pick_fingerprint, select_picks, DraftPickRequest, LlmPickSelection,
+    build_draft_pick_prompt, pick_fingerprint, select_picks, select_picks_from_response,
+    DraftPickRequest, LlmPickSelection,
 };

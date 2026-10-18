@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildGameObjectWithCoreTypes,
@@ -19,6 +20,7 @@ import {
 } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
+  buildManaPaymentWaitingFor,
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
@@ -382,6 +384,63 @@ describe("ZoneViewer", () => {
     );
   });
 
+  it("dispatches the engine-surfaced plot activation for a revealed library top (Fblthp)", () => {
+    // CR 702.170f: Fblthp, Lost on the Range lets its controller plot the top
+    // card. The engine surfaces it as an ActivateAbility on the top card whose
+    // runtime-granted index is past the serialized `abilities`.
+    const top = makeObject({
+      id: 30,
+      zone: "Library",
+      name: "Mystic Sanctuary",
+      display_visible_to_viewer: true,
+      keywords: [],
+      base_keywords: [],
+      abilities: [],
+    });
+    const plot: GameAction = {
+      type: "ActivateAbility",
+      data: { source_id: top.id, ability_index: 0 },
+    };
+    const base = makeState(top);
+    const gameState = {
+      ...base,
+      players: [{ ...base.players[0], graveyard: [], library: [top.id] }, base.players[1]],
+    };
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [plot],
+      legalActionsByObject: { [String(top.id)]: [plot] },
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="library" playerId={0} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByTitle("Activate from Library: Mystic Sanctuary"));
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(plot);
+  });
+
+  it("offers a graveyard activated ability (Unearth) alongside casts", () => {
+    const object = makeObject({ abilities: [] });
+    const unearth: GameAction = {
+      type: "ActivateAbility",
+      data: { source_id: object.id, ability_index: 0 },
+    };
+    useGameStore.setState({
+      legalActions: [unearth],
+      legalActionsByObject: { [String(object.id)]: [unearth] },
+    });
+
+    render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByTitle("Activate from Graveyard: Flame Jab"));
+
+    expect(dispatch).toHaveBeenCalledWith(unearth);
+  });
+
   it("shows the owner's own top under a continuous look (Future Sight) and keeps it castable", () => {
     // Future Sight / Bolas's Citadel / Oracle of Mul Daya grant
     // `can_look_at_top_of_library` — a continuous static that exposes the OWNER's
@@ -638,5 +697,60 @@ describe("ZoneViewer", () => {
 
     expect(screen.getByLabelText("2")).toBeInTheDocument();
     expect(screen.queryByText(/suspend/i)).not.toBeInTheDocument();
+  });
+
+  describe("delve from a shared graveyard", () => {
+    const delveTap: GameAction = {
+      type: "TapForConvoke",
+      data: { object_id: 7, mana_type: "Colorless" },
+    };
+
+    function seatOneDelving({ withAction }: { withAction: boolean }) {
+      const object = makeObject();
+      const gameState = buildGameState({
+        active_player: 1,
+        priority_player: 1,
+        players: buildPlayers([{ id: 0, graveyard: [object.id] }, { id: 1 }]),
+        objects: buildObjectMap(object),
+        battlefield: [],
+        exile: [],
+        stack: [],
+        waiting_for: buildManaPaymentWaitingFor({
+          data: { player: 1, convoke_mode: "Delve" },
+        }),
+        derived: { shared_piles: { library: 0, graveyard: 0 } },
+      });
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: withAction ? [delveTap] : [],
+        legalActionsByObject: withAction ? { "7": [delveTap] } : {},
+        gameMode: "online",
+      });
+      useMultiplayerStore.setState({ activePlayerId: 1 });
+    }
+
+    afterEach(() => {
+      useMultiplayerStore.setState({ activePlayerId: null });
+    });
+
+    it("offers the engine's delve action to the seat that is not the holder", () => {
+      seatOneDelving({ withAction: true });
+      render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+      fireEvent.click(screen.getByTestId("card-image"));
+
+      expect(targetDispatch).toHaveBeenCalledWith(delveTap);
+    });
+
+    it("offers nothing for a card the engine reports no delve action for", () => {
+      seatOneDelving({ withAction: false });
+      render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+      expect(screen.getByTestId("card-image")).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId("card-image"));
+
+      expect(targetDispatch).not.toHaveBeenCalled();
+    });
   });
 });

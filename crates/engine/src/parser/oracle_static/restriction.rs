@@ -1794,20 +1794,62 @@ pub(crate) fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDe
 /// E.g., Omen Machine: "Players can't draw cards."
 /// E.g., Maralen of the Mornsong: "Players can't draw cards."
 pub(crate) fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefinition> {
+    let (who, _) = parse_cant_draw_cards_predicate(tp)?;
+    Some(StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()))
+}
+
+/// CR 101.2 / CR 121.3: "[Subject] can't draw (cards|a card)" — the subject and
+/// the draw prohibition shared by `parse_cant_draw_cards` and
+/// `parse_cant_draw_cards_or_gain_life`. Returns the subject's scope and the
+/// text after the draw object.
+fn parse_cant_draw_cards_predicate(tp: &str) -> Option<(ProhibitionScope, &str)> {
     type VE<'a> = OracleError<'a>;
 
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
     let rest = nom_tag_lower(predicate, predicate, "can't draw ")
         .or_else(|| nom_tag_lower(predicate, predicate, "can\u{2019}t draw "))?;
-
-    alt((
+    let (rest, _) = alt((
         value((), tag::<_, _, VE<'_>>("cards")),
         value((), tag::<_, _, VE<'_>>("a card")),
     ))
-    .parse(rest.trim_end_matches('.'))
+    .parse(rest)
     .ok()?;
+    Some((who, rest))
+}
 
-    Some(StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()))
+/// CR 101.2 + CR 121.3 + CR 119.7: "[Subject] can't draw cards or gain life."
+/// — two prohibitions sharing one subject (Mornsong Aria). The single-static
+/// `parse_cant_draw_cards` stops after "cards" and silently drops the life clause.
+pub(crate) fn parse_cant_draw_cards_or_gain_life(
+    tp: &str,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (who, rest) = parse_cant_draw_cards_predicate(tp)?;
+    let rest = nom_tag_lower(rest, rest, " or gain life")?;
+    if !rest.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // Both prohibitions bind the one parsed subject, so the life clause's
+    // player scope is derived from `who` rather than re-scanned from the text.
+    let life_scope = match &who {
+        ProhibitionScope::AllPlayers => TargetFilter::Typed(TypedFilter::default()),
+        ProhibitionScope::Opponents => {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        }
+        ProhibitionScope::Controller => {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You))
+        }
+        // CR 303.4e: "Enchanted player" — the player the Aura is attached to.
+        ProhibitionScope::EnchantedCreatureController => TargetFilter::AttachedTo,
+    };
+
+    Some(vec![
+        StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()),
+        StaticDefinition::new(StaticMode::CantGainLife)
+            .affected(life_scope)
+            .description(text.to_string()),
+    ])
 }
 
 /// CR 121.1 + CR 613.11: Parse a draw-source redirection static from Oracle
@@ -2032,6 +2074,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(affected)
             .condition(StaticCondition::DuringYourTurn)
@@ -2144,13 +2187,6 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         (r, CastFrequency::Unlimited, CardPlayMode::Play, false)
     } else {
         let r = nom_tag_lower(lower, lower, "you may cast ")?;
-        // Only match if a graveyard anchor follows — avoid catching other "you
-        // may cast" statics.
-        if !nom_primitives::scan_contains(r, "from your graveyard")
-            && !nom_primitives::scan_contains(r, GRAVEYARD_POOL_ANCHOR)
-        {
-            return None;
-        }
         (r, CastFrequency::Unlimited, CardPlayMode::Cast, false)
     };
     // CR 102.1 + CR 601.3: "during your turn" and "(once) during each of your
@@ -2158,7 +2194,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // player. The frequency only caps the count per turn.
     let your_turn_only = during_your_turn_head || each_of_your_turns;
 
-    let (filter_text, trailing, pool_props) = split_graveyard_permission_anchor(rest)?;
+    let (filter_text, zones, trailing, pool_props) = split_graveyard_permission_anchor(rest)?;
 
     // Strip leading article via nom tag ("a ", "an ")
     let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
@@ -2280,6 +2316,20 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     if !is_punctuation_only(residual) {
         return None;
     }
+    // CR 604.6 + CR 113.6f: the exile tail is modeled only as the card's own
+    // unlimited, rider-free "You may cast this card from ... exile" permission.
+    let own_unlimited_cast = self_ref_permission
+        && frequency == CastFrequency::Unlimited
+        && play_mode == CardPlayMode::Cast
+        && required_cast_keyword.is_none()
+        && enters_with_counter.is_none()
+        && graveyard_destination_replacement.is_none()
+        && extra_cost.is_none()
+        && is_punctuation_only(residual);
+    // allow-noncombinator: typed `Vec<Zone>` membership, not text dispatch.
+    if zones.contains(&Zone::Exile) && !own_unlimited_cast {
+        return None;
+    }
 
     let affected = filter;
     // CR 400.7 + CR 604.2: the pool provenance the anchor stated ("cards in
@@ -2297,6 +2347,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         extra_cost,
         enters_with_counter,
         required_cast_keyword,
+        pool: GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(affected)
     .description(text.to_string());
@@ -2314,7 +2365,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         def = def.condition(condition);
     }
     if self_ref_permission {
-        def = def.active_zones(vec![Zone::Graveyard]);
+        def = def.active_zones(zones);
     }
     Some(def)
 }
@@ -2354,13 +2405,13 @@ enum GraveyardPoolQualifier {
 /// Mirrors the established exile-side anchor `"from among cards exiled with"`.
 const GRAVEYARD_POOL_ANCHOR: &str = " from among cards in your graveyard";
 
-/// CR 604.2 + CR 400.7: Split a graveyard cast-permission body at its zone
-/// anchor, returning the filter text before it, the rider text after it, and
-/// the provenance properties the pool qualifier stated (empty for the bare
-/// anchor).
+/// CR 604.2 + CR 400.7: Split a cast-permission body at its zone anchor,
+/// returning the filter text before it, the zones it names, the rider text
+/// after it, and the provenance properties the pool qualifier stated (empty for
+/// the zone tail).
 ///
 /// The pool anchor is tried FIRST and kept explicit so a future widening of
-/// either literal cannot make the bare anchor shadow the qualified one.
+/// either anchor cannot make the zone tail shadow the qualified one.
 ///
 /// `None` is a REFUSAL, not "some other shape". Two causes:
 ///   * a provenance qualifier is printed but unmodeled. Leaving it in `trailing`
@@ -2375,7 +2426,9 @@ const GRAVEYARD_POOL_ANCHOR: &str = " from among cards in your graveyard";
 ///     requiring a punctuation-only tail costs no coverage and closes the hole
 ///     for BOTH callers — including the disjunctive one, which discards its
 ///     branch remainder entirely.
-fn split_graveyard_permission_anchor(rest: &str) -> Option<(&str, &str, Vec<FilterProp>)> {
+fn split_graveyard_permission_anchor(
+    rest: &str,
+) -> Option<(&str, Vec<Zone>, &str, Vec<FilterProp>)> {
     if let Ok((_, (filter_text, after))) =
         nom_primitives::split_once_on(rest, GRAVEYARD_POOL_ANCHOR)
     {
@@ -2387,11 +2440,19 @@ fn split_graveyard_permission_anchor(rest: &str) -> Option<(&str, &str, Vec<Filt
         if !is_punctuation_only(trailing) {
             return None;
         }
-        return Some((filter_text, trailing, props));
+        return Some((filter_text, vec![Zone::Graveyard], trailing, props));
     }
-    nom_primitives::split_once_on(rest, " from your graveyard")
-        .ok()
-        .map(|(_, (filter_text, trailing))| (filter_text, trailing, Vec::new()))
+    let (filter_text, zones, trailing) =
+        nom_primitives::scan_preceded(rest, parse_cast_permission_zone_tail)?;
+    Some((filter_text.trim_end(), zones, trailing, Vec::new()))
+}
+
+/// [`split_graveyard_permission_anchor`] restricted to a graveyard-only anchor;
+/// the exile tail belongs only to the direct self-permission path.
+fn split_graveyard_only_anchor(rest: &str) -> Option<(&str, &str, Vec<FilterProp>)> {
+    split_graveyard_permission_anchor(rest)
+        .filter(|(_, zones, _, _)| *zones == [Zone::Graveyard])
+        .map(|(filter_text, _, trailing, props)| (filter_text, trailing, props))
 }
 
 /// CR 400.7: Classify the text following the pool anchor.
@@ -2464,6 +2525,23 @@ fn inject_filter_props(filter: TargetFilter, props: Vec<FilterProp>) -> TargetFi
             ],
         },
     }
+}
+
+/// CR 113.6b + CR 604.6: the zones a cast permission names — "from your
+/// graveyard", "from exile", or "from your graveyard or from exile".
+fn parse_cast_permission_zone_tail(input: &str) -> OracleResult<'_, Vec<Zone>> {
+    preceded(
+        tag("from "),
+        alt((
+            value(
+                vec![Zone::Graveyard, Zone::Exile],
+                tag("your graveyard or from exile"),
+            ),
+            value(vec![Zone::Graveyard], tag("your graveyard")),
+            value(vec![Zone::Exile], tag("exile")),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 601.2f: Outcome of matching the "by <cost> in addition to … other costs"
@@ -2589,9 +2667,9 @@ fn is_punctuation_only(text: &str) -> bool {
 }
 
 /// CR 601.2a + CR 113.6b: True when `lower` opens with this module's
-/// cast-from-graveyard permission lead, regardless of whether the full
-/// permission parses. The document dispatcher uses it to keep a declined
-/// permission line a strict `static_structure` gap instead of letting the
+/// cast-permission lead — from a graveyard, or the card's own exile tail —
+/// regardless of whether the full permission parses. The document dispatcher
+/// uses it to keep a declined permission line a strict `static_structure` gap instead of letting the
 /// replacement/effect fallbacks reclaim it as a partial parse.
 pub(crate) fn is_graveyard_cast_permission_lead(lower: &str) -> bool {
     let lower = lower.trim_start();
@@ -2599,9 +2677,19 @@ pub(crate) fn is_graveyard_cast_permission_lead(lower: &str) -> bool {
         .or_else(|| nom_tag_lower(lower, lower, "once each turn, "))
         .or_else(|| nom_tag_lower(lower, lower, "during your turn, "))
         .unwrap_or(lower);
-    (nom_tag_lower(lower, lower, "you may cast ").is_some()
-        || nom_tag_lower(lower, lower, "you may play ").is_some())
-        && nom_primitives::scan_contains(lower, "from your graveyard")
+    let Some(rest) = nom_tag_lower(lower, lower, "you may cast ")
+        .or_else(|| nom_tag_lower(lower, lower, "you may play "))
+    else {
+        return false;
+    };
+    nom_primitives::scan_contains(rest, "from your graveyard")
+        || preceded(
+            parse_self_subject,
+            preceded(tag(" "), parse_cast_permission_zone_tail),
+        )
+        .parse(rest)
+        // allow-noncombinator: typed `Vec<Zone>` membership, not text dispatch.
+        .is_ok_and(|(_, zones)| zones.contains(&Zone::Exile))
 }
 
 /// CR 607.1 + CR 122.1 + CR 614.1c: outcome of the linked "if you cast a spell
@@ -2751,8 +2839,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
     // ("from among cards in your graveyard that were put there from your library
     // this turn" — Kagha, Shadow Archdruid) also yields the provenance
     // properties that narrow the pool.
-    let (spell_branch, spell_trailing, spell_props) =
-        split_graveyard_permission_anchor(spell_branch)?;
+    let (spell_branch, spell_trailing, spell_props) = split_graveyard_only_anchor(spell_branch)?;
     // A branch remainder carrying rules-bearing text would be
     // discarded here (this helper keeps no rider machinery, unlike the direct
     // caller), so refuse rather than drop it.
@@ -2767,7 +2854,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
     // carries an unmodeled qualifier declines the whole permission rather than
     // dropping it.
     let (land_branch, land_props, land_states_its_own_anchor) =
-        match split_graveyard_permission_anchor(land_branch) {
+        match split_graveyard_only_anchor(land_branch) {
             Some((before, trailing, props)) => {
                 if !is_punctuation_only(trailing) {
                     return None;
@@ -2822,6 +2909,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         extra_cost: None,
         enters_with_counter: None,
         required_cast_keyword: None,
+        pool: GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(affected)
     .description(text.to_string());
@@ -2868,6 +2956,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
         })
         .affected(affected)
         .description(text.to_string()),
@@ -2899,7 +2988,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::Not { .. }
         | TargetFilter::StackAbility { .. }
@@ -2930,6 +3019,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -3450,8 +3540,18 @@ fn strip_leading_permission_condition(input: &str) -> Option<(&str, StaticCondit
 
 fn strip_exile_play_source_reference(rest: &str, grantee: ExileCastGrantee) -> Option<&str> {
     let after_anchor = match grantee {
-        ExileCastGrantee::SourceController => nom_tag_lower(rest, rest, "cards exiled with ")
-            .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?,
+        ExileCastGrantee::SourceController => {
+            // CR 607.2a: "the exiled card[s]" names the same linked pool as
+            // "cards exiled with [this object]" (Null Summoner), so it needs no
+            // self-reference after it.
+            if let Some(after) = nom_tag_lower(rest, rest, "the exiled cards")
+                .or_else(|| nom_tag_lower(rest, rest, "the exiled card"))
+            {
+                return Some(after);
+            }
+            nom_tag_lower(rest, rest, "cards exiled with ")
+                .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?
+        }
         // CR 406.6: "cards they exiled with <self>" — the per-player share of
         // the source's pool, bound to the "each player" subject.
         ExileCastGrantee::EachPlayerOwnExiles => {
