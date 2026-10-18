@@ -7,9 +7,9 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CountScope,
-    CounterAdjustment, DamageKindFilter, DoorLockOp, PlayerRelation,
-    SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CombatRelation,
+    CombatRelationSubject, CountScope, CounterAdjustment, DamageKindFilter, DoorLockOp,
+    PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
@@ -1388,8 +1388,8 @@ fn activation_during_gate_composes_named_step_axis() {
 /// was the named-step activation instruction now parse with zero
 /// `Effect::Unimplemented` and a typed step restriction. Kongming's
 /// Contraptions composes the step leg with its existing `BeenAttackedThisStep`
-/// leg. (Lesser Werewolf's target filter is a separate, pre-existing backlog
-/// item; nothing here asserts that reading.)
+/// leg. CR 509.1g + CR 509.1h: Lesser Werewolf's counter target keeps its
+/// "blocking or blocked by this creature" relation, anchored to the source.
 #[test]
 fn named_step_activation_cards_parse_without_gaps() {
     const DESERT: &str = "{T}: Add {C}.\n{T}: This land deals 1 damage to target attacking creature. Activate only during the end of combat step.";
@@ -1430,6 +1430,23 @@ fn named_step_activation_cards_parse_without_gaps() {
     assert_eq!(
         werewolf.abilities[0].activation_restrictions,
         vec![named_step_restriction(vec![Phase::DeclareBlockers])]
+    );
+    let counter = werewolf.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("the -0/-1 counter clause chains after the pump");
+    let Effect::PutCounter { target, .. } = counter.effect.as_ref() else {
+        panic!("expected the PutCounter sub-ability, got {counter:#?}");
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockingOrBlockedBy,
+                subject: CombatRelationSubject::Source,
+            }
+        ])),
+        "the counter's target must stay restricted to creatures blocking or blocked by the source"
     );
 
     let kongming = parse(
