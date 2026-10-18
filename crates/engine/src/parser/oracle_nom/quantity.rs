@@ -3212,7 +3212,6 @@ mod coordinated_population_tests {
             "card you own in exile and in unknown",
             "card you own in exile and in",
             "card you own in exile and in your graveyard and",
-            "card you own in exile and in your graveyard and each artifact you control",
             "card you own in exile and in your graveyard that's an instant card or unknown",
             "card you own in exile and in your graveyard that's an instant card and",
             "card you own in exile and in your graveyard that's a card that has an adventures",
@@ -3222,6 +3221,19 @@ mod coordinated_population_tests {
             assert!(crate::parser::oracle_quantity::parse_for_each_clause(phrase).is_none(), "{phrase}");
             assert!(crate::parser::oracle_quantity::parse_quantity_ref(&format!("the number of {phrase}")).is_none(), "{phrase}");
         }
+        let phrase = "card you own in exile and in your graveyard and each artifact you control";
+        assert!(matches!(
+            parse_coordinated_card_population(phrase),
+            Err(nom::Err::Failure(_))
+        ));
+        assert!(matches!(
+            crate::parser::oracle_quantity::parse_for_each_clause(phrase),
+            Some(QuantityRef::ObjectCount { .. })
+        ));
+        assert!(matches!(
+            crate::parser::oracle_quantity::parse_quantity_ref(&format!("the number of {phrase}")),
+            Some(QuantityRef::ObjectCount { .. })
+        ));
         assert!(matches!(
             parse_coordinated_card_population(
                 "artifact you control and each artifact card in your hand"

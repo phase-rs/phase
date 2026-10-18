@@ -1789,6 +1789,21 @@ fn pending_population_functioning_modifier_sources() {
                 &mut Vec::new(),
             );
         }
+        engine::game::layers::flush_layers(runner.state_mut());
+        assert_eq!(
+            engine::game::functioning_abilities::game_functioning_statics(runner.state())
+                .filter(|(object, definition)| {
+                    object.id == host && matches!(definition.mode, StaticMode::ModifyCost { .. })
+                })
+                .count(),
+            1,
+            "{source_kind}: the intended host must supply the modifier"
+        );
+        assert_eq!(
+            engine::game::casting::effective_spell_cost(runner.state(), P0, spell),
+            Some(ManaCost::generic(1)),
+            "{source_kind}: preview counts the unannounced hand artifact"
+        );
         begin_manual(&mut runner, spell);
         assert!(runner.state().objects[&spell].static_definitions.is_empty());
         assert_eq!(
