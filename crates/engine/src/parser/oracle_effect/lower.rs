@@ -4782,12 +4782,13 @@ pub(super) fn effect_publishes_revealed_subject(effect: &Effect) -> bool {
             | Effect::ExileFromTopUntil { .. }
             | Effect::Clash
             | Effect::TurnFaceUp { .. }
+            // CR 701.20a: only a search that actually reveals publishes this subject.
+            | Effect::SearchLibrary { reveal: true, .. }
             // Zone-change-class (emit ZoneChanged → last_zone_changed_ids).
             | Effect::ChangeZone { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::ExileTop { .. }
             | Effect::Mill { .. }
-            | Effect::SearchLibrary { .. }
     )
 }
 
@@ -16542,6 +16543,28 @@ mod where_x_tests {
             gain.contains(&demonstrative_mv),
             "you-gain GainLife.amount must bind Demonstrative mana value, got {gain:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod search_subject_publisher_tests {
+    use super::*;
+
+    /// SHAPE — CR 701.20a: choosing an unrevealed search result does not
+    /// publish a revealed subject for the following type condition.
+    #[test]
+    fn only_revealing_library_searches_publish_a_revealed_subject() {
+        for (oracle, expected) in [
+            ("Search your library for a card.", false),
+            ("Search your library for a card and reveal it.", true),
+        ] {
+            let search =
+                crate::parser::oracle_effect::parse_effect_chain(oracle, AbilityKind::Spell);
+            assert!(
+                matches!(search.effect.as_ref(), Effect::SearchLibrary { reveal, .. } if *reveal == expected)
+            );
+            assert_eq!(effect_publishes_revealed_subject(&search.effect), expected);
+        }
     }
 }
 

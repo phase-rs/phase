@@ -2011,4 +2011,5 @@ mod starting_intensity_keyword;
 mod tidebinder_source_type_gate;
 
 mod resolution_progress_contract;
+mod search_result_conditional_destination;
 mod search_result_missing_referent;

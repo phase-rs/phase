@@ -11,18 +11,18 @@ use crate::game::speed::has_max_speed;
 use crate::parser::oracle_effect::publishes_chain_created_referent;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, CommanderOwnership,
+    CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, ChosenTargetSlots, CommanderOwnership,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
     CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
     FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
-    MassLibraryShuffleMode, NameStickerSet, ObjectSelectionCardinality, OpponentMayScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
-    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    MassLibraryShuffleMode, NameStickerSet, ObjectScope, ObjectSelectionCardinality,
+    OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef,
+    ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -4866,16 +4866,14 @@ fn resolve_optional_effect_decision_step(
 /// branch (modelling the reduced gate's condition both ways, a superset of
 /// what resolution runs).
 ///
-/// Invariant: a borrowed branch is a printed decline branch (an `else`, an "if
-/// you don't" clause, or an unconditional next instruction), unchanged. An
-/// owned branch is returned only when no printed decline branch is selected
-/// and `sub` is a plain positive "if you do" gate some later instruction of
-/// which survives the decline: `sub` itself, whose condition reads false once
-/// the decline is recorded, with its sub-chain replaced by exactly the
-/// surviving instructions in printed order
-/// ([`declined_gate_reduced_to_surviving_instructions`]).
+/// Invariant: borrowed branches are unchanged printed decline alternatives or
+/// surviving instructions. Owned branches are either a plain positive "if you
+/// do" gate reduced by [`declined_gate_reduced_to_surviving_instructions`], or
+/// an ordinary search continuation changed by removing instructions consuming
+/// its unproduced object. Independent player work, own targets and fresh
+/// producers survive; explicit decline alternatives keep their own authority.
 pub(crate) fn optional_decline_branch<'a>(
-    _state: &GameState,
+    state: &GameState,
     ability: &'a ResolvedAbility,
 ) -> Option<Cow<'a, ResolvedAbility>> {
     if let Some(branch) = ability.else_ability.as_deref() {
@@ -4905,23 +4903,947 @@ pub(crate) fn optional_decline_branch<'a>(
                 )
                 .is_some()
                     || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
-    if !selected {
-        // CR 608.2c: a declined "you may" fails the "if you do" gate `sub`,
-        // and the gate skips only the instructions it governs.
-        return declined_gate_reduced_to_surviving_instructions(sub).map(Cow::Owned);
-    }
-    if sub
-        .condition
-        .as_ref()
-        .is_some_and(|condition| condition.is_optional_effect_performed())
-        && sub.else_ability.is_none()
-    {
-        Some(Cow::Borrowed(
-            nested_optional_decline_clause(sub).unwrap_or(sub),
-        ))
+    let branch = if !selected {
+        // CR 608.2c: the positive performed gate retains its existing reduction.
+        Cow::Owned(declined_gate_reduced_to_surviving_instructions(sub)?)
     } else {
-        Some(Cow::Borrowed(sub))
+        if sub
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_optional_effect_performed())
+            && sub.else_ability.is_none()
+        {
+            if let Some(decline) = nested_optional_decline_clause(sub) {
+                return Some(Cow::Borrowed(decline));
+            }
+        }
+        Cow::Borrowed(sub)
+    };
+    // CR 608.2c + CR 609.3 + CR 701.23a: a declined search produced no found
+    // object. Select surviving instructions before any result gate or fallback
+    // reads the source. Runtime and search-ordering consume this same branch.
+    if matches!(ability.effect, Effect::SearchLibrary { .. })
+        && declined_search_branch_requires_reduction(state, &branch)
+    {
+        without_declined_search_object_dependencies(state, &branch).map(Cow::Owned)
+    } else {
+        Some(branch)
     }
+}
+
+// CR 608.2c: only implicit current-result references name this unperformed
+// search. Explicit prior sets and action-qualified sets retain their authority.
+fn declined_search_reference_available(
+    state: &GameState,
+    filter: &TargetFilter,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+) -> bool {
+    match filter {
+        TargetFilter::ParentTarget => object_information_available,
+        TargetFilter::ParentTargetSlot { index } => slot_context.is_some_and(|ability| {
+            matches!(
+                crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index),
+                Some(TargetRef::Object(_))
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn declined_search_bare_filter_dependency(
+    state: &GameState,
+    filter: &TargetFilter,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            !declined_search_reference_available(state, filter, information, context)
+        }
+        TargetFilter::LastRevealed => true,
+        TargetFilter::TrackedSet { id } => *id == TrackedSetId(0),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => {
+            *id == TrackedSetId(0) && caused_by.is_none()
+        }
+        _ => false,
+    }
+}
+
+// CR 608.2c + CR 608.2h: inspect required information before predicate binding.
+fn declined_search_scalar_quantity_dependency(
+    state: &GameState,
+    quantity: &QuantityExpr,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    crate::game::filter::quantity_expr_contains_scalar_input(
+        quantity,
+        &|property, information, _| {
+            !information && matches!(property, FilterProp::SameNameAsParentTarget)
+        },
+        &|reference, information, context| {
+            declined_search_quantity_ref_dependency(state, reference, information, context)
+        },
+        &|filter, information, context| {
+            declined_search_bare_filter_dependency(state, filter, information, context)
+        },
+        &|source, _, _| {
+            matches!(
+                source,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None
+                }
+            )
+        },
+        information,
+        context,
+    )
+}
+
+fn declined_search_scalar_filter_inputs(
+    state: &GameState,
+    filter: &TargetFilter,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    crate::game::filter::filter_contains_scalar_input(
+        filter,
+        &|property, information, _| {
+            !information && matches!(property, FilterProp::SameNameAsParentTarget)
+        },
+        &|reference, information, context| {
+            declined_search_quantity_ref_dependency(state, reference, information, context)
+        },
+        &|filter, information, context| {
+            declined_search_bare_filter_dependency(state, filter, information, context)
+        },
+        &|source, _, _| {
+            matches!(
+                source,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None
+                }
+            )
+        },
+        information,
+        context,
+    )
+}
+
+fn declined_search_player_dependency(state: &GameState, player: &PlayerFilter) -> bool {
+    crate::game::filter::player_filter_contains_scalar_input(
+        player,
+        &|property, information, _| {
+            !information && matches!(property, FilterProp::SameNameAsParentTarget)
+        },
+        &|reference, information, context| {
+            declined_search_quantity_ref_dependency(state, reference, information, context)
+        },
+        &|filter, information, context| {
+            declined_search_bare_filter_dependency(state, filter, information, context)
+        },
+        &|source, _, _| {
+            matches!(
+                source,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None
+                }
+            )
+        },
+        false,
+        None,
+    )
+}
+
+fn declined_search_scalar_filter_dependency(
+    state: &GameState,
+    filter: &TargetFilter,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    declined_search_bare_filter_dependency(state, filter, information, context)
+        || declined_search_scalar_filter_inputs(state, filter, information, context)
+}
+
+fn declined_search_filter_dependency(
+    state: &GameState,
+    filter: &TargetFilter,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    declined_search_scalar_filter_dependency(state, filter, information, context)
+        || match filter {
+            TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
+                declined_search_property_dependency(state, property, information, context)
+            }),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(|filter| {
+                    declined_search_filter_dependency(state, filter, information, context)
+                })
+            }
+            TargetFilter::Not { filter } => {
+                declined_search_filter_dependency(state, filter, information, context)
+            }
+            _ => false,
+        }
+}
+
+fn declined_search_property_dependency(
+    state: &GameState,
+    property: &FilterProp,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    match property {
+        FilterProp::InTrackedSet { id } => *id == TrackedSetId(0),
+        FilterProp::DistinctFrom { reference } => {
+            declined_search_filter_dependency(state, reference, information, context)
+        }
+        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
+            declined_search_quantity_dependency(state, value, information, context)
+        }
+        FilterProp::Counters { count, .. } => {
+            declined_search_quantity_dependency(state, count, information, context)
+        }
+        FilterProp::Not { prop } => {
+            declined_search_property_dependency(state, prop, information, context)
+        }
+        FilterProp::AnyOf { props } => props.iter().any(|property| {
+            declined_search_property_dependency(state, property, information, context)
+        }),
+        _ => false,
+    }
+}
+
+// CR 608.2c: explicit action/event populations keep their own authority.
+fn declined_search_population_dependency(
+    state: &GameState,
+    source: &CardTypeSetSource,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    let mut dependent = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |member| {
+            dependent |= match member {
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                } => true,
+                CardTypeSetSource::Objects { filter } => {
+                    declined_search_filter_dependency(state, filter, information, context)
+                }
+                CardTypeSetSource::TurnJournal { filter, .. } => {
+                    filter.as_ref().is_some_and(|filter| {
+                        declined_search_filter_dependency(state, filter, information, context)
+                    })
+                }
+                _ => false,
+            };
+        });
+    dependent || !complete
+}
+
+fn declined_search_quantity_dependency(
+    state: &GameState,
+    quantity: &QuantityExpr,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    (!information
+        && crate::game::filter::quantity_expr_contains_filter_prop(quantity, &|property| {
+            matches!(property, FilterProp::SameNameAsParentTarget)
+        }))
+        || declined_search_scalar_quantity_dependency(state, quantity, information, context)
+        || quantity.any_ref(&mut |reference| match reference {
+            QuantityRef::DistinctCardTypes { source }
+            | QuantityRef::SharedCardTypes { source }
+            | QuantityRef::DistinctSubtypes { source, .. }
+            | QuantityRef::DistinctColorsAmong { source } => {
+                declined_search_population_dependency(state, source, information, context)
+            }
+            QuantityRef::PropertyAggregate(aggregate) => declined_search_population_dependency(
+                state,
+                aggregate.source(),
+                information,
+                context,
+            ),
+            QuantityRef::ObjectCount { filter }
+            | QuantityRef::ObjectCountDistinct { filter, .. }
+            | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+            | QuantityRef::CountersOnObjects { filter, .. }
+            | QuantityRef::DistinctCounterKindsAmong { filter } => {
+                declined_search_filter_dependency(state, filter, information, context)
+            }
+            _ => false,
+        })
+}
+
+fn declined_search_quantity_ref_dependency(
+    state: &GameState,
+    reference: &QuantityRef,
+    information: bool,
+    context: Option<&ResolvedAbility>,
+) -> bool {
+    match reference {
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+            !information
+                && matches!(
+                    scope,
+                    ObjectScope::Target
+                        | ObjectScope::Recipient
+                        | ObjectScope::Anaphoric
+                        | ObjectScope::Demonstrative
+                )
+        }
+        QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize {
+            caused_by: None, ..
+        } => true,
+        QuantityRef::TargetObjectManaValue { filter } => {
+            !information || declined_search_filter_dependency(state, filter, information, context)
+        }
+        QuantityRef::TargetControllerCounter { .. } => {
+            !context.is_some_and(|ability| {
+                let first = ability.target_occurrences().into_iter().enumerate().find(
+                    |(_, (target, _))| match target {
+                        TargetRef::Player(_) => true,
+                        TargetRef::Object(id) => {
+                            crate::game::ability_utils::last_known_permanent_controller(state, *id)
+                                .is_some()
+                        }
+                    },
+                );
+                match first {
+                    Some((position, (target, _))) => {
+                        declined_search_selected_occurrence(ability, position, &target)
+                            && match target {
+                                TargetRef::Object(id) => {
+                                    ability.target_pin_is_current(id, state)
+                                        && ability.target_occurrence_is_current(position, state)
+                                }
+                                TargetRef::Player(_) => true,
+                            }
+                    }
+                    None => ability.effect_context_object.is_some(),
+                }
+            })
+        }
+        _ => false,
+    }
+}
+
+// Player recipients are roles of the effect, even when spelled ParentTarget.
+// A mixed damage slot additionally consults its actual announced/bound role.
+// CR 608.2c: player recipients and object operands retain their distinct roles.
+fn declined_search_object_operands(ability: &ResolvedAbility) -> Vec<&TargetFilter> {
+    match &ability.effect {
+        Effect::Double {
+            target_kind:
+                crate::types::ability::DoubleTarget::LifeTotal
+                | crate::types::ability::DoubleTarget::ManaPool { .. },
+            ..
+        }
+        | Effect::Draw { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Mill { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::RevealTop { .. } => Vec::new(),
+        Effect::Discard {
+            filter,
+            unless_filter,
+            ..
+        } => filter.iter().chain(unless_filter).collect(),
+        Effect::SearchLibrary { filter, .. }
+        | Effect::Dig { filter, .. }
+        | Effect::RevealUntil { filter, .. } => vec![filter],
+        Effect::ExileFromTopUntil { until, .. } => match until {
+            crate::types::ability::UntilCondition::NextMatches { filter, .. } => vec![filter],
+            crate::types::ability::UntilCondition::CumulativeThreshold { .. } => Vec::new(),
+        },
+        Effect::RevealHand { card_filter, .. } => vec![card_filter],
+        Effect::Token { attach_to, .. } => attach_to.iter().collect(),
+        Effect::CopyTokenOf {
+            target,
+            source_filter,
+            ..
+        } => vec![source_filter.as_ref().unwrap_or(target)],
+        Effect::DealDamage { target, .. }
+            if target.is_player_scope()
+                || (!ability.targets.is_empty()
+                    && ability
+                        .targets
+                        .iter()
+                        .all(|target| matches!(target, TargetRef::Player(_)))) =>
+        {
+            Vec::new()
+        }
+        Effect::ChooseFromZone { filter, .. } => filter.iter().collect(),
+        _ => effect_parent_ref_slots(&ability.effect),
+    }
+}
+
+// CR 601.2c + CR 608.2c: declarations, result references and selected
+// occurrences have different authority. The neutral query supplies witnesses,
+// not an exhaustive target-slot vector.
+fn declined_search_announcement_witness(filter: &TargetFilter) -> bool {
+    if filter.is_context_ref() {
+        return false;
+    }
+    match filter {
+        TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChosenCard
+        | TargetFilter::ChosenDamageSource { .. } => false,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(declined_search_announcement_witness)
+        }
+        TargetFilter::Not { filter } => declined_search_announcement_witness(filter),
+        _ => true,
+    }
+}
+
+// Declaration-role Boolean composition does not inspect property predicates.
+fn declined_search_has_player_role(filter: &TargetFilter) -> bool {
+    filter.is_player_scope()
+        || filter.denotes_player_target()
+        || matches!(filter, TargetFilter::Opponent)
+        || match filter {
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().any(declined_search_has_player_role)
+            }
+            TargetFilter::Not { filter } => declined_search_has_player_role(filter),
+            _ => false,
+        }
+}
+
+fn declined_search_object_witness(filter: &TargetFilter) -> bool {
+    if !declined_search_announcement_witness(filter)
+        || filter.is_player_scope()
+        || filter.denotes_player_target()
+        || matches!(filter, TargetFilter::Opponent)
+    {
+        return false;
+    }
+    match filter {
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(declined_search_object_witness)
+        }
+        TargetFilter::And { filters } => {
+            filters.iter().any(declined_search_object_witness)
+                && !filters.iter().any(declined_search_has_player_role)
+        }
+        TargetFilter::Not { filter } => declined_search_object_witness(filter),
+        TargetFilter::Typed(_) => filter.names_enumerable_population(),
+        TargetFilter::Named { .. }
+        | TargetFilter::HasChosenName
+        | TargetFilter::StackSpell
+        | TargetFilter::StackAbility { .. } => true,
+        _ => false,
+    }
+}
+
+fn declined_search_selected_occurrence(
+    ability: &ResolvedAbility,
+    position: usize,
+    target: &TargetRef,
+) -> bool {
+    if ability.target_reads != TargetReadOrigin::OwnAnnouncement {
+        return false;
+    }
+    match &ability.chosen_target_slots {
+        ChosenTargetSlots::Recorded(positions) => {
+            positions.contains(&position)
+                && crate::game::ability_utils::node_has_stack_target_declaration_matching(
+                    ability,
+                    &declined_search_announcement_witness,
+                )
+        }
+        ChosenTargetSlots::Unrecorded => {
+            crate::game::ability_utils::chain_node_positions(ability).contains(&position)
+                && crate::game::ability_utils::node_has_stack_target_declaration_matching(
+                    ability,
+                    &|filter| match target {
+                        TargetRef::Object(_) => declined_search_object_witness(filter),
+                        TargetRef::Player(_) => {
+                            declined_search_announcement_witness(filter)
+                                && (filter.is_player_scope()
+                                    || filter.denotes_player_target()
+                                    || matches!(filter, TargetFilter::Opponent))
+                        }
+                    },
+                )
+        }
+    }
+}
+
+fn declined_search_owns_target(ability: &ResolvedAbility) -> bool {
+    ability.target_reads == TargetReadOrigin::OwnAnnouncement
+        && (crate::game::ability_utils::node_has_stack_target_declaration_matching(
+            ability,
+            &declined_search_object_witness,
+        ) || ability
+            .target_occurrences()
+            .into_iter()
+            .enumerate()
+            .find(|(_, (target, _))| matches!(target, TargetRef::Object(_)))
+            .is_some_and(|(position, (target, _))| {
+                matches!(ability.chosen_target_slots, ChosenTargetSlots::Recorded(_))
+                    && declined_search_selected_occurrence(ability, position, &target)
+            }))
+}
+
+// CR 400.7 + CR 608.2h: information belongs to the first actual Object
+// occurrence and its own positional/delayed pins, never another chosen slot.
+fn declined_search_object_information(state: &GameState, ability: &ResolvedAbility) -> bool {
+    ability
+        .target_occurrences()
+        .into_iter()
+        .enumerate()
+        .find(|(_, (target, _))| matches!(target, TargetRef::Object(_)))
+        .is_some_and(|(position, (target, _))| match target {
+            TargetRef::Object(id) => {
+                declined_search_selected_occurrence(ability, position, &TargetRef::Object(id))
+                    && ability.target_pin_is_current(id, state)
+                    && ability.target_occurrence_is_current(position, state)
+            }
+            TargetRef::Player(_) => false,
+        })
+}
+
+// CR 608.2c + CR 609.3: one pure preparation serves preflight and retention.
+// Inputs are checked before a new producer can establish a fresh authority.
+fn prepare_declined_search_node<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> Option<Cow<'a, ResolvedAbility>> {
+    if crosses_modal_boundary(ability)
+        || ability.reads_chosen_group.is_some()
+        || ability.reads_return_result.is_some()
+    {
+        return Some(Cow::Borrowed(ability));
+    }
+    let owns_object = declined_search_owns_target(ability);
+    let information = declined_search_object_information(state, ability);
+    let context = Some(ability);
+    let retain_reference =
+        |filter: &TargetFilter, information: bool, context: Option<&ResolvedAbility>| {
+            declined_search_reference_available(state, filter, information, context)
+        };
+    // These are current operative player roles. Branch definitions retain
+    // their own later boundary; a missing scope refuses the whole instruction.
+    let raw_player = match &ability.effect {
+        Effect::StartYourEngines { player_scope } | Effect::ChangeSpeed { player_scope, .. } => {
+            Some(player_scope)
+        }
+        Effect::DamageAll { player_filter, .. }
+        | Effect::Conjure {
+            library_players: player_filter,
+            ..
+        } => player_filter.as_ref(),
+        Effect::DamageEachPlayer { player_filter, .. } => Some(player_filter),
+        Effect::RevealChosenNumbers { players, .. } => Some(players),
+        Effect::ChooseOneOf { chooser, .. } => Some(chooser),
+        _ => None,
+    };
+    if raw_player.is_some_and(|player| declined_search_player_dependency(state, player))
+        || ability
+            .player_scope
+            .as_ref()
+            .is_some_and(|player| declined_search_player_dependency(state, player))
+        || ability.effect.target_filter().is_some_and(|filter| {
+            (filter.is_player_scope()
+                || filter.denotes_player_target()
+                || matches!(filter, TargetFilter::Opponent))
+                && declined_search_scalar_filter_inputs(state, filter, information, context)
+        })
+        || matches!(&ability.effect, Effect::SearchLibrary { target_player: Some(player), .. }
+            if declined_search_scalar_filter_inputs(state, player, false, None))
+    {
+        return None;
+    }
+    let mut dependent = false;
+    ability.effect.for_each_quantity_expr(&mut |quantity| {
+        dependent |=
+            declined_search_scalar_quantity_dependency(state, quantity, information, context);
+    });
+    dependent |= ability.repeat_for.as_ref().is_some_and(|quantity| {
+        declined_search_scalar_quantity_dependency(state, quantity, information, context)
+    });
+    if dependent {
+        return None;
+    }
+    let mut prepared = ability.clone();
+    let mut complete = true;
+    prepared.effect.for_each_quantity_expr_mut(&mut |quantity| {
+        complete &= crate::game::filter::bind_absent_search_predicates_in_quantity_with_context(
+            quantity,
+            information,
+            context,
+            &retain_reference,
+        );
+    });
+    if let Some(quantity) = &mut prepared.repeat_for {
+        complete &= crate::game::filter::bind_absent_search_predicates_in_quantity_with_context(
+            quantity,
+            information,
+            context,
+            &retain_reference,
+        );
+    }
+    if !complete {
+        return None;
+    }
+    prepared.effect.for_each_quantity_expr(&mut |quantity| {
+        dependent |= declined_search_quantity_dependency(state, quantity, information, context);
+    });
+    dependent |= prepared.repeat_for.as_ref().is_some_and(|quantity| {
+        declined_search_quantity_dependency(state, quantity, information, context)
+    });
+    if dependent {
+        return None;
+    }
+
+    // CR 115.1 + CR 115.10a: these modes consume matching predicates; the
+    // same variants' announced/direct modes keep their separate authority.
+    let counter_population = ability.effect.is_counter_multiplication()
+        && ability.target_choice_timing == TargetChoiceTiming::Resolution
+        && ability.targets.is_empty()
+        && ability.multi_target.is_none()
+        && !ability.optional_targeting
+        && ability.effect.target_filter().is_some_and(|target| {
+            !target.is_context_ref()
+                && target.names_enumerable_population()
+                && matches!(target.extract_in_zone(), None | Some(Zone::Battlefield))
+        });
+    let described_host = matches!(&ability.effect, Effect::Attach { attachment, target, .. }
+        if ability.target_choice_timing == TargetChoiceTiming::Resolution
+            && ability.attach_host_target().is_none()
+            && attachment.is_context_ref()
+            && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+            && target.denotes_battlefield_objects());
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = &mut prepared.effect
+    {
+        static_abilities.retain_mut(|static_def| {
+            let application = effect::generic_effect_application_filter(
+                target.as_ref(),
+                static_def.affected.as_ref(),
+            );
+            if application.is_some_and(|filter| {
+                declined_search_scalar_filter_inputs(state, filter, information, context)
+            }) {
+                return false;
+            }
+            if application.is_some_and(|filter| {
+                (owns_object && matches!(filter, TargetFilter::ParentTarget))
+                    || (matches!(filter, TargetFilter::ParentTargetSlot { .. })
+                        && declined_search_reference_available(state, filter, information, context))
+            }) {
+                // The inherited application names this instruction's own target.
+                // Secondary quantities and repeats passed their input checks.
+                return true;
+            }
+            let Some(application) = application else {
+                return true;
+            };
+            if target.is_none() && !application.is_context_ref() && !application.is_player_scope() {
+                let Some(affected) = &mut static_def.affected else {
+                    return true;
+                };
+                match crate::game::filter::bind_absent_search_predicate_with_context(
+                    affected,
+                    information,
+                    context,
+                    &retain_reference,
+                ) {
+                    Some(Some(false)) | None => false,
+                    Some(_) => {
+                        !declined_search_filter_dependency(state, affected, information, context)
+                    }
+                }
+            } else {
+                !declined_search_filter_dependency(state, application, information, context)
+            }
+        });
+        if static_abilities.is_empty() {
+            return None;
+        }
+    } else {
+        let mut impossible = false;
+        let mut bind = |filter: &mut TargetFilter| {
+            if declined_search_scalar_filter_dependency(state, filter, information, context) {
+                impossible = true;
+                return;
+            }
+            match crate::game::filter::bind_absent_search_predicate_with_context(
+                filter,
+                information,
+                context,
+                &retain_reference,
+            ) {
+                Some(Some(false)) | None => impossible = true,
+                Some(_) => {
+                    impossible |=
+                        declined_search_filter_dependency(state, filter, information, context)
+                }
+            }
+        };
+        if let Some(population) = mass_population_target_mut(&mut prepared.effect) {
+            bind(population);
+        } else {
+            match &mut prepared.effect {
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    target,
+                    ..
+                }
+                | Effect::Transform {
+                    scope: EffectScope::All,
+                    target,
+                    ..
+                }
+                | Effect::ForceAttack {
+                    scope: EffectScope::All,
+                    target,
+                    ..
+                }
+                | Effect::Suspect {
+                    scope: EffectScope::All,
+                    target,
+                }
+                | Effect::Unsuspect {
+                    scope: EffectScope::All,
+                    target,
+                }
+                | Effect::BecomePrepared {
+                    scope: EffectScope::All,
+                    target,
+                }
+                | Effect::BecomeUnprepared {
+                    scope: EffectScope::All,
+                    target,
+                }
+                | Effect::PreventDamage {
+                    recipient_scope: EffectScope::All,
+                    target,
+                    ..
+                }
+                | Effect::GoadAll { target } => bind(target),
+                Effect::ExploreAll { filter }
+                | Effect::SearchLibrary { filter, .. }
+                | Effect::Dig { filter, .. }
+                | Effect::RevealUntil { filter, .. }
+                | Effect::RevealHand {
+                    card_filter: filter,
+                    ..
+                } => bind(filter),
+                Effect::ExileFromTopUntil {
+                    until: crate::types::ability::UntilCondition::NextMatches { filter, .. },
+                    ..
+                } => bind(filter),
+                Effect::ChooseFromZone {
+                    filter: Some(filter),
+                    ..
+                }
+                | Effect::CopyTokenOf {
+                    source_filter: Some(filter),
+                    ..
+                } => bind(filter),
+                Effect::Discard {
+                    filter,
+                    unless_filter,
+                    ..
+                } => {
+                    if let Some(filter) = filter {
+                        bind(filter);
+                    }
+                    // CR 608.2c: this is an alternative to the ordinary discard, not its
+                    // required population. An empty alternative leaves that
+                    // ordinary instruction available.
+                    if let Some(filter) = unless_filter {
+                        impossible |= declined_search_scalar_filter_dependency(
+                            state,
+                            filter,
+                            information,
+                            context,
+                        )
+                            || crate::game::filter::bind_absent_search_predicate_with_context(
+                                filter,
+                                information,
+                                context,
+                                &retain_reference,
+                            )
+                            .is_none()
+                            || declined_search_filter_dependency(
+                                state,
+                                filter,
+                                information,
+                                context,
+                            );
+                    }
+                }
+                Effect::Attach {
+                    attachment, target, ..
+                } if described_host => {
+                    if declined_search_filter_dependency(state, attachment, false, context) {
+                        return None;
+                    }
+                    bind(target);
+                }
+                _ if counter_population => {
+                    if let Some(filter) = prepared.effect.target_filter_mut() {
+                        bind(filter);
+                    }
+                }
+                _ if has_resolution_owned_zone_choice(ability) => {
+                    if let Some(filter) = prepared.effect.target_filter_mut() {
+                        bind(filter);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if impossible {
+            return None;
+        }
+        if declined_search_object_operands(&prepared)
+            .into_iter()
+            .any(|operand| {
+                let owns_operand = owns_object
+                    && (!matches!(operand, TargetFilter::ParentTargetSlot { .. })
+                        || declined_search_reference_available(
+                            state,
+                            operand,
+                            information,
+                            context,
+                        ))
+                    && prepared
+                        .effect
+                        .target_filter()
+                        .is_some_and(|declared| std::ptr::eq(declared, operand));
+                declined_search_scalar_filter_inputs(
+                    state,
+                    operand,
+                    if owns_operand { information } else { false },
+                    context,
+                ) || (!owns_operand
+                    && declined_search_filter_dependency(state, operand, false, context))
+            })
+        {
+            return None;
+        }
+    }
+    if prepared == *ability {
+        Some(Cow::Borrowed(ability))
+    } else {
+        Some(Cow::Owned(prepared))
+    }
+}
+
+// CR 608.2c: a genuine later producer owns its continuation's referent.
+fn declined_search_fresh_authority(ability: &ResolvedAbility) -> bool {
+    declined_search_owns_target(ability)
+        || ability.reads_chosen_group.is_some()
+        || ability.reads_return_result.is_some()
+        || matches!(
+            ability.effect,
+            Effect::SearchLibrary { .. }
+                | Effect::ChooseFromZone { .. }
+                | Effect::ExileFromTopUntil { .. }
+        )
+        || effect_writes_last_revealed_ids(&ability.effect)
+        || reveal_hand::effect_parks_reveal_card_choice(&ability.effect)
+        || publishes_chain_created_referent(&ability.effect)
+        || (ability.forward_result
+            && matches!(
+                ability.effect,
+                Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
+            ))
+}
+
+// CR 608.2c: retain borrowing when no instruction requires the unproduced object.
+fn declined_search_branch_requires_reduction(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if crosses_modal_boundary(ability) {
+        return false;
+    }
+    if !matches!(
+        prepare_declined_search_node(state, ability),
+        Some(Cow::Borrowed(_))
+    ) {
+        return true;
+    }
+    !declined_search_fresh_authority(ability)
+        && (ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|node| declined_search_branch_requires_reduction(state, node))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|node| declined_search_branch_requires_reduction(state, node)))
+}
+
+// CR 608.2c + CR 609.3: discard an impossible object instruction WITH its
+// resolution steps and branches, then resume at the next printed instruction.
+// This is local to ordinary search decline, never a general chain optimizer.
+fn without_declined_search_object_dependencies(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    let mut kept = Vec::new();
+    let mut cursor = Some(ability);
+    let mut skipped_instruction = false;
+    while let Some(node) = cursor {
+        cursor = node.sub_ability.as_deref();
+        if crosses_modal_boundary(node) {
+            kept.extend(
+                std::iter::successors(Some(node), |node| node.sub_ability.as_deref()).cloned(),
+            );
+            break;
+        }
+        if skipped_instruction && !starts_independent_instruction(node) {
+            continue;
+        }
+        skipped_instruction = false;
+        let Some(prepared) = prepare_declined_search_node(state, node) else {
+            skipped_instruction = true;
+            continue;
+        };
+        let mut remaining = prepared.into_owned();
+        if declined_search_fresh_authority(&remaining) {
+            kept.push(remaining);
+            kept.extend(std::iter::successors(cursor, |node| node.sub_ability.as_deref()).cloned());
+            break;
+        }
+        remaining.else_ability = node
+            .else_ability
+            .as_deref()
+            .and_then(|node| without_declined_search_object_dependencies(state, node))
+            .map(Box::new);
+        kept.push(remaining);
+    }
+    relink_in_printed_order(kept.iter().collect()).map(|root| *root)
 }
 
 /// Whether a sub-ability condition references a per-iteration outcome gate —
@@ -21787,9 +22709,10 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
         ChooseOneOfKind, LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
-        SearchSelectionConstraint, SpentColor,
+        SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
 
     #[test]
@@ -21883,6 +22806,2595 @@ mod tests {
             serde_json::to_value(with_tail).unwrap()
         );
         assert_eq!(serde_json::to_value(&owned_parent).unwrap(), before);
+    }
+
+    #[test]
+    fn declined_search_mixed_empty_declarations_and_per_static_scalars_keep_their_roles() {
+        let state = GameState::new_two_player(42);
+        let object = TargetFilter::Typed(TypedFilter::creature());
+        let mixed = TargetFilter::Or {
+            filters: vec![TargetFilter::Player, object.clone()],
+        };
+        for (target, expected) in [
+            (object.clone(), true),
+            (TargetFilter::Player, false),
+            (mixed.clone(), false),
+        ] {
+            let mut node = declined_search_test_ability(Effect::PutCounter {
+                target,
+                count: QuantityExpr::Fixed { value: 1 },
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            });
+            node.optional_targeting = true;
+            node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![]);
+            assert_eq!(declined_search_owns_target(&node), expected);
+            assert!(!declined_search_object_information(&state, &node));
+        }
+        assert!(!declined_search_object_witness(&TargetFilter::And {
+            filters: vec![object.clone(), mixed.clone()]
+        }));
+        assert!(declined_search_object_witness(&TargetFilter::And {
+            filters: vec![object.clone(), TargetFilter::Any]
+        }));
+        let mut actual = declined_search_test_ability(Effect::PutCounter {
+            target: mixed,
+            count: QuantityExpr::Fixed { value: 1 },
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+        });
+        actual.targets = vec![TargetRef::Player(P1), TargetRef::Object(ObjectId(22))];
+        actual.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0, 1]);
+        assert!(declined_search_owns_target(&actual));
+        assert!(declined_search_object_information(&state, &actual));
+        actual.chosen_target_slots = ChosenTargetSlots::Unrecorded;
+        assert!(!declined_search_owns_target(&actual));
+        assert!(!declined_search_object_information(&state, &actual));
+        for missing in [true, false] {
+            let dependent =
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: if missing {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        }
+                    } else {
+                        QuantityExpr::Fixed { value: 0 }
+                    },
+                }]));
+            let node = declined_search_test_ability(Effect::GenericEffect {
+                target: None,
+                duration: None,
+                end_cost: None,
+                static_abilities: vec![
+                    StaticDefinition::continuous().affected(dependent),
+                    StaticDefinition::continuous().affected(TargetFilter::SelfRef),
+                ],
+            });
+            let prepared = prepare_declined_search_node(&state, &node).unwrap();
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = &prepared.effect
+            else {
+                unreachable!()
+            };
+            assert_eq!(static_abilities.len(), if missing { 1 } else { 2 });
+            assert_eq!(
+                static_abilities.last().unwrap().affected,
+                Some(TargetFilter::SelfRef)
+            );
+            assert_eq!(matches!(prepared, Cow::Owned(_)), missing);
+        }
+    }
+
+    #[test]
+    fn declined_search_indexed_references_share_read_bind_and_residual_authority() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Carrier source", "")
+            .id();
+        let chosen = scenario
+            .add_creature(P0, "Independent prior slot", 2, 2)
+            .id();
+        let mut state = scenario.build().state().clone();
+        let mut player = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(P1)],
+            source,
+            P0,
+        );
+        player.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0]);
+        let mut object = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(chosen)],
+            source,
+            P0,
+        );
+        object.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0]);
+        object.target_pins = vec![Some(
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&chosen]),
+        )];
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(player.clone().sub_ability(object.clone())),
+            },
+        });
+        let mut body = declined_search_test_ability(Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::ParentTargetSlot { index: 1 },
+        });
+        body.source_id = source;
+        body.target_reads = TargetReadOrigin::ParentAnnouncement;
+        assert!(!declined_search_owns_target(&body));
+        for index in 0..3 {
+            let filter = TargetFilter::ParentTargetSlot { index };
+            let expected = index == 1;
+            assert_eq!(
+                !declined_search_scalar_filter_dependency(&state, &filter, false, Some(&body)),
+                expected
+            );
+            assert_eq!(
+                !declined_search_filter_dependency(&state, &filter, false, Some(&body)),
+                expected
+            );
+            let mut bound = filter.clone();
+            crate::game::filter::bind_absent_search_predicate_with_context(
+                &mut bound,
+                false,
+                Some(&body),
+                &|filter, information, context| {
+                    declined_search_reference_available(&state, filter, information, context)
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                bound,
+                if expected {
+                    filter
+                } else {
+                    TargetFilter::Or { filters: vec![] }
+                }
+            );
+        }
+        assert!(matches!(
+            prepare_declined_search_node(&state, &body),
+            Some(Cow::Borrowed(_))
+        ));
+        assert!(!declined_search_fresh_authority(&body));
+        let descriptor = TargetFilter::Typed(
+            TypedFilter::new(crate::types::ability::TypeFilter::Artifact)
+                .controller(ControllerRef::You),
+        );
+        let mut mixed = body.clone();
+        mixed.effect = Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::ParentTargetSlot { index: 1 },
+                            TargetFilter::ParentTargetSlot { index: 0 },
+                            descriptor.clone(),
+                        ],
+                    },
+                },
+            },
+            player: TargetFilter::Controller,
+        };
+        let prepared = prepare_declined_search_node(&state, &mixed).unwrap();
+        assert!(matches!(prepared, Cow::Owned(_)));
+        assert!(matches!(
+            &prepared.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter }
+                },
+                ..
+            } if *filter == TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 1 },
+                    TargetFilter::Or { filters: vec![] },
+                    descriptor,
+                ]
+            }
+        ));
+        let missing = declined_search_test_placement(TargetFilter::LastRevealed);
+        let tail = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        });
+        body.sub_ability = Some(Box::new(missing.sub_ability(tail.clone())));
+        let kept = without_declined_search_object_dependencies(&state, &body).unwrap();
+        assert!(matches!(
+            kept.effect,
+            Effect::PutCounter {
+                target: TargetFilter::ParentTargetSlot { index: 1 },
+                ..
+            }
+        ));
+        assert!(*kept.sub_ability.unwrap() == tail);
+        let first_reader = QuantityExpr::Ref {
+            qty: QuantityRef::TargetObjectManaValue {
+                filter: Box::new(TargetFilter::ParentTargetSlot { index: 1 }),
+            },
+        };
+        assert!(
+            declined_search_scalar_quantity_dependency(&state, &first_reader, false, Some(&body)),
+            "indexed authority is not first-object information"
+        );
+        let raw = PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            comparator: Comparator::GE,
+            count: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::ParentTargetSlot { index: 1 },
+                },
+            }),
+        };
+        assert!(declined_search_player_dependency(&state, &raw));
+        state
+            .resolving_stack_entry
+            .as_mut()
+            .unwrap()
+            .ability_mut()
+            .unwrap()
+            .illegal_target_slots = vec![0];
+        assert!(
+            !declined_search_scalar_filter_dependency(
+                &state,
+                &TargetFilter::ParentTargetSlot { index: 1 },
+                false,
+                Some(&body)
+            ),
+            "illegal earlier slot never renumbers this Object"
+        );
+        state
+            .resolving_stack_entry
+            .as_mut()
+            .unwrap()
+            .ability_mut()
+            .unwrap()
+            .illegal_target_slots = vec![1];
+        assert!(prepare_declined_search_node(&state, &body).is_none());
+        // The same existing current-mode authority supplies local index zero.
+        player.modal_instruction_ordinal = Some(0);
+        object.modal_instruction_ordinal = Some(1);
+        *state
+            .resolving_stack_entry
+            .as_mut()
+            .unwrap()
+            .ability_mut()
+            .unwrap() = player.sub_ability(object);
+        state.resolving_modal_instruction = Some(1);
+        if let Effect::PutCounter { target, .. } = &mut body.effect {
+            *target = TargetFilter::ParentTargetSlot { index: 0 };
+        }
+        assert!(matches!(
+            prepare_declined_search_node(&state, &body),
+            Some(Cow::Borrowed(_))
+        ));
+        state.resolving_modal_instruction = Some(0);
+        assert!(
+            prepare_declined_search_node(&state, &body).is_none(),
+            "other mode's player slot cannot supply an Object"
+        );
+        state.resolving_modal_instruction = Some(1);
+        let pin =
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&chosen]);
+        body.target_incarnations = vec![pin];
+        state.objects.get_mut(&chosen).unwrap().incarnation += 1;
+        assert!(prepare_declined_search_node(&state, &body).is_none());
+    }
+
+    #[test]
+    fn declined_search_each_power_recorded_sources_supply_first_object_information() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_artifact_from_oracle(P0, "Source", "").id();
+        let first = scenario
+            .add_creature(P0, "First source", 2, 2)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(2))
+            .id();
+        let extra = scenario
+            .add_creature(P0, "Extra source", 3, 3)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(5))
+            .id();
+        let state = scenario.build().state().clone();
+        let mut node = ResolvedAbility::new(
+            Effect::EachDealsDamageEqualToPower {
+                sources: TargetFilter::Typed(TypedFilter::creature()),
+                extra_source: Some(TargetFilter::Typed(TypedFilter::creature())),
+                recipient: TargetFilter::Player,
+            },
+            vec![
+                TargetRef::Object(first),
+                TargetRef::Object(extra),
+                TargetRef::Player(P1),
+            ],
+            source,
+            P0,
+        );
+        node.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
+        node.target_pins = vec![
+            Some(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(
+                    &state.objects[&first],
+                ),
+            ),
+            Some(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(
+                    &state.objects[&extra],
+                ),
+            ),
+            None,
+        ];
+        node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0, 1, 2]);
+        assert!(
+            !crate::game::ability_utils::node_has_stack_target_declaration_matching(
+                &node,
+                &declined_search_object_witness
+            ),
+            "C0 preserves its recipient-only witness contract"
+        );
+        assert!(declined_search_owns_target(&node));
+        assert!(declined_search_object_information(&state, &node));
+        let scalar = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target,
+            },
+        };
+        assert!(!declined_search_scalar_quantity_dependency(
+            &state,
+            &scalar,
+            declined_search_object_information(&state, &node),
+            Some(&node)
+        ));
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(&state, &scalar, &node),
+            2
+        );
+        node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![1, 2]);
+        assert!(
+            !declined_search_object_information(&state, &node),
+            "an unproved first source may not be skipped to bless extra source"
+        );
+        node.targets = vec![TargetRef::Player(P1)];
+        node.target_pins = vec![None];
+        node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0]);
+        assert!(!declined_search_owns_target(&node));
+        assert!(!declined_search_object_information(&state, &node));
+        node.targets.clear();
+        node.target_pins.clear();
+        node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![]);
+        assert!(!declined_search_owns_target(&node));
+        assert!(!declined_search_object_information(&state, &node));
+    }
+
+    #[test]
+    fn declined_search_raw_current_scope_and_searcher_keep_only_scalar_authority() {
+        let state = GameState::new_two_player(42);
+        for missing in [true, false] {
+            let scope = PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                comparator: Comparator::GE,
+                count: Box::new(if missing {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    }
+                } else {
+                    QuantityExpr::Fixed { value: 0 }
+                }),
+            };
+            let mut node = declined_search_test_ability(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            });
+            node.player_scope = Some(scope.clone());
+            assert_eq!(
+                prepare_declined_search_node(&state, &node).is_none(),
+                missing
+            );
+            if !missing {
+                assert!(matches!(
+                    prepare_declined_search_node(&state, &node),
+                    Some(Cow::Borrowed(_))
+                ));
+                assert!(matches_player_scope(&state, P0, &scope, P0, node.source_id));
+            }
+            let mut search = declined_search_test_search();
+            let searcher = TargetFilter::PlayerMatching {
+                player: Box::new(scope),
+            };
+            if let Effect::SearchLibrary { target_player, .. } = &mut search.effect {
+                *target_player = Some(searcher.clone());
+            }
+            assert_eq!(
+                prepare_declined_search_node(&state, &search).is_none(),
+                missing
+            );
+            if !missing {
+                let prepared = prepare_declined_search_node(&state, &search).unwrap();
+                assert!(matches!(prepared, Cow::Borrowed(_)));
+                assert!(*prepared == search);
+            }
+            // The explicit contextual Typed searcher wrapper is also operative.
+            let wrapper = TargetFilter::Typed(
+                TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::ParentTargetController),
+                    properties: vec![],
+                }
+                .properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: if missing {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        }
+                    } else {
+                        QuantityExpr::Fixed { value: 0 }
+                    },
+                }]),
+            );
+            if let Effect::SearchLibrary { target_player, .. } = &mut search.effect {
+                *target_player = Some(wrapper);
+            }
+            assert_eq!(
+                prepare_declined_search_node(&state, &search).is_none(),
+                missing
+            );
+        }
+        let mut player = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::ParentTarget,
+        });
+        for scope in [
+            PlayerFilter::Controller,
+            PlayerFilter::ParentObjectTargetController,
+            PlayerFilter::ParentObjectTargetOwner,
+            PlayerFilter::ChosenPlayer { index: 0 },
+            PlayerFilter::TargetPlayer,
+        ] {
+            player.player_scope = Some(scope);
+            assert!(matches!(
+                prepare_declined_search_node(&state, &player),
+                Some(Cow::Borrowed(_))
+            ));
+        }
+        let mut search = declined_search_test_search();
+        if let Effect::SearchLibrary { target_player, .. } = &mut search.effect {
+            *target_player = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: Some(ControllerRef::ParentTargetController),
+                properties: vec![],
+            }));
+        }
+        assert!(search.effect.target_filter().is_none(), "the existing contextual searcher wrapper is intentionally hidden by the target accessor");
+        assert!(matches!(
+            prepare_declined_search_node(&state, &search),
+            Some(Cow::Borrowed(_))
+        ));
+        if let Effect::SearchLibrary { target_player, .. } = &mut search.effect {
+            *target_player = Some(TargetFilter::ParentTarget);
+        }
+        assert!(matches!(
+            prepare_declined_search_node(&state, &search),
+            Some(Cow::Borrowed(_))
+        ));
+        let mut announced_player = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::All),
+            },
+        });
+        announced_player.targets = vec![TargetRef::Player(P1)];
+        announced_player.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0]);
+        let tail = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        });
+        let chain = announced_player.sub_ability(
+            declined_search_test_placement(TargetFilter::LastRevealed).sub_ability(tail.clone()),
+        );
+        let reduced = without_declined_search_object_dependencies(&state, &chain).unwrap();
+        assert!(matches!(
+            reduced.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        assert!(*reduced.sub_ability.unwrap() == tail);
+    }
+
+    #[test]
+    fn declined_search_complete_scalar_carriers_refuse_before_binding() {
+        let state = GameState::new_two_player(42);
+        for missing in [true, false] {
+            let threshold = if missing {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                }
+            } else {
+                QuantityExpr::Fixed { value: 0 }
+            };
+            for property in [
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: threshold.clone(),
+                },
+                FilterProp::PtComparison {
+                    stat: crate::types::ability::PtStat::Power,
+                    scope: crate::types::ability::PtValueScope::Current,
+                    comparator: Comparator::EQ,
+                    value: threshold.clone(),
+                },
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::Any,
+                    comparator: Comparator::EQ,
+                    count: threshold.clone(),
+                },
+            ] {
+                let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::AnyOf {
+                        props: vec![FilterProp::Not {
+                            prop: Box::new(property),
+                        }],
+                    },
+                ]));
+                let objects = CardTypeSetSource::Objects {
+                    filter: filter.clone(),
+                };
+                let journal = CardTypeSetSource::TurnJournal {
+                    journal: crate::types::ability::TurnJournalKind::SpellsCast,
+                    scope: crate::types::ability::CountScope::Controller,
+                    filter: Some(filter.clone()),
+                };
+                let carriers = vec![
+                    QuantityRef::ObjectCount {
+                        filter: filter.clone(),
+                    },
+                    QuantityRef::ObjectCountDistinct {
+                        filter: filter.clone(),
+                        qualities: vec![SharedQuality::Name],
+                    },
+                    QuantityRef::ObjectCountBySharedQuality {
+                        filter: filter.clone(),
+                        quality: SharedQuality::Name,
+                        aggregate: crate::types::ability::AggregateFunction::Max,
+                    },
+                    QuantityRef::CountersOnObjects {
+                        filter: filter.clone(),
+                        counter_type: None,
+                    },
+                    QuantityRef::DistinctCounterKindsAmong {
+                        filter: filter.clone(),
+                    },
+                    QuantityRef::ControlledByEachPlayer {
+                        filter: filter.clone(),
+                        aggregate: crate::types::ability::AggregateFunction::Max,
+                        relation: PlayerRelation::All,
+                    },
+                    QuantityRef::EnteredThisTurn {
+                        filter: filter.clone(),
+                    },
+                    QuantityRef::SacrificedThisTurn {
+                        filter: filter.clone(),
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                    QuantityRef::BattlefieldEntriesThisTurn {
+                        filter: filter.clone(),
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                    QuantityRef::ZoneChangeCountThisTurn {
+                        filter: filter.clone(),
+                        from: None,
+                        to: None,
+                    },
+                    QuantityRef::ZoneChangeAggregateThisTurn {
+                        filter: filter.clone(),
+                        from: None,
+                        to: None,
+                        function: crate::types::ability::AggregateFunction::Sum,
+                        property: crate::types::ability::ObjectProperty::Power,
+                    },
+                    QuantityRef::CounterAddedThisTurn {
+                        target: filter.clone(),
+                        actor: crate::types::ability::CountScope::Controller,
+                        counters: crate::types::counter::CounterMatch::Any,
+                    },
+                    QuantityRef::TokensCreatedThisTurn {
+                        filter: filter.clone(),
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                    QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(filter.clone()),
+                        caused_by: Some(ThisWayCause::Destroyed),
+                    },
+                    QuantityRef::PlayerCount {
+                        filter: PlayerFilter::ControlsCount {
+                            relation: PlayerRelation::All,
+                            filter: filter.clone(),
+                            comparator: Comparator::GE,
+                            count: Box::new(QuantityExpr::Fixed { value: 0 }),
+                        },
+                    },
+                    QuantityRef::EventContextPlayerCount {
+                        filter: PlayerFilter::ControlsCount {
+                            relation: PlayerRelation::All,
+                            filter: filter.clone(),
+                            comparator: Comparator::GE,
+                            count: Box::new(QuantityExpr::Fixed { value: 0 }),
+                        },
+                    },
+                    QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::Power,
+                            objects.clone(),
+                        )
+                        .unwrap(),
+                    ),
+                    QuantityRef::DistinctCardTypes {
+                        source: objects.clone(),
+                    },
+                    QuantityRef::SharedCardTypes {
+                        source: journal.clone(),
+                    },
+                    QuantityRef::DistinctSubtypes {
+                        source: objects.clone(),
+                        exclude: crate::types::ability::SubtypeExclusion::None,
+                    },
+                    QuantityRef::DistinctColorsAmong { source: journal },
+                    QuantityRef::ZoneCardCount {
+                        filter: Some(filter.clone()),
+                        zone: crate::types::ability::ZoneRef::Hand,
+                        scope: crate::types::ability::CountScope::Controller,
+                        card_types: vec![],
+                    },
+                    QuantityRef::SpellsCastThisTurn {
+                        filter: Some(filter.clone()),
+                        scope: crate::types::ability::CountScope::Controller,
+                    },
+                    QuantityRef::SpellsCastBeforeTriggeringSpell {
+                        filter: Some(filter.clone()),
+                        scope: crate::types::ability::CountScope::Controller,
+                    },
+                    QuantityRef::SpellsCastThisGame {
+                        filter: Some(filter.clone()),
+                        scope: crate::types::ability::CountScope::Controller,
+                    },
+                    QuantityRef::AttackedThisTurn {
+                        filter: Some(filter.clone()),
+                        scope: crate::types::ability::CountScope::Controller,
+                    },
+                    QuantityRef::DamageDealtThisTurn {
+                        source: Box::new(filter.clone()),
+                        target: Box::new(TargetFilter::Any),
+                        aggregate: crate::types::ability::AggregateFunction::Sum,
+                        group_by: None,
+                        damage_kind: crate::types::ability::DamageKindFilter::Any,
+                        channel: crate::types::ability::DamageChannel::Total,
+                    },
+                    QuantityRef::DamageDealtThisTurn {
+                        source: Box::new(TargetFilter::Any),
+                        target: Box::new(filter.clone()),
+                        aggregate: crate::types::ability::AggregateFunction::Sum,
+                        group_by: None,
+                        damage_kind: crate::types::ability::DamageKindFilter::Any,
+                        channel: crate::types::ability::DamageChannel::Total,
+                    },
+                    QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                        metric: crate::types::ability::CastManaSpentMetric::FromSource {
+                            source_filter: filter,
+                        },
+                    },
+                ];
+                for carrier in carriers {
+                    let quantity = QuantityExpr::Ref { qty: carrier };
+                    assert_eq!(
+                        declined_search_scalar_quantity_dependency(&state, &quantity, false, None),
+                        missing,
+                        "canonical carrier {quantity:?}"
+                    );
+                    let node = declined_search_test_ability(Effect::GainLife {
+                        amount: quantity,
+                        player: TargetFilter::Controller,
+                    });
+                    let before = node.clone();
+                    let prepared = prepare_declined_search_node(&state, &node);
+                    assert_eq!(
+                        prepared.is_none(),
+                        missing,
+                        "prepared carrier {:?}",
+                        node.effect
+                    );
+                    if let Some(prepared) = prepared {
+                        assert!(matches!(prepared, Cow::Borrowed(_)));
+                        assert!(*prepared == node);
+                    }
+                    let tail = declined_search_test_ability(Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    });
+                    let root = declined_search_test_search()
+                        .sub_ability(node.clone().sub_ability(tail.clone()));
+                    let selected = optional_decline_branch(&state, &root).unwrap();
+                    if missing {
+                        assert!(*selected == tail);
+                    } else {
+                        assert!(matches!(selected, Cow::Borrowed(_)));
+                    }
+                    assert!(before == node);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn declined_search_raw_effect_player_fields_are_required_inputs() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Scalar source", "")
+            .with_mana_cost(crate::types::mana::ManaCost::generic(1))
+            .id();
+        scenario.add_creature(P0, "First population", 2, 2);
+        scenario.add_creature(P1, "Second population", 2, 2);
+        let state = scenario.build().state().clone();
+        for attribute in [false, true] {
+            for threshold in [
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                QuantityExpr::Fixed { value: 0 },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::SelfManaValue,
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::ScopedPlayer,
+                    },
+                },
+            ] {
+                let missing = matches!(
+                    threshold,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    }
+                );
+                let scope = if attribute {
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(QuantityRef::LifeTotal {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        }),
+                        comparator: Comparator::GE,
+                        value: Box::new(threshold),
+                    }
+                } else {
+                    PlayerFilter::ControlsCount {
+                        relation: PlayerRelation::All,
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                        comparator: Comparator::GE,
+                        count: Box::new(threshold),
+                    }
+                };
+                assert_eq!(declined_search_player_dependency(&state, &scope), missing);
+                if !missing {
+                    assert!(matches_player_scope(&state, P0, &scope, P0, source));
+                }
+                let branch = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                );
+                let effects = [
+                    Effect::StartYourEngines {
+                        player_scope: scope.clone(),
+                    },
+                    Effect::ChangeSpeed {
+                        player_scope: scope.clone(),
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        direction: crate::types::ability::SpeedDelta::Increase,
+                        floor: None,
+                    },
+                    Effect::DamageAll {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        player_filter: Some(scope.clone()),
+                        damage_source: None,
+                    },
+                    Effect::DamageEachPlayer {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player_filter: scope.clone(),
+                    },
+                    Effect::RevealChosenNumbers {
+                        players: scope.clone(),
+                    },
+                    Effect::Conjure {
+                        cards: vec![crate::types::ability::ConjureCard {
+                            source: crate::types::ability::ConjureSource::Named {
+                                name: "Island".into(),
+                            },
+                            count: QuantityExpr::Fixed { value: 1 },
+                        }],
+                        destination: Zone::Library,
+                        tapped: false,
+                        library_position: Some(LibraryPosition::Top),
+                        library_players: Some(scope.clone()),
+                    },
+                    Effect::ChooseOneOf {
+                        chooser: scope.clone(),
+                        branches: vec![branch],
+                        kind: ChooseOneOfKind::Ordinary,
+                    },
+                ];
+                for effect in effects {
+                    let mut node = declined_search_test_ability(effect);
+                    node.source_id = source;
+                    let before = node.clone();
+                    let prepared = prepare_declined_search_node(&state, &node);
+                    assert_eq!(prepared.is_none(), missing, "raw role {:?}", node.effect);
+                    if let Some(prepared) = prepared {
+                        assert!(matches!(prepared, Cow::Borrowed(_)));
+                        assert!(*prepared == node);
+                    }
+                    let tail = declined_search_test_ability(Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    });
+                    node.sub_ability = Some(Box::new(tail.clone()));
+                    let root = declined_search_test_search().sub_ability(node.clone());
+                    let selected = optional_decline_branch(&state, &root).unwrap();
+                    if missing {
+                        assert!(*selected == tail);
+                    } else {
+                        assert!(matches!(selected, Cow::Borrowed(_)));
+                        assert!(*selected == node);
+                    }
+                    assert!(before.effect == node.effect);
+                    if matches!(node.effect, Effect::ChooseOneOf { .. }) {
+                        node.modal_instruction_ordinal = Some(0);
+                        assert!(matches!(
+                            prepare_declined_search_node(&state, &node),
+                            Some(Cow::Borrowed(_))
+                        ));
+                        let root = declined_search_test_search().sub_ability(node.clone());
+                        assert!(matches!(
+                            optional_decline_branch(&state, &root),
+                            Some(Cow::Borrowed(_))
+                        ));
+                        node.modal_instruction_ordinal = None;
+                        node.reads_chosen_group = Some(crate::types::ability::ChosenGroupId(9));
+                        assert!(matches!(
+                            prepare_declined_search_node(&state, &node),
+                            Some(Cow::Borrowed(_))
+                        ));
+                        node.reads_chosen_group = None;
+                        node.reads_return_result = Some((
+                            crate::types::ability::ReturnResultId(9),
+                            crate::types::ability::ReturnResultReadSpec {
+                                noun: TargetFilter::Typed(TypedFilter::creature()),
+                                destination: Zone::Hand,
+                                recipient: ControllerRef::You,
+                            },
+                        ));
+                        assert!(matches!(
+                            prepare_declined_search_node(&state, &node),
+                            Some(Cow::Borrowed(_))
+                        ));
+                    }
+                    match &mut node.effect {
+                        Effect::DamageAll { player_filter, .. } => {
+                            *player_filter = None;
+                        }
+                        Effect::Conjure {
+                            library_players, ..
+                        } => {
+                            *library_players = None;
+                        }
+                        _ => continue,
+                    }
+                    assert!(matches!(
+                        prepare_declined_search_node(&state, &node),
+                        Some(Cow::Borrowed(_))
+                    ));
+                }
+            }
+        }
+        // A fixed current chooser does not read deferred branch definitions.
+        let deferred = declined_search_test_ability(Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::StartYourEngines {
+                    player_scope: PlayerFilter::ControlsCount {
+                        relation: PlayerRelation::All,
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                        comparator: Comparator::GE,
+                        count: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        }),
+                    },
+                },
+            )],
+            kind: ChooseOneOfKind::Ordinary,
+        });
+        assert!(matches!(
+            prepare_declined_search_node(&state, &deferred),
+            Some(Cow::Borrowed(_))
+        ));
+    }
+
+    #[test]
+    fn declined_search_target_controller_scalar_preserves_ordered_authority() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Scalar source", "")
+            .id();
+        let object = scenario
+            .add_creature(P0, "Controlled by P1", 2, 2)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(2))
+            .id();
+        let mut state = scenario.build().state().clone();
+        state.objects.get_mut(&object).unwrap().controller = P1;
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 2;
+        let scalar = QuantityExpr::Ref {
+            qty: QuantityRef::TargetControllerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+            },
+        };
+        let nested = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Hand,
+                scope: crate::types::ability::CountScope::Controller,
+                card_types: vec![],
+                filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: scalar.clone(),
+                    },
+                ]))),
+            },
+        };
+        let mut node = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: scalar.clone(),
+                player: TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::All),
+                },
+            },
+            vec![TargetRef::Player(P1)],
+            source,
+            P0,
+        );
+        node.target_reads = TargetReadOrigin::OwnAnnouncement;
+        node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0]);
+        for quantity in [&scalar, &nested] {
+            assert!(!declined_search_scalar_quantity_dependency(
+                &state,
+                quantity,
+                false,
+                Some(&node)
+            ));
+            assert!(!declined_search_quantity_dependency(
+                &state,
+                quantity,
+                false,
+                Some(&node)
+            ));
+            assert!(declined_search_scalar_quantity_dependency(
+                &state, quantity, true, None
+            ));
+        }
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(&state, &scalar, &node),
+            2
+        );
+        assert!(matches!(
+            prepare_declined_search_node(&state, &node),
+            Some(Cow::Borrowed(_))
+        ));
+        let mut no_declaration = node.clone();
+        no_declaration.effect = Effect::GainLife {
+            amount: scalar.clone(),
+            player: TargetFilter::Controller,
+        };
+        assert!(
+            prepare_declined_search_node(&state, &no_declaration).is_none(),
+            "OwnAnnouncement plus arbitrary target is not a declaration"
+        );
+        let mut raw_outer = node.clone();
+        raw_outer.effect = Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::All),
+            },
+        };
+        raw_outer.player_scope = Some(PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            comparator: Comparator::GE,
+            count: Box::new(scalar.clone()),
+        });
+        assert!(
+            prepare_declined_search_node(&state, &raw_outer).is_none(),
+            "raw player count receives None despite an actual selected P1"
+        );
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            let mut unavailable = node.clone();
+            unavailable.targets.clear();
+            unavailable.target_pins.clear();
+            unavailable.chosen_target_slots = ChosenTargetSlots::Recorded(vec![]);
+            unavailable.target_reads = origin;
+            assert!(declined_search_scalar_quantity_dependency(
+                &state,
+                &scalar,
+                false,
+                Some(&unavailable)
+            ));
+            assert!(prepare_declined_search_node(&state, &unavailable).is_none());
+            let mut unproved = node.clone();
+            unproved.target_reads = TargetReadOrigin::ParentAnnouncement;
+            assert!(prepare_declined_search_node(&state, &unproved).is_none());
+        }
+        for (targets, expected) in [
+            (vec![TargetRef::Player(P0), TargetRef::Object(object)], 1),
+            (vec![TargetRef::Object(object), TargetRef::Player(P0)], 2),
+        ] {
+            node.targets = targets;
+            node.target_pins = node
+                .targets
+                .iter()
+                .map(|target| match target {
+                    TargetRef::Object(_) => Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&object],
+                        ),
+                    ),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0, 1]);
+            assert!(declined_search_object_information(&state, &node));
+            assert!(!declined_search_scalar_quantity_dependency(
+                &state,
+                &scalar,
+                true,
+                Some(&node)
+            ));
+            assert_eq!(
+                crate::game::quantity::resolve_quantity_with_targets(&state, &scalar, &node),
+                expected
+            );
+            let first_object = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            };
+            assert!(!declined_search_scalar_quantity_dependency(
+                &state,
+                &first_object,
+                declined_search_object_information(&state, &node),
+                Some(&node)
+            ));
+            assert_eq!(
+                crate::game::quantity::resolve_quantity_with_targets(&state, &first_object, &node),
+                2
+            );
+        }
+        let mut hostile = node.clone();
+        hostile.chosen_target_slots = ChosenTargetSlots::Recorded(vec![1]);
+        assert!(
+            prepare_declined_search_node(&state, &hostile).is_none(),
+            "the earlier resolvable but unselected Object cannot be skipped"
+        );
+        let pin =
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&object]);
+        state.objects.get_mut(&object).unwrap().incarnation += 1;
+        assert!(
+            prepare_declined_search_node(&state, &node).is_none(),
+            "positional stale pin refuses"
+        );
+        node.target_pins.clear();
+        node.target_incarnations = vec![pin];
+        assert!(
+            prepare_declined_search_node(&state, &node).is_none(),
+            "delayed stale pin refuses"
+        );
+        node.target_incarnations.clear();
+        assert!(matches!(
+            prepare_declined_search_node(&state, &node),
+            Some(Cow::Borrowed(_))
+        ));
+        let current_pin =
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&object]);
+        let mut duplicate = node.clone();
+        duplicate.targets = vec![TargetRef::Object(object), TargetRef::Object(object)];
+        duplicate.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0, 1]);
+        duplicate.target_pins = vec![Some(pin), Some(current_pin)];
+        assert!(
+            prepare_declined_search_node(&state, &duplicate).is_none(),
+            "later current occurrence of the same id cannot rescue a stale first occurrence"
+        );
+        duplicate.target_pins = vec![Some(current_pin), Some(pin)];
+        assert!(matches!(
+            prepare_declined_search_node(&state, &duplicate),
+            Some(Cow::Borrowed(_))
+        ));
+        node.targets = vec![TargetRef::Object(ObjectId(u64::MAX)), TargetRef::Player(P1)];
+        node.target_pins.clear();
+        node.chosen_target_slots = ChosenTargetSlots::Recorded(vec![1]);
+        assert!(
+            !declined_search_scalar_quantity_dependency(&state, &scalar, false, Some(&node)),
+            "an actually unresolvable Object is skipped by the real helper"
+        );
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(&state, &scalar, &node),
+            2
+        );
+        // Raw player values never inherit this same outer ability's targets.
+        for player in [
+            PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                comparator: Comparator::GE,
+                count: Box::new(scalar.clone()),
+            },
+            PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: crate::types::ability::PlayerScope::Controller,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(scalar.clone()),
+            },
+        ] {
+            assert!(declined_search_player_dependency(&state, &player));
+        }
+        node.targets = vec![TargetRef::Player(P1)];
+        node.chosen_target_slots = ChosenTargetSlots::Unrecorded;
+        assert!(
+            !declined_search_scalar_quantity_dependency(&state, &scalar, false, Some(&node)),
+            "legacy genuine Player declaration retains its role"
+        );
+        node.effect = Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: scalar.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        node.targets = vec![TargetRef::Object(object)];
+        assert!(!declined_search_scalar_quantity_dependency(
+            &state,
+            &scalar,
+            true,
+            Some(&node)
+        ));
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(&state, &scalar, &node),
+            2
+        );
+        assert!(matches!(
+            prepare_declined_search_node(&state, &node),
+            Some(Cow::Borrowed(_))
+        ));
+        for missing in [true, false] {
+            let value = QuantityExpr::Ref {
+                qty: QuantityRef::TargetObjectManaValue {
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                        vec![FilterProp::Cmc {
+                            comparator: Comparator::GE,
+                            value: if missing {
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::TrackedSetSize,
+                                }
+                            } else {
+                                QuantityExpr::Fixed { value: 0 }
+                            },
+                        }],
+                    ))),
+                },
+            };
+            assert_eq!(
+                declined_search_scalar_quantity_dependency(&state, &value, true, Some(&node)),
+                missing
+            );
+            if let Effect::PutCounter { count, .. } = &mut node.effect {
+                *count = value;
+            }
+            assert_eq!(
+                prepare_declined_search_node(&state, &node).is_none(),
+                missing
+            );
+        }
+        if let Effect::PutCounter { count, .. } = &mut node.effect {
+            *count = scalar.clone();
+        }
+        node.targets.clear();
+        assert!(
+            declined_search_owns_target(&node),
+            "optional-empty structural object declaration is retained"
+        );
+        assert!(
+            prepare_declined_search_node(&state, &node).is_none(),
+            "empty declaration supplies no scalar information"
+        );
+    }
+
+    #[test]
+    fn declined_search_target_controller_scalar_keeps_captured_context_after_departure() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 2;
+        let object = ObjectId(765);
+        let mut event = zone_change_event(object, Zone::Battlefield, Zone::Graveyard, 2);
+        if let GameEvent::ZoneChanged { record, .. } = &mut event {
+            record.controller = P1;
+        }
+        let snapshot = parent_referent_context_from_events(&state, &[event])
+            .expect("actual moved referent capture");
+        assert_eq!(snapshot.object_id, object);
+        assert_eq!(snapshot.lki.controller, P1);
+        let parent = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        });
+        let scalar = QuantityExpr::Ref {
+            qty: QuantityRef::TargetControllerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+            },
+        };
+        let mut child = declined_search_test_ability(Effect::GainLife {
+            amount: scalar.clone(),
+            player: TargetFilter::Controller,
+        });
+        apply_parent_chain_context(&mut child, &parent, Some(&snapshot), &mut state);
+        assert_eq!(
+            child.effect_context_object.as_ref().unwrap().object_id,
+            object
+        );
+        assert!(!state.objects.contains_key(&object));
+        state.last_revealed_ids = vec![ObjectId(999)];
+        assert_eq!(
+            crate::game::ability_utils::parent_target_controller(&child, &state),
+            Some(P1)
+        );
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(&state, &scalar, &child),
+            2
+        );
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            child.target_reads = origin;
+            let Some(Cow::Borrowed(retained)) = prepare_declined_search_node(&state, &child) else {
+                panic!("frozen controller metadata remains available");
+            };
+            assert!(retained.effect_context_object == child.effect_context_object);
+            assert!(!declined_search_quantity_dependency(
+                &state,
+                &scalar,
+                false,
+                Some(&child)
+            ));
+        }
+        let mut unresolved = child.clone();
+        unresolved.targets = vec![TargetRef::Object(ObjectId(u64::MAX))];
+        assert!(
+            matches!(
+                prepare_declined_search_node(&state, &unresolved),
+                Some(Cow::Borrowed(_))
+            ),
+            "only a genuinely unresolvable target permits the actual snapshot fallback"
+        );
+        let mut shadowed = child.clone();
+        shadowed.targets = vec![TargetRef::Player(P0)];
+        assert!(
+            prepare_declined_search_node(&state, &shadowed).is_none(),
+            "a resolvable unproved Player prevents falling through to context"
+        );
+        let mut missing = child.clone();
+        missing.effect_context_object = None;
+        assert!(prepare_declined_search_node(&state, &missing).is_none());
+        let raw = PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            comparator: Comparator::GE,
+            count: Box::new(scalar),
+        };
+        assert!(declined_search_player_dependency(&state, &raw));
+    }
+
+    #[test]
+    fn declined_search_rebound_counter_descriptor_preserves_population_gate() {
+        let mut scenario = GameScenario::new();
+        let artifact = scenario
+            .add_artifact_from_oracle(P0, "Independent artifact", "")
+            .id();
+        let creature = scenario.add_creature(P0, "Independent creature", 3, 3).id();
+        let opponent = scenario
+            .add_artifact_from_oracle(P1, "Opponent artifact", "")
+            .id();
+        let runner = scenario.build();
+        let absent = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            },
+        ]));
+        let independent = TargetFilter::Typed(
+            TypedFilter::new(crate::types::ability::TypeFilter::Artifact)
+                .controller(ControllerRef::You),
+        );
+        let descriptor = TargetFilter::Or {
+            filters: vec![absent.clone(), independent.clone()],
+        };
+        let mut bound_absent = absent.clone();
+        let TargetFilter::Typed(typed) = &mut bound_absent else {
+            unreachable!()
+        };
+        typed.properties[0] = FilterProp::AnyOf { props: vec![] };
+        let expected_descriptor = TargetFilter::Or {
+            filters: vec![bound_absent, independent.clone()],
+        };
+        for typed in [false, true] {
+            let effect = if typed {
+                Effect::MultiplyCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    multiplier: 2,
+                    target: descriptor.clone(),
+                }
+            } else {
+                Effect::Double {
+                    target_kind: crate::types::ability::DoubleTarget::Counters {
+                        counter_type: None,
+                    },
+                    target: descriptor.clone(),
+                }
+            };
+            let mut node = ResolvedAbility::new(effect, vec![], artifact, P0);
+            node.target_choice_timing = TargetChoiceTiming::Resolution;
+            assert!(node.targets.is_empty());
+            assert!(node.multi_target.is_none());
+            assert!(!node.optional_targeting);
+            assert!(descriptor.names_enumerable_population());
+            assert_eq!(
+                counters::nontargeted_counter_population_ids(runner.state(), &node, &descriptor),
+                Some(vec![artifact])
+            );
+            let prepared = prepare_declined_search_node(&GameState::new_two_player(42), &node)
+                .expect("independent artifact survives");
+            assert!(matches!(prepared, Cow::Owned(_)));
+            let bound = prepared.effect.target_filter().unwrap();
+            assert_eq!(bound, &expected_descriptor);
+            assert!(bound.names_enumerable_population());
+            assert_eq!(
+                counters::nontargeted_counter_population_ids(runner.state(), &prepared, bound),
+                Some(vec![artifact])
+            );
+            let mut parent = node.clone();
+            parent.targets = vec![TargetRef::Object(creature)];
+            assert!(!should_propagate_parent_targets(&parent, &prepared));
+            assert_eq!(parent.targets, vec![TargetRef::Object(creature)]);
+            for guard in 0..4 {
+                let mut refused = prepared.clone().into_owned();
+                match guard {
+                    0 => refused.target_choice_timing = TargetChoiceTiming::Stack,
+                    1 => refused.targets = vec![TargetRef::Object(creature)],
+                    // Local API-only control: Oracle does not currently emit this bit.
+                    2 => refused.optional_targeting = true,
+                    3 => {
+                        refused.multi_target =
+                            Some(crate::types::ability::MultiTargetSpec::fixed(0, 2))
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    counters::nontargeted_counter_population_ids(runner.state(), &refused, bound),
+                    None
+                );
+            }
+            for unclassified in [
+                TargetFilter::Any,
+                TargetFilter::Typed(TypedFilter::default()),
+                TargetFilter::Or { filters: vec![] },
+            ] {
+                assert_eq!(
+                    counters::nontargeted_counter_population_ids(
+                        runner.state(),
+                        &prepared,
+                        &unclassified
+                    ),
+                    None
+                );
+            }
+        }
+        // True constants keep their original Typed/Not(Typed) envelopes. This
+        // intentionally broad typed API predicate matches every battlefield object.
+        let mut broad = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Not {
+                    filter: Box::new(absent.clone()),
+                },
+                independent.clone(),
+            ],
+        };
+        let original = broad.clone();
+        assert!(original.names_enumerable_population());
+        assert_eq!(
+            crate::game::filter::bind_absent_search_predicate(&mut broad),
+            Some(Some(true))
+        );
+        assert!(broad.names_enumerable_population());
+        let mut node = declined_search_test_ability(Effect::Double {
+            target_kind: crate::types::ability::DoubleTarget::Counters { counter_type: None },
+            target: broad.clone(),
+        });
+        node.target_choice_timing = TargetChoiceTiming::Resolution;
+        let mut expected = vec![artifact, creature, opponent];
+        expected.sort();
+        for descriptor in [&original, &broad] {
+            let mut ids =
+                counters::nontargeted_counter_population_ids(runner.state(), &node, descriptor)
+                    .unwrap();
+            ids.sort();
+            assert_eq!(ids, expected);
+        }
+        for (mut descriptor, mut selected) in [
+            (
+                TargetFilter::And {
+                    filters: vec![
+                        independent.clone(),
+                        TargetFilter::Not {
+                            filter: Box::new(absent.clone()),
+                        },
+                    ],
+                },
+                vec![artifact],
+            ),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(absent.clone()),
+                },
+                vec![artifact, creature, opponent],
+            ),
+        ] {
+            let original = descriptor.clone();
+            assert!(original.names_enumerable_population());
+            assert!(crate::game::filter::bind_absent_search_predicate(&mut descriptor).is_some());
+            assert!(descriptor.names_enumerable_population());
+            selected.sort();
+            for descriptor in [&original, &descriptor] {
+                let mut ids =
+                    counters::nontargeted_counter_population_ids(runner.state(), &node, descriptor)
+                        .unwrap();
+                ids.sort();
+                assert_eq!(ids, selected);
+            }
+        }
+        let mut property_only =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Not {
+                prop: Box::new(FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                }),
+            }]));
+        let original_property_only = property_only.clone();
+        assert!(property_only.names_enumerable_population());
+        assert_eq!(
+            crate::game::filter::bind_absent_search_predicate(&mut property_only),
+            Some(Some(true))
+        );
+        assert!(property_only.names_enumerable_population());
+        assert!(!property_only.denotes_battlefield_objects());
+        assert!(
+            matches!(&property_only, TargetFilter::Typed(tf) if tf.properties == vec![FilterProp::Not { prop: Box::new(FilterProp::AnyOf { props: vec![] }) }])
+        );
+        for descriptor in [&original_property_only, &property_only] {
+            let mut ids =
+                counters::nontargeted_counter_population_ids(runner.state(), &node, descriptor)
+                    .unwrap();
+            ids.sort();
+            assert_eq!(ids, expected);
+        }
+        let mut private = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    FilterProp::InTrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                ])),
+                independent,
+            ],
+        };
+        assert_eq!(
+            counters::nontargeted_counter_population_ids(runner.state(), &node, &private),
+            None
+        );
+        assert_eq!(
+            crate::game::filter::bind_absent_search_predicate(&mut private),
+            Some(None)
+        );
+        assert!(
+            matches!(&private, TargetFilter::Or { filters } if matches!(&filters[0], TargetFilter::Typed(tf) if tf.properties[0] == (FilterProp::InZone { zone: Zone::Graveyard })))
+        );
+        assert_eq!(
+            counters::nontargeted_counter_population_ids(runner.state(), &node, &private),
+            None
+        );
+        let impossible = declined_search_test_ability(Effect::Double {
+            target_kind: crate::types::ability::DoubleTarget::Counters { counter_type: None },
+            target: absent,
+        });
+        let mut impossible = impossible;
+        impossible.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &impossible).is_none()
+        );
+    }
+
+    #[test]
+    fn declined_search_rebound_host_preserves_object_population_gate() {
+        let mut scenario = GameScenario::new();
+        let equipment = scenario
+            .add_artifact_from_oracle(P0, "Equipment", "")
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let first = scenario.add_creature(P0, "First host", 3, 3).id();
+        let second = scenario.add_creature(P0, "Second host", 3, 3).id();
+        let _opponent = scenario.add_creature(P1, "Opponent", 3, 3).id();
+        let mut runner = scenario.build();
+        let absent = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            },
+        ]));
+        let independent =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let host = TargetFilter::Or {
+            filters: vec![absent, independent],
+        };
+        let mut node = declined_search_test_ability(Effect::Attach {
+            attachment: TargetFilter::SpecificObject { id: equipment },
+            target: host.clone(),
+            selection: crate::types::ability::AttachSelection::Targeted,
+        });
+        node.source_id = equipment;
+        node.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(host.denotes_battlefield_objects());
+        assert!(host.names_enumerable_population());
+        let prepared = prepare_declined_search_node(&GameState::new_two_player(42), &node).unwrap();
+        assert!(matches!(prepared, Cow::Owned(_)));
+        let Effect::Attach {
+            attachment, target, ..
+        } = &prepared.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(attachment, &TargetFilter::SpecificObject { id: equipment });
+        assert!(target.denotes_battlefield_objects());
+        assert!(
+            matches!(target, TargetFilter::Or { filters } if matches!(&filters[0], TargetFilter::Typed(tf) if tf.properties == vec![FilterProp::AnyOf { props: vec![] }]))
+        );
+        // Supplemental actual consumer check; the integration test also reaches
+        // this prompt through cast/payment and the public optional decision.
+        resolve_ability_chain(runner.state_mut(), &prepared, &mut Vec::new(), 0).unwrap();
+        let WaitingFor::EffectZoneChoice {
+            cards, effect_kind, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("expected host choice")
+        };
+        assert_eq!(*effect_kind, EffectKind::Attach);
+        let mut cards = cards.clone();
+        cards.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(cards, expected);
+        let mut absent_attachment = node.clone();
+        let Effect::Attach { attachment, .. } = &mut absent_attachment.effect else {
+            unreachable!()
+        };
+        *attachment = TargetFilter::ParentTarget;
+        assert!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &absent_attachment)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn declined_search_host_truth_and_refusal_controls_keep_actual_candidates() {
+        let mut scenario = GameScenario::new();
+        let equipment = scenario
+            .add_artifact_from_oracle(P0, "Equipment", "")
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let first = scenario.add_creature(P0, "First host", 3, 3).id();
+        let second = scenario.add_creature(P0, "Second host", 3, 3).id();
+        let opponent = scenario.add_creature(P1, "Opponent host", 3, 3).id();
+        let baseline = scenario.build().state().clone();
+        let absent = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            },
+        ]));
+        let independent =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        for (host, mut expected) in [
+            (
+                TargetFilter::And {
+                    filters: vec![
+                        independent.clone(),
+                        TargetFilter::Not {
+                            filter: Box::new(absent.clone()),
+                        },
+                    ],
+                },
+                vec![first, second],
+            ),
+            // Deliberately broad typed API reading: the true Not(Typed(false))
+            // leg admits opponent creatures too; real Equipment legality still applies.
+            (
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(absent.clone()),
+                        },
+                        independent,
+                    ],
+                },
+                vec![first, second, opponent],
+            ),
+        ] {
+            assert!(host.denotes_battlefield_objects());
+            let mut node = declined_search_test_ability(Effect::Attach {
+                attachment: TargetFilter::SpecificObject { id: equipment },
+                target: host,
+                selection: crate::types::ability::AttachSelection::Targeted,
+            });
+            node.source_id = equipment;
+            node.target_choice_timing = TargetChoiceTiming::Resolution;
+            let prepared =
+                prepare_declined_search_node(&GameState::new_two_player(42), &node).unwrap();
+            let target = prepared.effect.target_filter().unwrap();
+            assert!(target.names_enumerable_population());
+            assert!(target.denotes_battlefield_objects());
+            for consumer in [&node, prepared.as_ref()] {
+                let mut state = baseline.clone();
+                resolve_ability_chain(&mut state, consumer, &mut Vec::new(), 0).unwrap();
+                let WaitingFor::EffectZoneChoice {
+                    cards, effect_kind, ..
+                } = &state.waiting_for
+                else {
+                    panic!("expected host choice")
+                };
+                assert_eq!(*effect_kind, EffectKind::Attach);
+                let mut cards = cards.clone();
+                cards.sort();
+                expected.sort();
+                assert_eq!(cards, expected);
+            }
+        }
+        let property_only =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Not {
+                prop: Box::new(FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                }),
+            }]));
+        for mut refused in [
+            property_only,
+            TargetFilter::Player,
+            TargetFilter::Any,
+            TargetFilter::Typed(TypedFilter::default()),
+            TargetFilter::Or { filters: vec![] },
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::InZone { zone: Zone::Hand },
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::InTrackedSet {
+                        id: TrackedSetId(0),
+                    }),
+                },
+            ])),
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Library, Zone::Graveyard],
+                },
+                FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                },
+            ])),
+        ] {
+            assert!(!refused.denotes_battlefield_objects());
+            assert!(crate::game::filter::bind_absent_search_predicate(&mut refused).is_some());
+            assert!(!refused.denotes_battlefield_objects());
+        }
+        let mut empty = declined_search_test_ability(Effect::Attach {
+            attachment: TargetFilter::SpecificObject { id: equipment },
+            target: absent,
+            selection: crate::types::ability::AttachSelection::Targeted,
+        });
+        empty.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(prepare_declined_search_node(&GameState::new_two_player(42), &empty).is_none());
+    }
+
+    #[test]
+    fn declined_search_quantity_populations_bind_before_final_dependency_and_resolve() {
+        let mut scenario = GameScenario::new();
+        let artifact = scenario
+            .add_artifact_from_oracle(P0, "Independent artifact", "")
+            .id();
+        scenario.add_creature(P0, "Nonmember creature", 3, 3);
+        let mut runner = scenario.build();
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::InTrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                ])),
+                TargetFilter::Typed(
+                    TypedFilter::new(crate::types::ability::TypeFilter::Artifact)
+                        .controller(ControllerRef::You),
+                ),
+            ],
+        };
+        let mut expected_filter = filter.clone();
+        let TargetFilter::Or { filters } = &mut expected_filter else {
+            unreachable!()
+        };
+        let TargetFilter::Typed(first) = &mut filters[0] else {
+            unreachable!()
+        };
+        first.properties[0] = FilterProp::AnyOf { props: vec![] };
+        let source = CardTypeSetSource::Objects {
+            filter: filter.clone(),
+        };
+        for quantity in [
+            QuantityRef::DistinctCardTypes {
+                source: source.clone(),
+            },
+            QuantityRef::SharedCardTypes {
+                source: source.clone(),
+            },
+            QuantityRef::DistinctSubtypes {
+                source: source.clone(),
+                exclude: Default::default(),
+            },
+            QuantityRef::DistinctColorsAmong {
+                source: source.clone(),
+            },
+            QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    crate::types::ability::AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::Power,
+                    source,
+                )
+                .unwrap(),
+            ),
+        ] {
+            let node = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty: quantity },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                artifact,
+                P0,
+            );
+            let prepared = prepare_declined_search_node(&GameState::new_two_player(42), &node)
+                .expect("independent population survives");
+            assert!(matches!(prepared, Cow::Owned(_)));
+            let Effect::GainLife {
+                amount: QuantityExpr::Ref { qty },
+                ..
+            } = &prepared.effect
+            else {
+                unreachable!()
+            };
+            let source = match qty {
+                QuantityRef::DistinctCardTypes { source }
+                | QuantityRef::SharedCardTypes { source }
+                | QuantityRef::DistinctSubtypes { source, .. }
+                | QuantityRef::DistinctColorsAmong { source } => source,
+                QuantityRef::PropertyAggregate(aggregate) => aggregate.source(),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                source,
+                &CardTypeSetSource::Objects {
+                    filter: expected_filter.clone()
+                }
+            );
+        }
+        let node = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            artifact,
+            P0,
+        );
+        let prepared = prepare_declined_search_node(&GameState::new_two_player(42), &node).unwrap();
+        assert!(matches!(prepared, Cow::Owned(_)));
+        let Effect::GainLife { amount, .. } = &prepared.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            amount,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: expected_filter
+                }
+            }
+        );
+        assert_eq!(
+            crate::game::quantity::resolve_quantity(runner.state(), amount, P0, artifact),
+            1
+        );
+        resolve_ability_chain(runner.state_mut(), &prepared, &mut Vec::new(), 0).unwrap();
+        assert_eq!(
+            runner.state().players[0].life,
+            21,
+            "the retained operative expression reaches the real life consumer"
+        );
+        let unresolved = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .properties(vec![FilterProp::SameNameAsParentTarget]),
+                        ),
+                    },
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            artifact,
+            P0,
+        );
+        assert!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &unresolved).is_none(),
+            "a reference without absent-membership semantics remains dependent after binding"
+        );
+    }
+
+    #[test]
+    fn declined_search_empty_discard_alternative_keeps_the_ordinary_choice() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_artifact_from_oracle(P0, "Source", "").id();
+        let first = scenario.add_spell_to_hand(P0, "First discard", false).id();
+        let second = scenario.add_spell_to_hand(P0, "Second discard", false).id();
+        let third = scenario.add_spell_to_hand(P0, "Third discard", false).id();
+        let mut runner = scenario.build();
+        let effect: Effect = serde_json::from_value(serde_json::json!({
+            "type":"Discard", "count":{"type":"Fixed","value":2},
+            "target":{"type":"Controller"},
+            "unless_filter":{"type":"Typed","type_filters":["Creature"],"properties":[{"type":"InTrackedSet","id":0}]}
+        })).unwrap();
+        let node = ResolvedAbility::new(effect, vec![], source, P0);
+        let prepared = prepare_declined_search_node(&GameState::new_two_player(42), &node).unwrap();
+        assert!(matches!(prepared, Cow::Owned(_)));
+        assert!(
+            matches!(&prepared.effect, Effect::Discard { unless_filter: Some(TargetFilter::Typed(tf)), .. } if tf.properties == vec![FilterProp::AnyOf { props: vec![] }])
+        );
+        resolve_ability_chain(runner.state_mut(), &prepared, &mut Vec::new(), 0).unwrap();
+        let WaitingFor::DiscardChoice {
+            player,
+            count,
+            cards,
+            unless_filter,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("ordinary discard remains available")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 2);
+        let mut cards = cards.clone();
+        cards.sort();
+        let mut expected = vec![first, second, third];
+        expected.sort();
+        assert_eq!(cards, expected);
+        assert!(
+            matches!(unless_filter, Some(TargetFilter::Typed(tf)) if tf.properties == vec![FilterProp::AnyOf { props: vec![] }])
+        );
+    }
+
+    #[test]
+    fn declined_search_secondary_inputs_precede_owned_application_and_freshness() {
+        let mut own = declined_search_test_ability(Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            static_abilities: vec![
+                StaticDefinition::continuous().affected(TargetFilter::ParentTarget)
+            ],
+            duration: None,
+            end_cost: None,
+        });
+        assert!(declined_search_owns_target(&own));
+        assert!(matches!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &own),
+            Some(Cow::Borrowed(_))
+        ));
+        own.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        assert!(prepare_declined_search_node(&GameState::new_two_player(42), &own).is_none());
+        own.repeat_for = None;
+        let mut chosen_host = declined_search_test_ability(Effect::Attach {
+            attachment: TargetFilter::ParentTarget,
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            selection: crate::types::ability::AttachSelection::Targeted,
+        });
+        assert!(declined_search_owns_target(&chosen_host));
+        assert!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &chosen_host).is_none(),
+            "own host does not own the missing secondary attachment"
+        );
+        if let Effect::Attach { attachment, .. } = &mut chosen_host.effect {
+            *attachment = TargetFilter::SpecificObject { id: ObjectId(7) };
+        }
+        assert!(matches!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &chosen_host),
+            Some(Cow::Borrowed(_))
+        ));
+        for value in [
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            QuantityExpr::Fixed { value: 1 },
+            QuantityExpr::Ref {
+                qty: QuantityRef::TurnsTaken,
+            },
+        ] {
+            let dependent = matches!(
+                value,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                }
+            );
+            let effect: Effect = serde_json::from_value(serde_json::json!({
+                "type":"Dig", "count":{"type":"Fixed","value":3},
+                "keep_count_expr":{"type":"Fixed","value":1},
+                "rest_split_top_count":value, "rest_destination":"Library"
+            }))
+            .unwrap();
+            let node = declined_search_test_ability(effect);
+            let mut search = declined_search_test_search();
+            let independent = declined_search_test_ability(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            });
+            let node = node.sub_ability(independent.clone());
+            search.sub_ability = Some(Box::new(node.clone()));
+            let branch = optional_decline_branch(&GameState::new_two_player(42), &search).unwrap();
+            assert_eq!(matches!(branch, Cow::Owned(_)), dependent);
+            assert_eq!(
+                branch.effect,
+                if dependent {
+                    independent.effect.clone()
+                } else {
+                    node.effect.clone()
+                }
+            );
+            assert_eq!(
+                prepare_declined_search_node(&GameState::new_two_player(42), &node).is_none(),
+                dependent,
+                "the split slot alone determines the unavailable scalar input"
+            );
+        }
+        for target_kind in [
+            crate::types::ability::DoubleTarget::LifeTotal,
+            crate::types::ability::DoubleTarget::ManaPool { color: None },
+        ] {
+            let player = declined_search_test_ability(Effect::Double {
+                target_kind,
+                target: TargetFilter::ParentTarget,
+            });
+            assert!(matches!(
+                prepare_declined_search_node(&GameState::new_two_player(42), &player),
+                Some(Cow::Borrowed(_))
+            ));
+        }
+    }
+
+    // Structural controls for C6; printed runtime coverage lives in the
+    // search_result_conditional_destination integration module.
+    fn declined_search_test_ability(effect: Effect) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+        ability.sub_link = SubAbilityLink::SequentialSibling;
+        ability
+    }
+
+    fn declined_search_test_search() -> ResolvedAbility {
+        let mut search = declined_search_test_ability(Effect::SearchLibrary {
+            source_zones: vec![Zone::Library],
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+        });
+        search.optional = true;
+        search
+    }
+
+    fn declined_search_test_placement(target: TargetFilter) -> ResolvedAbility {
+        declined_search_test_ability(Effect::PutAtLibraryPosition {
+            target,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+        })
+    }
+
+    // Structural contract control, not a claim about a printed card reaching
+    // the population walk's depth budget.
+    #[test]
+    fn declined_search_population_dependency_respects_walk_completion() {
+        for leaf in [
+            CardTypeSetSource::ExiledBySource,
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: Some(ThisWayCause::Destroyed),
+            },
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+            },
+            CardTypeSetSource::Objects {
+                filter: TargetFilter::ParentTarget,
+            },
+        ] {
+            let leaf_dependent = declined_search_population_dependency(
+                &GameState::new_two_player(42),
+                &leaf,
+                false,
+                None,
+            );
+            assert_eq!(
+                leaf_dependent,
+                matches!(
+                    &leaf,
+                    CardTypeSetSource::TrackedSet {
+                        caused_by: None,
+                        ..
+                    } | CardTypeSetSource::Objects { .. }
+                )
+            );
+            for nesting in [0, UNION_DEPTH_BUDGET - 1, UNION_DEPTH_BUDGET] {
+                let mut population = leaf.clone();
+                for _ in 0..nesting {
+                    population = CardTypeSetSource::any_of(vec![
+                        population,
+                        CardTypeSetSource::ExiledBySource,
+                    ])
+                    .unwrap();
+                }
+                let mut seen = 0;
+                let mut seen_dependent = false;
+                let complete = population.try_for_each_member(UNION_DEPTH_BUDGET, &mut |member| {
+                    seen += 1;
+                    seen_dependent |= declined_search_population_dependency(
+                        &GameState::new_two_player(42),
+                        member,
+                        false,
+                        None,
+                    );
+                });
+                assert_eq!(complete, nesting < UNION_DEPTH_BUDGET);
+                assert!(seen > 0, "truncation is not an empty population");
+                assert_eq!(
+                    seen_dependent,
+                    leaf_dependent && complete,
+                    "the dependent leaf is unseen when the budget is exhausted"
+                );
+                let dependent = leaf_dependent || !complete;
+                assert_eq!(
+                    declined_search_population_dependency(
+                        &GameState::new_two_player(42),
+                        &population,
+                        false,
+                        None
+                    ),
+                    dependent
+                );
+
+                for quantity in [
+                    QuantityRef::DistinctCardTypes {
+                        source: population.clone(),
+                    },
+                    QuantityRef::SharedCardTypes {
+                        source: population.clone(),
+                    },
+                    QuantityRef::DistinctSubtypes {
+                        source: population.clone(),
+                        exclude: Default::default(),
+                    },
+                    QuantityRef::DistinctColorsAmong {
+                        source: population.clone(),
+                    },
+                ] {
+                    let mut independent = declined_search_test_ability(Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::ParentTarget,
+                    });
+                    independent.targets = vec![TargetRef::Player(PlayerId(1))];
+                    let mut consumer = independent.clone();
+                    consumer.effect = Effect::GainLife {
+                        amount: QuantityExpr::Ref { qty: quantity },
+                        player: TargetFilter::ParentTarget,
+                    };
+                    consumer.sub_ability = Some(Box::new(independent.clone()));
+                    assert_eq!(
+                        prepare_declined_search_node(&GameState::new_two_player(42), &consumer)
+                            .is_none(),
+                        dependent
+                    );
+                    let mut root = declined_search_test_search();
+                    root.sub_ability = Some(Box::new(consumer.clone()));
+                    let branch =
+                        optional_decline_branch(&GameState::new_two_player(42), &root).unwrap();
+                    assert_eq!(matches!(branch, Cow::Owned(_)), dependent);
+                    let expected = if dependent { &independent } else { &consumer };
+                    assert_eq!(branch.effect, expected.effect);
+                    assert_eq!(branch.targets, expected.targets);
+                    assert_eq!(branch.sub_ability.is_some(), !dependent);
+                    if let Some(sibling) = &branch.sub_ability {
+                        assert_eq!(sibling.effect, independent.effect);
+                        assert_eq!(sibling.targets, independent.targets);
+                        assert!(sibling.sub_ability.is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Structural — CR 608.2c + CR 609.3: remove the whole nonexistent-object
+    /// instruction before either gate, but preserve player work and both edges.
+    #[test]
+    fn declined_search_reduces_object_units_without_pruning_player_or_prior_authorities() {
+        let dependent = declined_search_test_placement(TargetFilter::ParentTarget);
+        let life = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::ParentTarget,
+        });
+        let mut gated = dependent.clone();
+        gated.targets = vec![TargetRef::Object(ObjectId(99))];
+        gated.target_reads = TargetReadOrigin::ParentAnnouncement;
+        gated.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient,
+                },
+            },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        });
+        gated.else_ability = Some(Box::new(dependent.clone()));
+        let mut step = life.clone();
+        step.sub_link = SubAbilityLink::ContinuationStep;
+        gated.sub_ability = relink_in_printed_order(vec![&step, &life]);
+        let mut root = declined_search_test_search();
+        root.sub_ability = Some(Box::new(gated));
+        let reduced = optional_decline_branch(&GameState::new_two_player(42), &root)
+            .expect("independent player instruction survives");
+        assert!(matches!(reduced, Cow::Owned(_)));
+        assert!(matches!(reduced.effect, Effect::GainLife { .. }));
+        assert!(
+            reduced.sub_ability.is_none(),
+            "dependent resolution step was skipped with its object instruction"
+        );
+
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            Effect::Shuffle {
+                target: TargetFilter::ParentTarget,
+            },
+            life.effect.clone(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+                excess: None,
+            },
+        ] {
+            let mut player = declined_search_test_ability(effect);
+            player.targets = vec![TargetRef::Player(PlayerId(1))];
+            assert!(
+                !prepare_declined_search_node(&GameState::new_two_player(42), &player).is_none(),
+                "player operand is not an absent found object: {:?}",
+                player.effect
+            );
+            root.sub_ability = Some(Box::new(player));
+            assert!(matches!(
+                optional_decline_branch(&GameState::new_two_player(42), &root),
+                Some(Cow::Borrowed(_))
+            ));
+        }
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+            TargetFilter::LastRevealed,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+        ] {
+            root.sub_ability = Some(Box::new(declined_search_test_placement(filter.clone())));
+            assert!(
+                optional_decline_branch(&GameState::new_two_player(42), &root).is_none(),
+                "stale inherited targets cannot manufacture a result: {filter:?}"
+            );
+        }
+        for filter in [
+            TargetFilter::SelfRef,
+            TargetFilter::TriggeringSource,
+            TargetFilter::CostPaidObject,
+            TargetFilter::SpecificObject { id: ObjectId(7) },
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            },
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: Some(ThisWayCause::Destroyed),
+            },
+        ] {
+            root.sub_ability = Some(Box::new(declined_search_test_placement(filter)));
+            assert!(
+                matches!(
+                    optional_decline_branch(&GameState::new_two_player(42), &root),
+                    Some(Cow::Borrowed(_))
+                ),
+                "an explicit prior/source/cost authority is independent"
+            );
+        }
+        let mut player = life.clone();
+        player.optional = true;
+        player.condition = Some(AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::effect_performed(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Fixed { value: 1 },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        });
+        player.sub_ability = Some(Box::new(dependent.clone()));
+        player.else_ability = Some(Box::new(dependent));
+        let reduced =
+            without_declined_search_object_dependencies(&GameState::new_two_player(42), &player)
+                .unwrap();
+        assert_eq!(reduced.condition, player.condition);
+        assert!(reduced.optional);
+        assert!(reduced.sub_ability.is_none() && reduced.else_ability.is_none());
+    }
+
+    /// Structural — independent targets and real producers reset the authority;
+    /// producer-shaped instructions consuming absent inputs do not.
+    #[test]
+    fn declined_search_preserves_fresh_producers_but_checks_their_inputs_first() {
+        let dependent = declined_search_test_placement(TargetFilter::ParentTarget);
+        let mut root = declined_search_test_search();
+        for effect in [
+            declined_search_test_search().effect,
+            serde_json::from_value(serde_json::json!({"type":"ChooseFromZone", "zone":"Hand"})).unwrap(),
+            Effect::RevealTop { player: TargetFilter::ParentTarget, count: 1 },
+            Effect::RevealHand { target: TargetFilter::ParentTarget, card_filter: TargetFilter::Any, count: Some(QuantityExpr::Fixed { value: 1 }), selection: Default::default(), choice_optional: false, reveal: true },
+            Effect::ExileFromTopUntil { player: TargetFilter::ParentTarget, until: UntilCondition::NextMatches { filter: TargetFilter::Any, count: QuantityExpr::Fixed { value: 1 } } },
+            Effect::Reveal { target: TargetFilter::SpecificObject { id: ObjectId(7) } },
+            serde_json::from_value(serde_json::json!({"type":"Token", "name":"Independent token", "power":{"type":"Fixed","value":1}, "toughness":{"type":"Fixed","value":1}})).unwrap(),
+        ] {
+            let producer = declined_search_test_ability(effect).sub_ability(dependent.clone());
+            root.sub_ability = Some(Box::new(producer));
+            let branch = optional_decline_branch(&GameState::new_two_player(42), &root).unwrap();
+            assert!(matches!(branch, Cow::Borrowed(_)));
+            assert!(branch.sub_ability.is_some(), "new producer owns the later ParentTarget");
+        }
+        let mut own = declined_search_test_placement(TargetFilter::Typed(TypedFilter::creature()));
+        own.targets = vec![TargetRef::Object(ObjectId(8))];
+        own.sub_ability = Some(Box::new(dependent.clone()));
+        assert!(declined_search_owns_target(&own));
+        root.sub_ability = Some(Box::new(own));
+        assert!(matches!(
+            optional_decline_branch(&GameState::new_two_player(42), &root),
+            Some(Cow::Borrowed(_))
+        ));
+        let mut dependent_producer = declined_search_test_search();
+        dependent_producer.effect = Effect::Reveal {
+            target: TargetFilter::ParentTarget,
+        };
+        assert!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &dependent_producer)
+                .is_none()
+        );
+        assert!(without_declined_search_object_dependencies(
+            &GameState::new_two_player(42),
+            &dependent_producer
+        )
+        .is_none());
+        let mut count_dependent = declined_search_test_search();
+        if let Effect::SearchLibrary { count, .. } = &mut count_dependent.effect {
+            *count = QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            };
+        }
+        assert!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &count_dependent)
+                .is_none()
+        );
+        assert!(without_declined_search_object_dependencies(
+            &GameState::new_two_player(42),
+            &count_dependent
+        )
+        .is_none());
+        if let Effect::SearchLibrary { count, .. } = &mut count_dependent.effect {
+            *count = QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(ThisWayCause::Destroyed),
+                },
+            };
+        }
+        assert!(
+            !prepare_declined_search_node(&GameState::new_two_player(42), &count_dependent)
+                .is_none(),
+            "explicit earlier action remains its own quantity authority"
+        );
+        let mut secondary = declined_search_test_ability(
+            serde_json::from_value(
+                serde_json::json!({"type":"Token", "name":"Counter-input token"}),
+            )
+            .unwrap(),
+        );
+        if let Effect::Token {
+            enter_with_counters,
+            ..
+        } = &mut secondary.effect
+        {
+            enter_with_counters.push((
+                CounterType::Plus1Plus1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+            ));
+        }
+        assert!(
+            prepare_declined_search_node(&GameState::new_two_player(42), &secondary).is_none(),
+            "secondary quantity input is checked before a token becomes fresh"
+        );
+        assert!(without_declined_search_object_dependencies(
+            &GameState::new_two_player(42),
+            &secondary
+        )
+        .is_none());
+        let mut named_prior = dependent.clone();
+        named_prior.reads_chosen_group = Some(crate::types::ability::ChosenGroupId(7));
+        root.sub_ability = Some(Box::new(named_prior));
+        assert!(
+            matches!(
+                optional_decline_branch(&GameState::new_two_player(42), &root),
+                Some(Cow::Borrowed(_))
+            ),
+            "an explicitly named earlier group keeps its own result authority"
+        );
+        let mut mode = dependent.clone();
+        mode.modal_instruction_ordinal = Some(1);
+        assert!(
+            without_declined_search_object_dependencies(&GameState::new_two_player(42), &mode)
+                .is_some()
+        );
+        mode.sub_link = SubAbilityLink::ContinuationStep;
+        let crossing = dependent.clone().sub_ability(mode);
+        let preserved_mode =
+            without_declined_search_object_dependencies(&GameState::new_two_player(42), &crossing)
+                .unwrap();
+        assert_eq!(
+            preserved_mode.modal_instruction_ordinal,
+            Some(1),
+            "mode reset is independent of the preceding instruction's link kind"
+        );
+        let mut forward = declined_search_test_ability(serde_json::from_value(serde_json::json!({"type":"ChangeZone", "destination":"Hand", "target":{"type":"SpecificObject","id":7}})).unwrap());
+        forward.forward_result = true;
+        forward.sub_ability = Some(Box::new(dependent.clone()));
+        assert!(without_declined_search_object_dependencies(
+            &GameState::new_two_player(42),
+            &forward
+        )
+        .unwrap()
+        .sub_ability
+        .is_some());
+        let generic = declined_search_test_ability(Effect::GenericEffect {
+            target: None,
+            duration: None,
+            end_cost: None,
+            static_abilities: vec![
+                StaticDefinition::continuous().affected(TargetFilter::SelfRef),
+                StaticDefinition::continuous().affected(TargetFilter::ParentTarget),
+            ],
+        });
+        let reduced =
+            without_declined_search_object_dependencies(&GameState::new_two_player(42), &generic)
+                .unwrap();
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = reduced.effect
+        else {
+            panic!("grant remains");
+        };
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+        let mut both_dependent = generic.clone();
+        if let Effect::GenericEffect { target, .. } = &mut both_dependent.effect {
+            *target = Some(TargetFilter::ParentTarget);
+        }
+        assert!(without_declined_search_object_dependencies(
+            &GameState::new_two_player(42),
+            &both_dependent
+        )
+        .is_none());
+        root.else_ability = Some(Box::new(dependent));
+        assert!(
+            matches!(
+                optional_decline_branch(&GameState::new_two_player(42), &root),
+                Some(Cow::Borrowed(_))
+            ),
+            "explicit decline branch retains its original authority"
+        );
+    }
+
+    /// Structural mirror control: the actual ordering reader consumes the same
+    /// reduced selector result, including its independent top placement and reset.
+    #[test]
+    fn declined_search_ordering_mirror_uses_the_shared_reduced_branch() {
+        let state = GameState::new_two_player(42);
+        let mut outer = declined_search_test_search();
+        outer.optional = false;
+        let mut optional = declined_search_test_search();
+        let mut dependent = declined_search_test_placement(TargetFilter::ParentTarget);
+        dependent.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 1 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+        let independent = declined_search_test_placement(TargetFilter::Any);
+        dependent.sub_ability = Some(Box::new(independent));
+        optional.sub_ability = Some(Box::new(dependent));
+        outer.sub_ability = Some(Box::new(optional.clone()));
+        let reduced = optional_decline_branch(&GameState::new_two_player(42), &optional).unwrap();
+        assert!(matches!(
+            reduced.effect,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+        assert_eq!(search_library::search_ordering_hint(&state, &outer, 1), crate::types::ability::SearchOrderingHint::Unordered, "the nested accepted search resets the outer result even though its decline retains independent work");
+        let mut selected_branch = outer.clone();
+        selected_branch.sub_ability = Some(Box::new(reduced.into_owned()));
+        assert_eq!(
+            search_library::search_ordering_hint(&state, &selected_branch, 1),
+            crate::types::ability::SearchOrderingHint::OrderedToLibraryTop,
+            "the actual reduced branch retains its independent top placement"
+        );
+        let mut later = declined_search_test_search();
+        later.optional = false;
+        optional.sub_ability = Some(Box::new(later));
+        outer.sub_ability = Some(Box::new(optional));
+        assert_eq!(
+            search_library::search_ordering_hint(&state, &outer, 1),
+            crate::types::ability::SearchOrderingHint::Unordered
+        );
+    }
+
+    /// Structural/public-choice supplement — CR 608.2c + CR 609.3: an older
+    /// actual reveal and inherited object do not rescue a declined search's
+    /// object instruction, while its independently bound player still gains life.
+    #[test]
+    fn declined_search_public_choice_keeps_player_work_despite_stale_reveal() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Search source".into(),
+            Zone::Battlefield,
+        );
+        let old = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Prior revealed card".into(),
+            Zone::Library,
+        );
+        let prior = ResolvedAbility::new(
+            Effect::Reveal {
+                target: TargetFilter::SpecificObject { id: old },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &prior, &mut Vec::new(), 1).unwrap();
+        assert_eq!(state.last_revealed_ids, vec![old]);
+        let mut root = declined_search_test_search();
+        root.source_id = source;
+        root.targets = vec![TargetRef::Object(old)];
+        let mut destination = declined_search_test_placement(TargetFilter::LastRevealed);
+        destination.source_id = source;
+        let mut player = declined_search_test_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::ParentTarget,
+        });
+        player.source_id = source;
+        player.targets = vec![TargetRef::Player(PlayerId(1))];
+        destination.sub_ability = Some(Box::new(player));
+        root.sub_ability = Some(Box::new(destination));
+        resolve_ability_chain(&mut state, &root, &mut Vec::new(), 1).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        let events = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap()
+        .events;
+        assert_eq!(state.players[1].life, 23);
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&old].zone, Zone::Library);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::GainLife,
+                ..
+            }
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { .. } | GameEvent::CardsRevealed { .. }
+        )));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+        assert!(
+            state.active_library_searches.is_empty()
+                && state.active_search_decision_controls.is_empty()
+        );
+        assert!(state.pending_search_found_batch.is_none());
     }
 
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
