@@ -3995,3 +3995,42 @@ fn locket_name_population() {
     insta::assert_json_snapshot!("locket_name_population_ir", &ir);
     insta::assert_json_snapshot!("locket_name_population_lowered", &lowered);
 }
+
+#[test]
+fn craterous_prior_controller_source_and_lowered() {
+    // SHAPE: snapshot bytes are materialized only at the combined boundary.
+    let text = "Craterous Stomp deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+    let (ir, lowered) =
+        parse_two_layer(text, "Craterous Stomp", &["Kindred", "Instant"], &["Giant"]);
+    assert_eq!(ir.source_text, text);
+    assert_eq!(ir.items.len(), 1);
+    let OracleNodeIr::Spell(spell) = &ir.items[0].node else {
+        panic!("outer instruction")
+    };
+    assert_eq!(spell.body.clauses.len(), 2);
+    let population = &spell.body.clauses[1];
+    assert_eq!(
+        population.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    assert!(population
+        .source
+        .fragment()
+        .unwrap()
+        .contains("Each other creature"));
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(lowered.parse_warnings.is_empty());
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    let decoded: crate::parser::oracle::ParsedAbilities =
+        serde_json::from_value(serde_json::to_value(&lowered).unwrap()).unwrap();
+    assert_eq!(
+        decoded.abilities[0]
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    insta::assert_json_snapshot!("craterous_prior_controller_ir", &ir);
+    insta::assert_json_snapshot!("craterous_prior_controller_lowered", &lowered);
+}

@@ -34981,3 +34981,95 @@ fn locket_complete_name_population_shape() {
         );
     }
 }
+
+#[test]
+fn craterous_full_document_shape() {
+    // SHAPE: the public cast/combat discriminators live in jev_prior_controller.
+    let text = "Craterous Stomp deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+    let parsed = parse_oracle_text(
+        text,
+        "Craterous Stomp",
+        &[],
+        &["Kindred".into(), "Instant".into()],
+        &["Giant".into()],
+    );
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert!(
+        parsed.statics.is_empty(),
+        "the outer sentence is an instruction"
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let root = &parsed.abilities[0];
+    assert!(!has_unimplemented(root), "{root:#?}");
+    assert!(matches!(root.effect.as_ref(), Effect::DealDamage {
+        amount: QuantityExpr::Fixed { value: 3 }, target: TargetFilter::Typed(typed), ..
+    } if typed.controller == Some(ControllerRef::Opponent)
+        && typed.type_filters == vec![TypeFilter::Creature]));
+    let population = root
+        .sub_ability
+        .as_deref()
+        .expect("second printed instruction");
+    assert_eq!(
+        population.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    let Effect::GenericEffect {
+        target: None,
+        duration: Some(crate::types::ability::Duration::Permanent),
+        static_abilities,
+        ..
+    } = population.effect.as_ref()
+    else {
+        panic!("{population:#?}")
+    };
+    assert_eq!(static_abilities.len(), 1);
+    let Some(TargetFilter::Typed(filter)) = &static_abilities[0].affected else {
+        panic!("typed population")
+    };
+    assert_eq!(
+        filter.controller,
+        Some(ControllerRef::ParentTargetController)
+    );
+    assert!(filter.properties.iter().any(|p| matches!(p, FilterProp::DistinctFrom { reference } if matches!(reference.as_ref(), TargetFilter::ParentTarget))));
+    assert!(static_abilities[0].modifications.iter().any(|m| matches!(m, crate::types::ability::ContinuousModification::AddSubtype { subtype } if subtype == "Coward")));
+    assert!(
+        static_abilities[0].modifications.len() >= 2,
+        "the quoted rule must survive alongside Coward"
+    );
+    assert!(population.sub_ability.is_none());
+}
+
+#[test]
+fn prior_controller_malformed_quote_public_document_remains_unsupported() {
+    for body in [
+        "This creature can't block Giants or Warriors blorple.",
+        "This creature can't block Giants or Warriors blorple unless you control a Wall.",
+    ] {
+        let text = format!("Synthetic deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains \"{body}\"");
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".into()], &[]);
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "outer damage must remain reachable"
+        );
+        assert!(matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::DealDamage { .. }
+        ));
+        let face = crate::types::card::CardFace {
+            abilities: parsed.abilities,
+            static_abilities: parsed.statics,
+            ..Default::default()
+        };
+        assert!(
+            crate::game::coverage::card_face_has_unimplemented_parts(&face),
+            "{face:#?}"
+        );
+        let encoded = serde_json::to_string(&face).unwrap();
+        // allow-noncombinator: test assertion on retained diagnostic text, not dispatch.
+        assert!(
+            encoded.contains("Giants or Warriors blorple"),
+            "retain the failed quoted body"
+        );
+    }
+}

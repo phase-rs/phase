@@ -28147,6 +28147,8 @@ pub enum TargetReadOrigin {
     /// instruction announced (Conformer Shuriken: "tap target creature defending
     /// player controls. If that creature has greater power than this creature,
     /// put … equal to the difference"). This instruction announces no target.
+    /// Controller/exclusion filters share that same selected occurrence and
+    /// its pin ("each other creature that player controls").
     ParentAnnouncement,
 }
 

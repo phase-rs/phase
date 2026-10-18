@@ -2551,9 +2551,9 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "~ can't block" ---
-    if nom_primitives::scan_contains(tp.lower, "can't block")
-        && !nom_primitives::scan_contains(tp.lower, "can't be blocked")
-    {
+    if let Some((_, _, tail)) = nom_primitives::scan_preceded(tp.lower, |input| {
+        tag::<_, _, OracleError<'_>>("can't block").parse(input)
+    }) {
         // CR 509.1b: the symmetric conjunction "<subject> can't block or be
         // blocked by <object>" is TWO opposite-direction restrictions sharing one
         // printed object; a single `StaticDefinition` cannot carry both. It is
@@ -2577,6 +2577,28 @@ pub(crate) fn parse_static_line_inner(
         {
             return None;
         }
+        // CR 509.1b: the filtered owner above consumes object restrictions.
+        // A residual object or unknown word must never become blanket CantBlock.
+        let bare = all_consuming((
+            multispace0,
+            opt(tag::<_, _, OracleError<'_>>(".")),
+            multispace0,
+        ))
+        .parse(tail)
+        .is_ok();
+        let attached_gate = preceded(
+            nom::character::complete::space1,
+            alt((
+                tag::<_, _, OracleError<'_>>("unless "),
+                tag("as long as "),
+                tag("if "),
+            )),
+        )
+        .parse(tail)
+        .is_ok();
+        if !bare && !attached_gate {
+            return None;
+        }
         let mut def = StaticDefinition::new(StaticMode::CantBlock)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
@@ -2589,7 +2611,8 @@ pub(crate) fn parse_static_line_inner(
         // unenforceable one is deferred to the inert gap marker
         // (`static_helpers::unenforceable_gate_marker`), so the restriction is
         // never switched on by a gate the engine cannot evaluate.
-        if let Some(condition) = parse_trailing_gate_condition(&tp, def.affected.as_ref()) {
+        if attached_gate {
+            let condition = parse_trailing_gate_condition(&tp, def.affected.as_ref())?;
             attach_gated_condition(&mut def, condition, tp.original);
         }
         return Some(def);

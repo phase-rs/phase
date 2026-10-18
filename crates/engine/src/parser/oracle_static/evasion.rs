@@ -2706,6 +2706,15 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         return Some(def);
     }
     let tp = TextPair::new(text, &lower);
+    // CR 509.1b: a condition must immediately follow this predicate/object.
+    // Scanning past an unknown object tail would discard a printed restriction.
+    if matches!(predicate, RuleStaticPredicate::CantBlock)
+        && tag::<_, _, OracleError<'_>>("unless ")
+            .parse(trailing)
+            .is_err()
+    {
+        return None;
+    }
     if let Some(unless_cond) =
         super::shared::parse_unless_static_condition(&tp, def.affected.as_ref())
     {

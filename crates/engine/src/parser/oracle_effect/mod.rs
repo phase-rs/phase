@@ -45843,6 +45843,30 @@ fn parse_effect_chain_ir_body(
             continue;
         }
 
+        // CR 608.2c + CR 115.10a: this population reads one preceding
+        // creature announcement; neither its controller nor its exclusion is
+        // a fresh target. An unproved relation retains the complete fragment.
+        let prior_controller_population = matches!(&clause.effect,
+        Effect::GenericEffect { target: None, static_abilities, .. }
+            if static_abilities.iter().any(|definition| matches!(
+                definition.affected.as_ref(), Some(TargetFilter::Typed(typed))
+                    if typed.controller == Some(ControllerRef::ParentTargetController)
+                        && typed.properties.iter().any(|property| matches!(property,
+                            FilterProp::DistinctFrom { reference }
+                                if matches!(reference.as_ref(), TargetFilter::ParentTarget)))
+            )));
+        if prior_controller_population
+            && token_pt_antecedent_origin(builder.clauses())
+                != Some(TargetReadOrigin::ParentAnnouncement)
+        {
+            unimplemented_clause(
+                &mut builder,
+                "prior_controller_population_antecedent",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let clause_declared_group = chunk_ctx.clause_declared_group.take();
         if let Some(group) = clause_declared_group {
             declarations.push((builder.clauses().len(), group));
@@ -45877,6 +45901,12 @@ fn parse_effect_chain_ir_body(
             .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
             .declared_player_group(clause_declared_group)
             .push();
+
+        if prior_controller_population {
+            if let Some(reader) = builder.last_mut() {
+                reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+            }
+        }
 
         if let Some((power, toughness, origin)) = token_definition {
             if let Some(creator) = builder.last_mut() {

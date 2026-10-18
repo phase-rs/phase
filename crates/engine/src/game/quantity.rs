@@ -8226,9 +8226,10 @@ where
     })
 }
 
-/// Select the stored occurrence, preserving damage-source binding precedence.
+/// Select one stored object occurrence for characteristic/controller/exclusion
+/// reads, preserving damage-source binding precedence and positional pins.
 /// This does not revalidate a target after another instruction moved it.
-pub(crate) fn selected_target_pt_object_occurrence(
+pub(crate) fn selected_target_object_occurrence(
     ability: &ResolvedAbility,
 ) -> Option<(usize, ObjectId)> {
     match ability.context.target_damage_source {
@@ -8337,7 +8338,7 @@ where
                 // live in its expected zone or from its departure information.
                 ability
                     .and_then(|a| {
-                        selected_target_pt_object_occurrence(a).and_then(|(index, id)| {
+                        selected_target_object_occurrence(a).and_then(|(index, id)| {
                             read_object_pt_by_id_for_incarnation(
                                 state,
                                 id,
@@ -24901,10 +24902,7 @@ mod token_target_occurrence_tests {
                 incarnation: old.incarnation + 1,
             }),
         ];
-        assert_eq!(
-            selected_target_pt_object_occurrence(&ability),
-            Some((1, id))
-        );
+        assert_eq!(selected_target_object_occurrence(&ability), Some((1, id)));
         let read = |state: &GameState, ability: &ResolvedAbility| {
             (
                 resolve_quantity_with_targets(
@@ -24970,7 +24968,7 @@ mod token_target_occurrence_tests {
         assert_eq!(read(&state, &ability), (17, 19), "legacy id-cache fallback");
         ability.targets.clear();
         ability.target_pins.clear();
-        assert_eq!(selected_target_pt_object_occurrence(&ability), None);
+        assert_eq!(selected_target_object_occurrence(&ability), None);
         assert_eq!(read(&state, &ability), (0, 0));
     }
 
@@ -25002,25 +25000,25 @@ mod token_target_occurrence_tests {
             )
         };
         assert_eq!(
-            selected_target_pt_object_occurrence(&ability),
+            selected_target_object_occurrence(&ability),
             Some((1, selected))
         );
         assert_eq!(power(&ability), 7);
         ability.context.target_damage_source = Some(TargetDamageSourceBinding::Bound);
         assert_eq!(
-            selected_target_pt_object_occurrence(&ability),
+            selected_target_object_occurrence(&ability),
             None,
             "Bound only reads position zero"
         );
         assert_eq!(power(&ability), 0);
         ability.targets[0] = TargetRef::Object(bound);
         assert_eq!(
-            selected_target_pt_object_occurrence(&ability),
+            selected_target_object_occurrence(&ability),
             Some((0, bound))
         );
         assert_eq!(power(&ability), 17);
         ability.context.target_damage_source = Some(TargetDamageSourceBinding::Illegal);
-        assert_eq!(selected_target_pt_object_occurrence(&ability), None);
+        assert_eq!(selected_target_object_occurrence(&ability), None);
         assert_eq!(power(&ability), 0);
     }
 }

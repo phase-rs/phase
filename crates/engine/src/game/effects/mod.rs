@@ -1,6 +1,65 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod prior_controller_chain_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::TargetReadOrigin;
+    use crate::types::identifiers::ObjectIncarnationRef;
+
+    #[test]
+    fn prior_controller_child_keeps_original_occurrence_after_move() {
+        let mut scenario = GameScenario::new();
+        let b = scenario.add_creature(P1, "B", 2, 8).id();
+        let mut state = scenario.build().state().clone();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let population = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::ParentTargetController)
+                .properties(vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }]),
+        );
+        let mut child = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(population.clone())
+                    .modifications(vec![ContinuousModification::AddSubtype {
+                        subtype: "Coward".into(),
+                    }])],
+                duration: Some(Duration::Permanent),
+                target: None,
+                end_cost: None,
+            },
+            vec![TargetRef::Object(b)],
+            ObjectId(999),
+            P0,
+        );
+        child.target_reads = TargetReadOrigin::ParentAnnouncement;
+        child.target_pins = vec![Some(pin)];
+        crate::game::zones::move_to_zone(&mut state, b, Zone::Exile, &mut Vec::new());
+        assert_eq!(
+            resolved_object_filter(&state, &child, &population),
+            population,
+            "normalization cannot replace the exclusion with a raw current ID"
+        );
+        assert_eq!(
+            crate::game::ability_utils::parent_target_controller(&child, &state),
+            Some(P1)
+        );
+        let parent = child.clone();
+        let mut empty = child.clone();
+        empty.replace_target_occurrences(vec![]);
+        assert_eq!(
+            inherited_parent_occurrences(&parent, &empty),
+            vec![(TargetRef::Object(b), Some(pin))]
+        );
+        empty.illegal_local_target_slots = vec![0];
+        assert!(inherited_parent_occurrences(&parent, &empty).is_empty());
+    }
+}
+
 use crate::game::conditions::{
     eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
     eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
@@ -12266,6 +12325,12 @@ pub(crate) fn resolved_object_filter(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> TargetFilter {
+    // CR 608.2h + CR 400.7: marked controller/exclusion readers need the
+    // original positional pin, including departed-object LKI. Concretizing
+    // to a bare SpecificObject here would erase that authority.
+    if ability.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement {
+        return target_filter.clone();
+    }
     filter::normalize_contextual_filter_with_liveness(target_filter, &ability.targets, &|id| {
         ability.target_pin_is_current(id, state)
     })
@@ -17912,7 +17977,9 @@ fn resolve_chain_body(
                 .as_deref()
                 .is_some_and(|sub| {
                     effect_refs_parent_target_metadata(&sub.effect)
-                        && !effect_requires_parent_target_object(&sub.effect)
+                        && (sub.target_reads
+                            == crate::types::ability::TargetReadOrigin::ParentAnnouncement
+                            || !effect_requires_parent_target_object(&sub.effect))
                 })
                 .then(|| library_move_metadata_context_from_events(state, effect_events))
                 .flatten()
@@ -19214,7 +19281,16 @@ fn resolve_chain_body(
         // `enter_attached_to` on the zone move. If that move Remained, there is
         // no ZoneChanged event — running Attach would stamp `attached_to` onto
         // an Aura that never left its origin zone.
-        if ability.forward_result
+        if sub.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement
+            && matches!(&sub.effect, Effect::GenericEffect { target: None, .. })
+        {
+            // CR 608.2c + CR 608.2h: this instruction reads the original
+            // announcement, not a moved result/new incarnation. Initial target
+            // validation already removed illegal occurrences from the child.
+            let mut child = sub.as_ref().clone();
+            apply_parent_chain_context(&mut child, ability, effect_context_object.as_ref(), state);
+            resolve_ability_chain(state, &child, events, depth + 1)?;
+        } else if ability.forward_result
             && forwarded_objects.is_empty()
             && matches!(
                 ability.effect,

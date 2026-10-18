@@ -39947,3 +39947,80 @@ fn locket_static_complete_population_and_honest_suffix() {
         );
     }
 }
+
+#[test]
+fn craterous_quoted_blocker_union() {
+    // SHAPE: CR 509.1b places the restriction on the blocker.
+    let valid = "This creature can't block Giants or Warriors.";
+    let definition = parse_static_line(valid).expect("complete filtered rule");
+    assert!(
+        matches!(&definition.mode, StaticMode::BlockRestriction { filter: TargetFilter::Not { filter } } if matches!(filter.as_ref(), TargetFilter::Or { filters } if filters.len() == 2)),
+        "{definition:#?}"
+    );
+    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+    let StaticMode::BlockRestriction {
+        filter: TargetFilter::Not { filter },
+    } = &definition.mode
+    else {
+        unreachable!()
+    };
+    let TargetFilter::Or { filters } = filter.as_ref() else {
+        unreachable!()
+    };
+    for subtype in ["Giant", "Warrior"] {
+        assert!(filters.iter().any(|filter| matches!(filter, TargetFilter::Typed(typed) if typed.type_filters.iter().any(|kind| matches!(kind, TypeFilter::Subtype(name) if name == subtype)))));
+    }
+    let modifications = parse_continuous_modifications(&format!("gains \"{valid}\""));
+    assert!(
+        modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::BlockRestriction { .. }
+            } | ContinuousModification::GrantStaticAbility { .. }
+        )),
+        "{modifications:#?}"
+    );
+    assert!(matches!(
+        parse_static_line("This creature can't block.")
+            .unwrap()
+            .mode,
+        StaticMode::CantBlock
+    ));
+    let gornog = parse_static_line("Cowards can't block Warriors.").unwrap();
+    assert!(matches!(gornog.affected, Some(TargetFilter::Typed(_))));
+    assert!(matches!(gornog.mode, StaticMode::BlockRestriction { .. }));
+    for text in [
+        "~ can't block if you control an untapped land.",
+        "~ can't block as long as you control a Wall.",
+        "This creature can't block unless you control a Wall.",
+        "This creature can't block Giants or Warriors unless you control a Wall.",
+    ] {
+        let conditional = parse_static_line(text).expect(text);
+        assert!(conditional.condition.is_some(), "{text}: {conditional:#?}");
+    }
+}
+
+#[test]
+fn prior_controller_quoted_blocker_malformed_tail_refuses() {
+    for invalid in [
+        "This creature can't block Giants or Warriors blorple.",
+        "This creature can't block Giants or Warriors blorple unless you control a Wall.",
+    ] {
+        assert!(parse_static_line(invalid).is_none(), "{invalid}");
+        assert!(parse_static_line_multi(invalid).is_empty(), "{invalid}");
+        let quoted = parse_continuous_modifications(&format!("gains \"{invalid}\""));
+        assert!(
+            !quoted.is_empty(),
+            "failed grant must retain an unsupported payload"
+        );
+        assert!(
+            !quoted.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBlock | StaticMode::BlockRestriction { .. }
+                }
+            )),
+            "invalid rule must not become supported: {quoted:#?}"
+        );
+    }
+}

@@ -1594,16 +1594,20 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // correct `affected` filter inherited from the subject.
                         let have_base_pt_continuation =
                             starts_have_base_power_toughness(remainder_trimmed);
-                        let continuous_modifier_conjunct =
-                            starts_you_control_subject_predicate(&before_lower)
-                                && alt((
-                                    tag::<_, _, OracleError<'_>>("gain "),
-                                    tag("gains "),
-                                    tag("have "),
-                                    tag("has "),
-                                ))
-                                .parse(remainder_trimmed)
-                                .is_ok();
+                        let continuous_modifier_conjunct = (starts_you_control_subject_predicate(&before_lower)
+                                // CR 611.2c: become plus grant is one frozen
+                                // continuous population, with one duration.
+                                || nom_primitives::scan_at_word_boundaries(
+                                    &before_lower, parse_become_verb,
+                                ).is_some())
+                            && alt((
+                                tag::<_, _, OracleError<'_>>("gain "),
+                                tag("gains "),
+                                tag("have "),
+                                tag("has "),
+                            ))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                         // CR 706.2: "roll a d{N} and (add|subtract) {quantity}" —
                         // the modifier clause is part of the same RollDie effect
                         // (it shifts the natural result) and must NOT be peeled
@@ -16586,6 +16590,18 @@ mod leading_duration_guard_tests_7923 {
             "a serial-list subject is one clause"
         );
     }
+    #[test]
+    fn craterous_prior_controller_continuous_conjunct_stays_whole() {
+        let text = "Deal 3 damage to target creature. Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+        let clauses = split_clause_sequence(text);
+        assert_eq!(
+            clauses.len(),
+            2,
+            "quoted OR and grant share the become subject"
+        );
+        assert_eq!(clauses[1].text, "Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"");
+    }
+
     #[test]
     fn token_definition_sentence_and_later_cleanup_keep_distinct_sequence_roles() {
         let clauses=split_clause_sequence("Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.");

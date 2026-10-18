@@ -3121,7 +3121,7 @@ pub(crate) fn resolve_token_spec(
         && ability.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement
         && [power, toughness].iter().any(|value| matches!(value,
             PtValue::Quantity(expr) if crate::game::quantity::quantity_expr_contains_scope(expr, crate::types::ability::ObjectScope::Target)))
-        && crate::game::quantity::selected_target_pt_object_occurrence(ability).is_none()
+        && crate::game::quantity::selected_target_object_occurrence(ability).is_none()
     {
         return None;
     }

@@ -7,8 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Effect handler: creates transient continuous effects from a GenericEffect.
 ///
@@ -245,8 +246,8 @@ fn evaluate_static_condition_for_ability(
 /// CR 116.2c: single install point for this module. Threads the (optional)
 /// pay-to-end permission into the state-level construction authority so the
 /// field rides INSIDE the journaled `ResolvedContinuousEffectCommand` rather
-/// than being post-stamped after the fact (which is what `duration_subject`
-/// does, and which a journal replay would lose).
+/// than being post-stamped after the fact. Duration subjects and recipient
+/// identities likewise ride inside the recorded construction command.
 ///
 /// Every `register_transient_effect` branch installs through here, so a branch
 /// that forgets the permission is impossible to write: the parameter is
@@ -262,6 +263,16 @@ fn install_transient(
     condition: Option<StaticCondition>,
 ) -> Option<u64> {
     let mut modifications = modifications;
+    // CR 611.2c + CR 400.7: freeze a current battlefield recipient's birth.
+    // Stack/off-zone grants stay unpinned for the existing CR 400.7a/g carry.
+    let affected_recipient = match &affected {
+        TargetFilter::SpecificObject { id } => state
+            .objects
+            .get(id)
+            .filter(|object| object.zone == Zone::Battlefield)
+            .map(ObjectIncarnationRef::from_object),
+        _ => None,
+    };
     // CR 201.5a + CR 400.7 + CR 113.7: a grant names the object whose ability resolved, as
     // it was then; a resolving spell is still on the stack (CR 608.2n).
     if let Some(granter) = ability.source_ref(state) {
@@ -287,6 +298,7 @@ fn install_transient(
         // CR 201.5a: a granted ability's effect names the object that granted it.
         TransientContinuousEffectBindings {
             granting_object: ability.context.granting_object,
+            affected_recipient,
             ..TransientContinuousEffectBindings::default()
         },
     )
@@ -1473,6 +1485,412 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    fn prior_controller_install_commands(
+        state: &GameState,
+    ) -> Vec<crate::types::resolved_commands::ResolvedContinuousEffectCommand> {
+        use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+        state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.command.as_ref() {
+                Some(ResolvedRulesCommand::ContinuousEffect(edit)) => match edit.as_ref() {
+                    ResolvedContinuousEffectEdit::Install(command) => Some(command.clone()),
+                    ResolvedContinuousEffectEdit::Retire(_) => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prior_controller_installer_pins_only_current_battlefield_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.context.granting_object =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&source]));
+        let permission = EndEffectPermission {
+            group: state.next_end_effect_group(),
+            cost: crate::types::mana::ManaCost::generic(2),
+        };
+        for zone in [Zone::Battlefield, Zone::Stack, Zone::Hand, Zone::Exile] {
+            let recipient =
+                create_object(&mut state, CardId(2), PlayerId(1), "Recipient".into(), zone);
+            let expected = (zone == Zone::Battlefield)
+                .then(|| ObjectIncarnationRef::from_object(&state.objects[&recipient]));
+            let before = state.clone();
+            let installed = install_transient(
+                &mut state,
+                Some(&permission),
+                &ability,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: recipient },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+                None,
+            );
+            assert!(installed.is_some());
+            let command = prior_controller_install_commands(&state).pop().unwrap();
+            assert_eq!(command.effect.affected_recipient, expected);
+            assert_eq!(
+                command.effect.granting_object,
+                ability.context.granting_object
+            );
+            assert_eq!(command.effect.end_permission, Some(permission.clone()));
+            assert_eq!(command.effect.duration, Duration::Permanent);
+            assert_eq!(command.effect.duration_subject, None);
+            assert_eq!(
+                state.transient_continuous_effects.last(),
+                Some(&command.effect)
+            );
+            let mut replay = before;
+            replay.apply_resolved_continuous_effect(&command).unwrap();
+            assert_eq!(
+                replay.transient_continuous_effects.last(),
+                Some(&command.effect)
+            );
+        }
+        for affected in [
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            TargetFilter::Typed(TypedFilter::creature()),
+        ] {
+            let count = state.transient_continuous_effects.len();
+            assert!(install_transient(
+                &mut state,
+                None,
+                &ability,
+                Duration::UntilEndOfTurn,
+                affected,
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }],
+                None
+            )
+            .is_some());
+            assert_eq!(state.transient_continuous_effects.len(), count + 1);
+            assert!(state
+                .transient_continuous_effects
+                .last()
+                .unwrap()
+                .affected_recipient
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn prior_controller_installer_replay_preserves_recipient_policy_and_bindings() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Recipient".into(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let before = state.clone();
+        install_transient(
+            &mut state,
+            None,
+            &ability,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: recipient },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            None,
+        )
+        .unwrap();
+        let command = prior_controller_install_commands(&state).pop().unwrap();
+        let mut replay = before;
+        replay.apply_resolved_continuous_effect(&command).unwrap();
+        for candidate in [&mut state, &mut replay] {
+            assert!(crate::game::layers::transient_effect_is_live(
+                candidate,
+                &candidate.transient_continuous_effects[0]
+            ));
+            candidate
+                .objects
+                .get_mut(&recipient)
+                .unwrap()
+                .bump_incarnation();
+            assert!(
+                !crate::game::layers::transient_effect_is_live(
+                    candidate,
+                    &candidate.transient_continuous_effects[0]
+                ),
+                "same storage ID is a different birth"
+            );
+        }
+        assert_eq!(
+            state.transient_continuous_effects,
+            replay.transient_continuous_effects
+        );
+    }
+
+    #[test]
+    fn prior_controller_installer_preserves_stack_and_cost_paid_carry_policy() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::resolved_commands::ResolvedRulesCommand;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Granting source".into(),
+            Zone::Battlefield,
+        );
+        let paid = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Cost-paid card".into(),
+            Zone::Exile,
+        );
+        let snapshot = CostPaidObjectSnapshot::capture(
+            &state.objects[&paid],
+            state.objects[&paid].snapshot_public_characteristics(),
+        );
+        let definition = StaticDefinition::continuous()
+            .affected(TargetFilter::CostPaidObject)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Suspend {
+                    count: 1,
+                    cost: crate::types::mana::ManaCost::generic(1),
+                },
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![definition.clone()],
+                duration: Some(Duration::Permanent),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+        let before = state.clone();
+        register_transient_effect(
+            &mut state,
+            &ability,
+            &definition,
+            None,
+            &Duration::Permanent,
+            None,
+        );
+        let command = prior_controller_install_commands(&state)
+            .pop()
+            .expect("cost-paid route installed");
+        assert_eq!(
+            command.effect.affected,
+            TargetFilter::SpecificObject { id: paid }
+        );
+        assert!(command.effect.affected_recipient.is_none());
+        let mut replay = before;
+        replay.apply_resolved_continuous_effect(&command).unwrap();
+        let mut unrelated = state.clone();
+        crate::game::zones::move_to_zone(&mut unrelated, paid, Zone::Hand, &mut Vec::new());
+        assert!(
+            unrelated.transient_continuous_effects.is_empty(),
+            "unrelated exit still prunes"
+        );
+        for to in [Zone::Stack, Zone::Battlefield] {
+            let old_birth = state.objects[&paid].incarnation;
+            let journal_start = state.resolved_rules_journal.entries().len();
+            crate::game::zones::move_to_zone(&mut state, paid, to, &mut Vec::new());
+            let moves: Vec<_> = state
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .skip(journal_start)
+                .filter_map(|entry| match entry.command.as_ref() {
+                    Some(ResolvedRulesCommand::ZoneChange(command)) => Some(command.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(moves.len(), 1);
+            crate::game::zones::apply_resolved_zone_change(&mut replay, &moves[0]).unwrap();
+            for candidate in [&state, &replay] {
+                assert_eq!(candidate.objects[&paid].zone, to);
+                assert_ne!(candidate.objects[&paid].incarnation, old_birth);
+                assert_eq!(candidate.transient_continuous_effects.len(), 1);
+                assert!(candidate.transient_continuous_effects[0]
+                    .affected_recipient
+                    .is_none());
+                assert!(crate::game::layers::transient_effect_is_live(
+                    candidate,
+                    &candidate.transient_continuous_effects[0]
+                ));
+            }
+        }
+        let count = state.transient_continuous_effects.len();
+        register_transient_effect(
+            &mut state,
+            &ability,
+            &definition,
+            None,
+            &Duration::Permanent,
+            None,
+        );
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            count,
+            "stale cost-paid guard remains authoritative"
+        );
+    }
+
+    #[test]
+    fn prior_controller_triggering_source_registration_classifies_actual_zone() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        for zone in [Zone::Stack, Zone::Battlefield] {
+            let recipient = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Triggered object".into(),
+                zone,
+            );
+            state.current_trigger_event = Some(GameEvent::SpellCast {
+                card_id: CardId(2),
+                controller: PlayerId(0),
+                object_id: recipient,
+                cast_mana_value: None,
+            });
+            let definition = StaticDefinition::continuous()
+                .affected(TargetFilter::TriggeringSource)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }]);
+            let ability = ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![definition.clone()],
+                    duration: Some(Duration::Permanent),
+                    target: None,
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            let count = state.transient_continuous_effects.len();
+            register_transient_effect(
+                &mut state,
+                &ability,
+                &definition,
+                None,
+                &Duration::Permanent,
+                None,
+            );
+            assert_eq!(state.transient_continuous_effects.len(), count + 1);
+            let installed = state.transient_continuous_effects.last().unwrap();
+            assert_eq!(
+                installed.affected,
+                TargetFilter::SpecificObject { id: recipient }
+            );
+            assert_eq!(
+                installed.affected_recipient,
+                (zone == Zone::Battlefield)
+                    .then(|| ObjectIncarnationRef::from_object(&state.objects[&recipient]))
+            );
+        }
+    }
+
+    #[test]
+    fn prior_controller_nested_population_broadcast_is_not_target_fanout() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{FilterProp, TargetReadOrigin};
+        let mut scenario = GameScenario::new();
+        let b = scenario.add_creature(P1, "B", 2, 8).id();
+        let a = scenario.add_creature(P1, "A", 2, 8).id();
+        let d = scenario.add_creature(P1, "D", 2, 8).id();
+        let source = scenario.add_creature(P0, "Source also creature", 2, 8).id();
+        let mut state = scenario.build().state().clone();
+        let population = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::ParentTargetController)
+                .properties(vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }]),
+        );
+        assert!(!generic_effect_affected_uses_inherited_targets(&population));
+        let definition = StaticDefinition::continuous()
+            .affected(population)
+            .modifications(vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Coward".into(),
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                },
+            ]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![definition],
+                duration: Some(Duration::Permanent),
+                target: None,
+                end_cost: None,
+            },
+            vec![TargetRef::Object(b)],
+            source,
+            P0,
+        );
+        ability.target_reads = TargetReadOrigin::ParentAnnouncement;
+        ability.target_pins = vec![Some(ObjectIncarnationRef::from_object(&state.objects[&b]))];
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        let affected: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .map(|effect| effect.affected.clone())
+            .collect();
+        assert_eq!(affected.len(), 2);
+        assert!(affected.contains(&TargetFilter::SpecificObject { id: a }));
+        assert!(affected.contains(&TargetFilter::SpecificObject { id: d }));
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| effect.affected_recipient.is_some()));
+    }
 
     #[test]
     fn generic_effect_registers_transient_effect_for_self_ref() {

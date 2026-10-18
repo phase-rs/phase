@@ -85932,3 +85932,73 @@ fn sought_failed_relation_retains_the_complete_reader_fragment() {
         "{invalid:#?}"
     );
 }
+
+#[test]
+fn prior_controller_grammar_boundaries() {
+    // SHAPE: public runtime coverage is jev_prior_controller.
+    let tail = "Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+    for head in [
+        "Exile target creature.",
+        "Destroy target creature. It can't be regenerated.",
+    ] {
+        let chain = parse_effect_chain(&format!("{head} {tail}"), AbilityKind::Spell);
+        let next = chain.sub_ability.as_deref().expect("population");
+        assert_eq!(next.target_reads, TargetReadOrigin::ParentAnnouncement);
+        assert!(
+            matches!(next.effect.as_ref(), Effect::GenericEffect { target: None, static_abilities, .. } if static_abilities[0].modifications.len() >= 2),
+            "{chain:#?}"
+        );
+    }
+    let alternate = parse_effect_chain("Tap target creature. All other Elf creatures that player controls become Cowards in addition to their other types and gain flying until end of turn.", AbilityKind::Spell);
+    assert_eq!(
+        alternate.sub_ability.as_ref().unwrap().target_reads,
+        TargetReadOrigin::ParentAnnouncement
+    );
+    assert_eq!(
+        alternate.sub_ability.as_ref().unwrap().duration,
+        Some(Duration::UntilEndOfTurn)
+    );
+    for head in [
+        "",
+        "Draw a card.",
+        "Destroy all creatures.",
+        "You may destroy target creature.",
+        "Destroy up to one target creature.",
+        "Destroy two target creatures.",
+        "If you control a Wall, destroy target creature.",
+    ] {
+        let chain = parse_effect_chain(&format!("{head} {tail}"), AbilityKind::Spell);
+        let face = CardFace {
+            abilities: vec![chain],
+            ..Default::default()
+        };
+        assert!(
+            card_face_has_unimplemented_parts(&face),
+            "unproved relation: {head}: {face:#?}"
+        );
+    }
+    let own = parse_effect_chain("Other creatures you control become Cowards in addition to their other types until end of turn.", AbilityKind::Spell);
+    assert_eq!(own.target_reads, TargetReadOrigin::OwnAnnouncement);
+    let player = parse_effect_chain(
+        "Target player draws a card. Each other creature that player controls becomes a Coward.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        player.sub_ability.as_ref().unwrap().target_reads,
+        TargetReadOrigin::OwnAnnouncement,
+        "a declared player retains its authority"
+    );
+}
+
+#[test]
+fn prior_controller_paragraph_modal_and_unknown_suffix_refuse() {
+    for text in [
+        "Exile target creature.\n\nEach other creature that player controls becomes a Coward.",
+        "Choose one —\n• Exile target creature.\n• Each other creature that player controls becomes a Coward.",
+        "Exile target creature. Each other creature that player controls blorple becomes a Coward.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic boundary", &[], &["Instant".into()], &[]);
+        let face = CardFace { abilities: parsed.abilities, triggers: parsed.triggers, static_abilities: parsed.statics, ..Default::default() };
+        assert!(card_face_has_unimplemented_parts(&face), "{text}: {face:#?}");
+    }
+}

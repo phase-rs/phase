@@ -2748,6 +2748,21 @@ fn parse_subject_application_for(
 
     let lower = subject.to_lowercase();
 
+    // CR 608.2c + CR 115.10a: preserve the entire selected-controller
+    // population. The generic universal-subject merger tolerates residual
+    // descriptors; this relation cannot discard one and still claim support.
+    if let Some((filter, rest)) =
+        super::super::oracle_target::parse_prior_controller_population(subject, ctx)
+    {
+        return rest.trim().is_empty().then(|| SubjectApplication {
+            affected: filter,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        });
+    }
+
     // NOTE (issue #6965): the literal `"you" + " and " + "permanents you
     // control"` arm that used to sit here is now handled by the general
     // `parse_conjoined_subject_application` union arm at the end of this
@@ -4391,6 +4406,8 @@ fn subject_filter_application(filter: TargetFilter, targeted: bool) -> Option<Su
 /// tapped object. Mirrors `build_pump_effect`, which honors `inherits_parent`
 /// the same way for the Pump family.
 pub(super) fn static_affected_for_application(application: &SubjectApplication) -> TargetFilter {
+    // A compound population may READ ParentTarget in its controller/exclusion
+    // without inheriting the parent as its recipient. Keep that filter intact.
     if application.target.is_some() || application.inherits_parent {
         TargetFilter::ParentTarget
     } else {

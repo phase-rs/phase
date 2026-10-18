@@ -1,5 +1,45 @@
 use std::str::FromStr;
 
+#[cfg(test)]
+mod prior_controller_population_tests {
+    use super::*;
+
+    #[test]
+    fn prior_controller_population_keeps_typed_relation_and_source_relative_sibling() {
+        for text in [
+            "each other creature that player controls",
+            "all other Elf creatures that player controls",
+            "other creatures that player controls",
+        ] {
+            let (TargetFilter::Typed(typed), rest) =
+                parse_type_phrase_folding_with_ctx(text, &mut ParseContext::default())
+            else {
+                panic!("typed population")
+            };
+            assert!(rest.is_empty(), "{text}: {rest}");
+            assert_eq!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            );
+            assert_eq!(
+                typed.properties,
+                vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget)
+                }]
+            );
+        }
+        let (TargetFilter::Typed(own), rest) = parse_type_phrase_folding_with_ctx(
+            "other creatures you control",
+            &mut ParseContext::default(),
+        ) else {
+            panic!("source sibling")
+        };
+        assert!(rest.is_empty());
+        assert_eq!(own.controller, Some(ControllerRef::You));
+        assert!(own.properties.contains(&FilterProp::Another));
+    }
+}
+
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, one_of, satisfy, space1};
@@ -2621,6 +2661,9 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
+    if let Some(population) = parse_prior_controller_population(text, ctx) {
+        return population;
+    }
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
@@ -6113,6 +6156,54 @@ pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetF
     }
 
     TargetFilter::Or { filters }
+}
+
+/// CR 608.2c + CR 115.10a: an untargeted population can name the controller
+/// of the preceding selected creature. Chain construction must prove that
+/// antecedent before accepting this provisional relation.
+pub(crate) fn parse_prior_controller_population<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    let antecedents = ctx.player_antecedents();
+    if antecedents.declared_that_player.is_some()
+        || antecedents
+            .third_person
+            .as_ref()
+            .is_some_and(|scope| !matches!(scope, ControllerRef::ParentTargetController))
+    {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let ((), original_rest) = nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            preceded(
+                multispace0,
+                preceded(
+                    opt(alt((tag::<_, _, OracleError<'_>>("each "), tag("all ")))),
+                    tag("other "),
+                ),
+            ),
+        )
+        .parse(input)
+    })?;
+    let mut scoped = ctx.clone_player_antecedents();
+    scoped.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    let (TargetFilter::Typed(mut typed), after) =
+        parse_type_phrase_folding_with_ctx(original_rest, &mut scoped)
+    else {
+        return None;
+    };
+    if typed.controller != Some(ControllerRef::ParentTargetController)
+        || typed.type_filters.is_empty()
+    {
+        return None;
+    }
+    typed.properties.push(FilterProp::DistinctFrom {
+        reference: Box::new(TargetFilter::ParentTarget),
+    });
+    Some((TargetFilter::Typed(typed), after))
 }
 
 fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {

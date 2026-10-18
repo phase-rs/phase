@@ -1994,6 +1994,7 @@ mod declared_player_object_controller;
 mod decline_branch_not_graveyard_rider;
 mod event_source_lift_referent_stops;
 mod exile_origin_target_acquisition;
+mod jev_prior_controller;
 mod jev_spell_scope;
 mod jev_token_followup;
 mod keyword_activation_cancel;

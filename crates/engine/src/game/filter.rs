@@ -5,6 +5,74 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod prior_controller_filter_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::{Effect, TargetReadOrigin};
+
+    #[test]
+    fn prior_controller_exclusion_uses_selected_birth_and_missing_anchor_fails_closed() {
+        let mut scenario = GameScenario::new();
+        let b = scenario.add_creature(P1, "Selected B", 2, 8).id();
+        let a = scenario.add_creature(P1, "Other A", 2, 8).id();
+        let c = scenario.add_creature(P0, "Caster C", 2, 8).id();
+        let mut state = scenario.build().state().clone();
+        let old = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let lki = state.objects[&b].snapshot_public_characteristics();
+        let mut reader = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(b), TargetRef::Object(c)],
+            ObjectId(999),
+            P0,
+        );
+        reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+        reader.target_pins = vec![
+            Some(old),
+            Some(ObjectIncarnationRef::from_object(&state.objects[&c])),
+        ];
+        let population = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::ParentTargetController)
+                .properties(vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }]),
+        );
+        let matches = |state: &GameState, reader: &ResolvedAbility, id| {
+            matches_target_filter(state, id, &population, &FilterContext::from_ability(reader))
+        };
+        assert!(matches(&state, &reader, a));
+        assert!(!matches(&state, &reader, b));
+        assert!(!matches(&state, &reader, c));
+        state
+            .lki_by_incarnation
+            .entry(b)
+            .or_default()
+            .insert(old.incarnation, lki);
+        state.objects.get_mut(&b).unwrap().incarnation += 1;
+        assert!(
+            matches(&state, &reader, b),
+            "returned same-id birth is other than old B"
+        );
+        state.objects.get_mut(&b).unwrap().controller = P0;
+        assert!(
+            matches(&state, &reader, a),
+            "old controller comes from pinned LKI"
+        );
+        assert!(!matches(&state, &reader, b));
+        state.lki_by_incarnation.remove(&b);
+        assert!(!matches(&state, &reader, a));
+        reader.target_pins[0] = None;
+        assert!(
+            !matches(&state, &reader, c),
+            "missing anchor cannot broaden into caster population"
+        );
+    }
+}
+
 use crate::game::combat;
 use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
@@ -1716,6 +1784,9 @@ fn parent_target_controller_player(
     ability: Option<&ResolvedAbility>,
 ) -> Option<PlayerId> {
     ability.and_then(|a| {
+        if a.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement {
+            return crate::game::ability_utils::parent_target_controller(a, state);
+        }
         crate::game::targeting::resolve_effect_player_ref(
             state,
             a,
@@ -9544,8 +9615,22 @@ fn matches_filter_prop(
         // reference resolution below). Used by Radiance's "each OTHER creature
         // that shares a color with it" — excludes the already-damaged target.
         FilterProp::DistinctFrom { reference } => {
-            // `matches_filter_prop` runs once per candidate object, so short-circuit
-            // via `.any()` rather than collecting the reference ids into a `Vec`.
+            // CR 608.2b + CR 608.2h + CR 400.7: a marked exclusion names
+            // the same selected incarnation as its controller. No anchor is
+            // no population; a returned incarnation is a different object.
+            if matches!(reference.as_ref(), TargetFilter::ParentTarget) {
+                if let Some(ability) = source.ability.filter(|ability| {
+                    ability.target_reads
+                        == crate::types::ability::TargetReadOrigin::ParentAnnouncement
+                }) {
+                    return crate::game::ability_utils::selected_parent_target_incarnation(ability)
+                        .is_some_and(|selected| {
+                            selected != ObjectIncarnationRef::from_object(obj)
+                        });
+                }
+            }
+            // Legacy matching short-circuits via `.any()` rather than collecting
+            // reference IDs for each candidate object.
             //
             // NOTE (fail-open asymmetry): the `ParentTarget` arm reads ONLY
             // `ability.targets` — it lacks the LKI / `recipient_id` /
