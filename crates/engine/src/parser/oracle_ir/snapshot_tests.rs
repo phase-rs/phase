@@ -313,12 +313,16 @@ fn jev_seek_public_ir_binding_and_coverage() {
         seek.where_x_expression.as_deref(),
         Some("the number of colors among permanents you control")
     );
-    seek.where_x_expression = Some("three".into());
+    seek.where_x_expression = Some("your life total".into());
     let rebound = lower_oracle_ir(&mut ir);
     assert!(matches!(
         rebound.abilities[0].effect.as_ref(),
         Effect::Seek {
-            count: QuantityExpr::Fixed { value: 3 },
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+            },
             ..
         }
     ));
