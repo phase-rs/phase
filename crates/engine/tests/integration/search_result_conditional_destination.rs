@@ -26,6 +26,7 @@ use engine::types::zones::Zone;
 
 // Complete Oracle text from MTGJSON AtomicCards.json; live parsing avoids stale fixtures.
 const NAZAHN: &str = "When Nazahn enters, search your library for an Equipment card and reveal it. If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.\nWhenever an equipped creature you control attacks, you may tap target creature defending player controls.";
+const SELFIE: &str = "Search your library for a basic land card and reveal it. If there's a tree in its art, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.";
 const PATHMAKER: &str = "Vigilance\nWhen this Vehicle enters, you may search your library for an artifact card and reveal it. Put it onto the battlefield if its mana value is 2 or less. Otherwise, put it into your hand. If you search your library this way, shuffle.\nCrew 2";
 const FARMER: &str = "When this creature enters, search your library for a basic Plains card and reveal it. If an opponent controls more lands than you, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.\nForetell {1}{W} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
 const RUIN: &str = "Devoid (This card has no color.)\nSearch your library for a basic land card and reveal it. You may put that card onto the battlefield tapped if you control a land named Wastes. Otherwise, put that card into your hand. Then shuffle.";
@@ -588,10 +589,17 @@ fn conditional_search_empty_pick_drains_without_borrowing_a_result() {
 }
 
 /// CR 608.2c + CR 701.23a: the found Equipment never denotes Nazahn itself.
-/// TR1 named-reveal destination remains unsupported; this asserts only source binding.
+/// TR1 keeps BOTH named destinations unsupported. The supported prefix reveals
+/// the selected card in its library and the independent shuffle still settles.
 #[test]
 fn nazahn_search_result_never_rebinds_to_the_entering_source() {
-    for name in ["Other Equipment", "Hammer of Nazahn"] {
+    for (name, select) in [
+        (Some("Other Equipment"), true),
+        (Some("Hammer of Nazahn"), true),
+        (Some("Other Equipment"), false),
+        (Some("Hammer of Nazahn"), false),
+        (None, false),
+    ] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let source = scenario
@@ -604,34 +612,74 @@ fn nazahn_search_result_never_rebinds_to_the_entering_source() {
             })
             .id();
         fund(&mut scenario, 4, &[ManaType::Green, ManaType::White]);
-        let found = scenario
-            .add_creature_to_hand(P0, name, 1, 1)
-            .as_artifact()
-            .with_subtypes(vec!["Equipment"])
-            .id();
+        let found = name.map(|name| {
+            scenario
+                .add_creature_to_hand(P0, name, 1, 1)
+                .as_artifact()
+                .with_subtypes(vec!["Equipment"])
+                .id()
+        });
         let cover = scenario
             .add_spell_to_library_top(P0, "Non-Equipment cover", false)
             .id();
         let mut runner = scenario.build();
-        assert!(!move_object_for_test(
-            runner.state_mut(),
-            ZoneMoveRequest::pregame(found, Zone::Library),
-            &mut Vec::new()
-        ));
-        assert_library_order(&runner, &[cover, found]);
+        if let Some(found) = found {
+            assert!(!move_object_for_test(
+                runner.state_mut(),
+                ZoneMoveRequest::pregame(found, Zone::Library),
+                &mut Vec::new()
+            ));
+        }
+        assert_library_order(
+            &runner,
+            &std::iter::once(cover).chain(found).collect::<Vec<_>>(),
+        );
         runner.cast(source).commit();
+        // CR 601.2h: this is the actual six-mana cast, before ETB resolution.
+        assert!(runner.state().players[0].mana_pool.is_empty());
+        assert_eq!(runner.state().objects[&source].zone, Zone::Stack);
         let mut events = Vec::new();
-        let _ = pass_to_pause(&mut runner, &mut events);
-        assert_search_prompt(&runner, &[found], true);
-        assert_pending_result(&runner, &events, source, found);
-        let last = runner
-            .act(GameAction::SelectCards { cards: vec![found] })
-            .unwrap()
-            .events;
-        events.extend(last.clone());
+        let resolving_action = pass_to_pause(&mut runner, &mut events);
+        let last = if let Some(found) = found {
+            assert_search_prompt(&runner, &[found], true);
+            assert_pending_result(&runner, &events, source, found);
+            assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+            // CR 701.23b: a quality search permits an explicit empty selection.
+            let last = runner
+                .act(GameAction::SelectCards {
+                    cards: if select { vec![found] } else { vec![] },
+                })
+                .unwrap()
+                .events;
+            events.extend(last.clone());
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+            assert!(
+                !events.iter().any(|event| matches!(event,
+                    GameEvent::ZoneChanged { object_id, .. } if *object_id == found
+                )),
+                "a refused conditional must supply neither destination"
+            );
+            last
+        } else {
+            // SearchLibrary's synchronous no-quality-match branch supplies no prompt.
+            resolving_action
+        };
         assert_complete(&runner, &last);
         assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
         assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+        assert!(!events.iter().any(|event| matches!(event,
+            GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), .. } if *object_id == source
+        )));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(Zone::Library),
+                    ..
+                }
+            )),
+            "neither the selected result nor the hidden cover may move"
+        );
         assert!(events.iter().any(|event| matches!(event,
             GameEvent::EffectResolved { kind: EffectKind::SearchLibrary, source_id, .. } if *source_id == source
         )));
@@ -642,14 +690,16 @@ fn nazahn_search_result_never_rebinds_to_the_entering_source() {
                 _ => None,
             })
             .collect();
-        assert_eq!(reveals, vec![vec![found]]);
-        let moved = events.iter().position(|event| matches!(event,
-            GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), .. } if *object_id == found
-        )).expect("the selected result must reach a move, not stop at an unsupported clause");
-        let revealed = events
-            .iter()
-            .position(|event| matches!(event, GameEvent::CardsRevealed { .. }))
-            .unwrap();
+        // CR 701.20a + CR 701.20b: revealing only the selected card leaves it
+        // in its library; this is gap safety, not full named-predicate support.
+        assert_eq!(
+            reveals,
+            if select {
+                vec![vec![found.unwrap()]]
+            } else {
+                vec![]
+            }
+        );
         let shuffled = events
             .iter()
             .position(|event| {
@@ -663,7 +713,130 @@ fn nazahn_search_result_never_rebinds_to_the_entering_source() {
                 )
             })
             .unwrap();
-        assert!(revealed < moved && moved < shuffled);
+        if select {
+            let revealed = events
+                .iter()
+                .position(|event| matches!(event, GameEvent::CardsRevealed { .. }))
+                .unwrap();
+            assert!(revealed < shuffled);
+        }
+    }
+}
+
+/// CR 701.20b + CR 701.23b: the real search/reveal and legal empty choices
+/// survive while TR4's art predicate and BOTH destinations remain unsupported.
+#[test]
+fn selfie_preservation_refused_destinations_keep_the_supported_search_and_shuffle() {
+    for (candidate, select) in [(true, true), (true, false), (false, false)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_spell_to_hand_from_oracle(P0, "Selfie Preservation", false, SELFIE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        fund(&mut scenario, 1, &[ManaType::Green]);
+        let found = candidate.then(|| scenario.add_basic_land(P0, ManaColor::Green));
+        let cover = scenario
+            .add_spell_to_library_top(P0, "Nonland cover", false)
+            .id();
+        let mut runner = scenario.build();
+        if let Some(found) = found {
+            assert!(!move_object_for_test(
+                runner.state_mut(),
+                ZoneMoveRequest::pregame(found, Zone::Library),
+                &mut Vec::new()
+            ));
+        }
+        assert_library_order(
+            &runner,
+            &std::iter::once(cover).chain(found).collect::<Vec<_>>(),
+        );
+        runner.cast(source).commit();
+        // CR 601.2h: the actual {1}{G} is paid before the search begins.
+        assert!(runner.state().players[0].mana_pool.is_empty());
+        assert_eq!(runner.state().objects[&source].zone, Zone::Stack);
+        let mut events = Vec::new();
+        let resolving_action = pass_to_pause(&mut runner, &mut events);
+        let last = if let Some(found) = found {
+            assert_search_prompt(&runner, &[found], true);
+            assert_eq!(runner.state().objects[&source].zone, Zone::Stack);
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+            assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                GameEvent::CardsRevealed { .. }
+                    | GameEvent::ZoneChanged {
+                        from: Some(Zone::Library),
+                        ..
+                    }
+            )));
+            let last = runner
+                .act(GameAction::SelectCards {
+                    cards: if select { vec![found] } else { vec![] },
+                })
+                .unwrap()
+                .events;
+            events.extend(last.clone());
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+            assert!(!events.iter().any(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == found
+            )));
+            last
+        } else {
+            resolving_action
+        };
+        assert_complete(&runner, &last);
+        // CR 608.2n: final sorcery completion still puts Selfie in its graveyard.
+        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+        assert!(events.iter().any(|event| matches!(event,
+            GameEvent::EffectResolved { kind: EffectKind::SearchLibrary, source_id, .. } if *source_id == source
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                ..
+            }
+        )));
+        let reveals: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reveals,
+            if select {
+                vec![vec![found.unwrap()]]
+            } else {
+                vec![]
+            }
+        );
+        if select {
+            let revealed = events
+                .iter()
+                .position(|event| matches!(event, GameEvent::CardsRevealed { .. }))
+                .unwrap();
+            let shuffled = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        GameEvent::PlayerPerformedAction {
+                            player_id: P0,
+                            action: PlayerActionKind::ShuffledLibrary,
+                            ..
+                        }
+                    )
+                })
+                .unwrap();
+            assert!(revealed < shuffled);
+        }
     }
 }
 

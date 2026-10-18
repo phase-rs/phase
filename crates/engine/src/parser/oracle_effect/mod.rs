@@ -41864,6 +41864,9 @@ fn parse_effect_chain_ir_body(
     // player performs the action. Only propagates within a single sentence /
     // chain; the anchor is reset at each top-level call.
     let mut chunk_diagnostics: Vec<OracleDiagnostic> = Vec::new();
+    // CR 608.2c: a refused conditional can own only the next source chunk's
+    // alternative. Keep its identity outside the scrubbed executable metadata.
+    let mut pending_rejected_search_guard: Option<ClauseId> = None;
     // CR 608.2c: "Repeat the following process N times." appears as its own
     // sentence before the body clause. The count is stashed here and applied
     // to the immediately-following clause so the body executes N times.
@@ -41978,6 +41981,7 @@ fn parse_effect_chain_ir_body(
         // a stale antecedent for the next chunk.
         ctx.chain_declared_object_target = chain_declared_object_target(builder.clauses()).cloned();
         ctx.chain_declared_slots = chain_declared_slot_registry(builder.clauses());
+        let prospective_rejected_guard = pending_rejected_search_guard.take();
         // TOP of the iteration: check the PREVIOUS iteration's stamp, then re-arm.
         debug_assert!(
             pending_stamp
@@ -42410,6 +42414,28 @@ fn parse_effect_chain_ir_body(
             crate::parser::oracle_nom::condition::parse_otherwise_branch_connector(i)
         });
         if let Some((_, else_text)) = otherwise_rest {
+            // CR 608.2c: this alternative belongs to the immediately preceding
+            // refused source conditional, not an older represented condition.
+            if prospective_rejected_guard.is_some_and(|owner| {
+                builder.clauses().last().map(|clause| clause.id) == Some(owner)
+            }) {
+                builder
+                    .clause(
+                        &chunk.text,
+                        placeholder_parsed_clause("otherwise_placeholder"),
+                        chunk.boundary_after,
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None,
+                        },
+                    )
+                    .push();
+                builder
+                    .last_mut()
+                    .expect("just minted alternative source clause")
+                    .replace_with_gap("search_result_condition");
+                continue;
+            }
             // CR 608.2c: The else-branch is parsed as its own chain, so its anaphors
             // must inherit the referent established BEFORE the paired conditional it
             // is the else of. Walk the outer chain past that one conditional
@@ -46107,8 +46133,8 @@ fn parse_effect_chain_ir_body(
                     && repeat_for.is_none()
                     && !is_distributed_chunk
             }) {
-                // CR 608.2c + CR 609.3: retain this refused instruction at its own
-                // source position; independent later instructions remain executable.
+                // CR 608.2c: retain this refused conditional at its own source
+                // position and preserve ownership of its immediate alternative.
                 builder
                     .clause(
                         &fragment,
@@ -46125,6 +46151,7 @@ fn parse_effect_chain_ir_body(
                     .last()
                     .expect("just minted source clause")
                     .id;
+                pending_rejected_search_guard = Some(rejected);
                 builder
                     .clauses_mut()
                     .iter_mut()
