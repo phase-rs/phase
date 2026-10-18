@@ -298,7 +298,11 @@ describe("pickAiSeatDecks", () => {
       deck("saved:Loose", { name: "Loose", source: { type: "saved" } }),
     ];
     try {
-      vi.spyOn(Math, "random").mockReturnValue(0.99);
+      // Roll 0, not 0.99: with the folder exclusion applied the pool holds
+      // only Loose (index 0 either way), but a bypassed curation would serve
+      // pool [Aggro, Loose] where roll 0 picks the excluded Aggro. A 0.99
+      // roll selects the last entry on both paths and cannot discriminate.
+      vi.spyOn(Math, "random").mockReturnValue(0);
       expect(
         pick(catalog, [AI_DECK_RANDOM], {
           poolSelection: { ...emptyPoolSelection(), excludedGroups: [folderPoolGroup("f1")] },

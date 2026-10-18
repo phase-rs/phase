@@ -334,18 +334,21 @@ export function HostControlTile() {
   );
   // The dropdown lists every legal deck (any of them can be pinned), but fresh
   // seats draw from the curated pool — falling back to the full catalog when
-  // the selection matches nothing.
-  const poolChoices = useMemo(() => {
-    if (suppliedFormat) return deckChoices;
-    const keep = new Set(
-      applyPoolSelection(
-        withCatalogSavedNames(aiDeckCatalog.candidates),
-        aiPoolSelection,
-        poolFolderIndex,
-      ).pool.map((candidate) => candidate.id),
+  // the selection matches nothing. The fallback flag is kept (not dropped):
+  // live Fill-with-AI assignments would otherwise draw excluded decks with
+  // no notice, contradicting the warn-plus-fallback setup surfaces.
+  const poolResolution = useMemo(() => {
+    if (suppliedFormat) return { choices: deckChoices, fellBack: false };
+    const { pool, fellBack } = applyPoolSelection(
+      withCatalogSavedNames(aiDeckCatalog.candidates),
+      aiPoolSelection,
+      poolFolderIndex,
     );
-    return deckChoices.filter(({ id }) => keep.has(id));
+    const keep = new Set(pool.map((candidate) => candidate.id));
+    return { choices: deckChoices.filter(({ id }) => keep.has(id)), fellBack };
   }, [suppliedFormat, deckChoices, aiDeckCatalog.candidates, aiPoolSelection, poolFolderIndex]);
+  const poolChoices = poolResolution.choices;
+  const poolFellBack = poolResolution.fellBack;
   // Pick a random format-legal deck for each fresh AI-seat assignment.
   // Previously this defaulted to `deckChoices[0]`, which meant every AI seat
   // got the same deck — uninteresting and exposed catalog ordering. The
@@ -557,6 +560,14 @@ export function HostControlTile() {
             <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">
               {t("hostControl.seatsOccupied", { occupied: occupiedSeats, total: playerSlots.length })}
             </div>
+            {poolFellBack && (
+              <div
+                role="status"
+                className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200"
+              >
+                {t("menu:randomPool.emptyWarning", { total: deckChoices.length })}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               {waitingSeats.length === 0 ? (
                 <button
