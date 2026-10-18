@@ -517,10 +517,11 @@ fn inherit_activation_incarnation(state: &GameState, branch: &mut ResolvedAbilit
 /// caller then drains the continuation back to Priority.
 ///
 /// CR 706.3b + CR 400.7 + CR 113.7a: a results-table row is part of the ability that
-/// rolled, so the branch frame acts for the source object that ability captured
-/// when it went on the stack (see `inherit_activation_incarnation`). A source that
-/// left and re-entered the zone meanwhile is a new object and does not receive its
-/// old activation's rows.
+/// rolled, so the branch frame of an ACTIVATED ability acts for the source object
+/// that activation captured when it went on the stack (see
+/// `inherit_activation_incarnation`; a triggered ability's rows stay unstamped). A
+/// source that left and re-entered the zone meanwhile is a new object and does not
+/// receive its old activation's rows.
 pub fn resume_after_ignore(
     state: &mut GameState,
     pending: PendingDieRoll,

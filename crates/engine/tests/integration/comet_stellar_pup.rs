@@ -1237,7 +1237,7 @@ fn face_six_adds_loyalty_and_grants_two_more_activations_to_comet_only() {
     );
 }
 
-/// CR 601.2a + CR 608.2: cast from hand, Comet resolves onto the battlefield with
+/// CR 601.2a + CR 608.3a: cast from hand, Comet resolves onto the battlefield with
 /// his loyalty, no recipient prompt (the row is no longer an orphan ability merged
 /// into the spell) and exactly one ability.
 #[test]

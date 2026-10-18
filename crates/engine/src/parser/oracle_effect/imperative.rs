@@ -14652,10 +14652,11 @@ fn try_parse_roll_die_with_modifier(
     Some((sides, Some(modifier)))
 }
 
-/// CR 706.3b: a results-table row closes its result marker with a pipe
-/// ("1—9 | …") or with an em dash ("1 or 2 — …"). `try_parse_die_result_line`
-/// tries the pipe and then the em dash; `try_parse_em_dash_die_result_line` is the
-/// em-dash instantiation of the same grammar alone.
+/// CR 706.3a: a results-table row names its possible results and an effect. Oracle
+/// closes the result marker with a pipe ("1—9 | …") or an em dash ("1 or 2 — …"), a
+/// printing convention the rule does not specify. `try_parse_die_result_line` tries the pipe
+/// and then the em dash; `try_parse_em_dash_die_result_line` is the em-dash
+/// instantiation of the same grammar alone.
 const DIE_RESULT_PIPE: &str = "|";
 const DIE_RESULT_EM_DASH: &str = "\u{2014}";
 
