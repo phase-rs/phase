@@ -262,30 +262,29 @@ pub(crate) fn drive_from_copy(
         params.source_id,
         player,
     );
-    // Depth 1: skip the depth-0 chain prelude so per-resolution ledgers
-    // (`last_created_token_ids`) are not reset.
-    let stack_depth_before_copy = state.resolution_stack.capture_child_boundary();
-    super::resolve_ability_chain(state, &copy_ability, events, 1)?;
-
-    // CR 616.1: The copy parked a replacement-ordering choice. Do NOT read
-    // `last_created_token_ids` (stale) and do NOT advance (that would clobber the
-    // replacement `WaitingFor`). Park an `AwaitingCopy` continuation.
-    if state.active_copy_token().is_some() {
-        park_each_player_copy_chosen_after_current_step(
-            state,
-            make_pending(
-                CopyChosenStage::AwaitingCopy,
-                player,
-                chosen,
-                remaining_choices,
-                params,
-            ),
-            stack_depth_before_copy,
-        );
-        return Ok(());
+    let work = super::token_copy::prepare_copy_creation(state, &copy_ability)?;
+    state.push_each_player_copy_chosen(make_pending(
+        CopyChosenStage::AwaitingCopy,
+        player,
+        chosen,
+        remaining_choices,
+        params,
+    ));
+    let id = super::token_copy::install_creation(
+        state,
+        &copy_ability,
+        work,
+        EffectKind::CopyTokenOf,
+        crate::types::game_state::TokenCreationCallerState::EachPlayerCopyChosen,
+    );
+    state.resolution_stack.bind_each_player_creation_child(id);
+    if matches!(
+        super::token_copy::drive_creation(state, id, events),
+        crate::types::game_state::TokenCreationProgress::Completed(_)
+    ) {
+        drain_pending(state, events);
     }
-
-    perform_counter_step_then_advance(state, player, chosen, remaining_choices, params, events)
+    Ok(())
 }
 
 /// CR 122.1 + CR 208.1: Place the scaling counters (if any) on the created
@@ -298,10 +297,15 @@ pub(crate) fn perform_counter_step_then_advance(
     chosen: Vec<ObjectId>,
     remaining_choices: Vec<CopyChosenSelection>,
     params: &CopyChosenParams,
+    completed: Option<crate::types::ability::ForwardedResultContext>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // All ids created by the copy (N>1 under a token doubler).
-    let created_nonempty = !state.last_created_token_ids.is_empty();
+    let created_nonempty = completed
+        .as_ref()
+        .map_or(!state.last_created_token_ids.is_empty(), |result| {
+            !result.object_incarnations.is_empty()
+        });
     if let Some(scale) = &params.scale {
         if chosen.len() == 2 && created_nonempty {
             // CR 122.1 + CR 208.1: read the second chosen object's property live
@@ -317,7 +321,7 @@ pub(crate) fn perform_counter_step_then_advance(
                 // Target `LastCreated` so counters land on EVERY created copy
                 // (the full `last_created_token_ids` vector); `resolve_add`
                 // self-manages any per-object counter-replacement pause.
-                let counter_ability = ResolvedAbility::new(
+                let mut counter_ability = ResolvedAbility::new(
                     Effect::PutCounter {
                         counter_type: scale.counter_type.clone(),
                         count: QuantityExpr::Fixed { value: amount },
@@ -327,6 +331,25 @@ pub(crate) fn perform_counter_step_then_advance(
                     params.source_id,
                     player,
                 );
+                if let Some(result) = completed.as_ref() {
+                    let filters = result
+                        .object_incarnations
+                        .iter()
+                        .map(|member| TargetFilter::SpecificObject {
+                            id: member.object_id,
+                        })
+                        .collect::<Vec<_>>();
+                    if let Effect::PutCounter { target, .. } = &mut counter_ability.effect {
+                        *target = TargetFilter::Or { filters };
+                    }
+                    counter_ability.replace_target_occurrences(
+                        result
+                            .object_incarnations
+                            .iter()
+                            .map(|member| (TargetRef::Object(member.object_id), Some(*member)))
+                            .collect(),
+                    );
+                }
                 let stack_depth_before_counter = state.resolution_stack.capture_child_boundary();
                 super::resolve_ability_chain(state, &counter_ability, events, 1)?;
                 // CR 616.1: the counter placement paused for a replacement
@@ -355,10 +378,17 @@ pub(crate) fn perform_counter_step_then_advance(
 /// replacement-resume arms in `engine_replacement.rs` once the paused primitive
 /// has fully drained and state is back at Priority.
 pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // Guard invariants: never resume while a primitive of the current step is
-    // still mid-flight (a copy re-paused under a second doubler, or a counter
-    // ordering is still open).
-    if state.active_copy_token().is_some() || state.active_counter_additions().is_some() {
+    // Only the structurally exposed parent may resume. A covered creation's
+    // absence from the top accessor is never completion evidence.
+    let Some(parent) = state.active_each_player_copy_chosen() else {
+        return;
+    };
+    if matches!(
+        parent.copy_status,
+        Some(crate::types::game_state::TokenCreationCopyStatus::Pending(
+            _
+        ))
+    ) {
         return;
     }
     let Some(pending) = state
@@ -377,6 +407,15 @@ pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) 
             pending.chosen,
             pending.remaining_choices,
             &params,
+            match pending.copy_status {
+                Some(crate::types::game_state::TokenCreationCopyStatus::Completed(result)) => {
+                    Some(result)
+                }
+                None => None, // Explicit id-less historical continuation.
+                Some(crate::types::game_state::TokenCreationCopyStatus::Pending(_)) => {
+                    unreachable!("pending owner cannot drain")
+                }
+            },
             events,
         ),
         // The counter placement finished draining — continue the collected action walk.
@@ -485,6 +524,7 @@ fn make_pending(
     params: &CopyChosenParams,
 ) -> PendingEachPlayerCopyChosen {
     PendingEachPlayerCopyChosen {
+        copy_status: None,
         stage,
         player,
         chosen,
@@ -1191,5 +1231,202 @@ mod tests {
             ),
             "walk completes after the only prompted chooser resolves"
         );
+    }
+
+    #[test]
+    fn covered_creation_child_keeps_each_player_copy_pending() {
+        // Typed two-choice/scaling isolation: the printed Parallel Universe
+        // reference has no scaling clause. Every pause below is a real action.
+        for counter in [false, true] {
+            let mut state = setup();
+            let first = add_creature(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Distinct copied body",
+                3,
+                false,
+            );
+            let scale = add_creature(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Distinct scale",
+                2,
+                false,
+            );
+            let foreign = add_creature(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Foreign latest",
+                9,
+                false,
+            );
+            state.objects.get_mut(&foreign).unwrap().is_token = true;
+            let mut install = |name: &str, definition: ReplacementDefinition| {
+                let id = create_object(
+                    &mut state,
+                    CardId(8),
+                    PlayerId(0),
+                    name.into(),
+                    Zone::Battlefield,
+                );
+                let object = state.objects.get_mut(&id).unwrap();
+                object.base_replacement_definitions = Arc::new(vec![definition.clone()]);
+                object.replacement_definitions = vec![definition].into();
+            };
+            let chatter=crate::parser::oracle::parse_oracle_text("Forestwalk (This creature can't be blocked as long as defending player controls a Forest.)\nIf one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.\n{B}, Sacrifice X Squirrels: Target creature gets +X/-X until end of turn.","Chatterfang, Squirrel General",&["Forestwalk".into()],&["Creature".into()],&[]);
+            install("Chatterfang", chatter.replacements[0].clone());
+            let jinnie=crate::parser::oracle::parse_oracle_text("If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.","Jinnie Fay, Jetmir's Second",&[],&["Creature".into()],&[]);
+            install(
+                "Queued substitute",
+                jinnie.replacements[0].clone().condition(
+                    crate::types::ability::ReplacementCondition::TokenSubtypeMatches {
+                        subtypes: vec!["Squirrel".into()],
+                    },
+                ),
+            );
+            if counter {
+                install(
+                    "Entry counter",
+                    ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                        .valid_card(TargetFilter::Any)
+                        .execute(crate::types::ability::AbilityDefinition::new(
+                            crate::types::ability::AbilityKind::Spell,
+                            Effect::PutCounter {
+                                counter_type: CounterType::Plus1Plus1,
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::SelfRef,
+                            },
+                        )),
+                );
+                install(
+                    "Counter double",
+                    ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                        .quantity_modification(QuantityModification::DOUBLE),
+                );
+                install(
+                    "Counter plus",
+                    ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                        .quantity_modification(QuantityModification::Plus { value: 1 }),
+                );
+            }
+            drop(install);
+            let ability = ability(
+                1,
+                2,
+                vec![],
+                Some(CopyScale {
+                    counter_type: CounterType::Plus1Plus1,
+                    scale_property: ObjectProperty::Power,
+                }),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            events.extend(
+                apply_as_current(
+                    &mut state,
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(first), TargetRef::Object(scale)],
+                    },
+                )
+                .unwrap()
+                .events,
+            );
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let parent = state
+                .resolution_stack
+                .iter()
+                .find_map(|frame| {
+                    if let crate::types::resolution::ResolutionFrame::EachPlayerCopyChosen(parent) =
+                        frame
+                    {
+                        Some(parent)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let Some(crate::types::game_state::TokenCreationCopyStatus::Pending(id)) =
+                parent.copy_status
+            else {
+                panic!("covered owner still awaits its exact creation");
+            };
+            assert!(state.resolution_stack.token_creation(id).is_some());
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::EachPlayerCopyChosen,
+                    ..
+                }
+            )));
+            let mut malformed =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+            for frame in malformed["resolution_frames"]["frames"]
+                .as_array_mut()
+                .unwrap()
+            {
+                if frame["type"] == "EachPlayerCopyChosen" {
+                    frame["data"]["copy_status"] = serde_json::Value::Null;
+                }
+            }
+            assert!(
+                serde_json::from_value::<ResolutionStateWire>(malformed).is_err(),
+                "current covered child cannot masquerade as legacy missing status"
+            );
+            let mut pauses = 0;
+            for _ in 0..80 {
+                let action = match state.waiting_for {
+                    WaitingFor::ReplacementChoice { .. } => {
+                        GameAction::ChooseReplacement { index: 0 }
+                    }
+                    WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 1 },
+                    WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => break,
+                    ref other => panic!("unexpected covered child: {other:?}"),
+                };
+                pauses += 1;
+                state = serde_json::from_value::<ResolutionStateWire>(
+                    serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap(),
+                )
+                .unwrap()
+                .into_game_state();
+                // Labelled storage isolation: a foreign latest mirror cannot
+                // replace this child's exact terminal result or its recipients.
+                state.last_created_token_ids = vec![foreign];
+                events.extend(apply_as_current(&mut state, action).unwrap().events);
+            }
+            assert!(pauses >= 2);
+            assert!(state.resolution_stack.is_empty());
+            let created: Vec<_> = state
+                .objects
+                .values()
+                .filter(|object| object.is_token && object.id != foreign)
+                .collect();
+            assert_eq!(created.len(), 2);
+            for object in created {
+                assert_eq!(
+                    object.counters.get(&CounterType::Plus1Plus1).copied(),
+                    Some(if counter { 8 } else { 2 })
+                );
+            }
+            assert!(state.objects[&foreign].counters.is_empty());
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::EachPlayerCopyChosen,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+        }
     }
 }

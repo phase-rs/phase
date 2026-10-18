@@ -216,6 +216,10 @@ fn handle_replacement_choice_inner(
         )));
     }
     let replacement_action_event_start = events.len();
+    let pending_creation = match &pending.proposed {
+        ProposedEvent::CreateToken { creation_frame, .. } => *creation_frame,
+        _ => None,
+    };
     let parked_search_found_replacement = state
         .pending_replacement
         .as_ref()
@@ -923,7 +927,13 @@ fn handle_replacement_choice_inner(
                 // — the `spec` field carries the full self-describing token
                 // characteristics. Delegate to the shared helper.
                 create @ ProposedEvent::CreateToken { .. } => {
-                    if !apply_create_token_after_replacement(state, create, events) {
+                    if let ProposedEvent::CreateToken {
+                        creation_frame: Some(_),
+                        ..
+                    } = &create
+                    {
+                        crate::game::effects::token_copy::approve_creation_batch(state, create);
+                    } else if !apply_create_token_after_replacement(state, create, events) {
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -1467,6 +1477,14 @@ fn handle_replacement_choice_inner(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            if let Some(id) = pending_creation {
+                let pending = state
+                    .resolution_stack
+                    .token_creation_mut(id)
+                    .expect("prevented creation keeps its exact owner");
+                pending.pending = None;
+                pending.replacement_queue_tail = None;
+            }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
                     paused.member,
@@ -2089,7 +2107,7 @@ fn copy_token_tail_for_source(
 /// attached after installing the host copy"), which is Aura-specific machinery.
 /// Esix is a resident creature with no `attached_to`, so routing it through that
 /// handler would trip the assertion rather than share useful code.
-fn handle_copy_token_source_choice(
+fn handle_legacy_copy_token_source_choice(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
@@ -2144,7 +2162,7 @@ fn handle_copy_token_source_choice(
             .clone()
             .unwrap_or_default(),
     );
-    effects::resolve_ability_chain(state, &ability, events, 0)
+    effects::token_copy::resolve_legacy_copy_token_choice(state, &ability, events)
         .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
 
     // CR 614.5: a replacement effect gets only one opportunity to affect an
@@ -2236,8 +2254,60 @@ pub(super) fn handle_copy_target_choice(
         // SOURCE for a `CreateToken` substitution, not a donor of copiable
         // values to a third party. Its tail is a `CopyTokenOf`, resolved against
         // the answered object.
-        CopyTargetPurpose::CopyTokenSource => {
-            return handle_copy_token_source_choice(state, source_id, player, target_id, events);
+        CopyTargetPurpose::CopyTokenSource { continuation } => {
+            if let Some(mut tail) = continuation {
+                let parent = tail.context.token_creation_parent.ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Current copy source is missing its creation authority".into(),
+                    )
+                })?;
+                let drain = state
+                    .active_post_replacement_drains()
+                    .and_then(|drains| drains.resident());
+                if !matches!(
+                    state.resolution_stack.last(),
+                    Some(crate::types::resolution::ResolutionFrame::PostReplacement(
+                        _
+                    ))
+                ) || !drain.is_some_and(|drain| {
+                    matches!(drain.status, crate::types::game_state::DrainStatus::Paused)
+                        && drain.source == Some(source_id)
+                        && drain.controller.unwrap_or(player) == player
+                        && drain.token_creation_parent == Some(parent)
+                        && drain.applied == tail.replacement_applied
+                }) || state
+                    .resolution_stack
+                    .token_creation(parent.frame)
+                    .is_none()
+                {
+                    return Err(EngineError::InvalidAction(
+                        "Copy source has a foreign or stale creation owner".into(),
+                    ));
+                }
+                let pin = state
+                    .objects
+                    .get(&target_id)
+                    .map(ObjectIncarnationRef::from_object);
+                tail.replace_target_occurrences(vec![(TargetRef::Object(target_id), pin)]);
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                // CR 608.2c: this is the selected replacement's continuation,
+                // so it resumes the existing resolution without a root reset.
+                effects::resolve_ability_chain(state, &tail, events, 1)
+                    .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+                effects::resume_resolution_frames(state, events);
+                return Ok(state.waiting_for.clone());
+            }
+            if state.viewer_projection.is_some() || state.resolution_stack.iter().any(|frame| matches!(frame,
+                crate::types::resolution::ResolutionFrame::CopyToken(pending) if pending.creation_id.is_some()))
+                || state.active_post_replacement_drains().and_then(|drains| drains.resident()).is_some_and(|drain| drain.token_creation_parent.is_some())
+            {
+                return Err(EngineError::InvalidAction("Current copy source is missing its saved continuation".into()));
+            }
+            return handle_legacy_copy_token_source_choice(
+                state, source_id, player, target_id, events,
+            );
         }
         // Exhaustive on purpose: falling through to the enter-as-a-copy tail
         // below is correct ONLY for `BecomeCopy`. A wildcard here would silently
@@ -2369,10 +2439,15 @@ pub(super) fn handle_copy_target_choice(
         // only the liminal entry's PRESENCE matters here: it is what says this commit will park
         // an entry that later needs realizing.
         let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
+        let creation_owner = state
+            .liminal_entries
+            .get(&source_id)
+            .and_then(|entry| entry.creation_frame);
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
                     (
+                        entry.creation_frame,
                         entry.object.projected().owner,
                         copy.clone(),
                         entry.enter_tapped,
@@ -2466,10 +2541,17 @@ pub(super) fn handle_copy_target_choice(
                 },
             );
         }
-        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
-            copy_continuation.clone()
+        if let Some((
+            creation_frame,
+            owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            remaining_count,
+        )) = copy_continuation.clone()
         {
             counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
+                creation_frame,
                 owner,
                 copy,
                 enter_tapped,
@@ -2486,13 +2568,20 @@ pub(super) fn handle_copy_target_choice(
         )? {
             return Ok(waiting_for);
         }
-        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
-            copy_continuation
+        if let Some((
+            creation_frame,
+            owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            remaining_count,
+        )) = copy_continuation
         {
             let initial_created_ids = state.last_created_token_ids.clone();
             let status =
                 super::effects::token_copy::apply_copy_token_after_replacement_with_created_ids(
                     state,
+                    creation_frame,
                     owner,
                     *copy,
                     enter_tapped,
@@ -2512,7 +2601,13 @@ pub(super) fn handle_copy_target_choice(
             }
         }
         let created_ids = state.last_created_token_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
+        let pending = match creation_owner {
+            Some(id) => state.resolution_stack.token_creation_mut(id),
+            None => state
+                .active_copy_token_mut()
+                .filter(|pending| pending.creation_id.is_none()),
+        };
+        if let Some(pending) = pending {
             pending.created_ids = created_ids;
         }
         if state.active_copy_token().is_some() {
@@ -3069,7 +3164,7 @@ pub(super) fn apply_post_replacement_effect(
         // `ability_tree_copies_tokens`, never by an incidental structural probe
         // such as `sub_ability.is_some()`.
         let purpose = if super::replacement::ability_tree_copies_tokens(real_work) {
-            CopyTargetPurpose::CopyTokenSource
+            CopyTargetPurpose::CopyTokenSource { continuation: None }
         } else {
             CopyTargetPurpose::PersistChosenAttribute
         };
@@ -3285,8 +3380,72 @@ pub(crate) fn apply_pending_post_replacement_effect(
     let replacement_applied = state
         .active_post_replacement_drains_mut()
         .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
-        .map(|drain| std::mem::take(&mut drain.applied))
+        .map(|drain| drain.applied.clone())
         .unwrap_or_default();
+
+    // Capture the selected Ready value before begin_dispatch consumes it.
+    // Paused/Dispatching deliberately carry no resolved continuation.
+    let selected = state
+        .active_post_replacement_drains()
+        .and_then(|drains| drains.resident())
+        .and_then(|drain| {
+            Some((
+                drain.token_creation_parent?,
+                drain.ready_continuation()?.clone(),
+            ))
+        });
+    let prepared = selected.map(|(parent, continuation)| {
+        let mut resolved = match continuation {
+            PostReplacementContinuation::Resolved(resolved) => *resolved,
+            PostReplacementContinuation::Template(definition) => {
+                let definition = super::replacement::EventModifiers::first_non_modifier_ability(
+                    Some(&definition),
+                )
+                .unwrap_or(&definition);
+                let affected_controller = source
+                    .and_then(|id| state.entering_or_live_object(id))
+                    .map(super::replacement::replacement_source_player)
+                    .unwrap_or(state.active_player);
+                let controller = replacement_controller.unwrap_or(affected_controller);
+                let mut resolved = build_resolved_from_def_with_targets(
+                    definition,
+                    source.unwrap_or(ObjectId(0)),
+                    controller,
+                    source.into_iter().map(TargetRef::Object).collect(),
+                );
+                if controller != affected_controller {
+                    resolved.set_scoped_player_recursive(affected_controller);
+                }
+                resolved
+            }
+        };
+        while super::replacement::EventModifiers::is_event_modifier_effect(&resolved.effect) {
+            resolved = *resolved
+                .sub_ability
+                .take()
+                .expect("selected substitution has nonmodifier work");
+        }
+        fn stamp(
+            ability: &mut ResolvedAbility,
+            parent: crate::types::proposed_event::TokenCreationParentContext,
+        ) {
+            ability.context.token_creation_parent = Some(parent);
+            if let Some(child) = ability.sub_ability.as_deref_mut() {
+                stamp(child, parent);
+            }
+            if let Some(child) = ability.else_ability.as_deref_mut() {
+                stamp(child, parent);
+            }
+        }
+        stamp(&mut resolved, parent);
+        resolved.set_replacement_applied_recursive(replacement_applied.clone());
+        state
+            .resolution_stack
+            .token_creation_mut(parent.frame)
+            .expect("selected substitution owner")
+            .pending = Some(crate::types::game_state::TokenCreationPending::Substitution);
+        resolved
+    });
 
     let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
@@ -3296,22 +3455,67 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // (on unwind profiles) a panic. While it is held, the priority-boundary
     // sweeper must not treat a `Dispatching` resident as ownerless.
     let _live_dispatch = LiveDispatchGuard::enter();
-    let waiting_for = match continuation {
-        PostReplacementContinuation::Resolved(resolved) => {
-            apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
+    let current_substitution = prepared.is_some();
+    let waiting_for = if let Some(mut resolved) = prepared {
+        if let Effect::ChoosePermanent { filter } = &resolved.effect {
+            let valid_targets =
+                find_copy_targets(state, filter, resolved.source_id, resolved.controller, None);
+            if valid_targets.is_empty() {
+                None
+            } else {
+                let tail = resolved
+                    .sub_ability
+                    .take()
+                    .expect("selected copy substitution owns its resolved tail");
+                Some(WaitingFor::CopyTargetChoice {
+                    player: resolved.controller,
+                    source_id: resolved.source_id,
+                    valid_targets,
+                    max_mana_value: None,
+                    purpose: CopyTargetPurpose::CopyTokenSource {
+                        continuation: Some(tail),
+                    },
+                })
+            }
+        } else {
+            let caller_wait = std::mem::replace(
+                &mut state.waiting_for,
+                WaitingFor::Priority {
+                    player: state.active_player,
+                },
+            );
+            effects::resolve_ability_chain(state, &resolved, events, 1)
+                .expect("selected replacement continuation");
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                state.waiting_for = caller_wait;
+                None
+            } else {
+                Some(state.waiting_for.clone())
+            }
         }
-        PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
-            state,
-            &effect_def,
-            ContinuationSubjects {
-                affected: source,
-                controller: replacement_controller,
-            },
-            spell_resolution,
-            event.as_ref(),
-            replacement_applied,
-            events,
-        ),
+    } else {
+        match continuation {
+            PostReplacementContinuation::Resolved(resolved) => {
+                apply_post_replacement_resolved_effect(
+                    state,
+                    &resolved,
+                    replacement_applied,
+                    events,
+                )
+            }
+            PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
+                state,
+                &effect_def,
+                ContinuationSubjects {
+                    affected: source,
+                    controller: replacement_controller,
+                },
+                spell_resolution,
+                event.as_ref(),
+                replacement_applied,
+                events,
+            ),
+        }
     };
     // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
     // by whether the two-deep positional accessor can currently see this frame.
@@ -3334,7 +3538,9 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // follows the frame through every `frames.insert` / `frames.swap`, never
     // resolves to a sibling, and is not invalidated by a nested same-frame
     // dispatch.
-    if waiting_for.is_some() && state.post_replacement_dispatch_is_resident_top(dispatch) {
+    if (waiting_for.is_some() && state.post_replacement_dispatch_is_resident_top(dispatch))
+        || (current_substitution && !state.post_replacement_dispatch_is_resident_top(dispatch))
+    {
         // This dispatch's own work owns the prompt: park it so the paused-retire
         // paths (`finish_active_paused_post_replacement_dispatch` and the
         // `resume_resolution_frames` Paused branch) can finish it after the answer.
@@ -5257,6 +5463,8 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -5382,6 +5590,8 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,
@@ -5541,6 +5751,8 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,
@@ -5717,6 +5929,8 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,
@@ -5873,6 +6087,8 @@ mod tests {
             .clone()
             .unwrap_or_default();
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(dog_spec),
             copy: None,
@@ -6011,6 +6227,8 @@ mod tests {
         // Propose Treasure → Jinnie is the only matching replacement.
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,
@@ -7153,6 +7371,7 @@ mod tests {
                     .active_post_replacement_drains()
                     .and_then(crate::types::game_state::PostReplacementDrainStack::resident),
                 Some(crate::types::game_state::PostReplacementDrain {
+                    token_creation_parent: None,
                     status: crate::types::game_state::DrainStatus::Paused,
                     ..
                 })
@@ -7284,6 +7503,7 @@ mod tests {
                     .active_post_replacement_drains()
                     .and_then(crate::types::game_state::PostReplacementDrainStack::resident),
                 Some(crate::types::game_state::PostReplacementDrain {
+                    token_creation_parent: None,
                     status: crate::types::game_state::DrainStatus::Paused,
                     ..
                 })
@@ -8040,6 +8260,7 @@ mod tests {
         }
         let values = intrinsic_copiable_values(state.objects.get(&copied).unwrap());
         let continuation = PendingCounterPostAction::ContinueCopyTokenCreation {
+            creation_frame: None,
             owner: PlayerId(0),
             copy: Box::new(CopyTokenSpec {
                 values: Box::new(values),
@@ -8702,6 +8923,8 @@ mod tests {
         state.liminal_entries.insert(
             liminal_id,
             LiminalEntry {
+                creation_frame: None,
+                instructions: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),
                 ),

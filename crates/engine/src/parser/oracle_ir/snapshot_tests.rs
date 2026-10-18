@@ -187,8 +187,17 @@ fn jev_outer_scope_broken() {
     assert_outer_token_owner(&ir);
     assert!(lowered.statics.is_empty());
     assert_eq!(lowered.abilities[0].description.as_deref(), Some(text));
-    assert!(ability_has_unimplemented(&lowered.abilities[0]));
-    assert!(std::iter::successors(Some(&lowered.abilities[0]), |d| d.sub_ability.as_deref()).any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains("Sacrifice the token at the beginning of the next end step"))));
+    assert_outer_spirit_lowered(&lowered, 1);
+    let cleanup = lowered.abilities[0]
+        .sub_ability
+        .as_deref()
+        .unwrap()
+        .sub_ability
+        .as_deref()
+        .unwrap();
+    assert!(
+        matches!(cleanup.effect.as_ref(), Effect::CreateDelayedTrigger { effect, .. } if matches!(effect.effect.as_ref(), Effect::Sacrifice { target: TargetFilter::LastCreated, .. }))
+    );
     insta::assert_json_snapshot!("jev_outer_scope_broken_ir", &ir);
     insta::assert_json_snapshot!("jev_outer_scope_broken_lowered", &lowered);
 }

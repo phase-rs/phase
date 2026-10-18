@@ -563,6 +563,12 @@ impl ResolutionFrame {
     /// the concrete `WaitingFor` variant by the structural API.
     pub const fn gate(&self) -> FrameGate {
         match self {
+            Self::CopyToken(PendingCopyTokenResolution {
+                creation_id: Some(_),
+                pending: Some(crate::types::game_state::TokenCreationPending::CallerSelection),
+                caller: crate::types::game_state::TokenCreationCallerState::Populate { .. },
+                ..
+            }) => FrameGate::DirectChoice(DirectChoiceGate::Populate),
             Self::RepeatedOptionalPayment(RepeatedOptionalPaymentFrame {
                 pending: Some(_),
                 ..
@@ -640,6 +646,7 @@ pub enum FrameGate {
 /// A concrete prompt that a direct-choice frame is permitted to consume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirectChoiceGate {
+    Populate,
     RepeatedOptionalPayment,
     OptionalEffect,
     CoinFlipKeep,
@@ -653,16 +660,20 @@ impl DirectChoiceGate {
     const fn matches(self, waiting_for: &WaitingFor) -> bool {
         matches!(
             (self, waiting_for),
-            (
-                Self::RepeatedOptionalPayment,
-                WaitingFor::OptionalEffectChoice { .. }
-            ) | (
-                Self::RepeatedOptionalPayment,
-                WaitingFor::OpponentMayChoice { .. }
-            ) | (
-                Self::OptionalEffect,
-                WaitingFor::OptionalEffectChoice { .. }
-            ) | (Self::OptionalEffect, WaitingFor::OpponentMayChoice { .. })
+            (Self::Populate, WaitingFor::PopulateChoice { .. })
+                | (
+                    Self::RepeatedOptionalPayment,
+                    WaitingFor::OptionalEffectChoice { .. }
+                )
+                | (
+                    Self::RepeatedOptionalPayment,
+                    WaitingFor::OpponentMayChoice { .. }
+                )
+                | (
+                    Self::OptionalEffect,
+                    WaitingFor::OptionalEffectChoice { .. }
+                )
+                | (Self::OptionalEffect, WaitingFor::OpponentMayChoice { .. })
                 | (
                     Self::OptionalEffect,
                     WaitingFor::ResolutionOptionalPaymentChoice { .. }
@@ -768,6 +779,8 @@ pub enum ParkedFramePlacement {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionStack {
     frames: FrameVec,
+    #[serde(default)]
+    last_token_creation_frame_id: u64,
     /// The monotonic draw-frame allocator survives an abandoned MultiDraw
     /// frame, so a stale captured ID cannot alias a later instruction.
     #[serde(default)]
@@ -966,6 +979,16 @@ impl ResolutionStack {
     /// any recovery — and it does not provide uniqueness against unstamped
     /// frames, which are `None` and unaddressable by type.
     fn recover_post_replacement_frame_id_allocator(&mut self) {
+        self.last_token_creation_frame_id = self
+            .frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::CopyToken(pending) => pending.creation_id.map(|id| id.0),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .max(self.last_token_creation_frame_id);
         let last_frame_id = self
             .frames
             .iter()
@@ -1785,6 +1808,81 @@ impl ResolutionStack {
             Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
             Some(_) | None => None,
         }
+    }
+
+    pub(crate) fn token_creation(
+        &self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+    ) -> Option<&PendingCopyTokenResolution> {
+        match self.frames.get(self.frames.by_id(id)?)? {
+            ResolutionFrame::CopyToken(pending) => Some(pending),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn token_creation_mut(
+        &mut self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+    ) -> Option<&mut PendingCopyTokenResolution> {
+        let slot = self.frames.by_id(id)?;
+        match self.frames.get_mut(slot)? {
+            ResolutionFrame::CopyToken(pending) => Some(pending),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn install_token_creation(
+        &mut self,
+        mut pending: PendingCopyTokenResolution,
+    ) -> crate::types::identifiers::TokenCreationFrameId {
+        self.last_token_creation_frame_id = self
+            .last_token_creation_frame_id
+            .checked_add(1)
+            .expect("token creation frame identity exhausted");
+        let id = crate::types::identifiers::TokenCreationFrameId(self.last_token_creation_frame_id);
+        pending.creation_id = Some(id);
+        self.push_copy_token(pending);
+        id
+    }
+
+    pub(crate) fn bind_each_player_creation_child(
+        &mut self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+    ) {
+        let top = self.frames.top().expect("installed creation child");
+        assert!(
+            matches!(self.frames.get(top), Some(ResolutionFrame::CopyToken(pending)) if pending.creation_id == Some(id))
+        );
+        let parent = self
+            .frames
+            .below(top)
+            .expect("creation child has an EachPlayer parent");
+        let Some(ResolutionFrame::EachPlayerCopyChosen(pending)) = self.frames.get_mut(parent)
+        else {
+            panic!("creation child must be adjacent to its EachPlayer parent");
+        };
+        assert!(pending.copy_status.is_none());
+        pending.copy_status = Some(crate::types::game_state::TokenCreationCopyStatus::Pending(
+            id,
+        ));
+    }
+
+    pub(crate) fn admit_token_creation(
+        &mut self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+        member: crate::types::identifiers::ObjectIncarnationRef,
+    ) -> Result<(), String> {
+        let pending = self
+            .token_creation_mut(id)
+            .ok_or_else(|| format!("unknown token creation frame {}", id.0))?;
+        if pending.created_incarnations.contains(&member) {
+            return Err(format!(
+                "duplicate token creation member {}:{}",
+                member.object_id.0, member.incarnation
+            ));
+        }
+        pending.created_incarnations.push(member);
+        Ok(())
     }
 
     /// Consume exactly the active CopyToken owner after its remaining batches
@@ -3610,6 +3708,45 @@ impl ResolutionStack {
 
     /// Validate stack-local structural and prompt coherence invariants.
     pub fn validate(&self, waiting_for: &WaitingFor) -> Result<(), ResolutionStackError> {
+        if let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            purpose: crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation },
+            ..
+        } = waiting_for
+        {
+            let invalid = match continuation {
+                Some(tail) => {
+                    let drain = match self.last() {
+                        Some(ResolutionFrame::PostReplacement(drains)) => drains.resident(),
+                        _ => None,
+                    };
+                    match (tail.context.token_creation_parent, drain) {
+                        (Some(parent), Some(drain)) if drain.token_creation_parent == Some(parent)
+                            && matches!(drain.status, crate::types::game_state::DrainStatus::Paused)
+                            && drain.source == Some(*source_id) && drain.controller.unwrap_or(*player) == *player
+                            && tail.source_id == *source_id && tail.controller == *player && tail.replacement_applied == drain.applied
+                            && self.token_creation(parent.frame).is_some_and(|owner| owner.pending == Some(crate::types::game_state::TokenCreationPending::Substitution)) => false,
+                        _ => true,
+                    }
+                }
+                None => self.frames.iter().any(|frame| match frame {
+                    ResolutionFrame::CopyToken(owner) => owner.creation_id.is_some(),
+                    ResolutionFrame::PostReplacement(drains) => drains
+                        .resident()
+                        .is_some_and(|drain| drain.token_creation_parent.is_some()),
+                    _ => false,
+                }),
+            };
+            if invalid {
+                return Err(ResolutionStackError::InvalidPayload {
+                    frame: FrameKind::PostReplacement,
+                    message:
+                        "copy source prompt has missing, foreign or stale saved creation authority"
+                            .into(),
+                });
+            }
+        }
         let multi_draw_count = self
             .frames
             .iter()
@@ -3623,10 +3760,98 @@ impl ResolutionStack {
         }
         let has_multi_draw = multi_draw_count == 1;
         let mut discard_ids = HashSet::new();
+        let mut token_creation_ids = HashSet::new();
         let mut post_replacement_ids = HashSet::new();
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
+            if let ResolutionFrame::EachPlayerCopyChosen(parent) = frame {
+                let invalid = match &parent.copy_status {
+                    Some(crate::types::game_state::TokenCreationCopyStatus::Pending(id)) => parent.stage != crate::types::game_state::CopyChosenStage::AwaitingCopy || self.token_creation(*id)
+                        .is_none_or(|child| !matches!(child.caller, crate::types::game_state::TokenCreationCallerState::EachPlayerCopyChosen)),
+                    Some(crate::types::game_state::TokenCreationCopyStatus::Completed(result)) => result.object_incarnations.iter().collect::<HashSet<_>>().len() != result.object_incarnations.len(),
+                    None => false,
+                };
+                if invalid {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::EachPlayerCopyChosen,
+                        message:
+                            "EachPlayer copy status has missing or mismatched exact child/result"
+                                .into(),
+                    });
+                }
+            }
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                if let Some(parent) = drains
+                    .resident()
+                    .and_then(|drain| drain.token_creation_parent)
+                {
+                    if !token_creation_ids.contains(&parent.frame) {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::PostReplacement,
+                            message: "substitution drain has a foreign creation parent".into(),
+                        });
+                    }
+                }
+            }
+            if let ResolutionFrame::CopyToken(pending) = frame {
+                if let Some(id) = pending.creation_id {
+                    let invalid = if id.0 == 0 || !token_creation_ids.insert(id) {
+                        Some("duplicate or zero token creation frame id")
+                    } else if id.0 > self.last_token_creation_frame_id {
+                        Some("token creation allocator is behind its resident owner")
+                    } else if !pending.remaining.is_empty() {
+                        Some("current token creation also contains legacy copy work")
+                    } else if matches!(pending.pending, Some(crate::types::game_state::TokenCreationPending::Replacement)) != pending.replacement_queue_tail.is_some() {
+                        Some("creation replacement lacks its pending queue boundary")
+                    } else if pending
+                        .replacement_queue_tail
+                        .is_some_and(|tail| tail > pending.work.len())
+                    {
+                        Some("creation replacement queue boundary exceeds remaining work")
+                    } else if pending.segment_start > pending.created_incarnations.len() {
+                        Some("token creation segment exceeds its result")
+                    } else if matches!(pending.caller,crate::types::game_state::TokenCreationCallerState::EachPlayerCopyChosen) && !index.checked_sub(1).and_then(|parent|self.frames.iter().nth(parent)).is_some_and(|frame|matches!(frame,ResolutionFrame::EachPlayerCopyChosen(parent) if parent.copy_status==Some(crate::types::game_state::TokenCreationCopyStatus::Pending(id)))) {
+                        Some("current EachPlayer creation lacks its adjacent exact pending parent")
+                    } else if pending.creator.is_none() {
+                        Some("current token creation is missing its creator")
+                    } else if pending
+                        .result_parent
+                        .is_some_and(|parent| !token_creation_ids.contains(&parent) || parent == id || self.token_creation(parent).is_none_or(|owner| owner.pending != Some(crate::types::game_state::TokenCreationPending::Substitution)))
+                    {
+                        Some("token substitution parent is not an earlier resident creation")
+                    } else if pending
+                        .created_incarnations
+                        .iter()
+                        .collect::<HashSet<_>>()
+                        .len()
+                        != pending.created_incarnations.len()
+                    {
+                        Some("duplicate token birth incarnation in creation result")
+                    } else {
+                        None
+                    };
+                    if let Some(message) = invalid {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::CopyToken,
+                            message: message.into(),
+                        });
+                    }
+                } else if !pending.work.is_empty()
+                    || pending.pending.is_some()
+                    || pending.replacement_queue_tail.is_some()
+                    || pending.result_parent.is_some()
+                    || !pending.created_incarnations.is_empty()
+                    || pending.creator.is_some()
+                    || pending.continuation.is_some()
+                {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::CopyToken,
+                        message: "id-less legacy copy frame contains current creation metadata"
+                            .into(),
+                    });
+                }
+            }
             if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
                 direct_choice_count += 1;
                 if index + 1 != self.frames.len() {
@@ -3790,7 +4015,8 @@ impl ResolutionStack {
 /// from the legacy actor fallback stored in `valid_card`. Version 4 requires
 /// every draw frame to carry its result owner explicitly, including `null`.
 /// Version 5 adds the simultaneous-draw dealer to the draw frame.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
+/// Version 6 carries exact creation owners, queued work, and saved copy tails.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4367,7 +4593,7 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | RESOLUTION_STATE_WIRE_VERSION => {
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | 5 | RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV4
             }
             _ => {
@@ -4849,6 +5075,8 @@ fn has_removed_batched_repeated_optional_payment(value: &Value) -> bool {
 /// non-serializable and are checked only structurally at this boundary.
 #[cfg(debug_assertions)]
 pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
+    crate::types::game_state::validate_token_creation_authorities(state)
+        .unwrap_or_else(|error| panic!("token creation authority must validate: {error}"));
     let frames = canonicalize_legacy_resolution_state(state)
         .unwrap_or_else(|error| panic!("resolution state must canonicalize: {error}"));
     frames
@@ -5331,6 +5559,7 @@ impl LegacyReplacementTailsWire {
             if let Some(continuation) = continuation {
                 self.post_replacement_drains.install(
                     PostReplacementDrain {
+                        token_creation_parent: None,
                         status: DrainStatus::Ready(continuation),
                         source: self.post_replacement_source,
                         applied: self.post_replacement_applied,
@@ -6992,8 +7221,8 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 5);
+    fn resolution_wire_contract_pins_v6_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 6);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
@@ -7661,6 +7890,16 @@ mod tests {
         let mut copy_token = restore_v1_copy_token_fixture(
             GameState::new_two_player(121),
             PendingCopyTokenResolution {
+                creation_id: None,
+                result_parent: None,
+                work: std::collections::VecDeque::new(),
+                pending: None,
+                replacement_queue_tail: None,
+                created_incarnations: Vec::new(),
+                creator: None,
+                continuation: None,
+                caller: crate::types::game_state::TokenCreationCallerState::Plain,
+                segment_start: 0,
                 created_ids: Vec::new(),
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
@@ -7679,6 +7918,7 @@ mod tests {
     fn v1_nested_each_player_copy_and_counter_fixture_preserves_child_order() {
         let state = GameState::new_two_player(122);
         let each_player = PendingEachPlayerCopyChosen {
+            copy_status: None,
             stage: CopyChosenStage::AwaitingCopy,
             player: PlayerId(0),
             chosen: Vec::new(),
@@ -7695,6 +7935,16 @@ mod tests {
             trigger_event: None,
         };
         let copy_token = PendingCopyTokenResolution {
+            creation_id: None,
+            result_parent: None,
+            work: std::collections::VecDeque::new(),
+            pending: None,
+            replacement_queue_tail: None,
+            created_incarnations: Vec::new(),
+            creator: None,
+            continuation: None,
+            caller: crate::types::game_state::TokenCreationCallerState::Plain,
+            segment_start: 0,
             created_ids: Vec::new(),
             remaining: VecDeque::new(),
             effect_kind: EffectKind::CopyTokenOf,
@@ -7755,6 +8005,7 @@ mod tests {
         let mut each_player_copy = restore_v1_each_player_copy_chosen_fixture(
             GameState::new_two_player(130),
             PendingEachPlayerCopyChosen {
+                copy_status: None,
                 stage: CopyChosenStage::AwaitingCounters,
                 player: PlayerId(0),
                 chosen: Vec::new(),

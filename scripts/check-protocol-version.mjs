@@ -162,7 +162,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +72: v143 retypes `GameState.modal_modes_chosen_this_{turn,game}` keys to `ObjectIncarnationRef`.
 // +63: v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
 // +73: v144 adds the exact cast-time TargetFilter.CastingSpell reference.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 73;
+// +74: v145 carries exact token creation frames and resolution wire 6.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 74;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -259,7 +260,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +71: wire 125 moves with full-game v143 for incarnation-keyed modal history.
 // +62: wire 116 moves with full-game v134 for `AbilityActivated.stack_entry`.
 // +72: wire 126 moves with full-game v144 for TargetFilter.CastingSpell.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 72;
+// +73: wire 127 moves with full-game v145 for exact creation frames/resolution wire 6.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 73;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

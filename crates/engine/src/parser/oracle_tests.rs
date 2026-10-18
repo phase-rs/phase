@@ -25,7 +25,49 @@ const NORMALIZED_BROOD: &str = "If you control an Eldrazi Spawn, create three 0/
 const CIRCADIAN_BODY: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
 const CIRCADIAN_SEEK: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control";
 const CIRCADIAN_GRANT: &str = "For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
-const BROKEN_CLEANUP: &str = "Sacrifice the token at the beginning of the next end step";
+
+#[test]
+fn broken_visage_complete_public_chain() {
+    let parsed = parse_oracle_text(FULL_BROKEN, "Broken Visage", &[], &["Instant".into()], &[]);
+    assert_ordinary_spirit_shape(&parsed, 1);
+    let chain = scope_chain(&parsed.abilities[0]);
+    assert_eq!(
+        chain.len(),
+        3,
+        "destroy, defined creation, independent cleanup"
+    );
+    assert!(matches!(
+        *chain[0].effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    ));
+    assert!(matches!(*chain[1].effect, Effect::Token { .. }));
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = chain[2].effect.as_ref()
+    else {
+        panic!("normal delayed cleanup: {chain:#?}");
+    };
+    assert!(matches!(
+        condition,
+        DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::End
+        }
+    ));
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            ..
+        }
+    ));
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some(FULL_BROKEN)
+    );
+}
 
 fn scope_spell(text: &str) -> ParsedAbilities {
     parse_oracle_text(text, "Synthetic outer scope", &[], &["Instant".into()], &[])
@@ -139,9 +181,9 @@ fn outer_spell_instruction_owns_nested_static_text() {
         assert!(parsed.statics.is_empty(), "{name}: {parsed:#?}");
         assert_eq!(parsed.abilities.len(), 1);
         assert_eq!(parsed.abilities[0].description.as_deref(), Some(text));
-        assert!(
+        assert_eq!(
             has_unimplemented(&parsed.abilities[0]),
-            "unfinished full card must remain red: {name}"
+            name == "Circadian Struggle"
         );
         let gaps: Vec<_> = scope_chain(&parsed.abilities[0])
             .iter()
@@ -151,7 +193,10 @@ fn outer_spell_instruction_owns_nested_static_text() {
             })
             .collect();
         if name == "Broken Visage" {
-            assert!(gaps.iter().any(|f| f.contains(BROKEN_CLEANUP)));
+            assert!(gaps.is_empty());
+            assert!(scope_chain(&parsed.abilities[0])
+                .iter()
+                .any(|node| matches!(node.effect.as_ref(), Effect::CreateDelayedTrigger { .. })));
         } else {
             assert!(gaps.iter().any(|f| f.contains(CIRCADIAN_SEEK)));
             assert!(gaps.iter().any(|f| f.contains(CIRCADIAN_GRANT)));

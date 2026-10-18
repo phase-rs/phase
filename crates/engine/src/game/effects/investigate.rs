@@ -15,7 +15,7 @@ pub fn resolve(
     // CR 111.10f: A Clue token is a colorless Clue artifact token with
     // "{2}, Sacrifice this artifact: Draw a card."
     // Build a synthetic Token effect and resolve through the standard token pipeline.
-    let clue_ability = ResolvedAbility::new(
+    let mut clue_ability = ResolvedAbility::new(
         crate::types::ability::Effect::Token {
             name: "Clue".to_string(),
             power: PtValue::Fixed(0),
@@ -36,8 +36,24 @@ pub fn resolve(
         ability.source_id,
         ability.controller,
     );
-    super::token::resolve(state, &clue_ability, events)?;
+    clue_ability.context = ability.context.clone();
+    clue_ability.sub_ability = ability.sub_ability.clone();
+    super::token::begin_token_creation(
+        state,
+        &clue_ability,
+        crate::types::game_state::TokenCreationCallerState::Investigate {
+            player: ability.controller,
+        },
+        events,
+    );
 
+    Ok(())
+}
+
+pub(crate) fn complete_creation(
+    player: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
     // CR 608.2c + CR 109.5: Record the investigating player so downstream
     // "the number of opponents who investigated this way" references resolve.
     // During an `Effect`-level `player_scope: Opponent` fan-out the driver
@@ -45,12 +61,216 @@ pub fn resolve(
     // so each opponent's investigate records THAT opponent. The generic scan in
     // effects/mod.rs inserts `(player_id, action)` into `player_actions_this_way`.
     events.push(GameEvent::PlayerPerformedAction {
-        player_id: ability.controller,
+        player_id: player,
         action: PlayerActionKind::Investigate,
         look_count: None,
         scry_bottom_count: None,
         scry_top_count: None,
     });
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn investigate_completion_synchronous() {
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            crate::types::ability::Effect::Investigate,
+            super::super::token_copy::tests::CreationPauseCase::Synchronous,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::Investigate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::Token,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Investigate,
+                ..
+            }
+        )));
+    }
+    #[test]
+    fn investigate_completion_queued_child() {
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            crate::types::ability::Effect::Investigate,
+            super::super::token_copy::tests::CreationPauseCase::Queued,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::Investigate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::Token,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Investigate,
+                ..
+            }
+        )));
+    }
+    #[test]
+    fn investigate_completion_counter_pause() {
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            crate::types::ability::Effect::Investigate,
+            super::super::token_copy::tests::CreationPauseCase::Counter,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::Investigate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::Token,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Investigate,
+                ..
+            }
+        )));
+    }
+    #[test]
+    fn investigate_completion_queued_child_current_reload() {
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            crate::types::ability::Effect::Investigate,
+            super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::Investigate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::Token,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Investigate,
+                ..
+            }
+        )));
+    }
+    #[test]
+    fn investigate_completion_counter_current_reload() {
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            crate::types::ability::Effect::Investigate,
+            super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::Investigate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::Token,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Investigate,
+                ..
+            }
+        )));
+    }
 }

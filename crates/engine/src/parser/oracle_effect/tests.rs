@@ -186,15 +186,10 @@ fn token_definition_does_not_leak_across_parse_boundaries_or_cleanup() {
             .any(|effect| matches!(effect, Effect::Token { .. })),
         "creation is represented"
     );
-    assert!(
-        effects.iter().any(
-            |effect| effect
-                .unimplemented_description()
-                .is_some_and(|fragment| fragment
-                    == "Sacrifice the token at the beginning of the next end step")
-        ),
-        "exact cleanup remains strict until phase 6: {def:#?}"
-    );
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::CreateDelayedTrigger { effect, .. } if matches!(effect.effect.as_ref(), Effect::Sacrifice { target: TargetFilter::LastCreated, .. }))), "normal independent cleanup: {def:#?}");
+    assert!(effects
+        .iter()
+        .all(|effect| !matches!(effect, Effect::Unimplemented { .. })));
 }
 
 #[test]

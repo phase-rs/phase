@@ -29864,6 +29864,9 @@ pub struct PendingForwardedZoneResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// Present only while an accepted token substitution resolves its own creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.
@@ -33961,7 +33964,7 @@ pub struct LatchedCopiableSnapshot {
 /// copy effect on the Aura's enchanted host instead. `CopyTokenSource` (Esix,
 /// Fractal Bloom) uses the chosen permanent as the copy SOURCE for a token-creation
 /// substitution, transforming nothing and latching nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum CopyTargetPurpose {
     /// CR 707.2: the entering object (the clone) becomes a copy of the chosen
@@ -33977,7 +33980,10 @@ pub enum CopyTargetPurpose {
     /// token-creation substitution — the replacement creates that many tokens
     /// that are copies of it (Esix, Fractal Bloom). Unlike `BecomeCopy`, nothing
     /// is transformed; unlike `PersistChosenAttribute`, nothing is latched.
-    CopyTokenSource,
+    CopyTokenSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<Box<ResolvedAbility>>,
+    },
 }
 
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a

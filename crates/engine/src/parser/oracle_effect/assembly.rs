@@ -5904,4 +5904,51 @@ mod token_owner_tests {
         .any(|definition| definition.effect.unimplemented_description()
             == ir.clauses.last().unwrap().source.fragment()));
     }
+    #[test]
+    fn exact_token_definition_owner_does_not_become_the_delayed_cleanup_consumer() {
+        let text="Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let owner = ir
+            .clauses
+            .iter()
+            .find_map(|clause| clause.token_definition_owner)
+            .expect("separate definition has exact creation ClauseId");
+        assert!(ir.clauses.iter().any(|clause| clause.id == owner));
+        assert_ne!(ir.clauses.last().unwrap().id, owner);
+        let output = assemble_effect_chain(&ir);
+        let nodes = std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| matches!(*node.effect, Effect::Token { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            *nodes.last().unwrap().effect,
+            Effect::CreateDelayedTrigger { .. }
+        ));
+        let mut missing = ir.clone();
+        for clause in &mut missing.clauses {
+            clause.token_definition_owner = None;
+        }
+        let output = assemble_effect_chain(&missing);
+        assert!(
+            std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+                .any(|node| node.effect.unimplemented_description().is_some())
+        );
+        let mut duplicated = ir.clone();
+        let owner_index = duplicated
+            .clauses
+            .iter()
+            .position(|clause| clause.id == owner)
+            .unwrap();
+        duplicated.clauses[owner_index + 1].id = owner;
+        let output = assemble_effect_chain(&duplicated);
+        assert!(
+            std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+                .any(|node| node.effect.unimplemented_description().is_some())
+        );
+    }
 }

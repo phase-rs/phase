@@ -397,11 +397,14 @@ fn copy_token_source_targets(runner: &GameRunner) -> Vec<ObjectId> {
             purpose,
             ..
         } => {
-            assert_eq!(
-                *purpose,
-                CopyTargetPurpose::CopyTokenSource,
-                "the chosen-source arm must raise CopyTokenSource, not the \
-                 Metamorphic Alteration disposition"
+            assert!(
+                matches!(
+                    purpose,
+                    CopyTargetPurpose::CopyTokenSource {
+                        continuation: Some(_)
+                    }
+                ),
+                "current source choice owns its selected resolved tail: {purpose:?}"
             );
             valid_targets.clone()
         }
@@ -1456,6 +1459,140 @@ fn the_surviving_entry_prompts_can_also_be_declined() {
             p1p1_counters(c),
             0,
             "declined → no +1/+1 counter, so the prompt genuinely drove the outcome"
+        );
+    }
+}
+
+#[test]
+fn current_selected_tail_is_saved_authority_and_legacy_none_is_explicitly_separate() {
+    for legacy in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let chosen = scenario
+            .add_creature(P0, "Distinct chosen source", 7, 8)
+            .id();
+        let foreign = scenario.add_creature(P0, "Foreign latest", 11, 13).id();
+        let mut runner = scenario.build();
+        let source = install_esix(runner.state_mut(), P0);
+        resolve_token_source(&mut runner, P0, THREE_SOLDIERS);
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        assert!(copy_token_source_targets(&runner).contains(&chosen));
+        let mut state = runner.state().clone();
+        if legacy {
+            // Explicit historical id-less storage fixture: old saves carried
+            // count/applied transients and no selected resolved continuation.
+            let tail = match &state.waiting_for {
+                WaitingFor::CopyTargetChoice {
+                    purpose:
+                        CopyTargetPurpose::CopyTokenSource {
+                            continuation: Some(tail),
+                        },
+                    ..
+                } => tail,
+                _ => panic!("positive current saved prompt"),
+            };
+            state.post_replacement_token_choice_applied = Some(tail.replacement_applied.clone());
+            state.post_replacement_token_substitution_count = Some(3);
+            state.resolution_stack = Default::default();
+            if let WaitingFor::CopyTargetChoice { purpose, .. } = &mut state.waiting_for {
+                *purpose = CopyTargetPurpose::CopyTokenSource { continuation: None };
+            }
+        } else {
+            // Labelled storage isolation: changing the live source definition
+            // cannot change the selected Ready continuation already saved.
+            let object = state.objects.get_mut(&source).unwrap();
+            object.replacement_definitions = Default::default();
+            object.base_replacement_definitions = Arc::new(vec![]);
+            state.post_replacement_token_substitution_count = Some(99);
+            state.last_created_token_ids = vec![foreign];
+        }
+        let mut value = serde_json::to_value(&state).unwrap();
+        if legacy {
+            value["resolution_state_version"] = serde_json::json!(5);
+        }
+        let restored: GameState = serde_json::from_value(value).unwrap();
+        runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        let copies = tokens_named(&runner, "Distinct chosen source", P0);
+        assert_eq!(copies.len(), 3);
+        for copy in copies {
+            assert_eq!((copy.base_power, copy.base_toughness), (Some(7), Some(8)));
+        }
+        assert!(runner.state().resolution_stack.is_empty());
+        assert_eq!(runner.state().objects[&foreign].zone, Zone::Battlefield);
+    }
+}
+
+#[test]
+fn chosen_copy_liminal_entry_pause_current_roundtrips_retain_complete_cleanup_births() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let reveler = scenario.add_creature(P0, "Dead Reveler", 3, 2).id();
+    let mut runner = scenario.build();
+    grant_unleash(runner.state_mut(), reveler);
+    install_esix(runner.state_mut(), P0);
+    resolve_token_source(&mut runner,P0,"Create three 1/1 white Soldier creature tokens. Sacrifice those tokens at the beginning of the next end step.");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(reveler)),
+        })
+        .unwrap();
+    assert!(at_replacement_choice(&runner));
+    assert!(!runner.state().liminal_entries.is_empty());
+    assert!(runner.state().delayed_triggers.is_empty());
+    let mut prompts = 0;
+    for _ in 0..8 {
+        if !at_replacement_choice(&runner) {
+            break;
+        }
+        prompts += 1;
+        runner = GameRunner::from_state(
+            serde_json::from_value::<engine::types::game_state::TrustedGameStateEnvelope>(
+                serde_json::to_value(
+                    engine::types::game_state::TrustedGameStateEnvelope::capture(
+                        runner.state().clone(),
+                    ),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        );
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+    }
+    assert_eq!(prompts, 3);
+    assert_eq!(tokens_named(&runner, "Dead Reveler", P0).len(), 3);
+    assert!(tokens_named(&runner, "Dead Reveler", P0)
+        .iter()
+        .all(|object| p1p1_counters(object) == 1));
+    assert!(runner.state().resolution_stack.is_empty());
+    let delayed = runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .find(|trigger| matches!(trigger.ability.effect, Effect::Sacrifice { .. }))
+        .unwrap();
+    let births = delayed.ability.target_incarnations.clone();
+    assert_eq!(births.len(), 3);
+    let source = delayed.source_id;
+    super::jev_token_followup::reach_cleanup_stack(&mut runner, source);
+    runner.advance_until_stack_empty();
+    for member in births {
+        assert_ne!(
+            runner.state().objects[&member.object_id].zone,
+            Zone::Battlefield
         );
     }
 }

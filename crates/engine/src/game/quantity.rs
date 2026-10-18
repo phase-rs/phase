@@ -3843,7 +3843,10 @@ fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
         recipient: None,
         scoped_player: ability.scoped_player,
         damage_source: None,
-        event_amount: None,
+        event_amount: ability
+            .context
+            .token_creation_parent
+            .map(|parent| u32_to_i32_saturating(parent.substitution_count)),
         spell: None,
         granting_object: None,
     }

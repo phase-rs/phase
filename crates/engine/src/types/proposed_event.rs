@@ -22,6 +22,23 @@ use super::zones::Zone;
 
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
+/// Entry instructions fixed before replacement evaluation, separate from a token's body
+/// and from a later override on one particular entry event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCreationInstructions {
+    pub tapped: EtbTapState,
+    pub enters_attacking: bool,
+}
+
+/// An accepted substitution's complete authority over its selected parent event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCreationParentContext {
+    pub frame: crate::types::identifiers::TokenCreationFrameId,
+    pub instructions: TokenCreationInstructions,
+    pub enter_tapped: EtbTapState,
+    pub substitution_count: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
     pub source: ObjectId,
@@ -783,6 +800,10 @@ pub enum ProposedEvent {
     /// `TokenSpec` is ~400 bytes of resolved characteristics, and most
     /// other variants are small IDs.
     CreateToken {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<TokenCreationInstructions>,
         owner: PlayerId,
         /// Resolved token characteristics, keyed by replacement pipeline
         /// matchers on the apply path to reproduce the token faithfully.

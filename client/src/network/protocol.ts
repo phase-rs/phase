@@ -679,7 +679,8 @@ export type P2PInteractionPreviewAnswer =
   | { type: "failed"; message: string };
 
 // 126: TargetFilter.CastingSpell requires typed peers that decode the new tag.
-export const WIRE_PROTOCOL_VERSION = 126 as const;
+// 127: full-game 145 carries exact token creation and private resolved copy-source tails.
+export const WIRE_PROTOCOL_VERSION = 127 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

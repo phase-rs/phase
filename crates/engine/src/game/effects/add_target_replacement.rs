@@ -1685,6 +1685,8 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -1695,7 +1697,11 @@ mod tests {
 
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(ProposedEvent::CreateToken {
-            owner, ref spec, ..
+            creation_frame: None,
+            instructions: None,
+            owner,
+            ref spec,
+            ..
         }) = result
         else {
             panic!("expected modified CreateToken event, got {result:?}");
@@ -1780,6 +1786,8 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -1790,7 +1798,11 @@ mod tests {
 
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(ProposedEvent::CreateToken {
-            owner, ref spec, ..
+            creation_frame: None,
+            instructions: None,
+            owner,
+            ref spec,
+            ..
         }) = result
         else {
             panic!("expected modified CreateToken event, got {result:?}");
@@ -1865,6 +1877,8 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(token_spec),
             copy: None,

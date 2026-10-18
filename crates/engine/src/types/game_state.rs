@@ -4511,14 +4511,142 @@ pub struct CounterGrowth {
     pub per_cycle_delta: u32,
 }
 
+/// One replacement-visible batch belonging to a particular creation instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCreationBatch {
+    pub owner: PlayerId,
+    pub spec: Box<crate::types::proposed_event::TokenSpec>,
+    pub copy: Option<Box<CopyTokenSpec>>,
+    pub instructions: crate::types::proposed_event::TokenCreationInstructions,
+    pub enter_tapped: EtbTapState,
+    pub count: u32,
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub applied: HashSet<AppliedReplacementKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationWork {
+    Proposed(TokenCreationBatch),
+    Approved(TokenCreationBatch),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationPending {
+    Replacement,
+    Entry,
+    Substitution,
+    Caller,
+    CallerSelection,
+}
+
+/// Serializable post-creation work. Each segment consumes only its own suffix of
+/// the operation's birth-pinned result before the next subject can start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationCallerState {
+    #[default]
+    Plain,
+    Blocking {
+        current: ObjectIncarnationRef,
+        remaining: VecDeque<ObjectIncarnationRef>,
+        owner: TargetFilter,
+    },
+    Encore {
+        current: PlayerId,
+        remaining: VecDeque<PlayerId>,
+    },
+    Myriad {
+        current: PlayerId,
+        remaining: VecDeque<PlayerId>,
+        defender: PlayerId,
+    },
+    Populate {
+        eligible: Vec<ObjectId>,
+    },
+    Investigate {
+        player: PlayerId,
+    },
+    Amass {
+        controller: PlayerId,
+        subtype: String,
+        count: u32,
+    },
+    EmpowerJace {
+        controller: PlayerId,
+        count: u32,
+    },
+    Debug {
+        run_etb: bool,
+        preset: Option<crate::types::card::TokenImageRef>,
+        body: Option<Box<crate::types::proposed_event::TokenCharacteristics>>,
+    },
+    EachPlayerCopyChosen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationCopyStatus {
+    Pending(crate::types::identifiers::TokenCreationFrameId),
+    Completed(crate::types::ability::ForwardedResultContext),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenCreationProgress {
+    Completed(crate::types::ability::ForwardedResultContext),
+    Pending(crate::types::identifiers::TokenCreationFrameId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCopyTokenResolution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_id: Option<crate::types::identifiers::TokenCreationFrameId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_parent: Option<crate::types::identifiers::TokenCreationFrameId>,
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub work: VecDeque<TokenCreationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<TokenCreationPending>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_queue_tail: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_incarnations: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<Box<ResolvedAbility>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Box<PendingContinuation>>,
+    #[serde(default)]
+    pub caller: TokenCreationCallerState,
+    #[serde(default)]
+    pub segment_start: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created_ids: Vec<ObjectId>,
     #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+}
+
+impl PendingCopyTokenResolution {
+    pub(crate) fn legacy(
+        remaining: VecDeque<PendingCopyTokenBatch>,
+        effect_kind: EffectKind,
+        source_id: ObjectId,
+    ) -> Self {
+        Self {
+            creation_id: None,
+            result_parent: None,
+            work: VecDeque::new(),
+            pending: None,
+            replacement_queue_tail: None,
+            created_incarnations: Vec::new(),
+            creator: None,
+            continuation: None,
+            caller: TokenCreationCallerState::Plain,
+            segment_start: 0,
+            created_ids: Vec::new(),
+            remaining,
+            effect_kind,
+            source_id,
+        }
+    }
 }
 
 /// Private, face-complete source for a debug-created card that has not yet
@@ -4603,6 +4731,8 @@ pub struct CopyChosenSelection {
 /// continue the already-collected action walk after this player's step completes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEachPlayerCopyChosen {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_status: Option<TokenCreationCopyStatus>,
     pub stage: CopyChosenStage,
     pub player: PlayerId,
     /// `[0]` copied, `[1]` (optional) scales the copy.
@@ -7081,6 +7211,8 @@ pub enum TokenEntryEventEmission {
 /// is the whole point of postponing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingTokenBattlefieldEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     pub object_id: ObjectId,
     /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
     pub name: String,
@@ -7097,6 +7229,8 @@ pub struct PendingTokenBattlefieldEntry {
 /// resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTokenEntryTail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     pub owner: PlayerId,
     pub copy: Box<CopyTokenSpec>,
     pub enter_tapped: EtbTapState,
@@ -7130,6 +7264,8 @@ pub enum PendingCounterPostAction {
         ability: Box<ResolvedAbility>,
     },
     FinalizeAmass {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         subtype: String,
         ability: Box<ResolvedAbility>,
@@ -7146,6 +7282,8 @@ pub enum PendingCounterPostAction {
         object_id: ObjectId,
     },
     FinalizeTokenEntry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         attach_to: Option<AttachTarget>,
@@ -7154,12 +7292,18 @@ pub enum PendingCounterPostAction {
         controller: PlayerId,
     },
     ContinueTokenCreation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
         owner: PlayerId,
         spec: Box<TokenSpec>,
         enter_tapped: EtbTapState,
         remaining_count: u32,
     },
     FinalizeCopyTokenEntry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         enters_attacking: bool,
@@ -7167,6 +7311,8 @@ pub enum PendingCounterPostAction {
         controller: PlayerId,
     },
     ContinueCopyTokenCreation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
@@ -7174,6 +7320,8 @@ pub enum PendingCounterPostAction {
         remaining_count: u32,
     },
     ApplyCopyTokenModificationsAndFinalize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         enters_attacking: bool,
@@ -7195,6 +7343,8 @@ pub enum PendingCounterPostAction {
         tail: Box<CopyTokenEntryTail>,
     },
     FinalizeCommittedLiminalTokenEntry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         source_id: ObjectId,
@@ -7207,6 +7357,8 @@ pub enum PendingCounterPostAction {
         entry_events: TokenEntryEventEmission,
     },
     ContinueLiminalCopyTokenBatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
@@ -20708,6 +20860,10 @@ impl<'de> Deserialize<'de> for LiminalEntrant {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
     pub object: LiminalEntrant,
     pub name: String,
     pub source_id: ObjectId,
@@ -24062,6 +24218,114 @@ fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> 
     visit(value, &receipts)
 }
 
+pub(crate) fn validate_token_creation_authorities(state: &GameState) -> Result<(), String> {
+    let check = |id: Option<crate::types::identifiers::TokenCreationFrameId>| {
+        if let Some(id) = id {
+            if state.resolution_stack.token_creation(id).is_none() {
+                return Err(format!("token entry names unknown creation {}", id.0));
+            }
+        }
+        Ok(())
+    };
+    if let Some(pending) = &state.pending_replacement {
+        if let ProposedEvent::CreateToken {
+            creation_frame,
+            instructions,
+            ..
+        } = &pending.proposed
+        {
+            if creation_frame.is_some() != instructions.is_some() {
+                return Err("creation event has partial instruction authority".into());
+            }
+            check(*creation_frame)?;
+        }
+    }
+    for entry in state.liminal_entries.values() {
+        if entry.creation_frame.is_some() != entry.instructions.is_some() {
+            return Err("liminal token has partial creation authority".into());
+        }
+        check(entry.creation_frame)?;
+    }
+    if let Some(entry) = &state.pending_token_battlefield_entry {
+        check(entry.creation_frame)?;
+    }
+    fn check_installed(ability: &ResolvedAbility) -> Result<(), String> {
+        if ability.context.token_creation_parent.is_some() {
+            return Err("installed delayed payload retains a live creation affiliation".into());
+        }
+        if let Some(child) = &ability.sub_ability {
+            check_installed(child)?;
+        }
+        if let Some(child) = &ability.else_ability {
+            check_installed(child)?;
+        }
+        Ok(())
+    }
+    for delayed in &state.delayed_triggers {
+        check_installed(&delayed.ability)?;
+    }
+    for frame in state.resolution_stack.iter() {
+        if let crate::types::resolution::ResolutionFrame::CounterAdditions(pending) = frame {
+            for action in pending
+                .completion
+                .iter()
+                .flat_map(|completion| &completion.post_actions)
+            {
+                let id = match action {
+                    PendingCounterPostAction::FinalizeTokenEntry { creation_frame, .. }
+                    | PendingCounterPostAction::FinalizeAmass { creation_frame, .. }
+                    | PendingCounterPostAction::FinalizeCopyTokenEntry { creation_frame, .. }
+                    | PendingCounterPostAction::ContinueCopyTokenCreation {
+                        creation_frame, ..
+                    }
+                    | PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        creation_frame,
+                        ..
+                    }
+                    | PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                        creation_frame,
+                        ..
+                    }
+                    | PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+                        creation_frame,
+                        ..
+                    } => *creation_frame,
+                    PendingCounterPostAction::ContinueTokenCreation {
+                        creation_frame,
+                        instructions,
+                        ..
+                    } => {
+                        if creation_frame.is_some() != instructions.is_some() {
+                            return Err(
+                                "counter continuation has partial creation authority".into()
+                            );
+                        }
+                        *creation_frame
+                    }
+                    PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost {
+                        tail, ..
+                    } => tail.creation_frame,
+                    _ => None,
+                };
+                check(id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn freeze_stored_created_token_referents(state: &mut GameState) {
+    for delayed in &mut state.delayed_triggers {
+        // CR 603.7c: legacy installation already selected its targets. Never
+        // consult today's LastCreated or re-pin an object at a later epoch.
+        let result = crate::types::ability::ForwardedResultContext {
+            targets: delayed.ability.targets.clone(),
+            object_incarnations: delayed.ability.target_incarnations.clone(),
+        };
+        crate::game::effects::delayed_trigger::freeze_created_result(&mut delayed.ability, &result);
+    }
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -24101,6 +24365,8 @@ impl GameStateDecode {
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        freeze_stored_created_token_referents(&mut state);
+        validate_token_creation_authorities(&state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
@@ -24134,6 +24400,8 @@ impl GameStateDecode {
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
+        freeze_stored_created_token_referents(&mut state);
+        validate_token_creation_authorities(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
@@ -24429,6 +24697,8 @@ pub struct PostReplacementDrainDispatch {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
     /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
 
@@ -33573,6 +33843,7 @@ mod drain_stack_reentrancy_tests {
             matches!(
                 stack.resident(),
                 Some(PostReplacementDrain {
+                    token_creation_parent: None,
                     status: DrainStatus::Paused,
                     ..
                 })
@@ -33609,6 +33880,7 @@ mod drain_stack_reentrancy_tests {
             matches!(
                 stack.resident(),
                 Some(PostReplacementDrain {
+                    token_creation_parent: None,
                     status: DrainStatus::Paused,
                     ..
                 })
@@ -40939,6 +41211,7 @@ mod tests {
 
         fn copy_chosen_frame(trigger_event: GameEvent) -> ResolutionFrame {
             ResolutionFrame::EachPlayerCopyChosen(PendingEachPlayerCopyChosen {
+                copy_status: None,
                 stage: CopyChosenStage::AwaitingCopy,
                 player: PlayerId(0),
                 chosen: Vec::new(),

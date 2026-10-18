@@ -927,9 +927,11 @@ fn stash_post_replacement_continuation(
     applied: HashSet<AppliedReplacementKey>,
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
+    token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
 ) {
     state.install_post_replacement_drain(
         PostReplacementDrain {
+            token_creation_parent,
             status: DrainStatus::Ready(continuation),
             source: Some(source),
             applied,
@@ -950,6 +952,31 @@ fn stash_post_replacement_continuation(
         },
         ResidentDrainPolicy::KeepResident,
     );
+}
+
+fn token_substitution_parent(
+    event: &ProposedEvent,
+    definition: &AbilityDefinition,
+) -> Option<crate::types::proposed_event::TokenCreationParentContext> {
+    if !is_token_replacement_choice(definition) && !is_copy_token_substitution(definition) {
+        return None;
+    }
+    let ProposedEvent::CreateToken {
+        creation_frame: Some(frame),
+        instructions: Some(instructions),
+        enter_tapped,
+        count,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(crate::types::proposed_event::TokenCreationParentContext {
+        frame: *frame,
+        instructions: *instructions,
+        enter_tapped: *enter_tapped,
+        substitution_count: *count,
+    })
 }
 
 fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
@@ -4784,6 +4811,8 @@ fn create_token_applier(
     };
 
     if let ProposedEvent::CreateToken {
+        creation_frame,
+        instructions,
         owner,
         mut spec,
         mut copy,
@@ -4842,6 +4871,8 @@ fn create_token_applier(
         // the original batch is therefore suppressed here.
         if choose_token_substitution {
             return ApplyResult::Modified(ProposedEvent::CreateToken {
+                creation_frame,
+                instructions,
                 owner,
                 spec,
                 copy,
@@ -4865,120 +4896,96 @@ fn create_token_applier(
                 crate::game::effects::token::resolve_token_spec(state, &ability)
             {
                 spec = Box::new(substitute_spec);
+                if let Some(seed) = instructions {
+                    spec.tapped = seed.tapped.resolve(false);
+                    spec.enters_attacking = seed.enters_attacking;
+                }
+                copy = None;
             }
         }
 
-        // CR 614.1a + CR 111.1: "those tokens plus ..." — emit an additional
-        // CreateToken for the appended spec class (Chatterfang Squirrels,
-        // Donatello Mutagen). The additional batch counts equal the
-        // already-modified `new_count`, so replacement-ordering choices
-        // (CR 616) applied before this replacement flow through to the
-        // appended batch. The additional batch is proposed through
-        // `replace_event` so further replacements (e.g., Doubling Season on
-        // the creating player) apply to it as a separate event per CR 614.1a.
-        if let Some(mut extra) = additional_spec {
-            // Fill in the replacement source's runtime identity. The parser
-            // stores placeholder ObjectId(0) / PlayerId(0) since these cannot
-            // be known until the replacement fires.
-            let source_controller = state
-                .objects
-                .get(&rid.source)
-                .map(|o| o.controller)
-                .unwrap_or(owner);
+        // CR 614.5 + CR 614.6: replacement-defined children are fresh proposals
+        // owned by this exact creation instruction. They settle before the
+        // approved primary; their entry overrides start from the immutable seed.
+        let mut child_applied = applied.clone();
+        child_applied.insert(AppliedReplacementKey::object(rid.source, rid.index));
+        let seed =
+            instructions.unwrap_or(crate::types::proposed_event::TokenCreationInstructions {
+                tapped: EtbTapState::from_seeded_tapped(spec.tapped),
+                enters_attacking: spec.enters_attacking,
+            });
+        let mut expansions = Vec::new();
+        if let Some(extra) = additional_spec {
+            expansions.push(*extra);
+        }
+        if let Some(mut specs) = ensure_specs {
+            // CR 111.10 + CR 614.6: “one of each” supplies every complete
+            // predefined body, including the subtype-matching primary.
+            if !specs.is_empty() {
+                let primary = specs
+                    .iter()
+                    .position(|candidate| {
+                        candidate.characteristics.subtypes.iter().any(|wanted| {
+                            spec.characteristics
+                                .subtypes
+                                .iter()
+                                .any(|old| old.eq_ignore_ascii_case(wanted))
+                        })
+                    })
+                    .unwrap_or(0);
+                let mut selected = specs.remove(primary);
+                selected.source_id = rid.source;
+                selected.controller = source_controller;
+                selected.tapped = seed.tapped.resolve(false);
+                selected.enters_attacking = seed.enters_attacking;
+                spec = Box::new(selected);
+                copy = None;
+                expansions.extend(specs);
+            }
+        }
+        for mut extra in expansions.into_iter().rev() {
             extra.source_id = rid.source;
             extra.controller = source_controller;
-            // CR 614.5: Inherit the primary event's applied set to prevent
-            // replacements that already applied to the primary event from
-            // re-applying to the recursive extra event. Insert this
-            // Chatterfang-class replacement too so it cannot re-fire on its own
-            // appended batch.
-            let mut applied_on_extra = applied.clone();
-            applied_on_extra.insert(AppliedReplacementKey::object(rid.source, rid.index));
-            // CR 614.1c: The appended batch is a separate event — it does not
-            // inherit an `enter_tapped` override applied to the primary batch.
-            // The appended spec's own `tapped` field (from the parser) governs
-            // its entry state; further replacements (shock-land-style ETB-tap
-            // replacements on the appended batch itself) still compose via
-            // the recursive `replace_event` call below.
-            let extra_proposed = ProposedEvent::CreateToken {
-                owner,
-                spec: extra,
-                copy: None,
-                enter_tapped: EtbTapState::Unspecified,
-                count: new_count,
-                applied: applied_on_extra,
-            };
-            match replace_event(state, extra_proposed, events) {
-                ReplacementResult::Execute(extra_event) => {
-                    crate::game::effects::token::apply_create_token_after_replacement(
-                        state,
-                        extra_event,
-                        events,
-                    );
-                }
-                // Prevented / NeedsChoice branches on the appended batch do not
-                // affect the primary event. A NeedsChoice here would require
-                // infrastructure to queue replacement prompts inside an applier
-                // (none exists yet); the appended batch is silently dropped in
-                // that rare collision case, which is acceptable for the
-                // current class (no cards combine Chatterfang-style appends
-                // with optional ETB replacements on their targets).
-                ReplacementResult::Prevented | ReplacementResult::NeedsChoice(_) => {}
-            }
-        }
-
-        // CR 614.1a + CR 111.1: Manufactor's "ensure one of each" — emit a
-        // recursive CreateToken event for every listed spec whose subtype is
-        // *not* already in the primary event's spec. The primary event keeps
-        // the original subtype's count (Doubling Season etc. composes via
-        // `quantity_modification` above), and each additional batch is sized
-        // at `new_count` so any post-Manufactor multiplier ordered earlier in
-        // CR 616 reaches the appended subtypes.
-        if let Some(specs) = ensure_specs {
-            let source_controller = state
-                .objects
-                .get(&rid.source)
-                .map(|o| o.controller)
-                .unwrap_or(owner);
-            for mut extra in specs {
-                let already_present = extra.characteristics.subtypes.iter().any(|s| {
-                    spec.characteristics
-                        .subtypes
-                        .iter()
-                        .any(|already| already.eq_ignore_ascii_case(s))
-                });
-                if already_present {
-                    continue;
-                }
-                extra.source_id = rid.source;
-                extra.controller = source_controller;
-                // CR 614.5: Inherit the primary event's applied set to prevent
-                // replacements that already applied to the primary event from
-                // re-applying to the recursive extra event.
-                let mut applied_on_extra = applied.clone();
-                applied_on_extra.insert(AppliedReplacementKey::object(rid.source, rid.index));
-                let extra_proposed = ProposedEvent::CreateToken {
+            extra.tapped = seed.tapped.resolve(false);
+            extra.enters_attacking = seed.enters_attacking;
+            if let Some(id) = creation_frame {
+                crate::game::effects::token_copy::enqueue_creation_expansion(
+                    state,
+                    id,
+                    crate::types::game_state::TokenCreationBatch {
+                        owner,
+                        spec: Box::new(extra),
+                        copy: None,
+                        instructions: seed,
+                        enter_tapped: seed.tapped,
+                        count: new_count,
+                        applied: child_applied.clone(),
+                    },
+                );
+            } else {
+                // Explicit historical id-less creation: retain its old entry
+                // contract without claiming retrospective result provenance.
+                let event = ProposedEvent::CreateToken {
+                    creation_frame: None,
+                    instructions: None,
                     owner,
                     spec: Box::new(extra),
                     copy: None,
-                    enter_tapped: EtbTapState::Unspecified,
+                    enter_tapped: seed.tapped,
                     count: new_count,
-                    applied: applied_on_extra,
+                    applied: child_applied.clone(),
                 };
-                match replace_event(state, extra_proposed, events) {
-                    ReplacementResult::Execute(extra_event) => {
-                        crate::game::effects::token::apply_create_token_after_replacement(
-                            state,
-                            extra_event,
-                            events,
-                        );
-                    }
-                    ReplacementResult::Prevented | ReplacementResult::NeedsChoice(_) => {}
+                if let ReplacementResult::Execute(event) = replace_event(state, event, events) {
+                    crate::game::effects::token::apply_create_token_after_replacement(
+                        state, event, events,
+                    );
                 }
             }
         }
 
         ApplyResult::Modified(ProposedEvent::CreateToken {
+            creation_frame,
+            instructions,
             owner,
             spec,
             copy,
@@ -8064,6 +8071,8 @@ fn stage_transformed_entry_projection(
     state.liminal_entries.insert(
         entrant,
         LiminalEntry {
+            creation_frame: None,
+            instructions: None,
             object: crate::types::game_state::LiminalEntrant::Card(projected),
             name,
             source_id: entrant,
@@ -9357,7 +9366,7 @@ pub(super) struct EnterReplacementModifiers {
 impl EventModifiers {
     /// True if this single effect (ignoring sub_ability chain) is purely a
     /// ProposedEvent modifier with no additional resolution work.
-    fn is_event_modifier_effect(effect: &Effect) -> bool {
+    pub(super) fn is_event_modifier_effect(effect: &Effect) -> bool {
         matches!(
             effect,
             // CR 701.26a/b: a SelfRef single tap/untap is purely an enters-tapped
@@ -10199,6 +10208,14 @@ fn apply_single_replacement(
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
+        let token_creation_parent = mandatory_post_effect.as_ref().and_then(|post| match post {
+            PostReplacementContinuation::Template(definition) => {
+                token_substitution_parent(&proposed, definition)
+            }
+            PostReplacementContinuation::Resolved(resolved) => {
+                resolved.context.token_creation_parent
+            }
+        });
         match (handler.applier)(proposed, rid, state, events) {
             ApplyResult::Modified(mut new_event) => {
                 if modifiers.etb_tap_state != EtbTapState::Unspecified {
@@ -10370,6 +10387,7 @@ fn apply_single_replacement(
                         // `proposed_event_target` match above), so no existing
                         // continuation's event-target slot changes.
                         proposed_event_target.clone(),
+                        token_creation_parent,
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -10409,6 +10427,7 @@ fn apply_single_replacement(
                         replacement_applied.clone(),
                         proposed_damage_source,
                         proposed_event_target.clone(),
+                        None,
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -12556,8 +12575,12 @@ fn continue_replacement_impl(
         // The drain owns those fields, so replacing it clears them by construction.
         match (branch, post_effect) {
             (ReplacementBranch::Execute | ReplacementBranch::Decline, Some(def)) => {
+                let token_creation_parent = (branch == ReplacementBranch::Execute)
+                    .then(|| token_substitution_parent(&proposed, &def))
+                    .flatten();
                 state.install_post_replacement_drain(
                     PostReplacementDrain {
+                        token_creation_parent,
                         status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                         source: Some(rid.source),
                         applied: proposed.applied_set().clone(),
@@ -14023,6 +14046,8 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                creation_frame: None,
+                instructions: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),
                 ),
@@ -14097,6 +14122,8 @@ mod tests {
             .expect("fixture conniver exists")
             .snapshot;
         let token_event = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -16586,6 +16613,8 @@ mod tests {
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let proposed = ProposedEvent::CreateToken {
+                creation_frame: None,
+                instructions: None,
                 owner: PlayerId(0),
                 spec: Box::new(spec),
                 copy: None,
@@ -17494,6 +17523,7 @@ mod tests {
             );
             let installed = state.install_post_replacement_drain(
                 PostReplacementDrain {
+                    token_creation_parent: None,
                     status: DrainStatus::Ready(PostReplacementContinuation::Template(Box::new(
                         lose_one_life(),
                     ))),
@@ -18597,6 +18627,8 @@ mod tests {
         let dies =
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
         let token = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -18827,6 +18859,8 @@ mod tests {
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -18851,6 +18885,8 @@ mod tests {
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -19582,6 +19618,8 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -19625,6 +19663,8 @@ mod tests {
         spec.characteristics.subtypes.clear();
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(spec),
@@ -22020,6 +22060,8 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(plant_spec),
             copy: None,
@@ -22114,6 +22156,8 @@ mod tests {
         let mut treasure = artifact_spec("Treasure");
         treasure.source_id = manufactor;
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(treasure),
             copy: None,
@@ -22229,6 +22273,8 @@ mod tests {
         };
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(food_spec),
             copy: None,
@@ -22303,6 +22349,8 @@ mod tests {
 
         let soldier = test_token_spec(PlayerId(0), CoreType::Creature);
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(soldier),
             copy: None,
@@ -22388,6 +22436,8 @@ mod tests {
         state.battlefield.push_back(source);
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Artifact)),
             copy: None,
@@ -22599,6 +22649,8 @@ mod tests {
         state.battlefield.push_back(ojer);
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -22697,6 +22749,8 @@ mod tests {
         );
 
         let token_event = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(PlayerId(1), CoreType::Creature)),
@@ -22795,6 +22849,8 @@ mod tests {
         };
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(1),
             spec: Box::new(soldier_spec),
             copy: None,
@@ -23370,6 +23426,8 @@ mod tests {
         let mut treasure = artifact_spec("Treasure");
         treasure.source_id = manufactor;
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(treasure),
             copy: None,
@@ -23470,6 +23528,8 @@ mod tests {
         treasure.source_id = manufactor;
         treasure.controller = PlayerId(1);
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(1),
             spec: Box::new(treasure),
             copy: None,
@@ -23599,6 +23659,8 @@ mod tests {
         state.battlefield.push_back(tap_effect2);
 
         let proposed = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
                 characteristics: crate::types::proposed_event::TokenCharacteristics {

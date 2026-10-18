@@ -26745,3 +26745,92 @@ mod legacy_copy_announcement_tests {
         assert_eq!(elementals(&r), 1, "no Elemental for the abandoned copy");
     }
 }
+
+#[cfg(test)]
+mod creation_fodder_completion_tests {
+    use super::*;
+    #[test]
+    fn representative_fodder_completion_sync_queued_counter_and_current_reload() {
+        use crate::game::effects::token_copy::tests::{
+            creation_test_source, install_creation_fixture_replacements, CreationPauseCase,
+        };
+        for pause in [
+            CreationPauseCase::Synchronous,
+            CreationPauseCase::Queued,
+            CreationPauseCase::Counter,
+            CreationPauseCase::ReloadQueued,
+            CreationPauseCase::ReloadCounter,
+        ] {
+            let mut state = GameState::new_two_player(996);
+            let source = creation_test_source(
+                &mut state,
+                "Boundary fodder",
+                vec![crate::types::card_type::CoreType::Creature],
+                vec![],
+                2,
+                3,
+            );
+            let profile =
+                crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+            install_creation_fixture_replacements(&mut state, pause);
+            let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
+            seed_representative_fodder(&mut state, &mut result, PlayerId(0), &profile, true);
+            let mut events = result.events;
+            assert_eq!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                !matches!(pause, CreationPauseCase::Synchronous)
+            );
+            if matches!(
+                pause,
+                CreationPauseCase::ReloadQueued | CreationPauseCase::ReloadCounter
+            ) {
+                state = serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_game_state();
+            }
+            for _ in 0..60 {
+                let action = match state.waiting_for {
+                    WaitingFor::ReplacementChoice { .. } => {
+                        GameAction::ChooseReplacement { index: 0 }
+                    }
+                    WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 1 },
+                    WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => break,
+                    ref other => panic!("fodder completion: {other:?}"),
+                };
+                events.extend(apply_as_current(&mut state, action).unwrap().events);
+            }
+            let births = events
+                .iter()
+                .filter_map(|event| {
+                    if let GameEvent::TokenCreated { object_id, .. } = event {
+                        Some(*object_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                births.len(),
+                if matches!(
+                    pause,
+                    CreationPauseCase::Queued | CreationPauseCase::ReloadQueued
+                ) {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert!(state.resolution_stack.is_empty());
+            for id in births {
+                assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+                assert!(state.objects[&id].tapped);
+            }
+            assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        }
+    }
+}

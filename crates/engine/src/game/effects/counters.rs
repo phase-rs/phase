@@ -677,7 +677,7 @@ fn apply_pending_counter_post_action(
             count,
             ability,
         } => super::amass::continue_amass_after_token_creation(
-            state, controller, &subtype, count, &ability, events,
+            state, controller, &subtype, count, &ability, None, events,
         ),
         // CR 701.71a: the token-creation replacement settled; choose a Jace
         // token and put the counters on it. `false` = paused again, either on
@@ -690,11 +690,19 @@ fn apply_pending_counter_post_action(
             state, controller, source_id, count, events,
         ),
         PendingCounterPostAction::FinalizeAmass {
+            creation_frame,
             object_id,
             subtype,
             ability,
         } => {
-            super::amass::finalize_amass(state, object_id, &subtype, &ability, events);
+            super::amass::finalize_amass(
+                state,
+                object_id,
+                &subtype,
+                &ability,
+                creation_frame,
+                events,
+            );
             true
         }
         PendingCounterPostAction::InjectPredefinedTokenAbilities { object_id } => {
@@ -719,6 +727,7 @@ fn apply_pending_counter_post_action(
             true
         }
         PendingCounterPostAction::FinalizeTokenEntry {
+            creation_frame,
             object_id,
             name,
             attach_to,
@@ -758,7 +767,12 @@ fn apply_pending_counter_post_action(
             // that keeps `restrictions::record_token_created` above from writing a row. See that
             // function's doc for the wrong-trigger-fire measurement this prevents.
             super::token::push_committed_token_entry_events(
-                state, object_id, name, source_id, events,
+                state,
+                creation_frame,
+                object_id,
+                name,
+                source_id,
+                events,
             );
             if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
                 let sacrifice_token = DelayedTrigger {
@@ -786,6 +800,8 @@ fn apply_pending_counter_post_action(
             true
         }
         PendingCounterPostAction::ContinueTokenCreation {
+            creation_frame,
+            instructions,
             owner,
             spec,
             enter_tapped,
@@ -795,6 +811,8 @@ fn apply_pending_counter_post_action(
                 return true;
             }
             let event = ProposedEvent::CreateToken {
+                creation_frame,
+                instructions,
                 owner,
                 spec,
                 copy: None,
@@ -812,6 +830,7 @@ fn apply_pending_counter_post_action(
             )
         }
         PendingCounterPostAction::FinalizeCopyTokenEntry {
+            creation_frame,
             object_id,
             name,
             enters_attacking,
@@ -822,7 +841,9 @@ fn apply_pending_counter_post_action(
             // replacement-processed counters finish, preserving attacking
             // placement and the normal token ETB events.
             if enters_attacking {
-                crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+                crate::game::effects::token::apply_entry_attack_instruction(
+                    state, object_id, source_id, controller,
+                );
             }
             super::token::inject_predefined_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
@@ -840,17 +861,23 @@ fn apply_pending_counter_post_action(
             // `None` verdict, so it never disagrees with the existence-guarded
             // `record_token_created` ledger write immediately above it.
             super::token::push_committed_token_entry_events(
-                state, object_id, name, source_id, events,
+                state,
+                creation_frame,
+                object_id,
+                name,
+                source_id,
+                events,
             );
             // The anaphora slot has TWO destinations on this route — ledger 3 and the in-flight
             // copy batch's `created_ids`, which `token_copy.rs`'s drain assigns WHOLESALE back onto
             // ledger 3 — so one guarded call owns both. Guarding the ledger write and pushing the
             // buffer as a separate statement republished the withheld id and overwrote the guarded
             // list with it.
-            super::token::record_last_created_copy_batch_token(state, object_id);
+            super::token::record_last_created_copy_batch_token(state, creation_frame, object_id);
             true
         }
         PendingCounterPostAction::ContinueCopyTokenCreation {
+            creation_frame,
             owner,
             copy,
             enter_tapped,
@@ -862,6 +889,7 @@ fn apply_pending_counter_post_action(
             }
             let status = super::token_copy::apply_copy_token_after_replacement(
                 state,
+                creation_frame,
                 owner,
                 *copy,
                 enter_tapped,
@@ -870,7 +898,11 @@ fn apply_pending_counter_post_action(
                 events,
             );
             let completion = status.completion;
-            super::token_copy::extend_copy_batch_created_ids(state, status.created_ids);
+            super::token_copy::extend_copy_batch_created_ids(
+                state,
+                creation_frame,
+                status.created_ids,
+            );
             match completion {
                 super::token_copy::CopyTokenApplyCompletion::Completed => true,
                 super::token_copy::CopyTokenApplyCompletion::Paused => false,
@@ -885,6 +917,7 @@ fn apply_pending_counter_post_action(
             )
         }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+            creation_frame,
             object_id,
             name,
             enters_attacking,
@@ -893,6 +926,7 @@ fn apply_pending_counter_post_action(
             remaining_modifications,
         } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
             state,
+            creation_frame,
             object_id,
             name,
             enters_attacking,
@@ -910,6 +944,7 @@ fn apply_pending_counter_post_action(
             super::token::finalize_committed_liminal_token_entry_from_action(state, action, events)
         }
         PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+            creation_frame,
             owner,
             copy,
             enter_tapped,
@@ -917,6 +952,7 @@ fn apply_pending_counter_post_action(
             remaining_count,
         } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
             state,
+            creation_frame,
             owner,
             copy,
             enter_tapped,
@@ -942,6 +978,11 @@ fn apply_pending_counter_post_action(
             // in-`apply_action` call orders the CR 400.7 row ahead of that action's CR 704.3 SBA
             // pass (CR 704.5f). `false` means an earlier convergence point already realized it
             // (structurally idempotent, `Option::take_if`), which is not an error.
+            let creation_owner = state
+                .pending_token_battlefield_entry
+                .as_ref()
+                .filter(|entry| entry.object_id == object_id)
+                .and_then(|entry| entry.creation_frame);
             let _ = super::token::flush_pending_token_battlefield_entry(state, object_id, events);
             if !state.last_created_token_ids.contains(&object_id) {
                 super::token::record_last_created_token(state, object_id);
@@ -953,7 +994,13 @@ fn apply_pending_counter_post_action(
             // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
             // which is what `state.last_created_token_ids` is after the call above.
             let created_ids = state.last_created_token_ids.clone();
-            if let Some(pending) = state.active_copy_token_mut() {
+            let owner = match creation_owner {
+                Some(id) => state.resolution_stack.token_creation_mut(id),
+                None => state
+                    .active_copy_token_mut()
+                    .filter(|pending| pending.creation_id.is_none()),
+            };
+            if let Some(pending) = owner {
                 pending.created_ids = created_ids;
             }
             true
@@ -8560,6 +8607,7 @@ mod tests {
             );
             let liminal_entry =
                 |entry_events| PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
                     source_id,
@@ -8574,6 +8622,7 @@ mod tests {
                 };
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
                     enters_attacking: false,
@@ -8581,6 +8630,7 @@ mod tests {
                     controller: PlayerId(0),
                 },
                 Route::FinalizeTokenEntry => PendingCounterPostAction::FinalizeTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
                     attach_to: None,
@@ -8593,6 +8643,7 @@ mod tests {
                 // without needing an `, except` body.
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        creation_frame: None,
                         object_id,
                         name: "Saproling".to_string(),
                         enters_attacking: false,
@@ -8833,6 +8884,16 @@ mod tests {
                 Zone::Battlefield,
             );
             state.push_copy_token(PendingCopyTokenResolution {
+                creation_id: None,
+                result_parent: None,
+                work: std::collections::VecDeque::new(),
+                pending: None,
+                replacement_queue_tail: None,
+                created_incarnations: Vec::new(),
+                creator: None,
+                continuation: None,
+                caller: crate::types::game_state::TokenCreationCallerState::Plain,
+                segment_start: 0,
                 created_ids: vec![survivor],
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
@@ -8850,6 +8911,7 @@ mod tests {
             );
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Copy Token".to_string(),
                     enters_attacking: false,
@@ -8858,6 +8920,7 @@ mod tests {
                 },
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        creation_frame: None,
                         object_id,
                         name: "Copy Token".to_string(),
                         enters_attacking: false,

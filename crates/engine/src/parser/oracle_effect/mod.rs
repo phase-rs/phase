@@ -41250,34 +41250,6 @@ fn parse_effect_chain_ir_body(
         if normalized_text.is_empty() {
             continue;
         }
-        // CR 603.7a + CR 400.7j: this class needs the exact created-token
-        // incarnation set, supplied by phase 6; mutable LastCreated is insufficient.
-        let target_defined_creation = builder.clauses().iter().any(|clause| {
-            matches!(clause.parsed.effect, Effect::Token { .. })
-                && clause.target_reads == TargetReadOrigin::ParentAnnouncement
-        });
-        let normalized_lower = normalized_text.to_ascii_lowercase();
-        if target_defined_creation
-            && nom_primitives::scan_preceded(&normalized_lower, |input| {
-                value(
-                    (),
-                    (
-                        tag::<_, _, OracleError<'_>>("sacrifice "),
-                        alt((tag("the token"), tag("those tokens"))),
-                    ),
-                )
-                .parse(input)
-            })
-            .is_some()
-        {
-            unimplemented_clause(
-                &mut builder,
-                "exact_created_token_cleanup",
-                normalized_text,
-                chunk.boundary_after,
-            );
-            continue;
-        }
         let chain_parent_target_owner_scope_for_chunk = chain_parent_target_owner_scope.take();
         let previous_is_multi_coin_flip = builder
             .clauses()

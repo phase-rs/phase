@@ -179,6 +179,7 @@ fn create_gift_token(
     // deleted — keeping it would double-count `battlefield_entries_this_turn`.
     super::token::push_committed_token_entry_events(
         state,
+        None,
         obj_id,
         name.to_string(),
         source_id,

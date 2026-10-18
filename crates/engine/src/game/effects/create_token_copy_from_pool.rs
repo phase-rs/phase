@@ -20,7 +20,6 @@
 //! pipeline and token construction are never duplicated.
 
 use crate::game::effects::token::{no_token, resolve_token_owner};
-use crate::game::effects::token_copy::drive_copy_token_batches;
 use crate::game::filter::matches_target_filter_against_face;
 use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
@@ -162,11 +161,13 @@ pub fn resolve(
         }),
     });
 
-    drive_copy_token_batches(
+    let work = super::token_copy::copy_batches_to_work(state, remaining);
+    super::token_copy::begin_creation(
         state,
-        remaining,
+        ability,
+        work,
         EffectKind::from(&ability.effect),
-        ability.source_id,
+        crate::types::game_state::TokenCreationCallerState::Plain,
         events,
     );
 
@@ -221,4 +222,51 @@ pub fn face_is_eligible(
         Comparator::GT => mana_value > bound,
     };
     matches_bound && matches_target_filter_against_face(face, type_filter)
+}
+
+#[cfg(test)]
+mod creation_completion_tests {
+    use crate::types::ability::{
+        CardSelectionMode, Comparator, Effect, QuantityExpr, TargetFilter,
+    };
+    #[test]
+    fn pool_copy_completion_sync_queued_counter_and_current_reload() {
+        use super::super::token_copy::tests::{creation_wrapper_case, CreationPauseCase};
+        for pause in [
+            CreationPauseCase::Synchronous,
+            CreationPauseCase::Queued,
+            CreationPauseCase::Counter,
+            CreationPauseCase::ReloadQueued,
+            CreationPauseCase::ReloadCounter,
+        ] {
+            let (_state, events) = creation_wrapper_case(
+                Effect::CreateTokenCopyFromPool {
+                    owner: TargetFilter::Controller,
+                    type_filter: TargetFilter::Named {
+                        name: "Grizzly Bears".into(),
+                    },
+                    mv: Comparator::EQ,
+                    mv_bound: QuantityExpr::Fixed { value: 2 },
+                    selection: CardSelectionMode::Random,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    tapped: false,
+                    enters_attacking: false,
+                },
+                pause,
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        crate::types::events::GameEvent::EffectResolved {
+                            kind: crate::types::ability::EffectKind::CreateTokenCopyFromPool,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+        }
+    }
 }

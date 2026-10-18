@@ -17037,6 +17037,7 @@ fn resolve_chain_body(
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
     let mut immediate_effect_result = None;
+    let mut creation_tail_owned = false;
     // CR 610.3a / CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
     // move. Each `resolve_effect` call (one per repeat iteration) is judged on
     // its OWN event window by the resolver's own predicate; the node counts as
@@ -17408,6 +17409,40 @@ fn resolve_chain_body(
                             bounded_move_refusals += 1;
                         }
                     }
+                    // CR 608.2c: this iteration's creation owner takes the
+                    // actual direct tail only after all ordinary shells ran.
+                    // Numeric repetition keeps its sequential sibling for the
+                    // final iteration; the existing repeat frame owns the rest.
+                    let owned_creation;
+                    let iter_effective =
+                        if matches!(
+                            iter_effective.effect,
+                            Effect::Token { .. }
+                                | Effect::CopyTokenOf { .. }
+                                | Effect::CopyTokenBlockingAttacker { .. }
+                                | Effect::Encore
+                                | Effect::Myriad
+                                | Effect::Populate
+                                | Effect::Investigate
+                                | Effect::CreateTokenCopyFromPool { .. }
+                        ) || (matches!(iter_effective.effect, Effect::Amass { .. })
+                            && amass::creation_required(state, iter_effective))
+                            || (matches!(iter_effective.effect, Effect::EmpowerJace { .. })
+                                && empower_jace::creation_required(state, iter_effective))
+                        {
+                            creation_tail_owned = true;
+                            owned_creation = {
+                                let mut owned = iter_effective.clone();
+                                owned.repeat_for = None;
+                                if iteration + 1 < iterations {
+                                    owned.sub_ability = None;
+                                }
+                                owned
+                            };
+                            &owned_creation
+                        } else {
+                            iter_effective
+                        };
                     let resolved = if ability.repeat_for.is_some() {
                         with_iteration_return_result_occurrence(state, iter_effective, |state| {
                             resolve_effect(state, iter_effective, events)
@@ -17501,6 +17536,10 @@ fn resolve_chain_body(
                 return Ok(());
             }
         } // end shares_quality_failed else
+    }
+
+    if creation_tail_owned {
+        return Ok(());
     }
 
     // CR 701.61a + CR 608.2c: Forage owns the nested B→C→tail chain it

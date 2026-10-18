@@ -2,10 +2,8 @@ use crate::game::effects::counters::{
     add_counter_with_replacement, append_pending_counter_post_actions,
     stash_pending_counter_completion, stash_pending_counter_post_actions,
 };
-use crate::game::effects::token::apply_create_token_after_replacement;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter,
     TypeFilter, TypedFilter,
@@ -18,7 +16,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    EtbTapState, ProposedEvent, TokenCharacteristics, TokenHostRequest, TokenSpec,
+    EtbTapState, TokenCharacteristics, TokenHostRequest, TokenSpec,
 };
 use std::collections::HashSet;
 
@@ -49,55 +47,43 @@ pub fn resolve(
 
     // CR 701.71a + CR 111.2 + CR 614.1: the controller creates the Jace token,
     // and token-creation replacement effects apply to that event.
-    let proposed = ProposedEvent::CreateToken {
-        owner: controller,
-        spec: Box::new(jace_token_spec(controller, source_id)),
-        copy: None,
-        enter_tapped: EtbTapState::Unspecified,
-        count: 1,
-        applied: HashSet::new(),
+    let instructions = crate::types::proposed_event::TokenCreationInstructions {
+        tapped: EtbTapState::Unspecified,
+        enters_attacking: false,
     };
-    let owed = || PendingCounterPostAction::ContinueEmpowerJaceAfterTokenCreation {
-        controller,
-        source_id,
-        count: n,
-    };
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            if apply_create_token_after_replacement(state, event, events) {
-                continue_after_creation(state, controller, source_id, n, events);
-            } else {
-                // CR 614.1c + CR 122.6: the token's entry paused on an
-                // entry-counter replacement choice; choose and place only after
-                // the entry settles.
-                append_pending_counter_post_actions(state, vec![owed()]);
-            }
-        }
-        // CR 701.71a: no fallback — with no Jace token to choose, nothing
-        // further happens.
-        ReplacementResult::Prevented => {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::EmpowerJace,
-                source_id,
-                subject: None,
-            });
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            stash_pending_counter_post_actions(
-                state,
-                EffectKind::EmpowerJace,
-                source_id,
-                vec![owed()],
-            );
-            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-        }
-    }
+    let work =
+        std::collections::VecDeque::from([crate::types::game_state::TokenCreationWork::Proposed(
+            crate::types::game_state::TokenCreationBatch {
+                owner: controller,
+                spec: Box::new(jace_token_spec(controller, source_id)),
+                copy: None,
+                instructions,
+                enter_tapped: instructions.tapped,
+                count: 1,
+                applied: HashSet::new(),
+            },
+        )]);
+    super::token_copy::begin_creation(
+        state,
+        ability,
+        work,
+        EffectKind::EmpowerJace,
+        crate::types::game_state::TokenCreationCallerState::EmpowerJace {
+            controller,
+            count: n,
+        },
+        events,
+    );
     Ok(())
 }
 
 /// CR 701.71a: the blue Jace planeswalker token with 0 loyalty. Its two
 /// loyalty abilities come from the predefined subtype-keyed registry when the
 /// token enters (`predefined_token_abilities("Jace")`).
+pub(crate) fn creation_required(state: &GameState, ability: &ResolvedAbility) -> bool {
+    jace_token_candidates(state, ability.controller, ability.source_id).is_empty()
+}
+
 fn jace_token_spec(controller: PlayerId, source_id: ObjectId) -> TokenSpec {
     TokenSpec {
         characteristics: TokenCharacteristics {
@@ -215,4 +201,95 @@ pub(crate) fn place_loyalty_counters(
         subject: None,
     });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empower_jace_completion_synchronous() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::EmpowerJace {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+            },
+            super::super::token_copy::tests::CreationPauseCase::Synchronous,
+        );
+        assert!(state.objects.values().any(|object| object.is_token
+            && object.card_types.subtypes.contains(&"Jace".into())
+            && object
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn empower_jace_completion_queued_child() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::EmpowerJace {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+            },
+            super::super::token_copy::tests::CreationPauseCase::Queued,
+        );
+        assert!(state.objects.values().any(|object| object.is_token
+            && object.card_types.subtypes.contains(&"Jace".into())
+            && object
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn empower_jace_completion_counter_pause() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::EmpowerJace {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+            },
+            super::super::token_copy::tests::CreationPauseCase::Counter,
+        );
+        assert!(state.objects.values().any(|object| object.is_token
+            && object.card_types.subtypes.contains(&"Jace".into())
+            && object
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn empower_jace_completion_queued_child_current_reload() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::EmpowerJace {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+            },
+            super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
+        );
+        assert!(state.objects.values().any(|object| object.is_token
+            && object.card_types.subtypes.contains(&"Jace".into())
+            && object
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn empower_jace_completion_counter_current_reload() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::EmpowerJace {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+            },
+            super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
+        );
+        assert!(state.objects.values().any(|object| object.is_token
+            && object.card_types.subtypes.contains(&"Jace".into())
+            && object
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
 }

@@ -16586,4 +16586,16 @@ mod leading_duration_guard_tests_7923 {
             "a serial-list subject is one clause"
         );
     }
+    #[test]
+    fn token_definition_sentence_and_later_cleanup_keep_distinct_sequence_roles() {
+        let clauses=split_clause_sequence("Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.");
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(clauses[0].text, "Create a black Spirit creature token");
+        assert_eq!(clauses[1].text,"Its power is equal to that creature's power and its toughness is equal to that creature's toughness");
+        assert_eq!(
+            clauses[2].text,
+            "Sacrifice the token at the beginning of the next end step"
+        );
+        for text in ["Create two 1/1 red Warrior creature tokens that are tapped and attacking. Sacrifice them at the beginning of the next end step.","Create a token that's a copy of target creature you control. Exile that token at end of combat."] {assert_eq!(split_clause_sequence(text).len(),2);}
+    }
 }

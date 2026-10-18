@@ -10071,6 +10071,7 @@ mod tests {
             state.pending_liminal_entry_resume = None;
 
             state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+                creation_frame: None,
                 object_id: ObjectId(94),
                 name: "checkpoint token".to_string(),
                 source_id: ObjectId(95),
@@ -11678,6 +11679,76 @@ mod tests {
         // Every member shares the top member's copiable values, so all K
         // collapse into one batch producing K copies. Result equals the
         // sequential path.
+
+        #[test]
+        fn copy_probe_projection_does_not_expand_exception_or_tail_bulk_admission() {
+            for variant in 0..4 {
+                let mut state = setup();
+                add_lands(&mut state, 6);
+                let life = state.players[0].life;
+                for _ in 0..3 {
+                    let src = add_plain_creature_source(&mut state, "Bulk control", 2, 3);
+                    let mut sub = copy_instead_sub(src, 6);
+                    if let Effect::CopyTokenOf {
+                        extra_keywords,
+                        additional_modifications,
+                        ..
+                    } = &mut sub.effect
+                    {
+                        if variant == 1 {
+                            extra_keywords.push(crate::types::keywords::Keyword::Haste);
+                        }
+                        if variant == 2 {
+                            additional_modifications.push(
+                                crate::types::ability::ContinuousModification::AddType {
+                                    core_type: CoreType::Artifact,
+                                },
+                            );
+                        }
+                    }
+                    if variant == 3 {
+                        sub.sub_ability = Some(Box::new(ResolvedAbility::new(
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
+                            },
+                            vec![],
+                            src,
+                            PlayerId(0),
+                        )));
+                    }
+                    push_token_triggers(
+                        &mut state,
+                        src,
+                        insect_token_effect(),
+                        Some(Box::new(sub)),
+                        1,
+                    );
+                }
+                let steps = resolve_to_empty_batched(&mut state);
+                assert_eq!(steps, if variant == 0 { vec![3] } else { vec![1, 1, 1] });
+                assert_eq!(token_ids(&state).len(), 3);
+                for id in token_ids(&state) {
+                    let token = &state.objects[&id];
+                    assert_eq!((token.base_power, token.base_toughness), (Some(2), Some(3)));
+                    assert_eq!(
+                        token
+                            .keywords
+                            .contains(&crate::types::keywords::Keyword::Haste),
+                        variant == 1
+                    );
+                    assert_eq!(
+                        token.card_types.core_types.contains(&CoreType::Artifact),
+                        variant == 2
+                    );
+                }
+                assert_eq!(
+                    state.players[0].life,
+                    life + if variant == 3 { 3 } else { 0 }
+                );
+                assert!(state.resolution_stack.is_empty());
+            }
+        }
         #[test]
         fn cross_source_copy_identical_values_forms_one_batch() {
             let mut base = setup();
