@@ -915,9 +915,10 @@ impl BrokerEnv for SysEnv {
     }
 }
 
-/// Simple per-socket token bucket rate limiter.
+/// Simple per-socket fixed-window work limiter.
 struct RateLimiter {
     count: u32,
+    limit: u32,
     window_start: Instant,
     #[cfg(test)]
     frozen_at: Option<Instant>,
@@ -925,8 +926,13 @@ struct RateLimiter {
 
 impl RateLimiter {
     fn new() -> Self {
+        Self::with_limit(RATE_LIMIT_MESSAGES)
+    }
+
+    fn with_limit(limit: u32) -> Self {
         Self {
             count: 0,
+            limit,
             window_start: Instant::now(),
             #[cfg(test)]
             frozen_at: None,
@@ -944,7 +950,15 @@ impl RateLimiter {
             self.window_start = now;
         }
         self.count += 1;
-        self.count <= RATE_LIMIT_MESSAGES
+        self.count <= self.limit
+    }
+
+    /// Transfer one successful admission to another independently bounded lane.
+    /// The owning decoder is serial, so no later check can reset this window
+    /// between its admission and refund.
+    fn refund(&mut self) {
+        debug_assert!(self.count > 0);
+        self.count = self.count.saturating_sub(1);
     }
 
     #[cfg(test)]
@@ -1855,7 +1869,7 @@ async fn admit_seat_return_while_session_locked(
         // always been allowed to reconnect anyway.
         server_core::reconnect::ReconnectResult::Ok { .. }
         | server_core::reconnect::ReconnectResult::NotFound => {
-            session.mark_connected(player);
+            session.mark_connected_at(player, received_at);
             Ok(())
         }
         server_core::reconnect::ReconnectResult::Expired => {
@@ -2110,7 +2124,7 @@ async fn depart_full_seat_while_session_locked(
         players.remove(&player_id);
         players.values().cloned().collect::<Vec<_>>()
     };
-    session.mark_disconnected(player_id);
+    session.mark_disconnected_at(player_id, disconnected_at);
     let grace = {
         let mut registry = state.lock().await;
         let grace = registry.reconnect.grace_period;
@@ -4649,6 +4663,7 @@ async fn ws_handler(
     let slot = ConnectionSlot::new(app_state.player_count.clone());
 
     ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_MESSAGE_BYTES)
         .on_upgrade(move |socket| {
             handle_socket(
                 socket,
@@ -4822,6 +4837,7 @@ async fn handle_socket(
                 message: client_msg,
                 received_at,
                 admission,
+                ..
             } = tokio::select! {
                 biased;
                 _ = closed.wait_for(Option::is_some) => break,
@@ -13494,6 +13510,68 @@ mod full_socket_authority_tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_timely_contest_reconnect_retains_receipt_time_through_admission() {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::identifiers::ObjectId;
+        use std::time::{Duration, Instant};
+
+        let (state, _, code, _) = test_session();
+        let handle = state.lock().await.session(&code).expect("session");
+        let mut session = handle.lock().await;
+        let config = ContestConfig {
+            countdown_ms: 0,
+            inactivity_timeout_ms: 60_000,
+            reconnect_grace_ms: 1,
+            settle_window_ms: 0,
+            max_active_ms: 60_000,
+        };
+        session.contest.policy.config = config;
+        session.connected = vec![true, true];
+        session.state.waiting_for = WaitingFor::PhysicalContest {
+            contest: Box::new(ContestState::new(
+                1,
+                ContestKind::Staring,
+                PlayerId(0),
+                PlayerId(1),
+                config,
+            )),
+            source_id: ObjectId(1),
+        };
+        let received_at = Instant::now();
+        session.tick_contest_at(received_at);
+        session.mark_disconnected_at(PlayerId(0), received_at);
+        session.flush_contest_connections();
+        state.lock().await.reconnect.record_disconnect(
+            &code,
+            PlayerId(0),
+            Duration::from_millis(1),
+            received_at,
+        );
+        // Both registries must accept the same on-time receipt, even though
+        // processing occurs after their one-millisecond grace has elapsed.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        admit_seat_return_while_session_locked(&state, &mut session, PlayerId(0), received_at)
+            .await
+            .expect("the registry accepts a receipt at the disconnect instant");
+        assert!(session.connected[0]);
+        assert!(!state
+            .lock()
+            .await
+            .reconnect
+            .is_disconnected(&code, PlayerId(0)));
+        session.flush_contest_connections();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("admission delay must not forfeit a timely contest reconnect");
+        };
+        assert_eq!(
+            contest.contestants[0].connection,
+            engine::types::contest::ContestantConnection::Connected,
+        );
+        assert_eq!(contest.paused_since_ms, None);
+    }
+
     #[test]
     fn full_socket_policy_is_explicit_for_attachment_classes() {
         assert_eq!(
@@ -20258,6 +20336,40 @@ mod handshake_tests {
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
+                wire_format: None,
+            })
+        );
+    }
+
+    #[test]
+    fn bestow_payload_full_game_refuses_previous_and_accepts_current() {
+        // Independent literals discriminate a reverted version bump. A current
+        // lobby version cannot rescue an incompatible full GameState reader.
+        let classify = |protocol_version| {
+            classify_hello_gate(
+                false,
+                &ClientMessage::ClientHello {
+                    client_version: "bestow-peer".into(),
+                    build_commit: "bestow-build".into(),
+                    protocol_version,
+                    lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                    wire_formats: Vec::new(),
+                },
+                hello_acceptance(ServerMode::Full),
+            )
+        };
+        assert_eq!(
+            classify(150),
+            HelloGateOutcome::RejectProtocol {
+                client: 150,
+                server: 151
+            }
+        );
+        assert_eq!(
+            classify(151),
+            HelloGateOutcome::Accept(ClientHelloInfo {
+                client_version: "bestow-peer".into(),
+                build_commit: "bestow-build".into(),
                 wire_format: None,
             })
         );

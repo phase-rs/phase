@@ -22,6 +22,28 @@ use super::GameExecutor;
 
 type ClientSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+async fn receive_wire_json(socket: &mut ClientSocket) -> String {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        let json = match socket.next().await.unwrap().unwrap() {
+            Message::Text(text) => text.to_string(),
+            // Server snapshots are not subject to the 64 KiB C->S command cap.
+            Message::Binary(bytes) => {
+                crate::wire::decode_client_envelope(bytes.to_vec(), 16 * 1024 * 1024)
+                    .await
+                    .unwrap()
+            }
+            Message::Ping(_) | Message::Pong(_) => continue,
+            frame => panic!("expected an application reply on a live socket, got {frame:?}"),
+        };
+        return json;
+    }
+}
+
+async fn receive_wire_message(socket: &mut ClientSocket) -> ServerMessage {
+    serde_json::from_str(&receive_wire_json(socket).await).unwrap()
+}
 
 struct NativeTable {
     url: String,
@@ -114,6 +136,50 @@ impl NativeTable {
         socket
     }
 
+    async fn connect_with_format(
+        &self,
+        player: PlayerId,
+        format: Option<server_core::protocol::WireFormat>,
+    ) -> ClientSocket {
+        let Some(format) = format else {
+            return self.connect(player).await;
+        };
+        let (mut socket, _) = tokio_tungstenite::connect_async(&self.url).await.unwrap();
+        while !matches!(
+            recv_server_message(&mut socket).await,
+            ServerMessage::ServerHello { .. }
+        ) {}
+        send_test_message(
+            &mut socket,
+            &crate::issue_4548_full_create_tests::test_client_hello(vec![format]),
+            false,
+        )
+        .await;
+        send_test_message(
+            &mut socket,
+            &ClientMessage::Reconnect {
+                game_code: self.key.game_code.clone(),
+                player_token: self.tokens[usize::from(player.0)].clone(),
+                full_key: self.key.clone(),
+            },
+            true,
+        )
+        .await;
+        loop {
+            match receive_wire_message(&mut socket).await {
+                ServerMessage::GameStarted { your_player, .. } => {
+                    assert_eq!(your_player, player);
+                    break;
+                }
+                ServerMessage::Error { message, .. } => {
+                    panic!("formatted reconnect failed: {message}")
+                }
+                _ => {}
+            }
+        }
+        socket
+    }
+
     async fn keep_all(&self) {
         let session = crate::lock_session(&self.app.sessions, &self.key.game_code)
             .await
@@ -149,6 +215,213 @@ fn enable_ai(session: &mut GameSession, players: impl IntoIterator<Item = Player
             create_config_for_players(AiDifficulty::Easy, Platform::Native, 4),
         );
     }
+}
+
+#[test]
+fn queued_reconnect_before_departure_keeps_contest_presence_causal() {
+    run_async_test(|| async {
+        use engine::types::contest::{
+            ContestConfig, ContestKind, ContestPhase, ContestState, ContestantConnection,
+        };
+        use engine::types::game_state::WaitingFor;
+
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let mut old = table.connect(PlayerId(0)).await;
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, ()) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
+                    let config = ContestConfig {
+                        countdown_ms: 0,
+                        inactivity_timeout_ms: 60_000,
+                        reconnect_grace_ms: 100,
+                        settle_window_ms: 0,
+                        max_active_ms: 60_000,
+                    };
+                    session.contest.policy.config = config;
+                    session.state.phase = engine::types::phase::Phase::PreCombatMain;
+                    session.state.active_player = PlayerId(0);
+                    let source_id = *session.state.objects.keys().next().unwrap();
+                    session.state.waiting_for = WaitingFor::PhysicalContest {
+                        contest: Box::new(ContestState::new(
+                            91,
+                            ContestKind::Staring,
+                            PlayerId(0),
+                            PlayerId(1),
+                            config,
+                        )),
+                        source_id,
+                    };
+                    session.tick_contest_at(std::time::Instant::now());
+                    session.drain_contest_outbox();
+                    // Keep the autonomous driver from consuming either edge
+                    // until the replacement has completed its real bootstrap.
+                    assert!(session.claim_contest_driver());
+                })
+                .await;
+            drop(lease);
+
+            let work = table.app.context.socket_hooks.arm_parser_work();
+            let mut replacement = connect_and_hello(table.url.clone()).await;
+            work.wait_completed(1).await;
+            let lobby = table.app.lobby.lock().await;
+            send_test_message(&mut replacement, &ClientMessage::SubscribeLobby, false).await;
+            send_test_message(
+                &mut replacement,
+                &ClientMessage::Reconnect {
+                    game_code: table.key.game_code.clone(),
+                    player_token: table.tokens[0].clone(),
+                    full_key: table.key.clone(),
+                },
+                false,
+            )
+            .await;
+            // Decoder completion, not Pong, proves that both ordinary commands
+            // have been retained in FIFO order behind the held lobby dispatch.
+            work.wait_completed(3).await;
+            // Keep the host's millisecond receipt/death stamps distinct without
+            // relying on a race between worker scheduling and socket cleanup.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            old.close(None).await.unwrap();
+            drop(old);
+            loop {
+                let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let away = !lease.connected[0];
+                drop(lease);
+                let recorded = table
+                    .app
+                    .sessions
+                    .lock()
+                    .await
+                    .reconnect
+                    .is_disconnected(&table.key.game_code, PlayerId(0));
+                let unbound = table
+                    .app
+                    .connections
+                    .lock()
+                    .await
+                    .get(&table.key.game_code)
+                    .is_none_or(|players| !players.contains_key(&PlayerId(0)));
+                if away && recorded && unbound {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            drop(lobby);
+            loop {
+                match receive_wire_message(&mut replacement).await {
+                    ServerMessage::GameStarted { your_player, .. } => {
+                        assert_eq!(your_player, PlayerId(0));
+                        break;
+                    }
+                    ServerMessage::Error { message, .. } => panic!("replacement: {message}"),
+                    _ => {}
+                }
+            }
+
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, before_tick) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
+                    assert!(session.connected[0]);
+                    session.release_contest_driver();
+                    session.state_revision
+                })
+                .await;
+            drop(lease);
+            crate::ensure_contest_driver(
+                &table.app.context.game_executor,
+                &table.app.sessions,
+                &table.app.connections,
+                &table.app.draft_sessions,
+                &table.app.game_db,
+                &table.app.game_spectators,
+                &table.app.lobby,
+                &table.app.lobby_subscribers,
+                &table.key.game_code,
+            )
+            .await;
+            let mut departure = None;
+            let (departed_at, resumed_revision) = loop {
+                match receive_wire_message(&mut replacement).await {
+                    ServerMessage::StateUpdate {
+                        state_revision,
+                        state,
+                        ..
+                    } if state_revision > before_tick => {
+                        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+                            panic!("the accepted replacement must not forfeit");
+                        };
+                        assert_eq!(contest.id, 91);
+                        match contest.contestants[0].connection {
+                            ContestantConnection::Disconnected { since_ms } => {
+                                assert_eq!(contest.paused_since_ms, Some(since_ms));
+                                departure = Some((state_revision, since_ms));
+                            }
+                            ContestantConnection::Connected => {
+                                let Some((departure_revision, departed_at)) = departure else {
+                                    continue;
+                                };
+                                assert!(state_revision > departure_revision);
+                                assert!(contest.clock_ms >= departed_at);
+                                assert_eq!(contest.paused_since_ms, None);
+                                break (departed_at, state_revision);
+                            }
+                        }
+                    }
+                    ServerMessage::Error { message, .. } => {
+                        panic!("contest publication: {message}");
+                    }
+                    _ => {}
+                }
+            };
+            // A revision bump alone could precede the driver. Ordered departure
+            // AND return snapshots positively prove that both queued edges ran.
+            {
+                let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let WaitingFor::PhysicalContest { contest, .. } = &lease.state.waiting_for else {
+                    panic!("the published return must remain active");
+                };
+                assert!(lease.state_revision >= resumed_revision);
+                assert!(lease.connected[0]);
+                assert!(contest.clock_ms >= departed_at);
+                assert_eq!(
+                    contest.contestants[0].connection,
+                    ContestantConnection::Connected
+                );
+                assert_eq!(contest.paused_since_ms, None);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let WaitingFor::PhysicalContest { contest, .. } = &lease.state.waiting_for else {
+                panic!("no stale grace may forfeit the replacement later");
+            };
+            assert_eq!(contest.phase, ContestPhase::Active);
+            assert_eq!(
+                contest.contestants[0].connection,
+                ContestantConnection::Connected
+            );
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("queued receipt before old-route cleanup must remain a live contest seat");
+    });
 }
 
 #[test]
@@ -778,7 +1051,8 @@ async fn assert_quota_refusal_backlog_is_bounded(payload: serde_json::Value) {
             false,
         )
         .await;
-        // The encoder cannot flush application replies, but controls stay live.
+        // This encoder barrier holds ALL application replies before the kernel
+        // sink, so the bound does not depend on platform socket-buffer capacity.
         gate.entered.notified().await;
         for _ in 0..crate::RATE_LIMIT_MESSAGES {
             send_test_message(&mut socket, &ClientMessage::SubscribeLobby, false).await;
@@ -1177,8 +1451,8 @@ fn encoded_refusal_keeps_admission_until_actual_socket_flush() {
                 for id in 100..100 + count {
                     receive_quota_refusal(&mut socket, id).await;
                 }
-                // Flush-held capacity and the independent inspection-rate window
-                // are separate budgets. Reuse capacity in a fresh rate window.
+                // Reuse of flush-held permits is independent of the bounded
+                // inspection window. Start a fresh window before exhausting again.
                 tokio::time::sleep(Duration::from_secs(crate::RATE_LIMIT_WINDOW_SECS)).await;
                 exhaust_application_quota(&mut socket).await;
                 send_command_frame(&mut socket, &GameAction::PassPriority, 100 + count).await;
@@ -1193,8 +1467,6 @@ fn encoded_refusal_keeps_admission_until_actual_socket_flush() {
                     "a flushed budget must be reusable on the same live socket",
                 );
 
-                // The overflow phase must test eight unflushed refusals, not
-                // exhaustion of the separate thirty-inspection work window.
                 tokio::time::sleep(Duration::from_secs(crate::RATE_LIMIT_WINDOW_SECS)).await;
                 exhaust_application_quota(&mut socket).await;
                 let blocked = table.app.context.socket_hooks.arm_quota_flush();
@@ -1232,6 +1504,266 @@ fn encoded_refusal_keeps_admission_until_actual_socket_flush() {
             .await;
         table.server.abort();
         outcome.expect("actual socket flush must own refusal admission");
+    });
+}
+
+#[test]
+fn legitimate_forty_click_bursts_keep_plain_and_gzip_contests_running() {
+    run_async_test(|| async {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestPhase, ContestState};
+        use engine::types::game_state::WaitingFor;
+        use futures_util::SinkExt;
+        use server_core::protocol::WireFormat;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+        for format in [None, Some(WireFormat::GzipEnvelopeV1)] {
+            let table = NativeTable::new().await;
+            let work = table.app.context.socket_hooks.arm_parser_work();
+            let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+                table.keep_all().await;
+                let mut socket = table.connect_with_format(PlayerId(0), format).await;
+                let _opponent = table.connect(PlayerId(1)).await;
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code).await.unwrap();
+                let (lease, ()) = table.app.context.game_executor.with_session(session, |session| {
+                    let config = ContestConfig {
+                        countdown_ms: 1,
+                        inactivity_timeout_ms: 60_000,
+                        reconnect_grace_ms: 60_000,
+                        max_active_ms: 60_000,
+                        ..Default::default()
+                    };
+                    session.contest.policy.config = config;
+                    session.state.phase = engine::types::phase::Phase::PreCombatMain;
+                    let source_id = *session.state.objects.keys().next().unwrap();
+                    session.state.waiting_for = WaitingFor::PhysicalContest {
+                        contest: Box::new(ContestState::new(71, ContestKind::Staring, PlayerId(0), PlayerId(1), config)),
+                        source_id,
+                    };
+                }).await;
+                drop(lease);
+                crate::ensure_contest_driver(
+                    &table.app.context.game_executor, &table.app.sessions, &table.app.connections,
+                    &table.app.draft_sessions, &table.app.game_db, &table.app.game_spectators,
+                    &table.app.lobby, &table.app.lobby_subscribers, &table.key.game_code,
+                ).await;
+                loop {
+                    let lease = crate::lock_session(&table.app.sessions, &table.key.game_code).await.unwrap();
+                    let active = matches!(&lease.state.waiting_for, WaitingFor::PhysicalContest { contest, .. } if contest.phase == ContestPhase::Active);
+                    drop(lease);
+                    if active { break; }
+                    tokio::task::yield_now().await;
+                }
+                for seq in 1..=40 {
+                    send_test_message(&mut socket, &ClientMessage::ContestClick { contest: 71, seq }, format.is_some()).await;
+                }
+                // Hello + Reconnect spent two of thirty slots. The frozen quota
+                // clock proves all forty clicks arrive in the same work window.
+                work.wait_rate_limited(12).await;
+                let mut command = serde_json::to_value(ClientMessage::Action { action: GameAction::PassPriority }).unwrap();
+                command["command_id"] = serde_json::json!(719_001);
+                command["padding"] = serde_json::json!("x".repeat(4096));
+                let json = command.to_string();
+                assert!(json.len() > 1024, "exercise a command beyond the old compact recovery cap");
+                let frame = match crate::wire::encode_json_message_sync(json, format.is_some()).unwrap() {
+                    axum::extract::ws::Message::Text(text) => WsMessage::Text(text.to_string().into()),
+                    axum::extract::ws::Message::Binary(bytes) => WsMessage::Binary(bytes),
+                    _ => unreachable!("an application command is text or binary"),
+                };
+                socket.send(frame).await.unwrap();
+                work.wait_rate_limited(13).await;
+                send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 719 }, format.is_some()).await;
+                let mut pong = false;
+                let mut progress = false;
+                let mut refusal = false;
+                while !pong || !progress || !refusal {
+                    let json = receive_wire_json(&mut socket).await;
+                    match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+                        ServerMessage::Pong { timestamp: 719 } => pong = true,
+                        ServerMessage::ActionFailed { .. } => {
+                            let header: serde_json::Value = serde_json::from_str(&json).unwrap();
+                            assert_eq!(header["command_id"], 719_001);
+                            refusal = true;
+                        }
+                        ServerMessage::ContestProgress { contest: 71, clicks, .. } => {
+                            for (player, count) in clicks {
+                                if player == PlayerId(0) {
+                                    assert!(count <= 40, "a click was applied twice");
+                                    progress |= count == 40;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(work.counts(), (crate::RATE_LIMIT_MESSAGES as usize + 12, 13),
+                    "only twelve recovery-admitted compact clicks get an extra typed parse");
+                assert_eq!(table.app.context.metrics.ws_quota_discard_count(), 0);
+            }).await;
+            table.server.abort();
+            outcome.unwrap_or_else(|error| {
+                panic!("{format:?} forty-click burst stalled or closed its socket: {error}")
+            });
+        }
+    });
+}
+
+#[test]
+fn policy_compliant_click_refill_preserves_correlated_completion() {
+    run_async_test(|| async {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestPhase, ContestState};
+        use engine::types::game_state::WaitingFor;
+        use futures_util::{SinkExt, StreamExt};
+        use server_core::protocol::WireFormat;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        for format in [None, Some(WireFormat::GzipEnvelopeV1)] {
+            let table = NativeTable::new().await;
+            let work = table.app.context.socket_hooks.arm_parser_work();
+            let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+                table.keep_all().await;
+                let mut socket = table.connect_with_format(PlayerId(0), format).await;
+                let _opponent = table.connect(PlayerId(1)).await;
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let (lease, burst) = table
+                    .app
+                    .context
+                    .game_executor
+                    .with_session(session, |session| {
+                        let config = ContestConfig {
+                            countdown_ms: 0,
+                            inactivity_timeout_ms: 60_000,
+                            reconnect_grace_ms: 60_000,
+                            max_active_ms: 60_000,
+                            ..Default::default()
+                        };
+                        session.contest.policy.config = config;
+                        session.state.phase = engine::types::phase::Phase::PreCombatMain;
+                        let source_id = *session.state.objects.keys().next().unwrap();
+                        session.state.waiting_for = WaitingFor::PhysicalContest {
+                            contest: Box::new(ContestState::new(
+                                72,
+                                ContestKind::Staring,
+                                PlayerId(0),
+                                PlayerId(1),
+                                config,
+                            )),
+                            source_id,
+                        };
+                        session.contest.policy.click_burst
+                    })
+                    .await;
+                drop(lease);
+                let clicks = burst + 20;
+                assert!(clicks >= 60, "exercise the old exhausted-refusal boundary");
+                crate::ensure_contest_driver(
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.connections,
+                    &table.app.draft_sessions,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.app.lobby,
+                    &table.app.lobby_subscribers,
+                    &table.key.game_code,
+                )
+                .await;
+                loop {
+                    let lease = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    let active = matches!(&lease.state.waiting_for,
+                        WaitingFor::PhysicalContest { contest, .. }
+                            if contest.phase == ContestPhase::Active);
+                    drop(lease);
+                    if active {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                for seq in 1..=clicks {
+                    if seq > burst {
+                        // Twenty refill clicks over ~700 ms stay below the
+                        // policy's 30/s rate after its initial forty-click burst.
+                        tokio::time::sleep(Duration::from_millis(35)).await;
+                    }
+                    send_test_message(
+                        &mut socket,
+                        &ClientMessage::ContestClick { contest: 72, seq },
+                        format.is_some(),
+                    )
+                    .await;
+                    // One frozen decoder window, without letting ingress
+                    // capacity conceal the distinct work-allowance regression.
+                    work.wait_completed(2 + seq as usize).await;
+                }
+                let mut command = serde_json::to_value(ClientMessage::Action {
+                    action: GameAction::PassPriority,
+                })
+                .unwrap();
+                command["command_id"] = serde_json::json!(720_001);
+                command["padding"] = serde_json::json!("x".repeat(4096));
+                let frame =
+                    crate::wire::encode_json_message_sync(command.to_string(), format.is_some())
+                        .unwrap();
+                let frame = match frame {
+                    axum::extract::ws::Message::Text(text) => {
+                        WsMessage::Text(text.to_string().into())
+                    }
+                    axum::extract::ws::Message::Binary(bytes) => WsMessage::Binary(bytes),
+                    _ => unreachable!("application command encoding"),
+                };
+                socket.send(frame).await.unwrap();
+                work.wait_completed(3 + clicks as usize).await;
+                loop {
+                    let json = receive_wire_json(&mut socket).await;
+                    if matches!(
+                        serde_json::from_str::<ServerMessage>(&json).unwrap(),
+                        ServerMessage::ActionFailed { .. }
+                    ) {
+                        let header: serde_json::Value = serde_json::from_str(&json).unwrap();
+                        assert_eq!(header["command_id"], 720_001);
+                        break;
+                    }
+                }
+                // The frozen probe window may be spent by legitimate clicks;
+                // native control liveness does not depend on JSON probe credit.
+                socket
+                    .send(WsMessage::Ping(vec![72, 1].into()))
+                    .await
+                    .unwrap();
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        WsMessage::Pong(bytes) if bytes.as_ref() == [72, 1] => break,
+                        WsMessage::Text(_)
+                        | WsMessage::Binary(_)
+                        | WsMessage::Ping(_)
+                        | WsMessage::Pong(_) => {}
+                        frame => panic!("legitimate policy traffic closed the socket: {frame:?}"),
+                    }
+                }
+                let quota = crate::RATE_LIMIT_MESSAGES as usize;
+                let over_quota = clicks as usize - (quota - 2);
+                assert_eq!(work.counts(), (quota * 2, over_quota + 1));
+                assert_eq!(
+                    table.app.context.metrics.ws_quota_discard_count(),
+                    (over_quota - quota) as u64,
+                );
+                assert_eq!(
+                    table
+                        .app
+                        .context
+                        .metrics
+                        .ws_disconnect_count(crate::socket_disconnect::Cause::QuotaDiscardOverflow),
+                    0,
+                );
+            })
+            .await;
+            table.server.abort();
+            outcome.unwrap_or_else(|error| {
+                panic!("{format:?} maximal contest stream lost owned completion: {error}")
+            });
+        }
     });
 }
 

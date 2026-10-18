@@ -110,8 +110,29 @@ it("shows the full Japanese reference beside the original ability and preserves 
   // the English `kind_label` wording cannot drop the localized template.
   stack.rerender(<StackEntry entry={activated} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ ...details, kind_label: "activated ABILITY #3", ability_kind: { type: "Activated", data: { number: 3 } } }} />);
   expect(screen.getByText("起動型能力 3")).toBeInTheDocument();
-  stack.rerender(<StackEntry entry={activated} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ ...details, kind_label: "Activated ability", ability_kind: { type: "Activated", data: {} } }} />);
+  stack.rerender(<StackEntry entry={activated} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ ...details, kind_label: "Activated", ability_kind: { type: "Activated", data: {} } }} />);
   expect(screen.getByText(japanese.stack.activatedAbility)).toBeInTheDocument();
+  stack.rerender(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ ...details, kind_label: "Triggered", ability_kind: { type: "Triggered" } }} />);
+  expect(screen.getByText("誘発型能力")).toBeInTheDocument();
+});
+
+it("shows the engine's kind_label verbatim when no typed ability kind is sent", async () => {
+  // An older engine sends no `ability_kind`. Even a label matching the engine's
+  // English template stays as sent: the client never parses `kind_label`.
+  const activated = buildStackEntry({ kind: { type: "ActivatedAbility", data: { source_id: 2, ability: { targets: [] } } } });
+  const stack = render(<StackEntry entry={activated} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ source_name: "Spirited Companion", kind_label: "Activated ability 3" }} />);
+  expect(await screen.findByText("Activated ability 3")).toBeInTheDocument();
+  expect(screen.queryByText("起動型能力 3")).not.toBeInTheDocument();
+
+  const triggered = buildStackEntry({
+    kind: {
+      type: "TriggeredAbility",
+      data: { source_id: 2, source_name: "Spirited Companion", ability: { targets: [] } },
+    },
+  });
+  stack.rerender(<StackEntry entry={triggered} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ source_name: "Spirited Companion", kind_label: "Triggered ability" }} />);
+  expect(screen.getByText("Triggered ability")).toBeInTheDocument();
+  expect(screen.queryByText("誘発型能力")).not.toBeInTheDocument();
 });
 
 it("keeps the printed-text button a 44px target clear of the controller avatar and of ChooseTarget", async () => {

@@ -5037,8 +5037,12 @@ pub enum CastingPermission {
         /// cast object). Empty for every grant without a type-grant rider.
         /// Parallel to `enters_with_counter` because the counter (CR 122) and
         /// the type grant (CR 613) are categorically distinct rule sections.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enters_with_modifications: Vec<ContinuousModification>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_enters_with_modifications_compat",
+            skip_serializing_if = "PendingEntersModifications::is_empty"
+        )]
+        enters_with_modifications: PendingEntersModifications,
         /// CR 609.4b: Optional payment permission scoped to this specific grant.
         /// `AnyColor` and `AnyTypeOrColor` both relax colored mana requirements;
         /// only the latter also relaxes mana-type requirements. Read at payment
@@ -5770,6 +5774,11 @@ pub enum ResolutionMvRejectAction {
 }
 
 /// CR 608.2g: Follow-up after a during-resolution cast succeeds.
+// The `FreeCastOfferRemaining` variant legitimately carries the frozen
+// re-offer payload — the same policy/rider authority the sibling
+// `CastingPermission` carries — so the size spread is structural, not a
+// packing defect. Mirrors the allow on `CastingPermission` / `Effect`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ResolutionCastSuccessAction {
@@ -5808,6 +5817,19 @@ pub enum ResolutionCastSuccessAction {
             deserialize_with = "deserialize_graveyard_replacement_compat"
         )]
         graveyard_replacement: Option<SpellStackToGraveyardReplacement>,
+        /// CR 608.2c + CR 611.2a: the gains-modifications rider re-offered to
+        /// every remaining cast of the window (Strago and Relm). Unlike
+        /// `graveyard_replacement` — installed post-finalize — the rider must
+        /// ride each cast's `ResolutionCastRequest` into the elected
+        /// permission, which is its only application point (CR 611.2c). Empty
+        /// for windows without a rider and for saved states predating the
+        /// field.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_enters_with_modifications_compat",
+            skip_serializing_if = "PendingEntersModifications::is_empty"
+        )]
+        enters_with_modifications: PendingEntersModifications,
         /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch,
         /// threaded from the window that offered the cast so the re-offer's
         /// candidate set stays confined to the current resolution's exile
@@ -5845,6 +5867,7 @@ mod resolution_cast_face_policy_serde_tests {
             face_policy: policy,
             zones: vec![Zone::Exile],
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             member_pool: vec![ObjectId(702)],
         }
     }
@@ -5865,6 +5888,7 @@ mod resolution_cast_face_policy_serde_tests {
                 face_policy: Box::new(policy.clone()),
                 zones: vec![Zone::Exile],
                 graveyard_replacement: None,
+                enters_with_modifications: Default::default(),
                 member_pool: vec![ObjectId(702)],
             },
             delayed_trigger_receipts: Vec::new(),
@@ -5885,6 +5909,209 @@ mod resolution_cast_face_policy_serde_tests {
             panic!("fixture must carry the re-offer chain");
         };
         assert_eq!(*face_policy, policy);
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.8): both serialized carriers of the gains
+    /// rider (`CastOfferKind::FreeCastWindow`,
+    /// `ResolutionCastSuccessAction::FreeCastOfferRemaining`) deserialize a
+    /// pre-fix payload without the field to the default rider, omit the field
+    /// when the rider is empty, and round-trip a carried rider (including its
+    /// typed cast-quality predicate) exactly.
+    #[test]
+    fn gains_rider_field_back_compat_and_round_trip_on_both_carriers() {
+        use crate::types::ability::{ContinuousModification, PendingEntersModifications};
+        use crate::types::keywords::Keyword;
+
+        let rider = PendingEntersModifications {
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            // CR 608.2c + CR 601.2a: the printed quality rides the carrier as a
+            // typed predicate; the round-trip must preserve it.
+            cast_filter: Some(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            )),
+        };
+
+        // FreeCastWindow — an empty rider is skipped on the wire and the
+        // field-less shape deserializes to the same value.
+        let window_value = serde_json::to_value(window(policy())).unwrap();
+        assert!(
+            window_value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty window rider must be skipped on the wire"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(window_value).unwrap(),
+            window(policy())
+        );
+
+        // FreeCastWindow — a carried rider round-trips exactly.
+        let ridden_window = CastOfferKind::FreeCastWindow {
+            candidates: vec![ObjectId(702)],
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(7),
+            face_policy: policy(),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            member_pool: vec![ObjectId(702)],
+        };
+        let encoded = serde_json::to_value(&ridden_window).unwrap();
+        assert_eq!(
+            encoded["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap(),
+            "a carried rider must serialize under the engine field name"
+        );
+        // The typed cast-quality predicate is a populated sub-field, not an
+        // omitted one, and survives on its own.
+        assert!(
+            encoded["enters_with_modifications"]["cast_filter"].is_object(),
+            "a populated cast-quality predicate must serialize, got {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(encoded).unwrap(),
+            ridden_window
+        );
+
+        // A rider with modifications but no printed quality omits only the
+        // optional predicate sub-field, and the field-less shape reads back as
+        // the unconditional rider.
+        let unqualified = PendingEntersModifications {
+            modifications: rider.modifications.clone(),
+            cast_filter: None,
+        };
+        let encoded_unqualified = serde_json::to_value(&unqualified).unwrap();
+        assert!(
+            encoded_unqualified.get("cast_filter").is_none(),
+            "an absent cast-quality predicate must be skipped, got {encoded_unqualified}"
+        );
+        assert_eq!(
+            serde_json::from_value::<PendingEntersModifications>(encoded_unqualified).unwrap(),
+            unqualified
+        );
+
+        // FreeCastOfferRemaining — the same three properties on the re-offer
+        // carrier.
+        let ridden_action = ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller: PlayerId(1),
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(7),
+            face_policy: Box::new(policy()),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            member_pool: vec![ObjectId(702)],
+        };
+        let encoded_action = serde_json::to_value(&ridden_action).unwrap();
+        assert_eq!(
+            encoded_action["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<ResolutionCastSuccessAction>(encoded_action).unwrap(),
+            ridden_action
+        );
+        let empty_action = ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller: PlayerId(1),
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(7),
+            face_policy: Box::new(policy()),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
+            member_pool: vec![ObjectId(702)],
+        };
+        let mut pre_fix_action = serde_json::to_value(&empty_action).unwrap();
+        assert!(
+            pre_fix_action
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty re-offer rider must be skipped on the wire"
+        );
+        // A pre-fix payload that never had the key at all is the same shape.
+        pre_fix_action
+            .as_object_mut()
+            .unwrap()
+            .remove("enters_with_modifications");
+        assert_eq!(
+            serde_json::from_value::<ResolutionCastSuccessAction>(pre_fix_action).unwrap(),
+            empty_action,
+            "a field-less payload must read as an empty rider"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: retained state written by an intermediate build
+    /// serialized the rider as a bare `ContinuousModification` array (both the
+    /// permission field and the effect payload). The dual-shape deserializer
+    /// must restore a populated legacy array as the unconditional rider while
+    /// the current object shape keeps round-tripping — a same-build or
+    /// omitted-field round trip does not prove this.
+    #[test]
+    fn enters_with_modifications_accepts_the_legacy_array_shape() {
+        use crate::types::ability::{ContinuousModification, PendingEntersModifications};
+        use crate::types::keywords::Keyword;
+
+        let legacy_rider = PendingEntersModifications {
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            cast_filter: None,
+        };
+
+        // Legacy permission: a populated bare array under the field name.
+        let legacy_permission = serde_json::json!({
+            "type": "ExileWithAltCost",
+            "cost": serde_json::to_value(ManaCost::generic(2)).unwrap(),
+            "enters_with_modifications": [
+                { "type": "AddKeyword", "keyword": "Haste" }
+            ]
+        });
+        let permission: CastingPermission = serde_json::from_value(legacy_permission).unwrap();
+        let CastingPermission::ExileWithAltCost {
+            enters_with_modifications,
+            ..
+        } = permission
+        else {
+            panic!("the legacy permission must restore as ExileWithAltCost");
+        };
+        assert_eq!(
+            enters_with_modifications, legacy_rider,
+            "a populated legacy permission array must restore as the unconditional rider"
+        );
+
+        // Legacy effect payload: the array under the former `modifications` key.
+        let legacy_effect: Effect = serde_json::from_value(serde_json::json!({
+            "type": "AddPendingEntersModifications",
+            "modifications": [ { "type": "AddKeyword", "keyword": "Haste" } ]
+        }))
+        .unwrap();
+        let Effect::AddPendingEntersModifications { rider } = legacy_effect else {
+            panic!("the legacy effect must restore as AddPendingEntersModifications");
+        };
+        assert_eq!(
+            rider, legacy_rider,
+            "a populated legacy effect array must restore as the unconditional rider"
+        );
+
+        // The current object shapes still round-trip.
+        let current_effect = Effect::AddPendingEntersModifications {
+            rider: PendingEntersModifications {
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+                cast_filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                )),
+            },
+        };
+        let encoded = serde_json::to_value(&current_effect).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Effect>(encoded).unwrap(),
+            current_effect,
+            "the current effect object must round-trip unchanged"
+        );
     }
 
     #[test]
@@ -8932,6 +9159,36 @@ impl CardTypeSetSource {
         }
     }
 
+    /// Does this population route a filter that references the cost-paid
+    /// object? Only the object filter and the journal's optional narrowing
+    /// filter can; `AnyOf` recurses so a union member's reference is not
+    /// dropped.
+    ///
+    /// Uncited: a structural query over which arms hold a `TargetFilter`, not a
+    /// rule implementation. (It cited CR 109.2, the battlefield-default rule for
+    /// a bare type description, which does not speak to filter routing.)
+    pub fn references_cost_paid_object(&self) -> bool {
+        let mut found = false;
+        let complete = self.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+        // A truncated walk claims the reference: this gate exists to stop a
+        // cost-paid-object read from escaping, so exhaustion must not let one past.
+        found || !complete
+    }
+
     /// CR 400.1 + CR 613.4a: Every zone this population reads.
     ///
     /// THE single authority for the population-zone axis. Both consumers ask
@@ -10505,6 +10762,161 @@ impl QuantityRef {
         }
     }
 
+    /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
+    /// object, by either of the two structural axes a ref can carry it on:
+    ///
+    /// 1. **Object-axis refs** carry a `scope: ObjectScope` and read the cost-paid
+    ///    object iff that scope is `CostPaidObject`.
+    /// 2. **Filter-bearing refs** embed a `TargetFilter`, which can itself reference
+    ///    `TargetFilter::CostPaidObject` (e.g. "the number of counters on the
+    ///    sacrificed creature" via `CountersOnObjects { filter: CostPaidObject }`),
+    ///    so the embedded filter is walked recursively.
+    ///
+    /// The match is intentionally exhaustive (no `_` wildcard) so a future
+    /// `QuantityRef` variant that adds either axis forces a compile error here
+    /// rather than silently falling through and dropping the snapshot propagation.
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            // Object-axis refs: read the cost-paid object iff scoped to it.
+            QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
+            | QuantityRef::Toughness { scope }
+            | QuantityRef::Intensity { scope }
+            | QuantityRef::ObjectManaValue { scope }
+            | QuantityRef::ObjectColorCount { scope }
+            | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope },
+                letters: _,
+            }
+            | QuantityRef::ObjectTypelineComponentCount { scope }
+            | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+            | QuantityRef::CountersOn { scope, .. } => matches!(scope, ObjectScope::CostPaidObject),
+
+            // Filter-bearing refs (owned `TargetFilter`): recurse into the filter.
+            QuantityRef::ObjectCount { filter }
+            | QuantityRef::ObjectCountDistinct { filter, .. }
+            | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+            | QuantityRef::CountersOnObjects { filter, .. }
+            | QuantityRef::ControlledByEachPlayer { filter, .. }
+            | QuantityRef::EnteredThisTurn { filter }
+            | QuantityRef::SacrificedThisTurn { filter, .. }
+            | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+            | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+            | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+            | QuantityRef::TokensCreatedThisTurn { filter, .. }
+            | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
+
+            // Filter-bearing refs (boxed `TargetFilter`): recurse (auto-deref).
+            QuantityRef::TargetObjectManaValue { filter }
+            | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+                filter.references_cost_paid_object()
+            }
+
+            // Filter-bearing refs (optional `TargetFilter`): recurse when present.
+            QuantityRef::ZoneCardCount { filter, .. }
+            | QuantityRef::AttackedThisTurn { filter, .. }
+            | QuantityRef::SpellsCastThisTurn { filter, .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+            | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+                .as_ref()
+                .is_some_and(TargetFilter::references_cost_paid_object),
+
+            // Damage history carries a source filter and a recipient filter.
+            QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+                source.references_cost_paid_object() || target.references_cost_paid_object()
+            }
+
+            // Card-type / subtype / colour counting all embed their `TargetFilter`s
+            // through the shared population enum.
+            QuantityRef::DistinctCardTypes { source }
+            | QuantityRef::SharedCardTypes { source }
+            | QuantityRef::DistinctSubtypes { source, .. }
+            | QuantityRef::DistinctColorsAmong { source } => source.references_cost_paid_object(),
+            QuantityRef::PropertyAggregate(aggregate) => {
+                aggregate.source().references_cost_paid_object()
+            }
+
+            // Mana-spent metering embeds a `TargetFilter` through its metric enum.
+            QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+                CastManaSpentMetric::FromSource { source_filter } => {
+                    source_filter.references_cost_paid_object()
+                }
+                CastManaSpentMetric::Total
+                | CastManaSpentMetric::DistinctColors
+                | CastManaSpentMetric::OfColor { .. } => false,
+            },
+
+            // Non-object, non-filter refs never read the cost-paid object. Listed
+            // explicitly (no wildcard) so adding any future object-axis or
+            // filter-bearing variant is caught by the compiler here. `PlayerCount`
+            // carries a `PlayerFilter`, not a `TargetFilter`, so it cannot embed a
+            // `CostPaidObject` object reference.
+            QuantityRef::HandSize { .. }
+            | QuantityRef::LifeTotal { .. }
+            | QuantityRef::GraveyardSize { .. }
+            | QuantityRef::LifeAboveStarting
+            | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::PlayerCount { .. }
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Variable { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::ExiledFromHandThisResolution
+            // CR 608.2c: the resolution's placed-sticker record, not an object.
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::ThatSticker,
+                letters: _,
+            }
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
+            | QuantityRef::LifeLostThisTurn { .. }
+            | QuantityRef::PartySize { .. }
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::Speed { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::LifeGainedThisTurn { .. }
+            | QuantityRef::CardsDrawnThisTurn { .. }
+            | QuantityRef::LandsPlayedThisTurn { .. }
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ChosenNumber
+            | QuantityRef::PlayerChosenNumber { .. }
+            | QuantityRef::NotedNumber
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::CardsDiscardedThisTurn { .. }
+            | QuantityRef::PlayerActionsThisTurn { .. }
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::VoteCount { .. } => false,
+        }
+    }
+
     /// CR 109.4: mutable access to this reference's single player-relativity
     /// axis, when it has one.
     ///
@@ -11996,6 +12408,28 @@ impl<'de> serde::Deserialize<'de> for QuantityExpr {
 }
 
 impl QuantityExpr {
+    /// CR 400.7d + CR 608.2k: True when any leaf `QuantityRef` of this
+    /// expression reads the cost-paid object
+    /// ([`QuantityRef::references_cost_paid_object`]).
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            QuantityExpr::Ref { qty } => qty.references_cost_paid_object(),
+            QuantityExpr::Fixed { .. } => false,
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Multiply { inner, .. } => inner.references_cost_paid_object(),
+            QuantityExpr::UpTo { max } => max.references_cost_paid_object(),
+            QuantityExpr::Power { exponent, .. } => exponent.references_cost_paid_object(),
+            QuantityExpr::Difference { left, right } => {
+                left.references_cost_paid_object() || right.references_cost_paid_object()
+            }
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                exprs.iter().any(QuantityExpr::references_cost_paid_object)
+            }
+        }
+    }
+
     /// Scale a quantity expression by a non-negative runtime factor. Fixed
     /// values fold immediately; dynamic quantities compose through
     /// `QuantityExpr::Multiply` so the existing quantity resolver evaluates the
@@ -12817,6 +13251,12 @@ pub enum StaticCondition {
     },
     /// CR 102.1: The active player is the controller of this static ability.
     DuringYourTurn,
+    /// CR 500.8 + CR 506.1 + CR 608.2c: this is the first combat phase of the
+    /// turn — the per-turn phase-occurrence gate ("it's the first combat phase
+    /// of the turn"). The possessive "of your turn" form composes
+    /// `And([DuringYourTurn, FirstCombatPhaseOfTurn])` at the parse layer
+    /// (CR 109.5: "your" = the ability's controller).
+    FirstCombatPhaseOfTurn,
     /// CR 102.3 + CR 805.4a: The active player is an opponent of this static
     /// ability's controller. This is deliberately distinct from
     /// `Not(DuringYourTurn)`: in team games, a teammate may be the active
@@ -13086,6 +13526,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
     }
@@ -13195,6 +13636,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsPaired
             | StaticCondition::SourceInZone { .. }
             | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
     }
@@ -13431,6 +13873,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
     }
@@ -13550,6 +13993,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => visit(self),
         }
     }
@@ -17438,6 +17882,74 @@ impl ChooseOneOfKind {
     }
 }
 
+/// CR 608.2c + CR 611.2a: the payload of a cast-this-way gains rider — the
+/// continuous modifications granted to the spell cast under the permission
+/// plus the printed spell-quality gate the cast must satisfy for them to
+/// apply ("creature" in "If you cast a creature spell this way, it gains
+/// haste …", Strago and Relm).
+///
+/// CR 608.2c: the conditional instruction is only followed when its condition
+/// holds, so the quality is carried as a typed predicate and evaluated against
+/// the elected spell at cast finalization (CR 601.2a: the spell has all the
+/// characteristics of its card), not dropped at parse time. `cast_filter:
+/// None` is the unconditional anaphoric form ("if you cast it this way").
+///
+/// Carried on the cast permission (and the offer/request/re-offer chain that
+/// feeds it) as one value, so the modifications and their gate cannot drift
+/// apart across routes — the permission is the single application authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEntersModifications {
+    /// The typed continuous modifications applied as a `Duration::Permanent`
+    /// transient continuous effect scoped to the cast object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifications: Vec<ContinuousModification>,
+    /// The printed spell-quality predicate ("a creature spell", "an instant or
+    /// sorcery spell"). `None` when the rider names no quality. Evaluated
+    /// against the cast object with a neutral filter context (a printed type
+    /// phrase, never source-relative).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_filter: Option<TargetFilter>,
+}
+
+impl PendingEntersModifications {
+    /// True when no modifications would apply — the rider is absent. Used as
+    /// the serde skip predicate so an absent rider keeps the wire shape of a
+    /// pre-rider payload.
+    pub fn is_empty(&self) -> bool {
+        self.modifications.is_empty()
+    }
+}
+
+/// Dual-shape deserialization for the gains-rider payload. The field was
+/// first serialized as a bare `Vec<ContinuousModification>` (the legacy array
+/// shape) and now carries the typed [`PendingEntersModifications`] object
+/// (modifications + printed spell-quality predicate). State written by an
+/// intermediate build that still used the array must keep restoring: a
+/// populated legacy array deserializes to the unconditional rider
+/// (`cast_filter: None`, the legacy semantics — no quality was recorded), and
+/// the current object shape is accepted unchanged. Used by the effect variant
+/// (via the `modifications` alias) and by every serialized carrier field.
+pub(crate) fn deserialize_enters_with_modifications_compat<'de, D>(
+    deserializer: D,
+) -> Result<PendingEntersModifications, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RiderCompat {
+        Legacy(Vec<ContinuousModification>),
+        Current(PendingEntersModifications),
+    }
+    Ok(match RiderCompat::deserialize(deserializer)? {
+        RiderCompat::Legacy(modifications) => PendingEntersModifications {
+            modifications,
+            cast_filter: None,
+        },
+        RiderCompat::Current(rider) => rider,
+    })
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -18201,6 +18713,28 @@ pub enum Effect {
     Populate,
     /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
     Clash,
+    /// CR 701.13a + CR 202.3: A card-defined top-card contest: "each player exiles
+    /// the top card of their library. The player who exiled the card with the
+    /// greatest mana value <winner_effect>. If two or more players' cards are
+    /// tied for greatest, the tied players repeat this process until the tie is
+    /// broken." (Timesifter).
+    ///
+    /// The whole contest is one resolution step (CR 608.2c): every remaining
+    /// contender exiles their top card, the contenders whose exiled card has the
+    /// greatest mana value stay in, and the exile-and-compare repeats among them
+    /// until exactly one remains. A contender who exiles no card (empty library)
+    /// drops out — per the card's ruling, a player who fails to exile a card
+    /// can't win — so the loop is bounded by library sizes and ends with one
+    /// winner or with nobody.
+    ///
+    /// `winner_effect` resolves once for the winner, with the winner bound as the
+    /// acting (scoped) player the same way a `player_scope` iteration binds its
+    /// seat (CR 109.5: the printed controller stays the ability's controller), so
+    /// an imperative "take an extra turn after this one" names the winner. It
+    /// does not resolve when nobody wins.
+    ExileTopCardContest {
+        winner_effect: Box<AbilityDefinition>,
+    },
     /// CR 701.4a: Behold a [quality] — "Reveal a [quality] card from your hand or
     /// choose a [quality] permanent you control on the battlefield." The quality is
     /// a subtype/type `filter` shared by both legs (Sarkhan, Dragon Ascendant beholds
@@ -19553,7 +20087,15 @@ pub enum Effect {
     // RUNTIME: consumed only as `CastFromZone` permission metadata; a standalone
     // resolve is a fail-loud no-op (see `resolve_add_pending_enters_modifications`).
     AddPendingEntersModifications {
-        modifications: Vec<ContinuousModification>,
+        /// Dual-shape: the current object, or the legacy bare array under the
+        /// former `modifications` key (see
+        /// [`deserialize_enters_with_modifications_compat`]).
+        #[serde(
+            default,
+            alias = "modifications",
+            deserialize_with = "deserialize_enters_with_modifications_compat"
+        )]
+        rider: PendingEntersModifications,
     },
     /// CR 114.1 + CR 114.4: Create an emblem with the specified abilities in
     /// the command zone. Emblems persist for the rest of the game and cannot
@@ -21222,6 +21764,7 @@ pub enum NestedDefinitionEdge {
     VoteObjectOutcome,
     SeparateIntoPilesChosen,
     SeparateIntoPilesUnchosen,
+    ExileTopCardContestWinner,
     RevealFromHandOnDecline,
     CreateDelayedTriggerEffect,
     CreateBoonTrigger,
@@ -22826,6 +23369,40 @@ impl Effect {
         }
     }
 
+    /// CR 400.7d + CR 608.2k: does this single effect (ignoring its
+    /// sub-ability chain) read the cost-paid object through its primary
+    /// magnitude, its primary target filter, or a P/T modification? An effect
+    /// that does cannot be resolved without the `ResolvedAbility` that carries
+    /// the cost-paid snapshot.
+    pub fn references_cost_paid_object(&self) -> bool {
+        if self
+            .count_expr()
+            .is_some_and(QuantityExpr::references_cost_paid_object)
+        {
+            return true;
+        }
+        if self
+            .target_filter()
+            .is_some_and(TargetFilter::references_cost_paid_object)
+        {
+            return true;
+        }
+        // Set-P/T magnitudes (e.g. "+X/+X where X is the sacrificed creature's
+        // power") carry their quantity in a `PtValue`, which `count_expr` does not
+        // surface.
+        if let Effect::Pump {
+            power, toughness, ..
+        } = self
+        {
+            let reads = |value: &PtValue| match value {
+                PtValue::Quantity(expr) => expr.references_cost_paid_object(),
+                PtValue::Fixed(_) | PtValue::Variable(_) => false,
+            };
+            return reads(power) || reads(toughness);
+        }
+        false
+    }
+
     /// CR 115.1: Returns the target filter for effects that have a player-selectable
     /// `target` field. Returns `None` for effects with no target field, or whose
     /// targeting is handled through different mechanisms (filters, zones, etc.).
@@ -22950,6 +23527,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -23201,6 +23779,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -23946,6 +24525,7 @@ impl Effect {
             // CR 700.3b: SeparateIntoPiles has no targeting slot — partitioning
             // is a resolution-time set computation against `object_filter`.
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
             // it has no discrete `target` field for the generic targeting layer.
             | Effect::RevealFromHand { .. }
@@ -24398,6 +24978,7 @@ impl Effect {
             | Effect::Unimplemented { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::RevealFromHand { .. }
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. }
@@ -24486,6 +25067,8 @@ impl Effect {
             | Effect::ExploreAll { .. }
             // Exiles the top N cards of a player's library.
             | Effect::ExileTop { .. }
+            // CR 701.13a: each contender exiles the top card of their library.
+            | Effect::ExileTopCardContest { .. }
             // Exiles one explicit object AND the top `count` cards of a library.
             | Effect::ExileFaceDownPile { .. }
             // CR 701.50a: connive "draws a card, then discards".
@@ -25647,6 +26230,7 @@ macro_rules! define_effect_quantity_walk {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::Myriad
@@ -25845,6 +26429,13 @@ impl Effect {
                         unchosen_pile_effect,
                     );
                 }
+            }
+            // CR 608.2c: the contest winner's effect, run once for the winner.
+            Effect::ExileTopCardContest { winner_effect } => {
+                f(
+                    NestedDefinitionEdge::ExileTopCardContestWinner,
+                    winner_effect,
+                );
             }
             // CR 701.20: reveal. This is the branch taken when the player
             // DECLINES to reveal, so it is a payload rather than the reveal.
@@ -26266,6 +26857,7 @@ impl Effect {
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -26534,6 +27126,7 @@ impl Effect {
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -26748,6 +27341,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::EndCombatPhase => "EndCombatPhase",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
+        Effect::ExileTopCardContest { .. } => "ExileTopCardContest",
         Effect::Behold { .. } => "Behold",
         Effect::Vote { .. } => "Vote",
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
@@ -27003,6 +27597,8 @@ pub enum EffectKind {
     ProliferateTarget,
     Populate,
     Clash,
+    /// CR 701.13a + CR 202.3: a top-card exile contest won by greatest mana value.
+    ExileTopCardContest,
     /// CR 608.2d + CR 608.2e: an opponent / the defending player guesses a
     /// committed value or proposition during resolution.
     OpponentGuess,
@@ -27269,6 +27865,7 @@ impl From<&Effect> for EffectKind {
             Effect::EndCombatPhase => EffectKind::EndCombatPhase,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
+            Effect::ExileTopCardContest { .. } => EffectKind::ExileTopCardContest,
             Effect::Behold { .. } => EffectKind::Behold,
             Effect::Vote { .. } => EffectKind::Vote,
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
@@ -29694,6 +30291,23 @@ pub enum AbilityCondition {
 }
 
 impl AbilityCondition {
+    /// CR 608.2k: does this ability condition read the cost-paid object?
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            AbilityCondition::CostPaidObjectMatchesFilter { .. } => true,
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.references_cost_paid_object()
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(AbilityCondition::references_cost_paid_object)
+            }
+            _ => false,
+        }
+    }
+
     /// CR 608.2c / CR 608.2d: "if you do", "if that player does", and "if a
     /// player does" all read the same optional-effect-performed signal.
     pub fn effect_performed() -> Self {
@@ -36438,6 +37052,35 @@ impl PartialEq for ResolvedAbility {
 impl Eq for ResolvedAbility {}
 
 impl ResolvedAbility {
+    /// CR 400.7d + CR 608.2k: True when this resolved ability tree reads the
+    /// cost-paid object — i.e. references `ObjectScope::CostPaidObject` in a
+    /// magnitude / P-T expression, `TargetFilter::CostPaidObject`, or
+    /// `AbilityCondition::CostPaidObjectMatchesFilter` — anywhere in its effect,
+    /// condition, or `sub_ability` / `else_ability` branches. Gates the emerge
+    /// cast-cost-object propagation onto ETB triggers (`build_triggered_ability`,
+    /// Adipose Offspring) and the enters-with replacement continuation stamp in
+    /// `engine_replacement::apply_post_replacement_effect` (Dralnu's Pet), so
+    /// only chains that consume the referent are stamped.
+    ///
+    /// The per-node walk is the type-owned [`Effect::references_cost_paid_object`]
+    /// / [`AbilityCondition::references_cost_paid_object`]; this method adds only
+    /// the chain traversal.
+    pub(crate) fn references_cost_paid_object(&self) -> bool {
+        self.effect.references_cost_paid_object()
+            || self
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::references_cost_paid_object)
+            || self
+                .sub_ability
+                .as_deref()
+                .is_some_and(ResolvedAbility::references_cost_paid_object)
+            || self
+                .else_ability
+                .as_deref()
+                .is_some_and(ResolvedAbility::references_cost_paid_object)
+    }
+
     /// CR 610.3: The "until" event bounding this node's own zone change, for
     /// every bounded zone-move shape (single-object `ChangeZone` and mass
     /// `ChangeZoneAll`). The single classifier the CR 610.3a/b latch, the
@@ -36500,6 +37143,7 @@ impl ResolvedAbility {
             | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
+            | Effect::ExileTopCardContest { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
             | Effect::EpicCopy { .. }
@@ -42483,7 +43127,7 @@ mod tests {
             source_id: Some(ObjectId(7)),
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -42782,7 +43426,7 @@ mod tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -45923,7 +46567,7 @@ mod cast_cost_modifier_serde_tests {
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: Some(modifier.clone()),
         };

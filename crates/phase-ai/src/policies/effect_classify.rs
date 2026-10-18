@@ -467,6 +467,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SearchOutsideGame { .. }
         | Effect::Seek { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SetClassLevel { .. }
         | Effect::SetDayNight { .. }
         | Effect::SetLifeTotal { .. }

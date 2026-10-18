@@ -18,8 +18,8 @@ pub(crate) enum Cause {
     EncodingFailure,
     IngressOverflow,
     ApplicationEnd,
-    RawDecodeQuota,
     QuotaRefusalOverflow,
+    QuotaDiscardOverflow,
 }
 
 impl Cause {
@@ -32,8 +32,8 @@ impl Cause {
         Self::EncodingFailure,
         Self::IngressOverflow,
         Self::ApplicationEnd,
-        Self::RawDecodeQuota,
         Self::QuotaRefusalOverflow,
+        Self::QuotaDiscardOverflow,
     ];
 
     pub(crate) const fn index(self) -> usize {
@@ -46,8 +46,8 @@ impl Cause {
             Self::EncodingFailure => 5,
             Self::IngressOverflow => 6,
             Self::ApplicationEnd => 7,
-            Self::RawDecodeQuota => 8,
-            Self::QuotaRefusalOverflow => 9,
+            Self::QuotaRefusalOverflow => 8,
+            Self::QuotaDiscardOverflow => 9,
         }
     }
 
@@ -61,8 +61,8 @@ impl Cause {
             Self::EncodingFailure => "encoding_failure",
             Self::IngressOverflow => "ingress_overflow",
             Self::ApplicationEnd => "application_end",
-            Self::RawDecodeQuota => "raw_decode_quota",
             Self::QuotaRefusalOverflow => "quota_refusal_overflow",
+            Self::QuotaDiscardOverflow => "quota_discard_overflow",
         }
     }
 }
@@ -102,6 +102,10 @@ impl Death {
 
     pub(crate) fn record(&self, cause: Cause) {
         self.record_details(cause, None, None);
+    }
+
+    pub(crate) fn record_quota_discard(&self) {
+        self.metrics.record_ws_quota_discard();
     }
 
     pub(crate) fn peer_close(&self, code: Option<u16>) {

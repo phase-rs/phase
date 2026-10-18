@@ -46,50 +46,71 @@ pub(super) fn clear_preexisting_unstacked_triggers(state: &mut GameState) {
     }
 }
 
-/// CR 724.1b / CR 724.2b: Exile every non-resolving object still on the stack.
+/// CR 724.1b / CR 724.2b: "Exile every object on the stack, including the
+/// object that's resolving."
 ///
-/// `resolve_top` has already popped the resolving object before effect
-/// execution and routes that object after the resolver returns. Spell entries
+/// The resolving instant or sorcery was popped from `state.stack` as it began
+/// resolving, so it is found through its resolution carrier; it keeps resolving
+/// from exile (CR 608.2m). A resolving ability has no object to move. Spells
 /// move through the replacement-aware zone-change pipeline; non-card stack
 /// entries cease to exist when removed from the stack.
-pub(super) fn exile_nonresolving_stack_objects(
+pub(super) fn exile_every_stack_object(
     state: &mut GameState,
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    if let Some(resolving) =
+        crate::game::stack::resolving_instant_or_sorcery_on_stack(state).map(|entry| entry.id)
+    {
+        if !exile_spell_from_stack(state, resolving, source_id, events) {
+            return false;
+        }
+    }
     while let Some(removed) = pop_nonresolving_top_stack_entry(
         state,
         crate::game::lifecycle::DelayedTerminalDisposition::EndTurn,
     ) {
         let entry = removed.entry;
-        if matches!(entry.kind, StackEntryKind::Spell { .. }) {
-            match change_zone::execute_zone_move(
-                state,
-                entry.id,
-                Zone::Stack,
-                Zone::Exile,
-                source_id,
-                None,
-                false,
-                crate::types::zones::EtbTapState::Unspecified,
-                false,
-                None,
-                &[],
-                None,
-                false,
-                None,
-                None,
-                events,
-            ) {
-                ZoneMoveResult::Done => {}
-                ZoneMoveResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    return false;
-                }
-                ZoneMoveResult::NeedsAuraAttachmentChoice => return false,
-            }
+        if matches!(entry.kind, StackEntryKind::Spell { .. })
+            && !exile_spell_from_stack(state, entry.id, source_id, events)
+        {
+            return false;
         }
     }
     true
+}
+
+/// Returns `false` when the move paused for a choice.
+fn exile_spell_from_stack(
+    state: &mut GameState,
+    spell: ObjectId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    match change_zone::execute_zone_move(
+        state,
+        spell,
+        Zone::Stack,
+        Zone::Exile,
+        source_id,
+        None,
+        false,
+        crate::types::zones::EtbTapState::Unspecified,
+        false,
+        None,
+        &[],
+        None,
+        false,
+        None,
+        None,
+        events,
+    ) {
+        ZoneMoveResult::Done => true,
+        ZoneMoveResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            false
+        }
+        ZoneMoveResult::NeedsAuraAttachmentChoice => false,
+    }
 }

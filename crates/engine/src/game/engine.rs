@@ -1654,29 +1654,21 @@ fn apply_action_boundary_core(
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
     let scan_from = result.events.len();
-    if effects::token::realize_settled_token_battlefield_entry(state, &mut result.events) {
-        let wf = match engine_priority::run_post_action_pipeline_from(
-            state,
-            &mut result.events,
-            scan_from,
-            &result.waiting_for,
-            false,
-            false,
-        ) {
-            Ok(wf) => wf,
-            Err(err) => {
-                *state = boundary_snapshot;
-                return Err(err);
-            }
-        };
-        // The pipeline's terminal return hands back `flush_pending_priority_intercepts(..)` WITHOUT
-        // writing `state.waiting_for`, and the drain can raise `OrderTriggers` (CR 603.3b; measured
-        // on the Fanatic route). BOTH writes are load-bearing: `finish_action_boundary` copies
-        // `result.waiting_for` INTO the state at `sync_waiting_for`, and
-        // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without ever
-        // calling `finish_action_boundary`.
-        state.waiting_for = wf.clone();
-        result.waiting_for = wf;
+    let realized_token_entry =
+        effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+    // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+    // completed on a route that never reached the pipeline (a spell cast during
+    // a resolution, CR 608.2g, finishes its announcement here): the resolving
+    // instant or sorcery still owes its final part — leaving the stack — and the
+    // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
+    // triggers. A token realization and an owed final part on the same action
+    // share one pass.
+    let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+    if realized_token_entry || owed_spell_final_part_is_due {
+        if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
+            *state = boundary_snapshot;
+            return Err(err);
+        }
     }
     // CR 603.2 + CR 603.3: events this action emitted while the announcement
     // stays paused are staged into its carrier; a spell's carrier returns to
@@ -1699,6 +1691,87 @@ fn apply_action_boundary_core(
         preserve_interaction,
         lifecycle,
     })
+}
+
+/// CR 608.2c + CR 608.2n: whether the action's result leaves a Priority window
+/// in which the resolving instant or sorcery owes its final part and every
+/// instruction has been followed. The handler's result already names the
+/// Priority window; the state's copy is only synchronized at
+/// `finish_action_boundary`, and the final-part authority reads it, so it is
+/// synchronized first.
+fn owed_spell_final_part_is_due(state: &mut GameState, result: &ActionResult) -> bool {
+    let owes_spell_final_part = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && super::stack::resolving_spell_owes_final_part(state);
+    if owes_spell_final_part {
+        sync_waiting_for(state, &result.waiting_for);
+    }
+    owes_spell_final_part && resolution_instructions_are_done(state)
+}
+
+/// The action boundary's convergence pass: the ordinary post-action pipeline,
+/// scanning only `result.events[scan_from..]`, whose top runs an owed final
+/// part (`run_spell_final_part_if_due`) and whose drain puts the batch on the
+/// stack. The caller restores its own snapshot on `Err`.
+fn run_boundary_convergence_pipeline(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<(), EngineError> {
+    let wf = engine_priority::run_post_action_pipeline_from(
+        state,
+        &mut result.events,
+        scan_from,
+        &result.waiting_for,
+        false,
+        false,
+    )?;
+    // The pipeline's terminal return hands back `flush_pending_priority_intercepts(..)` WITHOUT
+    // writing `state.waiting_for`, and the drain can raise `OrderTriggers` (CR 603.3b; measured
+    // on the Fanatic route). BOTH writes are load-bearing: `finish_action_boundary` copies
+    // `result.waiting_for` INTO the state at `sync_waiting_for`, and
+    // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without ever
+    // calling `finish_action_boundary`.
+    state.waiting_for = wf.clone();
+    result.waiting_for = wf;
+    Ok(())
+}
+
+/// CR 608.2c + CR 608.2n: an action whose result completed a paused instant
+/// or sorcery's instructions on a route that reached no pipeline — a handler
+/// that returned its result directly, or an elimination by the CR 704.5a net
+/// that canonically declined the departed player's pending choice (CR 800.4a +
+/// CR 608.2m) — still owes the spell's final part. Run the pipeline from
+/// `scan_from`: its top runs that part (`run_spell_final_part_if_due`) and its
+/// drain puts the batch on the stack before the action returns.
+fn converge_owed_spell_final_part(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<bool, EngineError> {
+    if !owed_spell_final_part_is_due(state, result) {
+        return Ok(false);
+    }
+    run_boundary_convergence_pipeline(state, result, scan_from)?;
+    Ok(true)
+}
+
+/// CR 704.5a + CR 800.4a: the player-loss net, then the convergence of a
+/// resolution the net's elimination completed. `reconcile` is the net each
+/// side of the convergence runs: the full [`reconcile_terminal_result`], or,
+/// after an auto-pass drive that did not advance, only its terminal half
+/// ([`reconcile_terminal_sba`]) so the loop shortcut is evaluated once per
+/// priority frame (CR 732.2a).
+fn reconcile_terminal_result_completing_resolution(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    reconcile: fn(&mut GameState, &mut ActionResult),
+) -> Result<(), EngineError> {
+    reconcile(state, result);
+    let scan_from = result.events.len();
+    if converge_owed_spell_final_part(state, result, scan_from)? {
+        reconcile(state, result);
+    }
+    Ok(())
 }
 
 /// CR 117.3b + CR 608.2c + CR 614.12a + CR 614.13a: A completed Devour entry
@@ -1893,6 +1966,13 @@ fn recover_ownerless_post_replacement_completion_at_priority_boundary(
         || state.pending_cast.is_some()
         || state.pending_resolution_completion.is_some()
         || state.resolving_stack_entry.is_none()
+        // CR 608.2n: a carrier still owing its spell's final part is live work
+        // for the ordinary drain, not a stale rest.
+        || super::stack::resolving_spell_owes_final_part(state)
+        // CR 608.2n: an instant or sorcery still on the stack has not made its
+        // move to the graveyard; settling its carrier would strand it in the
+        // stack zone, so the shape is not a stale rest.
+        || super::stack::resolving_instant_or_sorcery_on_stack(state).is_some()
     {
         return false;
     }
@@ -1921,6 +2001,13 @@ fn is_orphaned_devour_completion_at_priority_boundary(state: &GameState) -> bool
         && state
             .active_post_replacement_drains()
             .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
+        // CR 608.2n: a carrier still owing its spell's final part is live work
+        // for the final part's authority, not a terminal rest.
+        && !super::stack::resolving_spell_owes_final_part(state)
+        // CR 608.2n: an instant or sorcery still on the stack has not made its
+        // move to the graveyard; settling its carrier would strand it in the
+        // stack zone, so the frame is not a terminal rest.
+        && super::stack::resolving_instant_or_sorcery_on_stack(state).is_none()
 }
 
 fn is_orphaned_spell_resolution_at_priority_boundary(state: &GameState) -> bool {
@@ -1941,6 +2028,13 @@ fn is_orphaned_spell_resolution_at_priority_boundary(state: &GameState) -> bool 
                 ..
             }) if *id == pending.object_id
         )
+        // CR 608.2n: a carrier still owing its spell's final part is live work
+        // for the final part's authority, not a terminal rest.
+        && !super::stack::resolving_spell_owes_final_part(state)
+        // CR 608.2n: an instant or sorcery still on the stack has not made its
+        // move to the graveyard; settling its carrier would strand it in the
+        // stack zone, so the frame is not a terminal rest.
+        && super::stack::resolving_instant_or_sorcery_on_stack(state).is_none()
 }
 
 /// Finalize a checked persisted restore after its runtime-only data is present.
@@ -2081,7 +2175,15 @@ fn finish_action_boundary_with_lifecycle(
         preserve_interaction,
         lifecycle,
     } = raw;
-    reconcile_terminal_result(state, &mut result);
+    if let Err(err) = reconcile_terminal_result_completing_resolution(
+        state,
+        &mut result,
+        reconcile_terminal_result,
+    ) {
+        lifecycle.discard();
+        *state = boundary_snapshot;
+        return Err(err);
+    }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
@@ -2100,10 +2202,17 @@ fn finish_action_boundary_with_lifecycle(
     } else {
         run_auto_pass_loop(state, &mut result)
     };
-    if auto_pass_advanced {
-        reconcile_terminal_result(state, &mut result);
+    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+    let reconcile: fn(&mut GameState, &mut ActionResult) = if auto_pass_advanced {
+        reconcile_terminal_result
     } else {
-        reconcile_terminal_sba(state, &mut result);
+        reconcile_terminal_sba
+    };
+    if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
+    {
+        lifecycle.discard();
+        *state = boundary_snapshot;
+        return Err(err);
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         take_and_restore_stack_resolution_session(state);
@@ -8852,14 +8961,6 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
         }
     }
-    // CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
-    // window is put into its zone as the final part of its resolution, now
-    // that the window and everything parked behind it are done.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && resolution_instructions_are_done(state)
-    {
-        super::stack::deliver_deferred_spell(state, events);
-    }
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
 }
@@ -8882,10 +8983,19 @@ pub(super) fn settle_resolving_stack_entry_after_continuation_resume(state: &mut
 /// stack object. Unlike the priority-boundary wrapper above, this is called at
 /// the exact completion point when the prompt has already replaced Priority.
 pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut GameState) {
+    // CR 608.2n: a carrier that owes its spell's final part is refused here
+    // (`resolving_stack_entry_can_settle`); `run_spell_final_part_if_due` runs it.
     if !resolving_stack_entry_can_settle(state) {
         return;
     }
     settle_finished_resolving_stack_entry(state);
+}
+
+/// CR 608.2n: an instant or sorcery whose final part is still owed is still
+/// resolving; its carrier may settle only after `run_spell_final_part_if_due`,
+/// which owns the event stream, has run that part.
+fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
+    resolution_instructions_are_done(state) && !super::stack::resolving_spell_owes_final_part(state)
 }
 
 /// CR 608.2c + CR 608.2m: An object that has left the stack keeps resolving
@@ -8900,15 +9010,6 @@ pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut 
 /// exists to clear it. Carrier/firing parity is a separate question, answered
 /// by `resolving_carrier_parity_is_coherent` and reported on the settle path
 /// rather than gating it.
-fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
-    resolution_instructions_are_done(state) && state.deferred_spell_delivery.is_none()
-}
-
-/// CR 608.2c + CR 608.2n: whether the carrier's resolution has followed all of
-/// its instructions. Its carrier still may not settle while a spell paused on
-/// its own free-cast window owes its final move (`deferred_spell_delivery`):
-/// only a site that can deliver that move (`stack::deliver_deferred_spell`,
-/// which needs the event stream) may do so first.
 pub(super) fn resolution_instructions_are_done(state: &GameState) -> bool {
     state.resolving_stack_entry.is_some()
         && state.active_ability_continuation().is_none()
@@ -8967,6 +9068,54 @@ fn settle_finished_resolving_stack_entry(state: &mut GameState) {
     );
     // CR 400.7j: resolution-scoped self-move state ends with its carrier.
     state.resolution_source_relatch = None;
+}
+
+/// CR 608.2c + CR 608.2n: the single authority that completes an instant or
+/// sorcery whose instructions paused. It acts only at a priority boundary,
+/// only while the carrier owes its final part, and only once every
+/// instruction has been followed.
+///
+/// It runs the hooks, destination, move and report
+/// (`stack::finish_deferred_spell_resolution`), then retires the carrier. A
+/// final part that parks a question of its own (CR 616.1, CR 702.99a) clears
+/// the marker, and the carrier then settles through the ordinary wrapper.
+///
+/// CR 603.2 + CR 603.3 + CR 603.3b: the final part's events trigger now and
+/// wait in `deferred_triggers` for the resolution's batch. They are claimed
+/// for the ordinary collector, so a scan of the same buffer does not collect
+/// them twice; CR 603.7 delayed collectors still see them.
+///
+/// Returns whether a final part ran.
+pub(super) fn run_spell_final_part_if_due(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || !super::stack::resolving_spell_owes_final_part(state)
+        || !resolution_instructions_are_done(state)
+    {
+        return false;
+    }
+    let final_part_start = events.len();
+    match super::stack::finish_deferred_spell_resolution(state, events) {
+        super::stack::DeferredFinalPart::Parked => {}
+        super::stack::DeferredFinalPart::Completed | super::stack::DeferredFinalPart::NotOwed => {
+            super::stack::finish_resolving_stack_entry(
+                state,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+            // CR 400.7j: resolution-scoped self-move state ends with its carrier.
+            state.resolution_source_relatch = None;
+        }
+    }
+    let final_part_events: Vec<GameEvent> = events[final_part_start..]
+        .iter()
+        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    triggers::collect_triggers_into_deferred(state, &final_part_events);
+    triggers::claim_events_for_ordinary_collection(state, events, final_part_start);
+    true
 }
 
 /// CR 118.3b + CR 119.4 + CR 616.1: Resume the exact outer cost action after
@@ -9234,6 +9383,7 @@ fn pass_priority_once_with_pipeline(
     // submitter (the controller), which would mis-count consecutive passes and
     // soft-lock the game.
     let current_seat = turn_control::priority_seat(state);
+    let final_part_owed_before_pass = super::stack::resolving_spell_owes_final_part(state);
     let priority_outcome = priority::handle_priority_pass_with_limit(
         current_seat,
         state,
@@ -9290,13 +9440,23 @@ fn pass_priority_once_with_pipeline(
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let mut wf = match engine_priority::run_post_action_pipeline(
-        state,
-        events,
-        &state.waiting_for.clone(),
-        skip_triggers,
-        false,
-    ) {
+    // CR 608.2n + CR 117.5: if `resolve_top`'s net ran a final part in this
+    // pass, the resolution is over, so its batch goes on the stack above any
+    // spell still below it before another object begins resolving.
+    let final_part_ran_in_pass =
+        final_part_owed_before_pass && !super::stack::resolving_spell_owes_final_part(state);
+    let pass_wf = state.waiting_for.clone();
+    let pipeline = if final_part_ran_in_pass {
+        engine_priority::run_post_action_pipeline_after_spell_final_part(
+            state,
+            events,
+            &pass_wf,
+            skip_triggers,
+        )
+    } else {
+        engine_priority::run_post_action_pipeline(state, events, &pass_wf, skip_triggers, false)
+    };
+    let mut wf = match pipeline {
         Ok(waiting_for) => waiting_for,
         Err(error) => {
             if let Some(snapshot) = boundary_snapshot.as_ref() {
@@ -9529,13 +9689,31 @@ pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> A
     let journal_start = state.resolved_rules_journal.entries().len();
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
 
-    reconcile_terminal_result(state, &mut result);
+    // This seam has no error channel: a failed convergence restores the
+    // seam's entry state and reports it unchanged. The owed carrier is then
+    // still found by `stack::resolve_top`'s net at the next pass.
+    if reconcile_terminal_result_completing_resolution(
+        state,
+        &mut result,
+        reconcile_terminal_result,
+    )
+    .is_err()
+    {
+        *state = boundary_snapshot;
+        return ActionResult::applied(Vec::new(), state.waiting_for.clone());
+    }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    if run_auto_pass_loop(state, &mut result) {
-        reconcile_terminal_result(state, &mut result);
+    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+    let reconcile: fn(&mut GameState, &mut ActionResult) = if run_auto_pass_loop(state, &mut result)
+    {
+        reconcile_terminal_result
     } else {
-        reconcile_terminal_sba(state, &mut result);
+        reconcile_terminal_sba
+    };
+    if reconcile_terminal_result_completing_resolution(state, &mut result, reconcile).is_err() {
+        *state = boundary_snapshot;
+        return ActionResult::applied(Vec::new(), state.waiting_for.clone());
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         take_and_restore_stack_resolution_session(state);
@@ -10107,11 +10285,29 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
     // sides of the internal auto-pass drive. The resume seam bypasses
     // `finish_action_boundary`, so without this a loss created by its final
     // resolution could remain at Priority instead of becoming GameOver.
-    reconcile_terminal_result(state, &mut result);
-    if run_auto_pass_loop(state, &mut result) {
-        reconcile_terminal_result(state, &mut result);
+    // This seam has no error channel: a failed convergence restores the
+    // seam's entry state and leaves `batch` untouched. The owed carrier is then
+    // still found by `stack::resolve_top`'s net at the next pass.
+    if reconcile_terminal_result_completing_resolution(
+        state,
+        &mut result,
+        reconcile_terminal_result,
+    )
+    .is_err()
+    {
+        *state = before;
+        return;
+    }
+    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+    let reconcile: fn(&mut GameState, &mut ActionResult) = if run_auto_pass_loop(state, &mut result)
+    {
+        reconcile_terminal_result
     } else {
-        reconcile_terminal_sba(state, &mut result);
+        reconcile_terminal_sba
+    };
+    if reconcile_terminal_result_completing_resolution(state, &mut result, reconcile).is_err() {
+        *state = before;
+        return;
     }
 
     let log_entries = super::log::resolve_log_entries(&result.events, &before, state);
@@ -11372,10 +11568,23 @@ pub(super) fn settle_deferred_phase_transition(
     // CR 608.2g + CR 502.4: retire a completed resolution-cast marker and its
     // carrier, as the pipeline's settlement step would, but leave the triggers
     // it parked held for the next time a player would receive priority.
-    engine_priority::settle_pending_resolution_completion(state);
+    engine_priority::settle_pending_resolution_completion(state, events);
+    // CR 608.2n: a completed resolution's final part runs here, and its
+    // triggers are collected with the batch. At the cleanup step, the retry
+    // below reaches `execute_cleanup`, whose tail puts that batch on the stack
+    // and gives the active player priority before the turn can end
+    // (CR 514.3a). At an untap step's turn-ending leave they are held for the
+    // next time a player receives priority (CR 502.4).
+    run_spell_final_part_if_due(state, events);
     // CR 608.2c: a carrier whose resolution has finished settles before the
     // transition is retried.
     settle_resolving_stack_entry_after_continuation_resume(state);
+    // CR 608.2n + CR 616.1: the settling spell's final part may itself have
+    // asked a question; that prompt, not the provisional window, now owns the
+    // waiting state.
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return state.waiting_for.clone();
+    }
     if state.stack.is_empty() && !turns::phase_transition_requires_settlement(state) {
         // CR 514.1 + CR 514.2: a transition deferred as the cleanup step began
         // came before the step's actions, so the interpreter resumes the step.
@@ -26742,6 +26951,77 @@ mod resolving_carrier_settle_tests {
             1,
             "the settled continuation must cross exactly one turn boundary"
         );
+    }
+
+    /// CR 608.2n + CR 514.3a: a sorcery whose paused instructions are done
+    /// still owes its final part when a transition deferred at the cleanup
+    /// step is settled. The final part runs there and its own move triggers
+    /// ("Whenever a card is put into your graveyard from anywhere"); the retry
+    /// reaches the cleanup step's actions, whose tail puts that trigger on the
+    /// stack and gives the active player priority, so the turn does not end.
+    #[test]
+    fn a_deferred_cleanup_transition_puts_the_final_parts_trigger_on_the_stack_before_the_turn_ends(
+    ) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::zones::move_to_zone;
+        use crate::types::game_state::{CastingVariant, OwedSpellFinalPart};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::End);
+        let archivist = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Graveyard Archivist",
+                "Whenever a card is put into your graveyard from anywhere, you gain 1 life.",
+            )
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Plain Draw", false, "Draw a card.")
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        move_to_zone(state, spell, Zone::Stack, &mut Vec::new());
+        state.phase = Phase::Cleanup;
+        state.active_player = P0;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: P0,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(spell.0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let starting_turn = state.turn_number;
+
+        let mut events = Vec::new();
+        let waiting_for = super::settle_deferred_phase_transition(state, &mut events);
+
+        // Reach guard: the final part ran.
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_spell_final_part.is_none());
+
+        assert_eq!(waiting_for, WaitingFor::Priority { player: P0 });
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert_eq!(state.turn_number, starting_turn, "the turn does not end");
+        assert_eq!(
+            state
+                .stack
+                .iter()
+                .filter(
+                    |entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                        && entry.source_id == archivist
+                )
+                .count(),
+            1,
+            "the final part's trigger is on the stack"
+        );
+        assert!(state.deferred_triggers.is_empty());
     }
 }
 

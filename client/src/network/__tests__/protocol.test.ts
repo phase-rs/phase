@@ -90,8 +90,8 @@ describe("lobby capability floor for the Dandan format", () => {
 });
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v129", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(129);
+  it("pins the P2P wire protocol to v133", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(133);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -387,6 +387,16 @@ describe("encodeWireMessage / decodeWireMessage", () => {
               type: "GraveyardPaidCast",
               hit_card: 17,
               cast_transformed: false,
+              // CR 608.2c + CR 601.2a: a populated gains-modifications rider —
+              // the typed modifications AND the printed spell-quality predicate
+              // must survive the wire round trip.
+              enters_with_modifications: {
+                modifications: [{ type: "AddKeyword", keyword: "Haste" }],
+                cast_filter: {
+                  type: "Typed",
+                  type_filters: [{ type: "Creature" }],
+                },
+              },
               graveyard_replacement: {
                 type: "Library",
                 position: { type: "BeneathTop", depth: { type: "Fixed", value: 2 } },
@@ -446,7 +456,41 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
     };
 
-    for (const message of [nonempty, legacyEmpty]) {
+    // FreeCastWindow — a populated rider on the window carrier, with the
+    // optional offer fields (remaining_casts / remaining_mv_budget /
+    // member_pool) omitted; the round trip must keep the populated values and
+    // keep the omitted values omitted.
+    const windowMessage: P2PMessage = {
+      ...nonempty,
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "FreeCastWindow",
+              candidates: [17, 18],
+              face_policy: {
+                filter: { type: "Any" },
+                source_id: 11,
+                controller: 0,
+                constraint: null,
+              },
+              zones: ["Exile"],
+              enters_with_modifications: {
+                modifications: [{ type: "AddKeyword", keyword: "Haste" }],
+                cast_filter: {
+                  type: "Typed",
+                  type_filters: [{ type: "Creature" }],
+                },
+              },
+            },
+          },
+        },
+      }),
+    };
+
+    for (const message of [nonempty, legacyEmpty, windowMessage]) {
       const bytes = await encodeWireMessage(message);
       await expect(decodeWireMessage(bytes)).resolves.toEqual(message);
     }

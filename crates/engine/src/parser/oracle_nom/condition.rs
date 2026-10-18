@@ -256,6 +256,12 @@ fn parse_condition_connector(input: &str) -> OracleResult<'_, ConditionConnectiv
 fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_you_attacked_with_total_power_this_combat,
+        // CR 500.8 + CR 506.1 + CR 109.5 + CR 608.2c: the first-combat-phase
+        // occurrence gate, scope-composed (non-possessive "the turn" vs
+        // possessive "your turn"). The single shared recognizer for this
+        // game-state condition; the effect parser lowers its typed result via
+        // `static_condition_to_ability_condition`.
+        parse_first_combat_phase_of_turn,
         // CR 601.2h + CR 608.2c: whole-phrase "it wasn't cast or no mana was spent
         // to cast <self>" gate. MUST precede the event-history arm's
         // `parse_was_cast_condition`, which would otherwise claim the bare "it
@@ -268,6 +274,34 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_resolution_context_conditions,
     ))
     .parse(input)
+}
+
+/// CR 500.8 + CR 506.1 + CR 109.5 + CR 608.2c: the first-combat-phase
+/// occurrence gate, composed per axis — the common phrase is parsed once and
+/// the scope alternates between the non-possessive "the turn" and the
+/// possessive "your turn" (CR 109.5: "your" = the ability's controller, so the
+/// possessive form composes `And([DuringYourTurn, FirstCombatPhaseOfTurn])`).
+/// Shared by the effect path (bridged to `AbilityCondition`) and the
+/// trigger/static paths (via `parse_inner_condition`).
+fn parse_first_combat_phase_of_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, possessive) = preceded(
+        (parse_it_is, tag(" the first combat phase of ")),
+        alt((value(false, tag("the turn")), value(true, tag("your turn")))),
+    )
+    .parse(input)?;
+    Ok((
+        rest,
+        if possessive {
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::DuringYourTurn,
+                    StaticCondition::FirstCombatPhaseOfTurn,
+                ],
+            }
+        } else {
+            StaticCondition::FirstCombatPhaseOfTurn
+        },
+    ))
 }
 
 /// CR 508.1a + CR 603.4: "you attacked with creatures with total power N or
@@ -14033,6 +14067,37 @@ mod tests {
     /// or more [type]` count authority is parameterized on the controller-scope
     /// axis. Both surface forms flow through `parse_inner_condition` and produce
     /// the same `ObjectCount >= N` shape, differing only in the injected
+    /// CR 500.8 + CR 506.1 + CR 109.5 + CR 608.2c: the first-combat-phase
+    /// occurrence gate is recognized by the SHARED authority, scope-composed
+    /// per axis — the possessive "your turn" form adds `DuringYourTurn`
+    /// (CR 109.5) while the non-possessive "the turn" form stays a single leaf.
+    #[test]
+    fn parse_inner_condition_first_combat_phase_scope_axis() {
+        let (rest, condition) = parse_inner_condition("it's the first combat phase of the turn")
+            .expect("the non-possessive form must parse in the shared authority");
+        assert_eq!(rest, "");
+        assert_eq!(condition, StaticCondition::FirstCombatPhaseOfTurn);
+
+        let (rest, condition) = parse_inner_condition("it's the first combat phase of your turn")
+            .expect("the possessive form must parse in the shared authority");
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::DuringYourTurn,
+                    StaticCondition::FirstCombatPhaseOfTurn,
+                ],
+            }
+        );
+
+        // Review control: the "it is" expansion is the same condition.
+        let (rest, condition) = parse_inner_condition("it is the first combat phase of the turn")
+            .expect("the 'it is' form must parse in the shared authority");
+        assert_eq!(rest, "");
+        assert_eq!(condition, StaticCondition::FirstCombatPhaseOfTurn);
+    }
+
     /// `ControllerRef`. Self form ("you control three or more creatures") pins
     /// `You`; opponent form (Lashwhip Predator: "your opponents control three or
     /// more creatures") pins `Opponent`.
@@ -25696,6 +25761,10 @@ mod tests {
             ),
             ("it's your turn", "it\u{2019}s your turn"),
             ("it's not your turn", "it\u{2019}s not your turn"),
+            (
+                "it's the first combat phase of the turn",
+                "it\u{2019}s the first combat phase of the turn",
+            ),
             (
                 "~ hasn't dealt damage yet",
                 "~ hasn\u{2019}t dealt damage yet",
