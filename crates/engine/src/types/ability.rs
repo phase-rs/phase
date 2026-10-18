@@ -35580,6 +35580,9 @@ pub struct ResolvedAbility {
     /// The full `trigger_source` context remains the authority for all triggered
     /// source facts; this field preserves the source epoch for activated and
     /// delayed self-transform abilities that do not carry trigger provenance.
+    /// An activated ability captures it at its announcement
+    /// (`casting::record_activation_announcement`), before any cost that moves
+    /// the source is paid; stack placement never restamps an existing capture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_incarnation: Option<u64>,
     /// CR 400.7 + CR 113.7a: Complete event-time authority for a triggered

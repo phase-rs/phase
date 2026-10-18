@@ -25,13 +25,21 @@
 //! arm.
 //!
 //! The activation cohort mirrors the trigger matrix through the activated
-//! consumer: the ability is activated (source incarnation captured at stack
-//! push), then the source is left alone (live), destroyed (departed), or
-//! blinked (a new incarnation at the same storage id) before the ability
-//! resolves — including returns whose prepared state diverges from the exit
-//! state in both directions. Completion runs through the Priority system: the
-//! removal/blink is cast in response, then priority is passed until the stack
-//! drains.
+//! consumer: the ability is activated (source incarnation captured at the
+//! activation's announcement, before any cost is paid), then the source is
+//! left alone (live), destroyed (departed), or blinked (a new incarnation at
+//! the same storage id) before the ability resolves — including returns whose
+//! prepared state diverges from the exit state in both directions. Completion
+//! runs through the Priority system: the removal/blink is cast in response,
+//! then priority is passed until the stack drains.
+//!
+//! The self-sacrifice cohort makes the cost itself move the source
+//! ("Sacrifice this creature: Draw a card if this creature is[n't]
+//! prepared."): the sacrifice advances the storage incarnation before stack
+//! placement, so only the announcement-captured incarnation's exit last-known
+//! information still records what the source was when the ability was
+//! activated, and a placement-time stamp would invert the discriminating
+//! verdicts (CR 602.2a + CR 113.7a).
 
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -52,6 +60,10 @@ const UNPREPARED_DRAW_ORACLE: &str =
     "At the beginning of your upkeep, draw a card if this creature isn't prepared.";
 const PREPARED_ACTIVATION_ORACLE: &str = "{1}: Draw a card if this creature is prepared.";
 const UNPREPARED_ACTIVATION_ORACLE: &str = "{1}: Draw a card if this creature isn't prepared.";
+const SELF_SACRIFICE_PREPARED_ACTIVATION_ORACLE: &str =
+    "Sacrifice this creature: Draw a card if this creature is prepared.";
+const SELF_SACRIFICE_UNPREPARED_ACTIVATION_ORACLE: &str =
+    "Sacrifice this creature: Draw a card if this creature isn't prepared.";
 const DOOM_BLADE_ORACLE: &str = "Destroy target creature.";
 const CLOUDSHIFT_ORACLE: &str =
     "Exile target creature you control, then return that card to the battlefield under your control.";
@@ -250,7 +262,15 @@ fn setup_activation(oracle: &str) -> (GameRunner, ObjectId, ObjectId, ObjectId) 
 
     // Parsed-control gate: the trailing suffix condition must be admitted
     // grammar AND must have parsed to the Prepared predicate — not residue.
-    let parsed_json = serde_json::to_string(&runner.state().objects[&witness].abilities)
+    assert_activation_parses_to_prepared(runner.state(), witness);
+    (runner, witness, doom_blade, cloudshift)
+}
+
+/// Parsed-control gate shared by the activation setups: the trailing suffix
+/// condition must be admitted grammar AND must have parsed to the Prepared
+/// predicate — not residue.
+fn assert_activation_parses_to_prepared(state: &GameState, witness: ObjectId) {
+    let parsed_json = serde_json::to_string(&state.objects[&witness].abilities)
         .expect("the witness's abilities must serialize");
     assert!(
         parsed_json.contains("Prepared"),
@@ -260,7 +280,49 @@ fn setup_activation(oracle: &str) -> (GameRunner, ObjectId, ObjectId, ObjectId) 
         !parsed_json.contains("\"Unimplemented\""),
         "the witness ability tree must contain no Effect::Unimplemented: {parsed_json}"
     );
-    (runner, witness, doom_blade, cloudshift)
+}
+
+/// Build the self-sacrifice activation witness — the cost-moves-the-source
+/// cohort: the ability's own `Sacrifice this creature` cost advances the
+/// storage incarnation before stack placement, so the announcement-captured
+/// incarnation's exit last-known information is the only surviving record of
+/// what the source was when the ability was activated. The witness stages the
+/// Prepare back face so `prepare_witness` can mark it.
+fn setup_self_sacrifice_activation(oracle: &str) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let witness = scenario
+        .add_creature(P0, WITNESS, 2, 2)
+        .from_oracle_text(oracle)
+        .id();
+    // CR 704.5b decking guard: resolving draws must have cards available.
+    for index in 0..20 {
+        scenario.add_card_to_library_top(P0, &format!("Prepared Witness Library P0 {index}"));
+        scenario.add_card_to_library_top(P1, &format!("Prepared Witness Library P1 {index}"));
+    }
+    let mut runner = scenario.build();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&witness)
+        .unwrap()
+        .back_face = Some(BackFaceData {
+        layout_kind: Some(LayoutKind::Prepare),
+        ..BackFaceData::default()
+    });
+
+    // Admission positively checked: the self-sacrifice cost and the trailing
+    // prepared condition must both be admitted grammar, not residue.
+    assert_activation_parses_to_prepared(runner.state(), witness);
+    assert!(
+        runner.state().objects[&witness]
+            .abilities
+            .iter()
+            .any(|ability| ability.cost.is_some()),
+        "the self-sacrifice activation must carry its printed cost"
+    );
+    (runner, witness)
 }
 
 fn activation_index(runner: &GameRunner, source: ObjectId) -> usize {
@@ -662,7 +724,8 @@ fn negated_prepared_source_condition_blink_returned_prepared_still_dispatches() 
 
 // ---------------------------------------------------------------------------
 // Activation cohort: the same condition consumed by an activated ability
-// (`trigger_source = None`), reading the incarnation captured at stack push.
+// (`trigger_source = None`), reading the incarnation captured at the
+// activation's announcement — before any cost is paid.
 // ---------------------------------------------------------------------------
 
 /// Activated reach/dispatch control: a live prepared source satisfies the
@@ -997,5 +1060,159 @@ fn negated_prepared_activation_blink_returned_prepared_still_dispatches() {
     assert!(
         state_prepared(runner.state(), returned),
         "the return stays prepared throughout"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Self-sacrifice cohort: the activation's own cost moves the source, so the
+// announcement-captured incarnation (before payment) is the only surviving
+// source epoch — the exit LKI of the sacrificed permanent, never the graveyard
+// object a placement-time stamp would have named.
+// ---------------------------------------------------------------------------
+
+/// CR 602.2a + CR 113.7a + CR 608.2h: the activation's own cost sacrifices the
+/// source, so the storage incarnation advances before stack placement. The
+/// announced incarnation's exit last-known information must answer the
+/// condition: the exit was prepared, so the draw dispatches even though the
+/// live graveyard card reads unprepared — a placement-time stamp would name
+/// the graveyard incarnation and suppress.
+#[test]
+fn prepared_activation_self_sacrifice_dispatches_after_prepared_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_PREPARED_ACTIVATION_ORACLE);
+    prepare_witness(&mut runner, witness);
+    let incarnation_before = runner.state().objects[&witness].incarnation;
+
+    activate_onto_stack(&mut runner, witness);
+
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the self-sacrifice cost must have moved the source before placement"
+    );
+    assert_ne!(
+        runner.state().objects[&witness].incarnation,
+        incarnation_before,
+        "the sacrifice advances the storage incarnation — a placement-time stamp would name this object"
+    );
+    assert!(
+        runner.state().objects[&witness].prepared.is_none(),
+        "the departed graveyard card's live designation is cleared — the exit snapshot is the only surviving record"
+    );
+
+    let baseline = hand_size(runner.state(), P0);
+    let events = drive_until_stack_empty(&mut runner);
+
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        baseline + 1,
+        "the announced incarnation's exit-prepared state must dispatch the draw"
+    );
+    assert_eq!(
+        draw_dispatches(&events, witness),
+        1,
+        "the draw must dispatch from the announced source epoch"
+    );
+    assert_eq!(cards_drawn_for(&events, P0), 1);
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete into a Priority window"
+    );
+}
+
+/// Paired control: an unprepared self-sacrifice exit suppresses the positive
+/// draw — the announced incarnation's exit absence survives the cost.
+#[test]
+fn prepared_activation_self_sacrifice_suppresses_after_unprepared_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_PREPARED_ACTIVATION_ORACLE);
+
+    activate_onto_stack(&mut runner, witness);
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the cost must have sacrificed the source"
+    );
+
+    let baseline = hand_size(runner.state(), P0);
+    let events = drive_until_stack_empty(&mut runner);
+
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        baseline,
+        "the exit was unprepared — the suppressed draw adds nothing"
+    );
+    assert_eq!(draw_dispatches(&events, witness), 0);
+    assert_eq!(cards_drawn_for(&events, P0), 0);
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete into a Priority window"
+    );
+}
+
+/// Negated polarity across the self-sacrifice cost: "isn't prepared" must read
+/// the announced incarnation's exit state and suppress, even though the live
+/// graveyard card reads unprepared — a placement-time stamp would invert this
+/// verdict.
+#[test]
+fn negated_prepared_activation_self_sacrifice_suppresses_after_prepared_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_UNPREPARED_ACTIVATION_ORACLE);
+    prepare_witness(&mut runner, witness);
+
+    activate_onto_stack(&mut runner, witness);
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the cost must have sacrificed the source"
+    );
+    assert!(
+        runner.state().objects[&witness].prepared.is_none(),
+        "the departed graveyard card's live designation is cleared"
+    );
+
+    let baseline = hand_size(runner.state(), P0);
+    let events = drive_until_stack_empty(&mut runner);
+
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        baseline,
+        "the exit was prepared — 'isn't prepared' must suppress"
+    );
+    assert_eq!(draw_dispatches(&events, witness), 0);
+    assert_eq!(cards_drawn_for(&events, P0), 0);
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete into a Priority window"
+    );
+}
+
+/// Negated polarity, self-sacrifice positive twin: an unprepared exit satisfies
+/// "isn't prepared" and dispatches.
+#[test]
+fn negated_prepared_activation_self_sacrifice_dispatches_after_unprepared_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_UNPREPARED_ACTIVATION_ORACLE);
+
+    activate_onto_stack(&mut runner, witness);
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the cost must have sacrificed the source"
+    );
+
+    let baseline = hand_size(runner.state(), P0);
+    let events = drive_until_stack_empty(&mut runner);
+
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        baseline + 1,
+        "the exit was unprepared — the draw must dispatch"
+    );
+    assert_eq!(draw_dispatches(&events, witness), 1);
+    assert_eq!(cards_drawn_for(&events, P0), 1);
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete into a Priority window"
     );
 }

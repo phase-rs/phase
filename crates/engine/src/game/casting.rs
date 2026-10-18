@@ -28033,6 +28033,27 @@ pub(crate) fn record_activation_announcement(
         .get(&source_id)
         .map(|source| source.activated_ability_provenance(ability_index));
     ability.set_source_ability_provenance_recursive(provenance);
+    // CR 400.7 + CR 113.7a: capture the source incarnation at this announcement
+    // — the authoritative pre-payment moment (CR 602.2a creates the ability
+    // here; CR 602.2b routes the remainder through the spell-casting steps, so
+    // this precedes every cost, CR 601.2h). A cost that moves the source
+    // (self-sacrifice, self-exile) advances the storage object's incarnation
+    // before stack placement; leaving the capture to the placement boundary
+    // would stamp the POST-cost object, and a source-subject resolution
+    // condition would read the moved object's cleared state (CR 608.2h
+    // current-information branch) instead of the announced source's last known
+    // information (CR 113.7a). An existing capture is never overwritten: the
+    // earliest announcement wins, and stack placement only fills abilities
+    // that reach it without one (triggered abilities, whose creation event
+    // that placement is).
+    if ability.source_incarnation.is_none() {
+        ability.set_source_incarnation_recursive(
+            state
+                .objects
+                .get(&source_id)
+                .map(|source| source.incarnation),
+        );
+    }
 }
 
 /// [`capture_activation_record`] from an ability definition and its committed

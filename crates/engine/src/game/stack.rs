@@ -202,7 +202,12 @@ fn push_to_stack_with_firing(
         if let Some(ability) = entry.ability_mut() {
             // CR 400.7 + CR 113.7a: Capture the source incarnation for every
             // activated or triggered ability, including non-transforming
-            // permanents. The transformation guard below has a narrower scope.
+            // permanents. An activated ability already carries the incarnation
+            // captured at its announcement, before any self-moving cost was
+            // paid (`record_activation_announcement`); this placement stamp
+            // only fills abilities created here — triggered abilities, whose
+            // creation event this placement is. The transformation guard below
+            // has a narrower scope.
             if ability.source_incarnation.is_none() {
                 ability
                     .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
