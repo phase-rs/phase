@@ -29176,7 +29176,7 @@ mod extra_loyalty_activation_grant_tests {
             .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
     }
 
-    /// (V1) Both recipient axes, each with and without the " this turn" the
+    /// Both recipient axes, each with and without the " this turn" the
     /// clause shell may already have peeled, and with an optional final period.
     #[test]
     fn grant_grammar_accepts_both_recipient_axes() {
@@ -29222,7 +29222,7 @@ mod extra_loyalty_activation_grant_tests {
         );
     }
 
-    /// (V1) Declines. Each is paired with the accepted base form in the same
+    /// Declines. Each is paired with the accepted base form in the same
     /// test, so a decline is a decision about the varied part, not an upstream
     /// short-circuit.
     #[test]

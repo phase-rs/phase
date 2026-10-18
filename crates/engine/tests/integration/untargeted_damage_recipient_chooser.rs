@@ -8,8 +8,8 @@
 //!
 //! The toy planeswalkers below isolate the recipient chooser from Comet, Stellar
 //! Pup's die table (covered end to end in `comet_stellar_pup.rs`); their rows run
-//! through the real activation pipeline. Wicked Guardian is the printed class
-//! member that resolves today.
+//! through the real activation pipeline. Wicked Guardian is the other printed class
+//! member, exercised through its own enters trigger.
 
 use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::{apply, EngineError};

@@ -1331,10 +1331,12 @@ fn a_blinked_component_pouch_gets_none_of_its_old_activations_counters() {
 }
 
 /// Comet blinked in response to his own activation: the new object is not the
-/// object that rolled, so his rows' `[+N]`, `[−N]` and grant do not reach it. Each
-/// face has an unblinked control. The loyalty is re-seeded after the blink (a new
-/// object has none), so an unchanged 5 is the row not applying and not a removal by
-/// the zero-loyalty state-based action.
+/// object that rolled, so the `[+2]` of faces 1 and 2, the `[−1]` of face 3 and the
+/// `[+1]` and grant of face 6 do not reach it. Each of those faces has an unblinked
+/// control. Faces 4 and 5 are not rolled here: their `[−2]` is the one row that
+/// resumes from the parked recipient prompt, and no blink row exercises it. The
+/// loyalty is re-seeded after the blink (a new object has none), so an unchanged 5
+/// is the row not applying and not a removal by the zero-loyalty state-based action.
 ///
 /// Red until the die-result frame carries the activation's stamp.
 #[test]
