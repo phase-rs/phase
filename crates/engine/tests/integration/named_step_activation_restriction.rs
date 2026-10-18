@@ -113,7 +113,7 @@ fn black_mana() -> ManaUnit {
 /// be the reason an attempt is refused.
 fn seed_one_black(runner: &mut GameRunner) {
     let pool = &mut runner.state_mut().players[1].mana_pool;
-    pool.mana.clear();
+    pool.clear();
     pool.add(black_mana());
 }
 
