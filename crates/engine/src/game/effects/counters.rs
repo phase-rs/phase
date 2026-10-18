@@ -9289,9 +9289,10 @@ mod tests {
             "Recipient".into(),
             Zone::Battlefield,
         );
+        mark_creature(&mut state, target);
         for filter in [
             TargetFilter::ParentTarget,
-            TargetFilter::SpecificObject { id: target },
+            TargetFilter::Typed(TypedFilter::creature()),
         ] {
             let mut ability = ResolvedAbility::new(
                 Effect::PutCounter {
