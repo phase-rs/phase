@@ -39,6 +39,7 @@ const TWO_CARD_WARD: &str = "Ward—Discard two cards.";
 struct WardedBoard {
     runner: GameRunner,
     warded: ObjectId,
+    destroy: ObjectId,
     p1_hand: Vec<ObjectId>,
     p0_hand: Vec<ObjectId>,
 }
@@ -74,6 +75,7 @@ fn target_warded_creature(
     WardedBoard {
         runner,
         warded,
+        destroy,
         p1_hand,
         p0_hand,
     }
@@ -104,6 +106,27 @@ fn pay(runner: &mut GameRunner) {
 
 fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
     runner.state().objects[&id].zone
+}
+
+/// CR 702.21a + CR 118.3: an unpaid ward counters the targeting spell. The stack
+/// has emptied, the destroy spell went to the graveyard without resolving, and
+/// the warded creature is untouched.
+fn assert_ward_countered_the_spell(board: &WardedBoard) {
+    assert!(
+        board.runner.state().stack.is_empty(),
+        "the stack must have emptied after the ward payment, got {:?}",
+        board.runner.state().stack
+    );
+    assert_eq!(
+        zone_of(&board.runner, board.destroy),
+        Zone::Graveyard,
+        "the countered destroy spell goes to the graveyard"
+    );
+    assert_eq!(
+        zone_of(&board.runner, board.warded),
+        Zone::Battlefield,
+        "the unpaid ward counters the destroy spell"
+    );
 }
 
 /// CR 118.3 + CR 702.21a: Saruman's ward needs an enchantment, instant, or
@@ -148,11 +171,7 @@ fn saruman_ward_cannot_be_paid_with_a_creature_card() {
         "a creature card must not be offered for a card-type-filtered discard, got {:?}",
         board.runner.state().waiting_for
     );
-    assert_eq!(
-        zone_of(&board.runner, board.warded),
-        Zone::Battlefield,
-        "the unpaid ward counters the destroy spell"
-    );
+    assert_ward_countered_the_spell(&board);
     assert_eq!(zone_of(&board.runner, board.p1_hand[0]), Zone::Hand);
     assert_eq!(zone_of(&board.runner, board.p0_hand[0]), Zone::Hand);
 }
@@ -278,7 +297,7 @@ fn alpharael_ward_with_an_empty_hand_counters_the_spell() {
     pay(&mut board.runner);
     board.runner.advance_until_stack_empty();
 
-    assert_eq!(zone_of(&board.runner, board.warded), Zone::Battlefield);
+    assert_ward_countered_the_spell(&board);
 }
 
 /// CR 702.21a + CR 701.9a: a counted ward discard needs and takes that many
@@ -336,7 +355,7 @@ fn counted_ward_discard_with_too_few_cards_counters_the_spell() {
     pay(&mut board.runner);
     board.runner.advance_until_stack_empty();
 
-    assert_eq!(zone_of(&board.runner, board.warded), Zone::Battlefield);
+    assert_ward_countered_the_spell(&board);
     assert_eq!(zone_of(&board.runner, board.p1_hand[0]), Zone::Hand);
 }
 
