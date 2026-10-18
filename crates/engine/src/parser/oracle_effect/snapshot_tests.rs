@@ -1249,15 +1249,14 @@ fn unrevealed_search_type_gate_reads_selected_target() {
 /// conditions or Auratouched Mage's remaining unsupported clauses.
 #[test]
 fn conditional_search_unsupported_clauses_remain_explicit_gaps() {
-    for (name, oracle, types, fragment) in [
-        ("Nazahn, Revered Bladesmith", "When Nazahn enters, search your library for an Equipment card and reveal it. If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.\nWhenever an equipped creature you control attacks, you may tap target creature defending player controls.", vec!["Creature"], "hammer of nazahn"),
-        ("Selfie Preservation", "Search your library for a basic land card and reveal it. If there's a tree in its art, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.", vec!["Sorcery"], "tree in its art"),
-        ("Auratouched Mage", "When this creature enters, search your library for an Aura card that could enchant it. If this creature is still on the battlefield, put that Aura card onto the battlefield attached to it. Otherwise, reveal the Aura card and put it into your hand. Then shuffle.", vec!["Creature"], "aura"),
+    for (name, oracle, types) in [
+        ("Nazahn, Revered Bladesmith", "When Nazahn enters, search your library for an Equipment card and reveal it. If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.\nWhenever an equipped creature you control attacks, you may tap target creature defending player controls.", vec!["Creature"]),
+        ("Selfie Preservation", "Search your library for a basic land card and reveal it. If there's a tree in its art, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.", vec!["Sorcery"]),
+        ("Auratouched Mage", "When this creature enters, search your library for an Aura card that could enchant it. If this creature is still on the battlefield, put that Aura card onto the battlefield attached to it. Otherwise, reveal the Aura card and put it into your hand. Then shuffle.", vec!["Creature"]),
     ] {
         let parsed = parse_card(oracle, name, &[], &types);
         let roots: Vec<_> = parsed.abilities.iter().chain(parsed.triggers.iter().filter_map(|trigger| trigger.execute.as_deref())).collect();
         let mut search = false;
-        let mut gap = false;
         let mut strict_fragments = Vec::new();
         let mut shuffles = 0;
         for root in roots {
@@ -1268,28 +1267,28 @@ fn conditional_search_unsupported_clauses_remain_explicit_gaps() {
                     if let Effect::SearchLibrary { reveal, .. } = effect {
                         assert!(*reveal);
                     }
-                    shuffles += usize::from(matches!(effect, Effect::Shuffle { .. }));
-                    if matches!(effect, Effect::Unimplemented { name, .. } if name == "search_result_condition") {
-                        strict_fragments.push(effect.unimplemented_description().expect("strict source fragment").to_string());
-                    }
+                } else {
+                    // The separate intrinsic Battlefield/attachment path remains
+                    // deferred; neither refused clause supplies Reveal or Hand delivery.
+                    assert!(!matches!(effect, Effect::Reveal { .. } | Effect::ChangeZone { destination: Zone::Hand, .. }), "the refused Aura alternative has no executable reveal or Hand destination: {effect:?}");
                 }
-                if let Some(description) = effect.unimplemented_description() {
-                    // allow-noncombinator: test inspects retained diagnostic text, not parsing dispatch.
-                    gap |= description.to_ascii_lowercase().contains(fragment);
+                shuffles += usize::from(matches!(effect, Effect::Shuffle { .. }));
+                if matches!(effect, Effect::Unimplemented { name, .. } if name == "search_result_condition") {
+                    strict_fragments.push(effect.unimplemented_description().expect("strict source fragment").to_string());
                 }
                 std::ops::ControlFlow::Continue(())
             });
         }
         assert!(search, "positive real search reach: {name}: {parsed:?}");
-        assert!(gap, "the remaining printed clause stays explicitly unsupported: {name}: {parsed:?}");
-        if name != "Auratouched Mage" {
-            assert_eq!(shuffles, 1);
-            assert_eq!(strict_fragments, if name == "Nazahn, Revered Bladesmith" {
-                vec!["If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield", "Otherwise, put that card into your hand"]
-            } else {
-                vec!["If there's a tree in its art, put it onto the battlefield tapped", "Otherwise, put it into your hand"]
-            });
-        }
+        assert_eq!(shuffles, 1);
+        let expected_fragments = if name == "Nazahn, Revered Bladesmith" {
+            ["If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield", "Otherwise, put that card into your hand"]
+        } else if name == "Selfie Preservation" {
+            ["If there's a tree in its art, put it onto the battlefield tapped", "Otherwise, put it into your hand"]
+        } else {
+            ["If this creature is still on the battlefield, put that Aura card onto the battlefield attached to it", "Otherwise, reveal the Aura card and put it into your hand"]
+        };
+        assert_eq!(strict_fragments, expected_fragments.map(|fragment| normalize_card_name_refs(fragment, name)), "both complete refused source clauses retain their exact category and fragments: {name}: {parsed:?}");
     }
 }
 
