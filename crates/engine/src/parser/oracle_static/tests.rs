@@ -11158,6 +11158,97 @@ fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
     }
 }
 
+/// CR 613.1f + CR 606.2 + CR 607.5: hostile multi-sentence fallback pin — a
+/// quoted-grant sentence sharing a line with the refused by-reference loyalty
+/// leaf does NOT refuse whole-line. The loyalty segment emits nothing, so the
+/// multi-sentence parse defers and falls through to the single-sentence
+/// fallback per the reviewed chain, and whole-line refusal is unachievable in
+/// predicate-only scope: the fallback re-parses the WHOLE line after the first
+/// " has " as one predicate, the by-reference clause match is `all_consuming`
+/// so it fails over the two-sentence predicate (the predicate never evaluates
+/// and the loyalty leaf is dropped, never emitted), while the quoted emission
+/// fires on the original quoted text. Observable pinned here: the quoted
+/// static IS present carrying only the quoted mod, ZERO kind-Loyalty
+/// by-reference grants are emitted, and ZERO gaps are recorded (the non-empty
+/// defs adopt at Priority 7, so the 14a `static_structure` fallback never runs
+/// — the refused leaf is silently dropped). Refusal signals (empty vec /
+/// `None`) are indistinguishable from non-match throughout the dispatch chain,
+/// so the fallback cannot know a sentence refused; a future
+/// refusal-propagation fix must update this pin (desired churn, not
+/// ossification).
+#[test]
+fn quoted_grant_with_refused_loyalty_leaf_falls_back_to_quoted_static() {
+    for line in [
+        // Quoted sentence first (plan-r3 V9 hostile shape).
+        "Grant Recipient has \"[0]: Proliferate\". Grant Recipient has all loyalty abilities of all other planeswalkers on the battlefield.",
+        // Leaf first: order-independent — the first-" has " combined predicate
+        // fails the all_consuming by-reference clause match either way.
+        "Grant Recipient has all loyalty abilities of all other planeswalkers on the battlefield. Grant Recipient has \"[0]: Proliferate\".",
+    ] {
+        let parsed = parse_card(line, "Grant Recipient", &[], &["Artifact"], &[]);
+
+        // The quoted static IS present, carrying only the quoted mod. This
+        // positive leg is the reach-guard proving the absence legs below are
+        // not vacuous (the line parsed — the leaf was dropped, not the line).
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "the quoted static must survive the fallback; line: {line}\n{:?}",
+            parsed.statics
+        );
+        assert_eq!(
+            parsed.statics[0].modifications.len(),
+            1,
+            "the fallback static must carry only the quoted mod; line: {line}\n{:?}",
+            parsed.statics
+        );
+        let ContinuousModification::GrantAbility { definition } =
+            &parsed.statics[0].modifications[0]
+        else {
+            panic!(
+                "the surviving mod must be the quoted GrantAbility; line: {line}\n{:?}",
+                parsed.statics
+            );
+        };
+        assert!(
+            matches!(definition.cost, Some(AbilityCost::Loyalty { amount: 0 })),
+            "the quoted grant must be the [0] loyalty ability; line: {line}\n{:?}",
+            parsed.statics
+        );
+        assert!(
+            matches!(*definition.effect, Effect::Proliferate),
+            "the quoted grant must be Proliferate; line: {line}\n{:?}",
+            parsed.statics
+        );
+
+        // ZERO kind-Loyalty by-reference grants anywhere in the line's statics:
+        // the fallback route must never re-admit the refused leaf.
+        for def in &parsed.statics {
+            for modification in &def.modifications {
+                assert!(
+                    !matches!(
+                        modification,
+                        ContinuousModification::GrantAllActivatedAbilitiesOf {
+                            kind: Some(ActivatedAbilityKind::Loyalty),
+                            ..
+                        }
+                    ),
+                    "no kind-Loyalty by-reference grant may emit through the fallback; line: {line}\n{:?}",
+                    parsed.statics
+                );
+            }
+        }
+
+        // 0-gap observation: the non-empty fallback defs adopt at Priority 7,
+        // so no static_structure gap records the dropped leaf.
+        assert!(
+            parsed.abilities.is_empty(),
+            "expected zero gaps (fallback defs adopt, 14a never runs); line: {line}\n{:?}",
+            parsed.abilities
+        );
+    }
+}
+
 /// CR 613.1f + CR 108.3: "all artifact cards in your graveyard" — ownership-based
 /// graveyard filter (Necrotic Ooze variant class). Uses FilterProp::Owned rather
 /// than TypedFilter::controller because graveyard cards are "yours" by ownership.
