@@ -999,6 +999,7 @@ fn leech_population_cost() {
         );
         let spell = scenario
             .add_creature_to_hand(P0, "Gargantuan Leech", 5, 5)
+            .with_subtypes(vec!["Leech"])
             .with_mana_cost(ManaCost::Cost {
                 generic: 7,
                 shards: vec![ManaCostShard::Black],
@@ -1034,6 +1035,32 @@ fn leech_population_cost() {
             runner.state_mut().objects.get_mut(&id).unwrap().controller = P1;
         }
         assert_eq!(runner.state().objects[&spell].static_definitions.len(), 1);
+        let StaticMode::ModifyCost {
+            dynamic_count: Some(quantity),
+            ..
+        } = &runner.state().objects[&spell].static_definitions[0].mode
+        else {
+            panic!("complete printed Cave population");
+        };
+        assert_eq!(
+            resolve_quantity(
+                runner.state(),
+                &QuantityExpr::Ref {
+                    qty: quantity.clone()
+                },
+                P0,
+                spell
+            ),
+            if populated { 2 } else { 0 },
+            "battlefield control and graveyard ownership have separate authorities"
+        );
+        assert_eq!(
+            engine::game::casting::effective_spell_cost(runner.state(), P0, spell),
+            Some(ManaCost::Cost {
+                generic: if populated { 5 } else { 7 },
+                shards: vec![ManaCostShard::Black]
+            })
+        );
         if colorless || short {
             assert!(runner.cast(spell).try_resolve().is_err());
             continue;
@@ -1146,7 +1173,7 @@ fn repeated_population_full_source_honesty() {
             parsed.statics.is_empty(),
             "must not admit a partial/fixed discount: {body}: {parsed:#?}"
         );
-        assert!(parsed.abilities.iter().any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "static_structure" && ability.description.as_deref() == Some(text.as_str()))), "full source must remain visible: {parsed:#?}");
+        assert!(parsed.abilities.iter().any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { description: Some(description), .. } if description.trim_end_matches('.') == text.trim_end_matches('.') && ability.description.as_deref() == Some(text.as_str()))), "full source must remain visible: {parsed:#?}");
     }
 }
 
@@ -1191,72 +1218,107 @@ fn begin_manual(runner: &mut GameRunner, spell: ObjectId) {
 #[test]
 fn pending_population_lock_payment_and_cancel() {
     for real_ability in [false, true] {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let text = if real_ability {
-            format!("{REPEATED}\nYou gain 1 life.")
-        } else {
-            REPEATED.into()
-        };
-        let spell = scenario
-            .add_artifact_to_hand_from_oracle(P0, "Synthetic locked artifact", &text)
-            .with_mana_cost(ManaCost::generic(4))
-            .id();
-        let source = scenario
-            .add_artifact_from_oracle(
-                P0,
-                "Synthetic sacrificial mana artifact",
-                "Sacrifice this artifact: Add {C}{C}.",
-            )
-            .id();
-        scenario.add_artifact_to_hand_from_oracle(P0, "Remaining hand artifact", "");
-        let mut runner = scenario.build();
-        assert_eq!(
-            runner.state().objects[&spell].abilities.is_empty(),
-            !real_ability
-        );
-        begin_manual(&mut runner, spell);
-        assert_eq!(
-            runner.state().pending_cast.as_ref().unwrap().cost,
-            ManaCost::generic(2)
-        );
-        assert!(
-            runner.act(GameAction::PassPriority).is_err(),
-            "manual payment cannot partially spend an empty pool"
-        );
-        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
-        assert_eq!(
-            runner.state().pending_cast.as_ref().unwrap().cost,
-            ManaCost::generic(2)
-        );
-        runner.act(GameAction::CancelCast).unwrap();
-        assert_eq!(count(runner.state(), spell, artifact_in(Zone::Hand)), 2);
-        assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 0);
-        begin_manual(&mut runner, spell);
-        assert_eq!(
-            runner.state().pending_cast.as_ref().unwrap().cost,
-            ManaCost::generic(2)
-        );
-        runner
-            .act(GameAction::ActivateAbility {
-                source_id: source,
-                ability_index: 0,
-            })
-            .unwrap();
-        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
-        assert_eq!(
-            count(runner.state(), spell, artifact_in(Zone::Battlefield)),
-            0
-        );
-        assert_eq!(
-            runner.state().pending_cast.as_ref().unwrap().cost,
-            ManaCost::generic(2)
-        );
-        runner.act(GameAction::PassPriority).unwrap();
-        assert!(runner.state().pending_cast.is_none());
-        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
-        runner.resolve_top();
-        assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+        for has_mana_source in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let text = if real_ability {
+                format!("{REPEATED}\nYou gain 1 life.")
+            } else {
+                REPEATED.into()
+            };
+            let spell = scenario
+                .add_artifact_to_hand_from_oracle(P0, "Synthetic locked artifact", &text)
+                .with_mana_cost(ManaCost::generic(4))
+                .id();
+            let source = scenario
+                .add_artifact_from_oracle(
+                    P0,
+                    "Synthetic sacrificial mana artifact",
+                    if has_mana_source {
+                        "Sacrifice this artifact: Add {C}{C}."
+                    } else {
+                        ""
+                    },
+                )
+                .id();
+            scenario.add_artifact_to_hand_from_oracle(P0, "Remaining hand artifact", "");
+            let mut runner = scenario.build();
+            assert_eq!(
+                runner.state().objects[&spell].abilities.is_empty(),
+                !real_ability
+            );
+            begin_manual(&mut runner, spell);
+            assert_eq!(
+                runner.state().pending_cast.as_ref().unwrap().cost,
+                ManaCost::generic(2)
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ManaPayment { .. }
+            ));
+            if has_mana_source {
+                // Confirming payment may activate the available source. An empty
+                // starting pool is not an insufficient-payment fixture in this case.
+                let mut automatic = GameRunner::from_state(runner.state().clone());
+                automatic.act(GameAction::PassPriority).unwrap();
+                assert!(automatic.state().pending_cast.is_none());
+                assert_eq!(automatic.state().objects[&source].zone, Zone::Graveyard);
+                assert_eq!(
+                    automatic.state().objects[&spell].mana_spent_to_cast_amount,
+                    2
+                );
+                assert_eq!(automatic.state().players[0].mana_pool.total(), 0);
+            } else {
+                assert!(
+                    runner.act(GameAction::PassPriority).is_err(),
+                    "an empty pool with no mana ability cannot pay the locked cost"
+                );
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ManaPayment { .. }
+                ));
+                assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+                assert_eq!(runner.state().objects[&spell].mana_spent_to_cast_amount, 0);
+            }
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_eq!(
+                runner.state().pending_cast.as_ref().unwrap().cost,
+                ManaCost::generic(2)
+            );
+            runner.act(GameAction::CancelCast).unwrap();
+            assert!(runner.state().pending_cast.is_none());
+            assert!(runner.state().objects[&spell].spell_announcement.is_none());
+            assert_eq!(count(runner.state(), spell, artifact_in(Zone::Hand)), 2);
+            assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 0);
+            if !has_mana_source {
+                continue;
+            }
+            begin_manual(&mut runner, spell);
+            assert_eq!(
+                runner.state().pending_cast.as_ref().unwrap().cost,
+                ManaCost::generic(2)
+            );
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .unwrap();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+            assert_eq!(
+                count(runner.state(), spell, artifact_in(Zone::Battlefield)),
+                0
+            );
+            assert_eq!(
+                runner.state().pending_cast.as_ref().unwrap().cost,
+                ManaCost::generic(2)
+            );
+            runner.act(GameAction::PassPriority).unwrap();
+            assert!(runner.state().pending_cast.is_none());
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            runner.resolve_top();
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+        }
     }
 }
 
@@ -1276,6 +1338,8 @@ fn population_modifier(dynamic: bool) -> engine::types::ability::StaticDefinitio
     definition.affected = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::You),
     ));
+    // CR 113.6: board and object-granted abilities use battlefield default.
+    definition.active_zones.clear();
     if !dynamic {
         let StaticMode::ModifyCost { dynamic_count, .. } = &mut definition.mode else {
             unreachable!()
@@ -1328,6 +1392,7 @@ fn applicability_fixture(
     *spell_filter = filter;
     if source_kind == ApplicabilitySource::SelfSpell {
         definition.affected = Some(TargetFilter::SelfRef);
+        definition.active_zones = engine::types::zones::self_spell_cost_mod_active_zones();
     } else if source_kind == ApplicabilitySource::Command {
         definition.active_zones = vec![Zone::Command];
     }
@@ -1399,12 +1464,10 @@ fn applicability_fixture(
             .transient_continuous_effects
             .iter()
             .any(|effect| effect.id == id));
-        assert!(!runner
-            .state()
-            .static_mode_presence
-            .contains(engine::types::statics::StaticModeKind::ModifyCost));
         assert!(runner.state().objects[&spell].static_definitions.is_empty());
     }
+    // Settle the fixture's real layer-6 grants before reading a pure preview.
+    engine::game::layers::flush_layers(runner.state_mut());
     (runner, spell)
 }
 
@@ -1415,6 +1478,20 @@ fn assert_applicability_payment(
     locked: u32,
     source_kind: ApplicabilitySource,
 ) {
+    let functioning_sources =
+        engine::game::functioning_abilities::game_functioning_statics(runner.state())
+            .filter(|(_, definition)| matches!(definition.mode, StaticMode::ModifyCost { .. }))
+            .count();
+    assert_eq!(
+        functioning_sources,
+        usize::from(matches!(
+            source_kind,
+            ApplicabilitySource::Battlefield
+                | ApplicabilitySource::Command
+                | ApplicabilitySource::ObjectGrant
+        )),
+        "{source_kind:?}: the intended object-source class must actually function"
+    );
     assert_eq!(
         engine::game::casting::effective_spell_cost(runner.state(), P0, spell),
         Some(ManaCost::generic(preview)),
@@ -1551,7 +1628,6 @@ fn pending_population_spell_filter_applicability_crosses_announcement() {
 
 #[test]
 fn pending_population_transient_grant_lock() {
-    use engine::types::statics::StaticModeKind;
     for mode in ["dynamic", "fixed", "expired", "wrong caster", "wrong spell"] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -1589,11 +1665,12 @@ fn pending_population_transient_grant_lock() {
                 None,
             )
             .unwrap();
+        engine::game::layers::flush_layers(runner.state_mut());
         assert!(runner.state().transient_continuous_effects.iter().any(|effect| effect.id == effect_id && matches!(effect.affected, TargetFilter::SpecificPlayer { id } if id == controller)));
-        assert!(!runner
-            .state()
-            .static_mode_presence
-            .contains(StaticModeKind::ModifyCost));
+        assert!(
+            !engine::game::functioning_abilities::game_functioning_statics(runner.state())
+                .any(|(_, definition)| matches!(definition.mode, StaticMode::ModifyCost { .. }))
+        );
         assert!(runner.state().objects[&spell].static_definitions.is_empty());
         assert!(runner.state().objects[&source]
             .static_definitions
@@ -1613,7 +1690,20 @@ fn pending_population_transient_grant_lock() {
                 .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
                 .collect();
         }
+        assert_eq!(
+            engine::game::casting::effective_spell_cost(runner.state(), P0, spell),
+            Some(ManaCost::generic(if mode == "dynamic" {
+                1
+            } else {
+                expected
+            })),
+            "{mode}: the public grant supplies the pre-announcement preview"
+        );
         begin_manual(&mut runner, spell);
+        assert!(
+            !engine::game::functioning_abilities::game_functioning_statics(runner.state())
+                .any(|(_, definition)| matches!(definition.mode, StaticMode::ModifyCost { .. }))
+        );
         assert_eq!(
             runner.state().pending_cast.as_ref().unwrap().cost,
             ManaCost::generic(expected)
@@ -1629,6 +1719,11 @@ fn pending_population_transient_grant_lock() {
                 count(runner.state(), spell, artifact_in(Zone::Battlefield)),
                 0
             );
+            assert!(!runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == effect_id));
             assert_eq!(
                 runner.state().pending_cast.as_ref().unwrap().cost,
                 ManaCost::generic(2)
@@ -1939,15 +2034,14 @@ fn pending_population_selected_permission_cost() {
             payment_mode: CastPaymentMode::Manual,
         })
         .unwrap();
+    let WaitingFor::TargetSelection { pending_cast, .. } = &runner.state().waiting_for else {
+        panic!("selected permission must pause for the printed target");
+    };
     assert_eq!(
-        runner
-            .state()
-            .pending_cast
-            .as_ref()
-            .unwrap()
-            .casting_permission_index,
+        pending_cast.casting_permission_index,
         Some(CastingPermissionIndex(1))
     );
+    assert_eq!(pending_cast.base_cost, Some(ManaCost::generic(6)));
     let CastingPermission::ExileWithAltCost { granted_to, .. } = &mut runner
         .state_mut()
         .objects
@@ -1963,6 +2057,16 @@ fn pending_population_selected_permission_cost() {
             target: Some(TargetRef::Player(P0)),
         })
         .unwrap();
+    assert_eq!(
+        runner
+            .state()
+            .pending_cast
+            .as_ref()
+            .unwrap()
+            .casting_permission_index,
+        Some(CastingPermissionIndex(1)),
+        "a newly eligible sibling cannot replace the selected authority"
+    );
     assert_eq!(
         runner.state().pending_cast.as_ref().unwrap().base_cost,
         Some(ManaCost::generic(6))

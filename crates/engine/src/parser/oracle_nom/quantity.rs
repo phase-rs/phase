@@ -2920,6 +2920,15 @@ mod repeated_population_tests {
             assert!(parse_for_each_clause_ref_complete(phrase).is_ok(), "{phrase}");
             assert!(parse_for_each_clause_ref_with_context(phrase, &ParseContext::default()).is_ok());
         }
+        for member in ["cave card in your graveyard", "artifact card in your hand"] {
+            let (_, filter) =
+                parse_single_locative_population(member, &ParseContext::default()).unwrap();
+            let TargetFilter::And { filters } = filter else {
+                panic!("independent locative retains both head and zone");
+            };
+            assert!(matches!(&filters[1], TargetFilter::Typed(typed)
+                if typed.controller.is_none() && typed.properties.contains(&FilterProp::Owned { controller: ControllerRef::You })));
+        }
         for phrase in [
             "artifact you control and each creature you control",
             "artifact you control and each artifact you control",
@@ -2988,6 +2997,29 @@ pub(crate) fn parse_repeated_object_population(input: &str) -> OracleResult<'_, 
     parse_repeated_object_population_with_context(input, &ParseContext::default())
 }
 
+// CR 108.3 + CR 109.4 + CR 400.1: an independently quantified card-zone
+// member uses the locative's owner authority, not a stored/LKI controller.
+fn parse_single_locative_population<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let (locative, head) = take_until(" in ").parse(input)?;
+    let (head_filter, remainder) = parse_type_phrase_folding_with_ctx(head, &mut ctx.clone());
+    if head.is_empty()
+        || !remainder.is_empty()
+        || !quantity_filter_has_meaningful_content(&head_filter)
+    {
+        return Err(oracle_err(input));
+    }
+    let (rest, zone) = all_consuming(parse_population_locative).parse(locative.trim_start())?;
+    Ok((
+        rest,
+        TargetFilter::And {
+            filters: vec![head_filter, zone],
+        },
+    ))
+}
+
 pub(crate) fn parse_repeated_object_population_with_context<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -3001,18 +3033,22 @@ pub(crate) fn parse_repeated_object_population_with_context<'a>(
         let mut filter = match parse_coordinated_card_population_with_context(segment, ctx) {
             Ok(("", QuantityRef::ObjectCount { filter })) => filter,
             Err(nom::Err::Failure(error)) => return Err(nom::Err::Failure(error)),
-            _ => {
-                let (filter, remainder) =
-                    parse_type_phrase_folding_with_ctx(segment, &mut ctx.clone());
-                if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter)
-                {
-                    return Err(nom::Err::Failure(OracleError::new(
-                        segment,
-                        nom::error::ErrorKind::Verify,
-                    )));
+            _ => match parse_single_locative_population(segment, ctx) {
+                Ok(("", filter)) => filter,
+                _ => {
+                    let (filter, remainder) =
+                        parse_type_phrase_folding_with_ctx(segment, &mut ctx.clone());
+                    if !remainder.trim().is_empty()
+                        || !quantity_filter_has_meaningful_content(&filter)
+                    {
+                        return Err(nom::Err::Failure(OracleError::new(
+                            segment,
+                            nom::error::ErrorKind::Verify,
+                        )));
+                    }
+                    filter
                 }
-                filter
-            }
+            },
         };
         // CR 109.2: only a wholly nominal, unzoned member has the implicit
         // battlefield domain. Make that bound explicit before unioning legs.

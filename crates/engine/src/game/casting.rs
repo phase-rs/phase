@@ -11185,10 +11185,9 @@ pub(super) enum CostLockOutcome {
 ///
 /// `extra` carries reductions the board cannot reproduce (an accepted Defiler
 /// life payment); `election` carries the caster's answer once they have given
-/// one. With neither, and with an unobservable election, the already-computed
-/// `pending.cost` is returned untouched — the pure-preview pipeline that
-/// produced it used the caster-optimal default, which is one of the legal
-/// CR 601.2f orders, so nothing needs recomputing and nothing changes.
+/// one. With neither, and with an unobservable election, reuse the preview only
+/// when modifier applicability and multipliers are proven cast-stable; otherwise
+/// recompute through the captured base cost and ordinary modifier pipeline.
 pub(super) fn lock_in_total_cost(
     state: &GameState,
     player: PlayerId,
