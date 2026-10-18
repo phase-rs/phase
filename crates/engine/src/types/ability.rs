@@ -10405,6 +10405,106 @@ impl LetterQuery {
 }
 
 impl QuantityRef {
+    /// Borrows the same single player-relativity axis as `player_scope_mut`.
+    pub(crate) fn player_scope(&self) -> Option<&PlayerScope> {
+        match self {
+            QuantityRef::HandSize { player }
+            | QuantityRef::LifeTotal { player }
+            | QuantityRef::GraveyardSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::PartySize { player }
+            | QuantityRef::Speed { player }
+            | QuantityRef::SacrificedThisTurn { player, .. }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
+            | QuantityRef::LandsPlayedThisTurn { player, .. }
+            | QuantityRef::PlayerChosenNumber { player }
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+            | QuantityRef::CardsDiscardedThisTurn { player }
+            | QuantityRef::TokensCreatedThisTurn { player, .. }
+            | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
+            QuantityRef::LifeAboveStarting
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::ObjectCount { .. }
+            | QuantityRef::ObjectCountDistinct { .. }
+            | QuantityRef::ObjectCountBySharedQuality { .. }
+            | QuantityRef::PlayerCount { .. }
+            | QuantityRef::CountersOn { .. }
+            | QuantityRef::CountersOnObjects { .. }
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Variable { .. }
+            | QuantityRef::Power { .. }
+            | QuantityRef::BasePower { .. }
+            | QuantityRef::Intensity { .. }
+            | QuantityRef::Toughness { .. }
+            | QuantityRef::ObjectManaValue { .. }
+            | QuantityRef::TargetObjectManaValue { .. }
+            | QuantityRef::ObjectColorCount { .. }
+            | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::NameStickerLetterCount { .. }
+            | QuantityRef::ObjectTypelineComponentCount { .. }
+            | QuantityRef::ManaSymbolsInManaCost { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::PropertyAggregate(_)
+            | QuantityRef::ControlledByEachPlayer { .. }
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::SharedCardTypes { .. }
+            | QuantityRef::DistinctSubtypes { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::ZoneCardCount { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::ExiledFromHandThisResolution
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            | QuantityRef::EnteredThisTurn { .. }
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ZoneChangeCountThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::DamageDealtThisTurn { .. }
+            | QuantityRef::ChosenNumber
+            | QuantityRef::NotedNumber
+            | QuantityRef::AttackedThisTurn { .. }
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::SpellsCastThisGame { .. }
+            | QuantityRef::CounterAddedThisTurn { .. }
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ManaSpentToCast { .. }
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::DistinctColorsAmong { .. }
+            | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::VoteCount { .. } => None,
+        }
+    }
+
     /// CR 109.4: mutable access to this reference's single player-relativity
     /// axis, when it has one.
     ///
@@ -45060,6 +45160,80 @@ mod monarch_subject_axis_tests {
             .evaluation_anchor(),
             None
         );
+    }
+
+    #[test]
+    fn quantity_ref_player_scope_borrows_every_actual_axis() {
+        let player = PlayerScope::Target;
+        for mut reference in [
+            QuantityRef::HandSize {
+                player: player.clone(),
+            },
+            QuantityRef::LifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::GraveyardSize {
+                player: player.clone(),
+            },
+            QuantityRef::StartingLifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::LifeLostThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::PartySize {
+                player: player.clone(),
+            },
+            QuantityRef::Speed {
+                player: player.clone(),
+            },
+            QuantityRef::SacrificedThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::LifeGainedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::CardsDrawnThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::LandsPlayedThisTurn {
+                player: player.clone(),
+                from_zones: None,
+            },
+            QuantityRef::PlayerChosenNumber {
+                player: player.clone(),
+            },
+            QuantityRef::LoyaltyAbilitiesActivatedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::CardsDiscardedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::TokensCreatedThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::PlayerActionsThisTurn {
+                player: player.clone(),
+                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+            },
+        ] {
+            assert_eq!(reference.player_scope(), Some(&player));
+            let borrowed = reference.player_scope().unwrap() as *const PlayerScope;
+            assert_eq!(
+                borrowed,
+                reference.player_scope_mut().unwrap() as *const PlayerScope
+            );
+            *reference.player_scope_mut().unwrap() = PlayerScope::ScopedPlayer;
+            assert_eq!(reference.player_scope(), Some(&PlayerScope::ScopedPlayer));
+        }
+        assert!(QuantityRef::SelfManaValue.player_scope().is_none());
+        assert!(QuantityRef::TrackedSetSize.player_scope().is_none());
     }
 
     /// CR 109.4: the mutable player-axis accessor must reach every reference

@@ -3,11 +3,13 @@ use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, AttachSelection, CardTypeSetSource, ChosenTargetSlots,
-    Comparator, ContinuousModification, ControllerRef, CountScope, DoubleTarget, Duration, Effect,
-    EffectKind, FilterProp, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetRef, TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, AttachSelection,
+    CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ChosenTargetSlots, Comparator,
+    ContinuousModification, ControllerRef, CountScope, DoubleTarget, Duration, Effect, EffectKind,
+    FilterProp, LetterQuery, NameStickerSet, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -18,6 +20,8 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerCounterKind;
+use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+use engine::types::stickers::{AppliedSticker, StickerLocator};
 use engine::types::zones::Zone;
 
 // Complete Oracle text from MTGJSON AtomicCards.json; live parsing avoids stale fixtures.
@@ -2275,6 +2279,52 @@ fn declined_search_refuses_unavailable_nested_scalar_thresholds() {
                     kind: PlayerCounterKind::Poison,
                 },
             },
+            QuantityExpr::Ref {
+                qty: QuantityRef::NameStickerLetterCount {
+                    stickers: NameStickerSet::OnObject {
+                        scope: ObjectScope::Target,
+                    },
+                    letters: LetterQuery::Letter { letter: 'o' },
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ParentObjectTargetController,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: CastManaSpentMetric::Total,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: CastManaSpentMetric::OfColor {
+                        color: ManaColor::Green,
+                    },
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: CastManaSpentMetric::FromSource {
+                        source_filter: TargetFilter::Typed(TypedFilter::land()),
+                    },
+                },
+            },
             QuantityExpr::Fixed { value: 0 },
         ] {
             let independent = matches!(threshold, QuantityExpr::Fixed { .. });
@@ -2388,13 +2438,15 @@ fn declined_search_refuses_unavailable_nested_scalar_thresholds() {
 
 #[test]
 fn declined_search_owned_threshold_keeps_only_available_object_authority() {
-    for parameter in 0..3 {
+    for parameter in 0..5 {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let chosen = scenario
-            .add_creature(P0, "Chosen MV two", 3, 3)
-            .with_mana_cost(ManaCost::generic(2))
-            .id();
+        let mut chosen_builder = scenario.add_creature(P0, "Chosen MV two", 3, 3);
+        chosen_builder.with_mana_cost(ManaCost::generic(2));
+        if parameter == 2 || parameter == 4 {
+            chosen_builder.controlled_by(P1);
+        }
+        let chosen = chosen_builder.id();
         let other = scenario
             .add_creature(P0, "Other MV five", 3, 3)
             .with_mana_cost(ManaCost::generic(5))
@@ -2402,13 +2454,28 @@ fn declined_search_owned_threshold_keeps_only_available_object_authority() {
         let hand = [
             scenario
                 .add_spell_to_hand(P0, "First hand", false)
-                .with_mana_cost(ManaCost::generic(if parameter == 1 { 0 } else { 2 }))
+                .with_mana_cost(ManaCost::generic(if parameter == 1 {
+                    0
+                } else if parameter == 4 {
+                    1
+                } else {
+                    2
+                }))
                 .id(),
             scenario
                 .add_spell_to_hand(P0, "Second hand", false)
-                .with_mana_cost(ManaCost::generic(if parameter == 1 { 0 } else { 2 }))
+                .with_mana_cost(ManaCost::generic(if parameter == 1 {
+                    0
+                } else if parameter == 4 {
+                    1
+                } else {
+                    2
+                }))
                 .id(),
         ];
+        if parameter == 4 {
+            scenario.add_spell_to_hand(P1, "Opponent hand", false);
+        }
         let found = scenario
             .add_spell_to_library_top(P0, "Candidate", false)
             .as_creature()
@@ -2421,6 +2488,15 @@ fn declined_search_owned_threshold_keeps_only_available_object_authority() {
             1 => QuantityRef::TrackedSetSize,
             2 => QuantityRef::TargetControllerCounter {
                 kind: PlayerCounterKind::Poison,
+            },
+            3 => QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject {
+                    scope: ObjectScope::Target,
+                },
+                letters: LetterQuery::Letter { letter: 'o' },
+            },
+            4 => QuantityRef::HandSize {
+                player: PlayerScope::RecipientController,
             },
             _ => unreachable!(),
         };
@@ -2460,17 +2536,43 @@ fn declined_search_owned_threshold_keeps_only_available_object_authority() {
             .id();
         fund(&mut scenario, 1, &[]);
         let mut runner = scenario.build();
-        if parameter == 2 {
+        assert_eq!(runner.state().objects[&chosen].owner, P0);
+        assert_eq!(
+            runner.state().objects[&chosen].controller,
+            if parameter == 2 || parameter == 4 {
+                P1
+            } else {
+                P0
+            }
+        );
+        if parameter == 3 {
             runner
                 .state_mut()
                 .objects
                 .get_mut(&chosen)
                 .unwrap()
-                .controller = P1;
+                .stickers
+                .push(AppliedSticker::Name {
+                    locator: StickerLocator {
+                        sheet: "Fixture".to_string(),
+                        index: 0,
+                    },
+                    text: "Hot Dog".to_string(),
+                    position: 0,
+                    timestamp: 0,
+                });
         }
         runner.state_mut().players[0].poison_counters = 1;
         runner.state_mut().players[1].poison_counters = 2;
         runner.cast(spell).target_object(chosen).commit();
+        assert_eq!(
+            runner.state().objects[&chosen].controller,
+            if parameter == 2 || parameter == 4 {
+                P1
+            } else {
+                P0
+            }
+        );
         let root = runner
             .state()
             .stack
@@ -2499,6 +2601,15 @@ fn declined_search_owned_threshold_keeps_only_available_object_authority() {
         let mut events = Vec::new();
         pass_to_pause(&mut runner, &mut events);
         assert_optional_prompt(&runner);
+        assert_eq!(runner.state().objects[&chosen].owner, P0);
+        assert_eq!(
+            runner.state().objects[&chosen].controller,
+            if parameter == 2 || parameter == 4 {
+                P1
+            } else {
+                P0
+            }
+        );
         let parked = runner
             .state()
             .active_optional_effect_frame()
@@ -2525,7 +2636,13 @@ fn declined_search_owned_threshold_keeps_only_available_object_authority() {
                 .get(&CounterType::Plus1Plus1)
                 .copied()
                 .unwrap_or(0),
-            if parameter == 1 { 0 } else { 2 }
+            if parameter == 1 {
+                0
+            } else if parameter == 4 {
+                1
+            } else {
+                2
+            }
         );
         for id in [other, found, cover, spell] {
             assert!(!runner.state().objects[&id]
@@ -2548,7 +2665,7 @@ fn declined_search_owned_threshold_keeps_only_available_object_authority() {
 
 #[test]
 fn declined_search_player_matching_keeps_announced_recipient() {
-    for parameter in 0..3 {
+    for parameter in 0..5 {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_creature(P0, "Caster creature", 2, 2);
@@ -2556,19 +2673,22 @@ fn declined_search_player_matching_keeps_announced_recipient() {
         let hand = [
             scenario
                 .add_spell_to_hand(P0, "First MV two", false)
-                .with_mana_cost(ManaCost::generic(2))
+                .with_mana_cost(ManaCost::generic(if parameter >= 3 { 1 } else { 2 }))
                 .id(),
             scenario
                 .add_spell_to_hand(P0, "Second MV two", false)
-                .with_mana_cost(ManaCost::generic(2))
+                .with_mana_cost(ManaCost::generic(if parameter >= 3 { 1 } else { 2 }))
                 .id(),
         ];
+        if parameter >= 3 {
+            scenario.add_spell_to_hand(P1, "Opponent hand", false);
+        }
         let found = scenario
             .add_spell_to_library_top(P0, "Candidate", false)
             .as_creature()
             .id();
         let cover = scenario.add_spell_to_library_top(P0, "Cover", false).id();
-        let amount = if parameter == 2 {
+        let amount = if parameter >= 2 {
             QuantityExpr::Ref {
                 qty: QuantityRef::ZoneCardCount {
                     zone: ZoneRef::Hand,
@@ -2578,8 +2698,17 @@ fn declined_search_player_matching_keeps_announced_recipient() {
                         FilterProp::Cmc {
                             comparator: Comparator::EQ,
                             value: QuantityExpr::Ref {
-                                qty: QuantityRef::TargetControllerCounter {
-                                    kind: PlayerCounterKind::Poison,
+                                qty: match parameter {
+                                    2 => QuantityRef::TargetControllerCounter {
+                                        kind: PlayerCounterKind::Poison,
+                                    },
+                                    3 => QuantityRef::HandSize {
+                                        player: PlayerScope::Target,
+                                    },
+                                    4 => QuantityRef::HandSize {
+                                        player: PlayerScope::ParentObjectTargetController,
+                                    },
+                                    _ => unreachable!(),
                                 },
                             },
                         },
@@ -2644,7 +2773,10 @@ fn declined_search_player_matching_keeps_announced_recipient() {
         assert!(counted.effect_context_object.is_none());
         assert_eq!(runner.state().players[0].hand.len(), 2);
         for id in hand {
-            assert_eq!(runner.state().objects[&id].mana_cost.mana_value(), 2);
+            assert_eq!(
+                runner.state().objects[&id].mana_cost.mana_value(),
+                if parameter >= 3 { 1 } else { 2 }
+            );
         }
         assert!(runner.state().players[0].mana_pool.is_empty());
         let mut events = Vec::new();
@@ -2666,6 +2798,10 @@ fn declined_search_player_matching_keeps_announced_recipient() {
         assert_eq!(runner.state().players[0].poison_counters, 1);
         assert_eq!(runner.state().players[1].poison_counters, 2);
         assert_eq!(runner.state().players[0].hand.len(), 2);
+        assert_eq!(
+            runner.state().players[1].hand.len(),
+            usize::from(parameter >= 3)
+        );
         assert!(runner.state().last_revealed_ids.is_empty());
         let decision = runner
             .act(GameAction::DecideOptionalEffect { accept: false })
@@ -2788,7 +2924,7 @@ fn declined_search_player_declaration_does_not_supply_object_information() {
 
 #[test]
 fn declined_search_scalar_player_fields_keep_candidate_authority() {
-    for parameter in 0..6 {
+    for parameter in 0..10 {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_creature(P0, "Caster population", 2, 2);
@@ -2829,15 +2965,22 @@ fn declined_search_scalar_player_fields_keep_candidate_authority() {
                     QuantityExpr::Fixed { value: 20 }
                 }),
             },
-            4 | 5 => PlayerFilter::PlayerAttribute {
+            4..=9 => PlayerFilter::PlayerAttribute {
                 relation: PlayerRelation::All,
                 attr: Box::new(QuantityRef::HandSize {
-                    player: PlayerScope::Controller,
+                    player: match parameter {
+                        6 | 7 => PlayerScope::ParentObjectTargetController,
+                        8 | 9 => PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Sum,
+                            exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                        },
+                        _ => PlayerScope::Controller,
+                    },
                 }),
                 comparator: Comparator::EQ,
                 value: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::HandSize {
-                        player: if parameter == 4 {
+                        player: if parameter % 2 == 0 {
                             PlayerScope::ScopedPlayer
                         } else {
                             PlayerScope::Controller
@@ -2886,7 +3029,7 @@ fn declined_search_scalar_player_fields_keep_candidate_authority() {
             runner.state().players[0].life,
             match parameter {
                 0 | 2 => 23,
-                5 => 24,
+                5 | 7 | 9 => 24,
                 _ => 25,
             }
         );
@@ -3141,5 +3284,542 @@ fn declined_search_keeps_exact_prior_declared_object_slot() {
             assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
             assert_settled(&runner);
         }
+    }
+}
+
+// CR 608.2c + CR 608.2h: inherited Player information is read when its retained instruction applies.
+#[test]
+fn declined_search_inherited_player_scalar_uses_each_runtime_entry() {
+    for prior in [false, true] {
+        for shape in 0..3 {
+            for parameter in 0..3 {
+                if prior && parameter != 2 {
+                    continue;
+                }
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                scenario.add_creature(P0, "Caster population", 2, 2);
+                scenario.add_creature(P1, "Opponent population", 2, 2);
+                let mv = if parameter == 2 { 2 } else { 1 };
+                let hand = [
+                    scenario
+                        .add_spell_to_hand(P0, "First matching hand", false)
+                        .with_mana_cost(ManaCost::generic(mv))
+                        .id(),
+                    scenario
+                        .add_spell_to_hand(P0, "Second matching hand", false)
+                        .with_mana_cost(ManaCost::generic(mv))
+                        .id(),
+                ];
+                let opponent_hand = scenario.add_spell_to_hand(P1, "Opponent hand", false).id();
+                let found = scenario
+                    .add_spell_to_library_top(P0, "Search candidate", false)
+                    .as_creature()
+                    .id();
+                let cover = scenario
+                    .add_spell_to_library_top(P0, "Hidden cover", false)
+                    .id();
+                let threshold = match parameter {
+                    0 => QuantityRef::HandSize {
+                        player: PlayerScope::Target,
+                    },
+                    1 => QuantityRef::HandSize {
+                        player: PlayerScope::ParentObjectTargetController,
+                    },
+                    2 => QuantityRef::TargetControllerCounter {
+                        kind: PlayerCounterKind::Poison,
+                    },
+                    _ => unreachable!(),
+                };
+                let mut life = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                );
+                life.sub_link = SubAbilityLink::SequentialSibling;
+                let mut amount = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Hand,
+                                scope: CountScope::Controller,
+                                card_types: vec![],
+                                filter: Some(TargetFilter::Typed(TypedFilter::card().properties(
+                                    vec![FilterProp::Cmc {
+                                        comparator: Comparator::EQ,
+                                        value: QuantityExpr::Ref { qty: threshold },
+                                    }],
+                                ))),
+                            },
+                        },
+                        player: TargetFilter::ParentTarget,
+                    },
+                )
+                .sub_ability(life);
+                amount.sub_link = SubAbilityLink::SequentialSibling;
+                let branch = if shape == 0 {
+                    amount
+                } else {
+                    let mut step = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 0 },
+                            player: TargetFilter::ParentTarget,
+                        },
+                    );
+                    if shape == 1 {
+                        step.sub_ability = Some(Box::new(amount));
+                    } else {
+                        step.condition = Some(AbilityCondition::QuantityCheck {
+                            lhs: QuantityExpr::Fixed { value: 0 },
+                            comparator: Comparator::GT,
+                            rhs: QuantityExpr::Fixed { value: 0 },
+                        });
+                        step.else_ability = Some(Box::new(amount));
+                    }
+                    step
+                };
+                let announced = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 0 },
+                        player: TargetFilter::PlayerMatching {
+                            player: Box::new(PlayerFilter::ControlsCount {
+                                relation: PlayerRelation::All,
+                                filter: TargetFilter::Typed(TypedFilter::creature()),
+                                comparator: Comparator::GE,
+                                count: Box::new(QuantityExpr::Fixed { value: 0 }),
+                            }),
+                        },
+                    },
+                )
+                .sub_ability(synthetic_optional_search(branch));
+                let announced = if prior {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::PlayerMatching {
+                                player: Box::new(PlayerFilter::All),
+                            },
+                        },
+                    )
+                    .sub_ability(announced)
+                } else {
+                    announced
+                };
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Paid inherited player", false)
+                    .with_ability_definition(announced)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id();
+                fund(&mut scenario, 1, &[]);
+                let mut runner = scenario.build();
+                runner.state_mut().players[0].poison_counters = 1;
+                runner.state_mut().players[1].poison_counters = 2;
+                runner
+                    .cast(spell)
+                    .target_players(if prior { &[P0, P1] } else { &[P1] })
+                    .commit();
+                let root = runner
+                    .state()
+                    .stack
+                    .iter()
+                    .find(|entry| entry.source_id == spell)
+                    .unwrap()
+                    .ability()
+                    .unwrap();
+                if prior {
+                    assert_eq!(root.targets, vec![TargetRef::Player(P0)]);
+                }
+                let root = if prior {
+                    root.sub_ability.as_deref().unwrap()
+                } else {
+                    root
+                };
+                assert_eq!(root.targets, vec![TargetRef::Player(P1)]);
+                assert_eq!(root.target_reads, TargetReadOrigin::OwnAnnouncement);
+                assert!(
+                    matches!(&root.chosen_target_slots, ChosenTargetSlots::Recorded(slots) if slots == &[0])
+                );
+                let search = root.sub_ability.as_deref().unwrap();
+                let branch = search
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+                    .sub_ability
+                    .as_deref()
+                    .unwrap();
+                assert!(branch.targets.is_empty());
+                assert!(
+                    matches!(&branch.chosen_target_slots, ChosenTargetSlots::Unrecorded)
+                        || matches!(&branch.chosen_target_slots, ChosenTargetSlots::Recorded(slots) if slots.is_empty())
+                );
+                let amount = if shape == 0 {
+                    branch
+                } else if shape == 1 {
+                    branch.sub_ability.as_deref().unwrap()
+                } else {
+                    branch.else_ability.as_deref().unwrap()
+                };
+                assert!(amount.targets.is_empty() && amount.target_pins.is_empty());
+                assert!(amount.effect_context_object.is_none());
+                assert!(
+                    matches!(&amount.chosen_target_slots, ChosenTargetSlots::Unrecorded)
+                        || matches!(&amount.chosen_target_slots, ChosenTargetSlots::Recorded(slots) if slots.is_empty())
+                );
+                assert_eq!(
+                    runner.state().players[0]
+                        .hand
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    hand.to_vec()
+                );
+                assert_eq!(
+                    runner.state().players[1]
+                        .hand
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    vec![opponent_hand]
+                );
+                assert!(runner.state().players[0].mana_pool.is_empty());
+                for id in hand {
+                    assert_eq!(runner.state().objects[&id].mana_cost.mana_value(), mv);
+                }
+                let mut events = Vec::new();
+                pass_to_pause(&mut runner, &mut events);
+                assert_optional_prompt(&runner);
+                let parked = runner
+                    .state()
+                    .active_optional_effect_frame()
+                    .unwrap()
+                    .ability
+                    .as_ref();
+                assert_eq!(parked.targets, vec![TargetRef::Player(P1)]);
+                let branch = parked
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+                    .sub_ability
+                    .as_deref()
+                    .unwrap();
+                assert!(branch.targets.is_empty() && branch.target_pins.is_empty());
+                let amount = if shape == 0 {
+                    branch
+                } else if shape == 1 {
+                    branch.sub_ability.as_deref().unwrap()
+                } else {
+                    branch.else_ability.as_deref().unwrap()
+                };
+                assert!(amount.targets.is_empty() && amount.target_pins.is_empty());
+                assert!(
+                    matches!(&amount.chosen_target_slots, ChosenTargetSlots::Unrecorded)
+                        || matches!(&amount.chosen_target_slots, ChosenTargetSlots::Recorded(slots) if slots.is_empty())
+                );
+                assert!(amount.effect_context_object.is_none());
+                assert_eq!(runner.state().players[0].poison_counters, 1);
+                assert_eq!(runner.state().players[1].poison_counters, 2);
+                assert!(runner.state().last_revealed_ids.is_empty());
+                assert!(runner.state().players[0].mana_pool.is_empty());
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: false })
+                    .unwrap();
+                assert_eq!(
+                    runner.state().players[0].life,
+                    if prior { 24 } else { 23 },
+                    "shape={shape}, parameter={parameter}, prior={prior}"
+                );
+                assert_eq!(
+                    runner.state().players[1].life,
+                    22,
+                    "shape={shape}, parameter={parameter}"
+                );
+                assert_eq!(
+                    runner.state().players[0]
+                        .hand
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    hand.to_vec()
+                );
+                assert_eq!(
+                    runner.state().players[1]
+                        .hand
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    vec![opponent_hand]
+                );
+                for id in [found, cover] {
+                    assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+                }
+                assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+                assert_settled(&runner);
+            }
+        }
+    }
+}
+
+// CR 601.2h + CR 202.3: actual mana paid can differ from the printed mana value.
+#[test]
+fn declined_search_paid_target_metrics_keep_the_actual_payment_subject() {
+    for metric in [
+        CastManaSpentMetric::Total,
+        CastManaSpentMetric::DistinctColors,
+        CastManaSpentMetric::OfColor {
+            color: ManaColor::Green,
+        },
+        CastManaSpentMetric::FromSource {
+            source_filter: TargetFilter::Typed(TypedFilter::land()),
+        },
+    ] {
+        let expected = if matches!(metric, CastManaSpentMetric::OfColor { .. }) {
+            1
+        } else {
+            2
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Creature-only reducer", 0, 1)
+            .with_static_definition(StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(1),
+                spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
+            }));
+        let target = scenario
+            .add_creature_to_hand(P0, "Paid colored creature", 3, 3)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Green],
+            })
+            .id();
+        let island = scenario.add_basic_land(P0, ManaColor::Blue);
+        let forest = scenario.add_basic_land(P0, ManaColor::Green);
+        let colorless = scenario
+            .add_land_from_oracle(P0, "Colorless land", "{T}: Add {C}.")
+            .id();
+        let hand = [
+            scenario
+                .add_spell_to_hand(P0, "First metric hand", false)
+                .with_mana_cost(ManaCost::generic(expected))
+                .id(),
+            scenario
+                .add_spell_to_hand(P0, "Second metric hand", false)
+                .with_mana_cost(ManaCost::generic(expected))
+                .id(),
+        ];
+        let found = scenario
+            .add_spell_to_library_top(P0, "Candidate", false)
+            .as_creature()
+            .id();
+        let cover = scenario.add_spell_to_library_top(P0, "Cover", false).id();
+        let mut tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        let counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        scope: CountScope::Controller,
+                        card_types: vec![],
+                        filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                            FilterProp::Cmc {
+                                comparator: Comparator::EQ,
+                                value: QuantityExpr::Ref {
+                                    qty: QuantityRef::ManaSpentToCast {
+                                        scope: CastManaObjectScope::AbilityTarget,
+                                        metric: metric.clone(),
+                                    },
+                                },
+                            },
+                        ]))),
+                    },
+                },
+            },
+        )
+        .sub_ability(tail);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Noncreature paid search", false)
+            .with_ability_definition(synthetic_optional_search(counter))
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(target).commit();
+        assert_eq!(runner.state().objects[&target].mana_cost.mana_value(), 3);
+        assert_eq!(runner.state().objects[&target].mana_spent_to_cast_amount, 2);
+        assert_eq!(
+            runner.state().objects[&target]
+                .colors_spent_to_cast
+                .distinct_colors(),
+            2
+        );
+        assert_eq!(
+            runner.state().objects[&target].colors_spent_to_cast.green,
+            1
+        );
+        assert_eq!(
+            runner.state().objects[&target]
+                .mana_spent_source_snapshots
+                .len(),
+            2
+        );
+        let paid_sources = runner.state().objects[&target]
+            .mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>();
+        assert_eq!(paid_sources.len(), 2);
+        assert!(paid_sources.contains(&island) && paid_sources.contains(&forest));
+        assert!(runner.state().objects[&island].tapped && runner.state().objects[&forest].tapped);
+        assert!(!runner.state().objects[&colorless].tapped);
+        let mut events = Vec::new();
+        pass_to_pause(&mut runner, &mut events);
+        assert_settled(&runner);
+        assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
+        runner.cast(spell).target_object(target).commit();
+        assert_eq!(runner.state().objects[&spell].mana_spent_to_cast_amount, 1);
+        assert!(runner.state().objects[&spell]
+            .colors_spent_to_cast
+            .is_empty());
+        assert_eq!(
+            runner.state().objects[&spell]
+                .mana_spent_source_snapshots
+                .len(),
+            1
+        );
+        assert_eq!(
+            runner.state().objects[&spell].mana_spent_source_snapshots[0].source_id,
+            colorless
+        );
+        assert!(runner.state().objects[&colorless].tapped);
+        assert_eq!(
+            runner.state().players[0]
+                .hand
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            hand.to_vec()
+        );
+        assert!(runner.state().players[0].mana_pool.is_empty());
+        let root = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == spell)
+            .unwrap()
+            .ability()
+            .unwrap();
+        let counter = std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
+            .find(|node| matches!(node.effect, Effect::PutCounter { .. }))
+            .unwrap();
+        assert_eq!(counter.targets, vec![TargetRef::Object(target)]);
+        assert_eq!(counter.target_reads, TargetReadOrigin::OwnAnnouncement);
+        assert!(
+            matches!(&counter.chosen_target_slots, ChosenTargetSlots::Recorded(slots) if slots == &[0])
+        );
+        assert_eq!(
+            counter.target_pins,
+            vec![Some(ObjectIncarnationRef::from_object(
+                &runner.state().objects[&target]
+            ))]
+        );
+        assert_eq!(
+            engine::game::quantity::resolve_quantity_with_targets(
+                runner.state(),
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::AbilityTarget,
+                        metric: metric.clone()
+                    }
+                },
+                counter
+            ),
+            expected as i32
+        );
+        assert_eq!(
+            engine::game::quantity::resolve_quantity_with_targets(
+                runner.state(),
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: metric.clone()
+                    }
+                },
+                counter
+            ),
+            if matches!(
+                metric,
+                CastManaSpentMetric::Total | CastManaSpentMetric::FromSource { .. }
+            ) {
+                1
+            } else {
+                0
+            }
+        );
+        pass_to_pause(&mut runner, &mut events);
+        assert_optional_prompt(&runner);
+        assert_eq!(runner.state().objects[&target].mana_spent_to_cast_amount, 2);
+        assert_eq!(runner.state().objects[&spell].mana_spent_to_cast_amount, 1);
+        assert_eq!(
+            runner.state().players[0]
+                .hand
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            hand.to_vec()
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+        assert_eq!(
+            runner.state().objects[&target]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&2)
+        );
+        for id in [found, cover, spell] {
+            assert!(!runner.state().objects[&id]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1));
+        }
+        assert_eq!(runner.state().players[0].life, 23);
+        assert_eq!(runner.state().players[1].life, 20);
+        assert_eq!(
+            runner.state().players[0]
+                .hand
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            hand.to_vec()
+        );
+        for id in [found, cover] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+        }
+        assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_settled(&runner);
     }
 }

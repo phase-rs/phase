@@ -2405,7 +2405,7 @@ pub(crate) fn filter_contains_filter_prop(
     filter_contains_input(
         filter,
         &|prop, _, _| predicate(prop),
-        &|_, _, _| false,
+        &|_, _, _, _| false,
         &|_, _, _| false,
         &|_, _, _| false,
         false,
@@ -2420,7 +2420,7 @@ pub(crate) fn quantity_expr_contains_filter_prop(
     quantity_expr_contains_input(
         expr,
         &|prop, _, _| predicate(prop),
-        &|_, _, _| false,
+        &|_, _, _, _| false,
         &|_, _, _| false,
         &|_, _, _| false,
         false,
@@ -2431,7 +2431,12 @@ pub(crate) fn quantity_expr_contains_filter_prop(
 pub(crate) fn filter_contains_scalar_input(
     filter: &TargetFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2451,7 +2456,12 @@ pub(crate) fn filter_contains_scalar_input(
 pub(crate) fn quantity_expr_contains_scalar_input(
     expr: &QuantityExpr,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2471,7 +2481,12 @@ pub(crate) fn quantity_expr_contains_scalar_input(
 pub(crate) fn player_filter_contains_scalar_input(
     filter: &PlayerFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2491,7 +2506,12 @@ pub(crate) fn player_filter_contains_scalar_input(
 fn filter_contains_input(
     filter: &TargetFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2610,7 +2630,12 @@ fn filter_contains_input(
 fn filter_prop_contains_input(
     prop: &FilterProp,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2826,7 +2851,12 @@ fn filter_prop_contains_input(
 fn player_filter_contains_input(
     filter: &PlayerFilter,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     _object_information_available: bool,
@@ -2876,6 +2906,7 @@ fn player_filter_contains_input(
                 population_leaf,
                 false,
                 None,
+                Some(filter),
             ) || quantity_expr_contains_input(
                 value,
                 predicate,
@@ -2947,7 +2978,12 @@ fn player_filter_contains_input(
 fn quantity_expr_contains_input(
     expr: &QuantityExpr,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -2962,6 +2998,7 @@ fn quantity_expr_contains_input(
             population_leaf,
             object_information_available,
             slot_context,
+            None,
         ),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -3017,56 +3054,67 @@ fn quantity_expr_contains_input(
 /// [`quantity_expr_contains_input`]. Keep this arm-for-arm with
 /// [`rewrite_quantity_ref_filter_props`] so readers and rewriters reach the
 /// same dynamic quantity topology.
+#[allow(clippy::too_many_arguments)]
 fn quantity_ref_contains_input(
     qty: &QuantityRef,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
     slot_context: Option<&ResolvedAbility>,
+    candidate_attribute_owner: Option<&PlayerFilter>,
 ) -> bool {
-    raw_reference(qty, object_information_available, slot_context)
-        || match qty {
-            QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountDistinct { filter, .. }
-            | QuantityRef::ObjectCountBySharedQuality { filter, .. }
-            | QuantityRef::CountersOnObjects { filter, .. }
-            | QuantityRef::ControlledByEachPlayer { filter, .. }
-            | QuantityRef::EnteredThisTurn { filter }
-            | QuantityRef::SacrificedThisTurn { filter, .. }
-            | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
-            | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-            | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
-            | QuantityRef::CounterAddedThisTurn { target: filter, .. }
-            | QuantityRef::TokensCreatedThisTurn { filter, .. }
-            | QuantityRef::DistinctCounterKindsAmong { filter } => {
-                scalar_filter(filter, object_information_available, slot_context)
-                    || filter_contains_input(
-                        filter,
-                        predicate,
-                        raw_reference,
-                        scalar_filter,
-                        population_leaf,
-                        object_information_available,
-                        slot_context,
-                    )
-            }
-            QuantityRef::TargetObjectManaValue { filter }
-            | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
-                scalar_filter(filter, object_information_available, slot_context)
-                    || filter_contains_input(
-                        filter,
-                        predicate,
-                        raw_reference,
-                        scalar_filter,
-                        population_leaf,
-                        object_information_available,
-                        slot_context,
-                    )
-            }
-            QuantityRef::PlayerCount { filter }
-            | QuantityRef::EventContextPlayerCount { filter } => player_filter_contains_input(
+    raw_reference(
+        qty,
+        object_information_available,
+        slot_context,
+        candidate_attribute_owner,
+    ) || match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => {
+            scalar_filter(filter, object_information_available, slot_context)
+                || filter_contains_input(
+                    filter,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+        }
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            scalar_filter(filter, object_information_available, slot_context)
+                || filter_contains_input(
+                    filter,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+        }
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_contains_input(
                 filter,
                 predicate,
                 raw_reference,
@@ -3074,151 +3122,150 @@ fn quantity_ref_contains_input(
                 population_leaf,
                 false,
                 None,
-            ),
-            QuantityRef::PropertyAggregate(aggregate) => card_type_set_source_contains_input(
-                aggregate.source(),
-                predicate,
-                raw_reference,
-                scalar_filter,
-                population_leaf,
-                object_information_available,
-                slot_context,
-            ),
-            QuantityRef::DistinctCardTypes { source }
-            | QuantityRef::SharedCardTypes { source }
-            | QuantityRef::DistinctSubtypes { source, .. }
-            | QuantityRef::DistinctColorsAmong { source } => card_type_set_source_contains_input(
-                source,
-                predicate,
-                raw_reference,
-                scalar_filter,
-                population_leaf,
-                object_information_available,
-                slot_context,
-            ),
-            QuantityRef::ZoneCardCount { filter, .. }
-            | QuantityRef::SpellsCastThisTurn { filter, .. }
-            | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
-            | QuantityRef::AttackedThisTurn { filter, .. }
-            | QuantityRef::SpellsCastThisGame { filter, .. } => {
-                filter.as_ref().is_some_and(|inner| {
-                    scalar_filter(inner, object_information_available, slot_context)
-                        || filter_contains_input(
-                            inner,
-                            predicate,
-                            raw_reference,
-                            scalar_filter,
-                            population_leaf,
-                            object_information_available,
-                            slot_context,
-                        )
-                })
-            }
-            QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-                scalar_filter(source, object_information_available, slot_context)
-                    || filter_contains_input(
-                        source,
-                        predicate,
-                        raw_reference,
-                        scalar_filter,
-                        population_leaf,
-                        object_information_available,
-                        slot_context,
-                    )
-                    || scalar_filter(target, object_information_available, slot_context)
-                    || filter_contains_input(
-                        target,
-                        predicate,
-                        raw_reference,
-                        scalar_filter,
-                        population_leaf,
-                        object_information_available,
-                        slot_context,
-                    )
-            }
-            QuantityRef::ManaSpentToCast { metric, .. } => match metric {
-                CastManaSpentMetric::FromSource { source_filter } => {
-                    scalar_filter(source_filter, object_information_available, slot_context)
-                        || filter_contains_input(
-                            source_filter,
-                            predicate,
-                            raw_reference,
-                            scalar_filter,
-                            population_leaf,
-                            object_information_available,
-                            slot_context,
-                        )
-                }
-                CastManaSpentMetric::Total
-                | CastManaSpentMetric::DistinctColors
-                | CastManaSpentMetric::OfColor { .. } => false,
-            },
-            QuantityRef::HandSize { .. }
-            | QuantityRef::LifeTotal { .. }
-            | QuantityRef::GraveyardSize { .. }
-            | QuantityRef::LifeAboveStarting
-            | QuantityRef::StartingLifeTotal { .. }
-            | QuantityRef::TriggeringDiscoverValue
-            | QuantityRef::TriggeringScryLookCount
-            | QuantityRef::TriggeringScryBottomCount
-            | QuantityRef::CountersOn { .. }
-            | QuantityRef::PlayerCounter { .. }
-            | QuantityRef::TargetControllerCounter { .. }
-            | QuantityRef::Variable { .. }
-            | QuantityRef::Power { .. }
-            | QuantityRef::BasePower { .. }
-            | QuantityRef::Intensity { .. }
-            | QuantityRef::Toughness { .. }
-            | QuantityRef::ObjectManaValue { .. }
-            | QuantityRef::ObjectColorCount { .. }
-            | QuantityRef::ObjectNameWordCount { .. }
-            | QuantityRef::NameStickerLetterCount { .. }
-            | QuantityRef::ObjectTypelineComponentCount { .. }
-            | QuantityRef::ManaSymbolsInManaCost { .. }
-            | QuantityRef::SelfManaValue
-            | QuantityRef::TargetZoneCardCount { .. }
-            | QuantityRef::Devotion { .. }
-            | QuantityRef::CardsExiledBySource
-            | QuantityRef::ExiledCardPower { .. }
-            | QuantityRef::BasicLandTypeCount { .. }
-            | QuantityRef::TrackedSetSize
-            | QuantityRef::ExiledFromHandThisResolution
-            | QuantityRef::PreviousEffectAmount { .. }
-            | QuantityRef::PreviousEffectCount
-            | QuantityRef::LifeLostThisTurn { .. }
-            | QuantityRef::PartySize { .. }
-            | QuantityRef::UnspentMana { .. }
-            | QuantityRef::Speed { .. }
-            | QuantityRef::AttachmentsOnLeavingObject { .. }
-            | QuantityRef::EventContextAmount
-            | QuantityRef::EventContextSourceCostX
-            | QuantityRef::EventContextSourceModesChosen
-            | QuantityRef::CrimesCommittedThisTurn
-            | QuantityRef::BendTypesThisTurn
-            | QuantityRef::LifeGainedThisTurn { .. }
-            | QuantityRef::CardsDrawnThisTurn { .. }
-            | QuantityRef::LandsPlayedThisTurn { .. }
-            | QuantityRef::TurnsTaken
-            | QuantityRef::ChosenNumber
-            | QuantityRef::PlayerChosenNumber { .. }
-            | QuantityRef::NotedNumber
-            | QuantityRef::DescendedThisTurn
-            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-            | QuantityRef::SpellsCastLastTurn
-            | QuantityRef::CardsDiscardedThisTurn { .. }
-            | QuantityRef::PlayerActionsThisTurn { .. }
-            | QuantityRef::DungeonsCompleted
-            | QuantityRef::CostXPaid
-            | QuantityRef::KickerCount
-            | QuantityRef::AdditionalCostPaymentCount
-            | QuantityRef::AdditionalCostPaymentCountFor { .. }
-            | QuantityRef::ConvokedCreatureCount
-            | QuantityRef::TimesCostPaidThisResolution
-            | QuantityRef::ColorsInCommandersColorIdentity
-            | QuantityRef::CommanderCastFromCommandZoneCount
-            | QuantityRef::CommanderManaValue { .. }
-            | QuantityRef::VoteCount { .. } => false,
+            )
         }
+        QuantityRef::PropertyAggregate(aggregate) => card_type_set_source_contains_input(
+            aggregate.source(),
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => card_type_set_source_contains_input(
+            source,
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref().is_some_and(|inner| {
+            scalar_filter(inner, object_information_available, slot_context)
+                || filter_contains_input(
+                    inner,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+        }),
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            scalar_filter(source, object_information_available, slot_context)
+                || filter_contains_input(
+                    source,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+                || scalar_filter(target, object_information_available, slot_context)
+                || filter_contains_input(
+                    target,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+        }
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => {
+                scalar_filter(source_filter, object_information_available, slot_context)
+                    || filter_contains_input(
+                        source_filter,
+                        predicate,
+                        raw_reference,
+                        scalar_filter,
+                        population_leaf,
+                        object_information_available,
+                        slot_context,
+                    )
+            }
+            CastManaSpentMetric::Total
+            | CastManaSpentMetric::DistinctColors
+            | CastManaSpentMetric::OfColor { .. } => false,
+        },
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
+    }
 }
 
 /// Whether a property predicate is reachable through a card-type population.
@@ -3227,7 +3274,12 @@ fn quantity_ref_contains_input(
 fn card_type_set_source_contains_input(
     source: &CardTypeSetSource,
     predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
-    raw_reference: &dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: &dyn Fn(
+        &QuantityRef,
+        bool,
+        Option<&ResolvedAbility>,
+        Option<&PlayerFilter>,
+    ) -> bool,
     scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
     population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
     object_information_available: bool,
@@ -12209,7 +12261,7 @@ mod tests {
                 order.borrow_mut().push("property");
                 false
             },
-            &|reference, information, context| {
+            &|reference, information, context, _| {
                 assert!(information);
                 assert!(std::ptr::eq(context.unwrap(), &ability));
                 order.borrow_mut().push("reference");
@@ -12245,7 +12297,7 @@ mod tests {
         assert!(!quantity_expr_contains_scalar_input(
             &composite,
             &|_, _, _| false,
-            &|_, _, _| false,
+            &|_, _, _, _| false,
             &|filter, _, _| {
                 roots.set(roots.get() + 1);
                 matches!(filter, TargetFilter::ParentTarget)
@@ -12298,7 +12350,7 @@ mod tests {
             assert!(player_filter_contains_scalar_input(
                 &wrapped,
                 &|_, _, _| false,
-                &|reference, information, context| {
+                &|reference, information, context, _| {
                     assert!(!information);
                     assert!(context.is_none());
                     visits.set(visits.get() + 1);
@@ -12322,6 +12374,57 @@ mod tests {
             ));
             assert!(visits.get() > 0);
         }
+    }
+
+    #[test]
+    fn canonical_raw_attribute_owner_is_immediate_and_borrowed() {
+        let missing = QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let attribute = PlayerFilter::PlayerAttribute {
+            relation: crate::types::ability::PlayerRelation::All,
+            attr: Box::new(QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::ParentObjectTargetController,
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::GE,
+                        value: missing.clone(),
+                    },
+                ])),
+            }),
+            comparator: Comparator::EQ,
+            value: Box::new(missing),
+        };
+        let visits = std::cell::RefCell::new(Vec::new());
+        assert!(!player_filter_contains_scalar_input(
+            &attribute,
+            &|_, information, context| {
+                assert!(!information && context.is_none());
+                false
+            },
+            &|reference, information, context, owner| {
+                assert!(!information && context.is_none());
+                if let Some(owner) = owner {
+                    assert!(std::ptr::eq(owner, &attribute));
+                }
+                visits.borrow_mut().push((
+                    matches!(reference, QuantityRef::BattlefieldEntriesThisTurn { .. }),
+                    owner.is_some(),
+                ));
+                false
+            },
+            &|_, information, context| {
+                assert!(!information && context.is_none());
+                false
+            },
+            &|_, _, _| false,
+            true,
+            None,
+        ));
+        assert_eq!(
+            *visits.borrow(),
+            [(true, true), (false, false), (false, false)]
+        );
     }
 
     #[test]
@@ -12380,7 +12483,7 @@ mod tests {
                     quantity_expr_contains_scalar_input(
                         &expression,
                         &|_, _, _| false,
-                        &|reference, _, _| matches!(reference, QuantityRef::TrackedSetSize),
+                        &|reference, _, _, _| matches!(reference, QuantityRef::TrackedSetSize),
                         &|_, _, _| false,
                         &|_, _, _| false,
                         true,
@@ -12431,7 +12534,7 @@ mod tests {
                     filter_contains_scalar_input(
                         &filter,
                         &|_, _, _| false,
-                        &|reference, information, context| {
+                        &|reference, information, context, _| {
                             assert!(!information);
                             assert!(context.is_none());
                             matches!(reference, QuantityRef::TrackedSetSize)
@@ -12464,7 +12567,7 @@ mod tests {
                 player_filter_contains_scalar_input(
                     &attribute,
                     &|_, _, _| false,
-                    &|reference, information, context| {
+                    &|reference, information, context, _| {
                         assert!(!information);
                         assert!(context.is_none());
                         matches!(reference, QuantityRef::TrackedSetSize)
