@@ -2765,7 +2765,7 @@ fn granted_spell_keywords_for_cast(
     // spell's own mana cost before it reaches affordability checks or payment
     // (Henzie, "Toolbox" Torre's granted blitz — issue #5435). Resolving at
     // this single exit covers all three grant sources uniformly (the
-    // `CastWithKeyword` static loop above, `transient_granted_spell_keywords_for_for_cast`,
+    // `CastWithKeyword` static loop above, `transient_granted_spell_keywords_for_cast`,
     // and `apply_pending_next_spell_keyword_grants`) without touching any of
     // the individual cost-extraction call sites that read this collector.
     for keyword in &mut keywords {
@@ -2784,7 +2784,7 @@ fn granted_spell_keyword_instances(
 }
 
 /// Fuse-aware sibling of [`granted_spell_keyword_instances`]. See
-/// [`granted_spell_keywords_for_for_cast`] for the `fused` projection rationale.
+/// [`granted_spell_keywords_for_cast`] for the `fused` projection rationale.
 fn granted_spell_keyword_instances_for(
     state: &GameState,
     caster: PlayerId,
@@ -2857,7 +2857,7 @@ fn granted_spell_keyword_instances_for_cast(
         casting_spell,
     );
 
-    // CR 118.9 + CR 601.2f: see the matching comment in `granted_spell_keywords_for_for_cast`.
+    // CR 118.9 + CR 601.2f: see the matching comment in `granted_spell_keywords_for_cast`.
     // `object_id` here is the recipient spell itself (not the fused-half object,
     // if any), so `SelfManaCost` correctly resolves against that spell's own
     // mana cost — matching "The blitz cost is equal to its mana cost." A fused
@@ -2880,7 +2880,7 @@ fn granted_spell_keyword_instances_for_cast(
 /// `granted_spell_keywords`; it mirrors the condition gating of the sibling player
 /// query `transient_grants_static_mode_to_player` (static_abilities.rs). `fused`
 /// projects a pre-payment fused split spell with its COMBINED characteristics
-/// (CR 702.102b); see [`granted_spell_keywords_for_for_cast`] for the rationale.
+/// (CR 702.102b); see [`granted_spell_keywords_for_cast`] for the rationale.
 #[allow(clippy::too_many_arguments)]
 
 /// CR 601.2b: retain the selected cast through this projection.
@@ -5931,7 +5931,7 @@ fn graveyard_permission_sources(
 /// `visibility::viewer_may_look_at_face_down` (`MayLookAtFaceDown`),
 /// `reduce_activated_ability_cost` (`ReduceAbilityCost`) and
 /// `transient_cast_free_permission` (`CastFromHandFree`). The closest of them,
-/// `transient_granted_spell_keywords_for_for_cast`, likewise unwraps a
+/// `transient_granted_spell_keywords_for_cast`, likewise unwraps a
 /// `GrantStaticAbility` off a raw TCE.
 fn transient_graveyard_permission_sources(
     state: &GameState,
@@ -7358,7 +7358,7 @@ fn cast_free_permission_from_source(
 /// what a per-object `CastingPermission` cannot express.
 ///
 /// Mirrors the condition gating of the sibling player-scoped scan
-/// `transient_granted_spell_keywords_for_for_cast` (Teferi, Time Raveler's flash grant).
+/// `transient_granted_spell_keywords_for_cast` (Teferi, Time Raveler's flash grant).
 fn transient_cast_free_permission(
     state: &GameState,
     player: PlayerId,
