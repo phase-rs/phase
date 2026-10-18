@@ -20143,53 +20143,48 @@ mod tests {
         );
     }
 
-    /// Parse the verbatim Bolas grant clause into host statics (the Phase 3
-    /// delta). Every Phase 3 layers test builds its Bolas host statics through
-    /// this helper; providers stay hand-built with distinct effects, since
-    /// provider parsing is the orthogonal Priority-11 printed-loyalty path.
-    /// The setup assertions make an emission revert fail here (red), not
-    /// downstream.
+    /// Hand-built kind-selected loyalty grant static (the runtime authority
+    /// in isolation — the verbatim line now refuses at parse, so the parser
+    /// is bypassed here by design). Every Phase 3 layers test builds its
+    /// Bolas host statics through this helper, carrying the same source
+    /// filter the parser used to lower; providers stay hand-built with
+    /// distinct effects, since provider parsing is the orthogonal
+    /// Priority-11 printed-loyalty path.
     fn bolas_grant_statics_from_verbatim_line() -> Vec<StaticDefinition> {
-        let parsed = parse_oracle_text(
-            "Nicol Bolas has all loyalty abilities of all other planeswalkers on the battlefield.",
-            "Nicol Bolas, Dragon-God",
-            &[],
-            &["Legendary".to_string(), "Planeswalker".to_string()],
-            &["Bolas".to_string()],
-        );
-        assert_eq!(
-            parsed.statics.len(),
-            1,
-            "verbatim Bolas grant clause must parse to exactly one static; got {:?}",
-            parsed.statics
-        );
-        assert!(
-            matches!(
-                parsed.statics[0].modifications.as_slice(),
-                [ContinuousModification::GrantAllActivatedAbilitiesOf {
-                    kind: Some(ActivatedAbilityKind::Loyalty),
-                    ..
-                }]
-            ),
-            "verbatim Bolas grant clause must lower to the loyalty grant; got {:?}",
-            parsed.statics[0].modifications
-        );
-        parsed.statics
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(
+                            vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                        )),
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::SelfRef),
+                        },
+                    ],
+                },
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
+            }])]
     }
 
-    /// CR 613.1f + CR 606.2: a Bolas host whose statics come from the verbatim
-    /// grant clause (the Phase 3 delta) gains exactly the donor walkers'
-    /// loyalty defs: the `[+1]`/`[-3]` fixed-loyalty defs and the `[-X]`
-    /// `RemoveCounter{X}`-shaped def (per `is_loyalty_ability_cost`), each with
-    /// its `AsSorcery` timing intact — while the donor's `{T}` non-loyalty def
-    /// is excluded by the ability-level loyalty-cost filter. An
-    /// OPPONENT-controlled donor donates too (the source carries no controller
-    /// axis).
+    /// CR 613.1f + CR 606.2: a Bolas host whose statics are the hand-built
+    /// kind-selected grant (the runtime authority in isolation) gains exactly
+    /// the donor walkers' loyalty defs: the `[+1]`/`[-3]` fixed-loyalty defs
+    /// and the `[-X]` `RemoveCounter{X}`-shaped def (per
+    /// `is_loyalty_ability_cost`), each with its `AsSorcery` timing
+    /// intact — while the donor's `{T}` non-loyalty def is excluded by the
+    /// ability-level loyalty-cost filter. An OPPONENT-controlled donor
+    /// donates too (the source carries no controller axis).
     ///
     /// Two phases plus a hostile leg: lone Bolas gains nothing; once the donor
     /// enters Bolas holds exactly the three donated defs; once an
     /// opponent-controlled donor enters Bolas holds all five. Reverting the
-    /// emission arm donates nothing (red at the phase-2 assertion).
+    /// runtime kind filter admits the `{T}` def (red at the phase-2
+    /// assertion).
     #[test]
     fn bolas_gains_exactly_donor_loyalty_defs() {
         use crate::types::ability::CounterCostSelection;
@@ -20356,13 +20351,14 @@ mod tests {
         }
     }
 
-    /// CR 611.3a: the verbatim-clause Bolas grant tracks the battlefield live —
+    /// CR 611.3a: the hand-built Bolas grant tracks the battlefield live —
     /// a provider leaving retires its donations on the next pass, and a newly
     /// entered provider donates immediately. Bolas + donor → present; second
     /// donor enters → both present; first donor leaves while the second remains
     /// → only the remaining donor's defs stay (provider-scan
     /// `matches_target_filter` false-after-leave); last donor leaves → absent.
-    /// Reverting the emission arm strands the phase-1 presence assertion (red).
+    /// Reverting the runtime expansion strands the phase-1 presence assertion
+    /// (red).
     #[test]
     fn bolas_grant_tracks_the_battlefield_live() {
         let mut state = setup();
@@ -20488,14 +20484,14 @@ mod tests {
     }
 
     /// CR 613.1f: self-exclusion is self-ONLY. A lone Bolas (three printed
-    /// loyalty defs, verbatim-clause statics) holds exactly its three printed
+    /// loyalty defs, hand-built statics) holds exactly its three printed
     /// defs — no self-duplication. Two Bolases plus a donor each hold their own
     /// three printed + the other Bolas's three printed + the donor's two, each
     /// exactly once (re-donation dedup: B's donated-from-donor defs re-donated
     /// to A collapse via the `GrantAbility` structural-equality `any` branch),
     /// with identical composition across two consecutive passes (per-pass reset
-    /// idempotence). Reverting the emission arm strands the pair assertions
-    /// (red: each holds only its own three).
+    /// idempotence). Reverting the runtime expansion strands the pair
+    /// assertions (red: each holds only its own three).
     ///
     /// Attribution (defense in depth): the FILTER conjunct is discriminated by
     /// P3-C1's exact-shape assert (revert the source arm to bare Typed →
@@ -20632,7 +20628,7 @@ mod tests {
     /// holding a quoted-granted loyalty def — built via the PRODUCTION
     /// quoted-grant path (`parse_quoted_ability_modifications`, the P1-C4
     /// extractor pattern), NOT hand-built — donates a correctly-timed def to
-    /// the verbatim-clause Bolas: present with `AsSorcery` intact. A quoted
+    /// the hand-built-statics Bolas: present with `AsSorcery` intact. A quoted
     /// NON-loyalty grant alongside is excluded (reaches the loyalty-cost false
     /// arm on a quoted def).
     ///
@@ -20641,8 +20637,8 @@ mod tests {
     /// ordering between Gauntlet's grant and Bolas's expansion); the
     /// Gauntlet→donor hop is P1-covered. Timing enforcement composes from P1-C4
     /// (quoted defs with `AsSorcery` refuse off-turn) + P3-C4 (donated defs'
-    /// carried restrictions are consulted). Reverting the emission arm strands
-    /// the donation assertion (red).
+    /// carried restrictions are consulted). Reverting the runtime expansion
+    /// strands the donation assertion (red).
     #[test]
     fn bolas_donates_quoted_granted_loyalty_def_with_timing() {
         use crate::parser::oracle_static::parse_quoted_ability_modifications;

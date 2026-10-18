@@ -1030,20 +1030,21 @@ mod tests {
     }
 
     /// Build the Phase 3 activation board: Bolas(4) with one hand-built printed
-    /// +1 and verbatim-clause statics, plus a donor walker (3) with a +1
-    /// gain-life def and a targeted -3 destroy def, in the `setup()` position
-    /// (P0's precombat main, P0 priority, empty stack), layers evaluated.
-    /// Printed and donor defs carry `AsSorcery` ONLY — never
-    /// `make_loyalty_ability` (that helper adds `OnlyOnceEachTurn`, which would
-    /// conflate cap attribution, per P1-C4). When `timed` is false the DONOR
-    /// defs are built restriction-free (the P3-C4 carriage-drop probe);
-    /// Bolas's own def stays timed.
+    /// +1 and hand-built grant statics (the verbatim line now refuses at
+    /// parse, so the parser is bypassed here by design), plus a donor walker
+    /// (3) with a +1 gain-life def and a targeted -3 destroy def, in the
+    /// `setup()` position (P0's precombat main, P0 priority, empty stack),
+    /// layers evaluated. Printed and donor defs carry `AsSorcery` ONLY —
+    /// never `make_loyalty_ability` (that helper adds `OnlyOnceEachTurn`,
+    /// which would conflate cap attribution, per P1-C4). When `timed` is
+    /// false the DONOR defs are built restriction-free (the P3-C4
+    /// carriage-drop probe); Bolas's own def stays timed.
     ///
     /// `create_planeswalker` installs abilities, types, and loyalty on the live
     /// object only, so the base fields are synced for the layer pass that
     /// follows. Returns `(state, bolas, donor, own_plus, donor_plus,
-    /// donor_minus)`; the setup assertions make an emission revert fail here
-    /// (red: donated defs absent), not downstream.
+    /// donor_minus)`; the setup assertions make a runtime-expansion revert
+    /// fail here (red: donated defs absent), not downstream.
     fn bolas_plus_donor_board(
         timed: bool,
     ) -> (
@@ -1055,7 +1056,6 @@ mod tests {
         AbilityDefinition,
     ) {
         use crate::game::layers::evaluate_layers;
-        use crate::parser::oracle::parse_oracle_text;
 
         fn time(mut def: AbilityDefinition, timed: bool) -> AbilityDefinition {
             if timed {
@@ -1088,20 +1088,34 @@ mod tests {
             obj.base_abilities = Arc::clone(&obj.abilities);
             obj.base_card_types = obj.card_types.clone();
             obj.base_loyalty = obj.loyalty;
-            let parsed = parse_oracle_text(
-                "Nicol Bolas has all loyalty abilities of all other planeswalkers on the battlefield.",
-                "Nicol Bolas, Dragon-God",
-                &[],
-                &["Legendary".to_string(), "Planeswalker".to_string()],
-                &["Bolas".to_string()],
-            );
-            assert_eq!(
-                parsed.statics.len(),
-                1,
-                "verbatim Bolas grant clause must parse to exactly one static; got {:?}",
-                parsed.statics
-            );
-            obj.static_definitions = parsed.statics.into();
+            // Hand-built equivalent of the refused verbatim grant line (same
+            // source filter the parser used to lower): the runtime authority
+            // is tested in isolation from the parser refusal.
+            use crate::types::ability::{
+                ContinuousModification, FilterProp, StaticDefinition, TypeFilter,
+            };
+            use crate::types::events::ActivatedAbilityKind;
+            obj.static_definitions = vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Planeswalker).properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    },
+                                ]),
+                            ),
+                            TargetFilter::Not {
+                                filter: Box::new(TargetFilter::SelfRef),
+                            },
+                        ],
+                    },
+                    cap: None,
+                    kind: Some(ActivatedAbilityKind::Loyalty),
+                }])]
+            .into();
         }
 
         let donor_plus = time(
@@ -1172,8 +1186,8 @@ mod tests {
     /// CR 606.4 + CR 606.6: the donated +1 activates on the controller's main
     /// phase with an empty stack — Bolas loyalty 4→5, the donor unchanged, the
     /// ability on the stack with Bolas as source, and the gain-life effect
-    /// resolves. Reverting the emission arm strands the board setup assertion
-    /// (red: donated ability absent).
+    /// resolves. Reverting the runtime expansion strands the board setup
+    /// assertion (red: donated ability absent).
     #[test]
     fn bolas_donated_plus_one_activates_and_moves_counters_on_bolas() {
         let (mut state, bolas, donor, _, donor_plus, _) = bolas_plus_donor_board(true);
@@ -1310,7 +1324,7 @@ mod tests {
     /// phase with an empty stack. Leg discipline is load-bearing (P1 F6):
     /// refusals run BEFORE the allow on the shared board, so the activation
     /// count stays 0 through the refusals and each refusal is attributable to
-    /// `AsSorcery`, not the per-permanent cap. Reverting the emission arm
+    /// `AsSorcery`, not the per-permanent cap. Reverting the runtime expansion
     /// strands the board setup assertion (red: donated ability absent).
     #[test]
     fn bolas_donated_ability_requires_sorcery_speed() {
@@ -1426,7 +1440,7 @@ mod tests {
     /// ACTIVATING permanent (`planeswalker.rs:129` reads `pw_id` = Bolas).
     /// Stack is cleared between same-board attempts so each refusal is
     /// attributable to the cap, not stack-nonempty AsSorcery. Reverting the
-    /// emission arm strands the board setup assertions (red: donated defs
+    /// runtime expansion strands the board setup assertions (red: donated defs
     /// absent, order-2 untestable).
     #[test]
     fn bolas_donated_and_printed_share_one_per_turn_cap() {

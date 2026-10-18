@@ -10547,23 +10547,32 @@ fn grant_cap_rider_folds_over_any_grant_source() {
 /// instead of silently dropping an explicit restriction on the acquired ability.
 #[test]
 fn grant_cap_rider_never_folds_onto_loyalty_grant() {
-    // Hostile leg: loyalty grant + rider. No returned modification may be a
-    // capped loyalty grant.
+    // Hostile leg: loyalty grant + rider. The line yields NO static defs —
+    // asserted EXPLICITLY (a rider-fold regression that capped the loyalty
+    // grant would emit a def and fail) — and the card-level parse carries
+    // the single static_structure gap. Lock-in: passes via the rider-decline
+    // path at base and via the loyalty-refusal path post-change.
     let defs = parse_static_line_multi(
         "~ has all loyalty abilities of all lands on the battlefield. You may activate each of those abilities only once each turn.",
     );
-    for def in &defs {
-        for modification in &def.modifications {
-            if let ContinuousModification::GrantAllActivatedAbilitiesOf { cap, kind, .. } =
-                modification
-            {
-                assert!(
-                    *kind != Some(ActivatedAbilityKind::Loyalty) || cap.is_none(),
-                    "rider must never fold a cap onto a loyalty grant; got {modification:?}",
-                );
-            }
-        }
-    }
+    assert!(
+        defs.is_empty(),
+        "loyalty+rider line must yield no static defs; got {defs:?}"
+    );
+    let refused = parse_card(
+        "Grant Recipient has all loyalty abilities of all lands on the battlefield. You may activate each of those abilities only once each turn.",
+        "Grant Recipient",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert!(refused.statics.is_empty(), "{:?}", refused.statics);
+    assert_eq!(refused.abilities.len(), 1, "{:?}", refused.abilities);
+    assert!(
+        matches!(&*refused.abilities[0].effect, Effect::Unimplemented { name, .. } if name == "static_structure"),
+        "{:?}",
+        refused.abilities,
+    );
 
     // Reach-guard leg: the SAME rider after an ACTIVATED grant still folds —
     // proving the guard discriminates by kind instead of breaking the fold.
@@ -10594,26 +10603,26 @@ fn grant_cap_rider_never_folds_onto_loyalty_grant() {
 #[test]
 fn grant_cap_rider_after_loyalty_grant_does_not_cap_older_sibling() {
     let grants = "Grant Recipient has all activated abilities of all lands on the battlefield. Grant Recipient has all loyalty abilities of all other planeswalkers on the battlefield.";
-    let uncapped = parse_card(grants, "Grant Recipient", &[], &["Artifact"], &[]);
-    assert!(uncapped.abilities.is_empty(), "{:?}", uncapped.abilities);
-    assert_eq!(uncapped.statics.len(), 2, "{:?}", uncapped.statics);
-    assert_eq!(
-        uncapped.statics[0].modifications,
-        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
-            source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
-                zone: Zone::Battlefield,
-            }])),
-            cap: None,
-            kind: None,
-        }],
+    // The loyalty sentence refuses at emission, so the whole line declines —
+    // the same observable as the rider-refusal leg below (documents that a
+    // loyalty sentence sharing a line with an admitted grant takes the line
+    // down with it; only Bolas prints the leaf).
+    let loyalty_line = parse_card(grants, "Grant Recipient", &[], &["Artifact"], &[]);
+    assert!(
+        loyalty_line.statics.is_empty(),
+        "{:?}",
+        loyalty_line.statics
     );
     assert_eq!(
-        uncapped.statics[1].modifications,
-        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
-            source: all_other_planeswalkers_source(),
-            cap: None,
-            kind: Some(ActivatedAbilityKind::Loyalty),
-        }],
+        loyalty_line.abilities.len(),
+        1,
+        "{:?}",
+        loyalty_line.abilities
+    );
+    assert!(
+        matches!(&*loyalty_line.abilities[0].effect, Effect::Unimplemented { name, .. } if name == "static_structure"),
+        "{:?}",
+        loyalty_line.abilities,
     );
 
     let refused = parse_card(
@@ -10641,9 +10650,17 @@ fn grant_cap_rider_after_loyalty_grant_does_not_cap_older_sibling() {
     );
     assert!(activated.abilities.is_empty(), "{:?}", activated.abilities);
     assert_eq!(activated.statics.len(), 2, "{:?}", activated.statics);
+    // The older sibling keeps the exact mods leg 1 asserted before the
+    // loyalty refusal (inlined: leg 1 no longer emits statics to compare to).
     assert_eq!(
         activated.statics[0].modifications,
-        uncapped.statics[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }])),
+            cap: None,
+            kind: None,
+        }],
     );
     assert_eq!(
         activated.statics[1].modifications,
@@ -10996,28 +11013,20 @@ fn all_other_planeswalkers_source() -> TargetFilter {
     }
 }
 
-/// CR 613.1f + CR 606.2: "all loyalty abilities of all other planeswalkers on
-/// the battlefield" (Nicol Bolas, Dragon-God) — the loyalty category leaf over
-/// the battlefield-wide planeswalker source set. Self-exclusion is the
-/// `Not{SelfRef}` conjunct (the Kraj precedent), NOT `FilterProp::Another`,
-/// which excludes the trigger source in trigger context. Reverting the
-/// category leaf, the source arm, or the emission arm strands this exact-shape
-/// assertion (red).
+/// CR 613.1f + CR 606.2 + CR 607.5: emission-level refusal — the loyalty
+/// category over the battlefield-wide planeswalker source set (Nicol Bolas,
+/// Dragon-God) yields NO mods: the donated linked pairs are unrepresentable
+/// in the source-level exile ledger, so the emission declines. Re-admitting
+/// the loyalty arm restores emission and strands the emptiness assert (red).
 #[test]
 fn parse_grant_all_loyalty_abilities_all_other_planeswalkers() {
-    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
-        source: all_other_planeswalkers_source(),
-        cap: None,
-        kind: Some(ActivatedAbilityKind::Loyalty),
-    };
     for predicate in [
         "all loyalty abilities of all other planeswalkers on the battlefield",
         "has all loyalty abilities of all other planeswalkers on the battlefield",
     ] {
-        assert_eq!(
-            parse_continuous_modifications(predicate),
-            vec![expected.clone()],
-            "predicate: {predicate}"
+        assert!(
+            parse_continuous_modifications(predicate).is_empty(),
+            "loyalty × planeswalker-source grant must refuse at emission; predicate: {predicate}"
         );
     }
 }
@@ -11041,38 +11050,30 @@ fn parse_grant_new_source_arm_composes_with_activated() {
     );
 }
 
-/// CR 613.1f: axis-independence (b) — the NEW loyalty category composes with
-/// the OLD Manascape land source (typed over a runtime-empty set — lands hold
-/// no loyalty abilities — so this is a parse-shape assertion only). Reaches
-/// exactly one new `alt` arm: reverting the category arm turns this red while
-/// the source hostile stays green, and vice versa.
+/// CR 613.1f + CR 607.5: emission-level refusal across the source axis too —
+/// the loyalty category over the Manascape land source yields NO mods (the
+/// refusal is on the kinds axis, so it covers every source arm uniformly).
+/// Re-admitting the loyalty arm restores emission and strands the emptiness
+/// assert (red).
 #[test]
 fn parse_grant_new_category_arm_composes_with_land_source() {
-    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
-    use crate::types::zones::Zone;
-    assert_eq!(
-        parse_continuous_modifications("has all loyalty abilities of all lands on the battlefield"),
-        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
-            source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
-                zone: Zone::Battlefield,
-            }]),),
-            cap: None,
-            kind: Some(ActivatedAbilityKind::Loyalty),
-        }],
+    assert!(
+        parse_continuous_modifications("has all loyalty abilities of all lands on the battlefield")
+            .is_empty(),
+        "loyalty × land-source grant must refuse at emission"
     );
 }
 
-/// CR 613.1f + CR 606.2: the verbatim Bolas grant clause parses typed end to
-/// end — one parametrized-loyalty `GrantAllActivatedAbilitiesOf` static
-/// affecting SelfRef, zero
-/// `Effect::Unimplemented` anywhere in the parse (the production
-/// `static_structure` honest gap, closed). Reverting any of the three
-/// production arms (category leaf, source arm, emission arm) strands the
-/// static-count assertion (red).
+/// CR 613.1f + CR 606.2 + CR 607.5: the verbatim Bolas grant clause REFUSES
+/// loudly — zero statics, exactly one `static_structure` honest gap (the
+/// 2024-01-12 acquired-pair linkage the grant donates is unrepresentable in
+/// the source-level exile ledger, so the sentence stays a loud gap rather
+/// than over-granting). Re-admitting the loyalty emission arm restores the
+/// typed static and strands the refusal asserts (red).
 #[test]
-fn bolas_grant_clause_parses_typed_with_no_unimplemented() {
+fn bolas_grant_clause_refuses_with_static_structure() {
     use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::{AbilityDefinition, Effect, TargetFilter};
+    use crate::types::ability::{AbilityDefinition, Effect};
 
     let parsed = parse_oracle_text(
         "Nicol Bolas has all loyalty abilities of all other planeswalkers on the battlefield.",
@@ -11083,7 +11084,7 @@ fn bolas_grant_clause_parses_typed_with_no_unimplemented() {
     );
 
     // Walk the whole ability tree (each ability plus its sub_ability chain) so
-    // a nested Unimplemented cannot hide.
+    // the gap cannot hide — and so the walk FINDS exactly one gap.
     fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
         out.push(&ability.effect);
         if let Some(sub) = &ability.sub_ability {
@@ -11094,36 +11095,32 @@ fn bolas_grant_clause_parses_typed_with_no_unimplemented() {
     for ability in &parsed.abilities {
         walk(ability, &mut effects);
     }
-    for effect in &effects {
-        assert!(
-            !matches!(effect, Effect::Unimplemented { .. }),
-            "verbatim Bolas grant clause must not emit Effect::Unimplemented, got {effect:?}"
-        );
-    }
-
-    // Positive reach-guard: exactly one static, so the negative above cannot
-    // pass vacuously on a parse that emitted nothing.
+    let gaps: Vec<&&Effect> = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Unimplemented { .. }))
+        .collect();
     assert_eq!(
-        parsed.statics.len(),
+        gaps.len(),
         1,
-        "verbatim Bolas grant clause must parse to exactly one static; got {:?}",
+        "verbatim Bolas grant clause must emit exactly one gap; got {effects:?}"
+    );
+    assert!(
+        matches!(gaps[0], Effect::Unimplemented { name, .. } if name == "static_structure"),
+        "the gap must be the static_structure honest gap; got {:?}",
+        gaps[0]
+    );
+
+    // Refusal shape: zero statics, one gap ability.
+    assert!(
+        parsed.statics.is_empty(),
+        "verbatim Bolas grant clause must refuse with zero statics; got {:?}",
         parsed.statics
     );
     assert_eq!(
-        parsed.statics[0].affected,
-        Some(TargetFilter::SelfRef),
-        "the Bolas grant static must affect its host; got {:?}",
-        parsed.statics[0].affected
-    );
-    assert_eq!(
-        parsed.statics[0].modifications,
-        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
-            source: all_other_planeswalkers_source(),
-            cap: None,
-            kind: Some(ActivatedAbilityKind::Loyalty),
-        }],
-        "the Bolas grant static must carry the typed loyalty grant; got {:?}",
-        parsed.statics[0].modifications
+        parsed.abilities.len(),
+        1,
+        "verbatim Bolas grant clause must lower to exactly one gap ability; got {:?}",
+        parsed.abilities
     );
 }
 

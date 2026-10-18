@@ -1349,6 +1349,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // triggered, source = the last chosen card). Typed/counter-gated sources stay
     // a gap (follow-ups).
     if let Some((kinds, source)) = parse_grant_all_abilities_clause(unquoted_tp.lower) {
+        // CR 607.5 + CR 606.2 + Bolas ruling 2024-01-12: a kind-selected loyalty
+        // grant donates linked pairs (e.g. Karn −3 + Ashiok −X onto one Bolas)
+        // that the source-level exile ledger cannot attribute to their donor pair
+        // (no donor binding on the installed grant, activation, or links).
+        // Refuse at emission so the sentence stays a loud `static_structure` gap
+        // rather than over-granting into the recipient's source-wide pile.
+        // Unblocks when the
+        // ledger carries donor/pair identity (see plan-r2 §4).
+        if matches!(kinds, GrantedAbilityKinds::Loyalty) {
+            return Vec::new();
+        }
         // CR 602.1 + CR 603.1: emit one continuous modification per donated
         // category. Activated and triggered land in different stores, so a
         // conjunction grant produces BOTH mods over the same `source`.
