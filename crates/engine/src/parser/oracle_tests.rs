@@ -35204,6 +35204,129 @@ fn prior_controller_malformed_quote_public_document_remains_unsupported() {
 }
 
 #[test]
+fn legacy_counter_adjustment_document_axes_keep_complete_typed_chain() {
+    use crate::types::counter::CounterMatch;
+
+    // SHAPE: synthetic grammar-axis documents; full pinned Clockspinning has its
+    // own test, but its first target disjunction bypasses the ordering defect.
+    let assert_legacy = |clause: &str, adjustment| {
+        for punctuation in ["", "."] {
+            let text = format!("Choose a counter on target permanent. {clause}{punctuation}");
+            let parsed = parse_oracle_text(
+                &text,
+                "Synthetic legacy axes",
+                &[],
+                &["Instant".into()],
+                &[],
+            );
+            assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+            let parent = &parsed.abilities[0];
+            assert!(
+                matches!(parent.effect.as_ref(), Effect::TargetOnly { .. }),
+                "{text}"
+            );
+            let adjustment_def = parent
+                .sub_ability
+                .as_deref()
+                .expect("complete second instruction");
+            assert_eq!(
+                adjustment_def.effect.as_ref(),
+                &Effect::ChooseCounterAdjustment {
+                    adjustment,
+                    counters: CounterMatch::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                },
+                "{text}"
+            );
+            assert!(adjustment_def.sub_ability.is_none(), "{text}");
+            assert!(parent.else_ability.is_none() && adjustment_def.else_ability.is_none());
+        }
+    };
+    for from in [
+        "",
+        " from it",
+        " from that permanent",
+        " from that card",
+        " from that permanent or card",
+    ] {
+        assert_legacy(
+            &format!("remove that counter{from}"),
+            CounterAdjustment::Remove,
+        );
+        for on in [
+            "it",
+            "that permanent",
+            "that card",
+            "that permanent or card",
+        ] {
+            assert_legacy(
+                &format!("remove that counter{from} or put another of those counters on {on}"),
+                CounterAdjustment::AddOrRemove,
+            );
+        }
+    }
+    for on in [
+        "it",
+        "that permanent",
+        "that card",
+        "that permanent or card",
+    ] {
+        assert_legacy(
+            &format!("put another of those counters on {on}"),
+            CounterAdjustment::Add,
+        );
+    }
+
+    for text in [
+        "put a charge counter on target creature or remove one from it",
+        "remove a charge counter from target creature or put one on it",
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            "Synthetic fixed-kind control",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+        assert!(
+            matches!(
+                parsed.abilities[0].effect.as_ref(),
+                Effect::ChooseCounterAdjustment {
+                    adjustment: CounterAdjustment::AddOrRemove,
+                    counters: CounterMatch::OfType(crate::types::counter::CounterType::Generic(kind)),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target,
+                } if kind == "charge" && !target.is_context_ref()
+            ),
+            "{text}: {parsed:#?}"
+        );
+    }
+    for text in [
+        "put a charge counter on target creature or remove two from it",
+        "put a charge counter on target creature or remove an oil counter from it",
+        "put a charge counter on target creature or remove one from ~",
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            "Synthetic malformed fixed-kind",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+        assert!(
+            matches!(
+                parsed.abilities[0].effect.as_ref(),
+                Effect::Unimplemented { description: Some(fragment), .. } if fragment == text
+            ),
+            "complete malformed fixed-kind clause must remain a gap: {text}: {parsed:#?}"
+        );
+    }
+}
+
+#[test]
 fn mandatory_counter_adjustment_parent_and_legacy_axes_shape() {
     use crate::types::ability::{CounterAdjustment, QuantityExpr, TargetFilter};
     use crate::types::counter::CounterMatch;

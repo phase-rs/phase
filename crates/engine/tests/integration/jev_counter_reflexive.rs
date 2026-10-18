@@ -1001,6 +1001,68 @@ fn mandatory_prompt_validates_actor_index_and_keeps_tail_private() {
     assert_eq!(r.life(P0), 21);
 }
 #[test]
+fn legacy_anaphoric_axes_cast_and_deliver_both_present_kind_operations() {
+    // Synthetic legacy grammar-axis fixtures, alongside the full pinned card.
+    // CR 122.1 + CR 608.2d: choose one present kind and one adjustment at resolution.
+    // CR 608.2c: the independent life instruction waits for that choice and runs once.
+    for from in [
+        "",
+        " from it",
+        " from that permanent",
+        " from that card",
+        " from that permanent or card",
+    ] {
+        for on in [
+            "it",
+            "that permanent",
+            "that card",
+            "that permanent or card",
+        ] {
+            let text = format!(
+                "Choose a counter on target permanent. Remove that counter{from} or put another of those counters on {on}. You gain 1 life."
+            );
+            for (index, expected) in [(2, 2), (3, 4)] {
+                let mut s = GameScenario::new();
+                s.at_phase(Phase::PreCombatMain);
+                mana(&mut s);
+                let id = s.add_creature(P0, "Legacy recipient", 2, 4).id();
+                let decoy = s.add_creature(P1, "Other legal recipient", 2, 4).id();
+                s.with_counter(id, CounterType::Time, 3)
+                    .with_counter(id, oil(), 2)
+                    .with_counter(decoy, CounterType::Time, 8);
+                let spell = s
+                    .add_spell_to_hand_from_oracle(P0, "Synthetic legacy axes", true, &text)
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: 0,
+                        shards: vec![ManaCostShard::Blue],
+                    })
+                    .id();
+                let mut r = s.build();
+                let outcome = r.cast(spell).target_object(id).resolve();
+                outcome.assert_zone(&[spell], Zone::Graveyard);
+                outcome.assert_life_delta(P0, 0);
+                prompt(&r, 4);
+                assert_eq!(n(&r, id, &CounterType::Time), 3);
+                assert_eq!(n(&r, id, &oil()), 2);
+                r = reload(r, index == 3);
+                prompt(&r, 4);
+                let events = choose(&mut r, index);
+                assert_eq!(n(&r, id, &CounterType::Time), expected, "{text}");
+                assert_eq!(event_count(&events, id, &CounterType::Time, index == 3), 1);
+                assert_eq!(event_count(&events, id, &CounterType::Time, index != 3), 0);
+                assert_eq!(n(&r, id, &oil()), 2);
+                assert_eq!(event_count(&events, id, &oil(), true), 0);
+                assert_eq!(event_count(&events, id, &oil(), false), 0);
+                assert_eq!(n(&r, decoy, &CounterType::Time), 8);
+                assert_eq!(event_count(&events, decoy, &CounterType::Time, true), 0);
+                assert_eq!(event_count(&events, decoy, &CounterType::Time, false), 0);
+                assert_eq!(r.life(P0), 21);
+            }
+        }
+    }
+}
+
+#[test]
 fn clockspinning_complete_oracle_live_present_kind_and_empty_controls() {
     for (initial, index, expected) in [(3, 0, 2), (3, 1, 4), (0, 0, 0)] {
         let mut s = GameScenario::new();

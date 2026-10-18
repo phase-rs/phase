@@ -16194,6 +16194,16 @@ pub(super) fn parse_zone_counter_ast<'a>(
     if let Some(ast) = parse_counter_ast(text, lower) {
         return Some(Ok(ast));
     }
+    // Complete legacy anaphors precede the specified-kind commitment gate;
+    // both adjustment forms must precede generic put/remove counter parsing.
+    if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
+        return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+            adjustment,
+            counters: crate::types::counter::CounterMatch::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        }));
+    }
     if let Some(parsed) = super::counter::try_parse_specified_counter_adjustment(lower, ctx) {
         return Some(
             parsed
@@ -16207,15 +16217,6 @@ pub(super) fn parse_zone_counter_ast<'a>(
                 })
                 .map_err(|()| text),
         );
-    }
-    // Legacy anaphoric add-only and remove forms precede generic counter parsing.
-    if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
-        return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
-            adjustment,
-            counters: crate::types::counter::CounterMatch::Any,
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::ParentTarget,
-        }));
     }
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
@@ -28887,6 +28888,106 @@ mod jev_seek_imperative_tests {
         ));
         let bad = "seek two cards that each share a color with one or more mysteries you control";
         assert!(parse_search_and_creation_ast(bad, bad, &mut ctx).is_none());
+    }
+
+    #[test]
+    fn legacy_counter_adjustment_axes_reach_production_family() {
+        use crate::types::counter::CounterMatch;
+
+        // SHAPE: exercise the ordered family entry, not the legacy helper alone.
+        let assert_legacy = |clause: &str, adjustment| {
+            for punctuation in ["", "."] {
+                let text = format!("{clause}{punctuation}");
+                let family =
+                    parse_zone_counter_family_ast(&text, &text, &mut ParseContext::default())
+                        .expect("legacy counter family");
+                let ImperativeFamilyAst::ZoneCounter(ast) = family else {
+                    panic!("legacy clause must not become a strict gap: {text}")
+                };
+                assert_eq!(
+                    lower_zone_counter_ast(ast),
+                    Effect::ChooseCounterAdjustment {
+                        adjustment,
+                        counters: CounterMatch::Any,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                    "{text}"
+                );
+            }
+        };
+        for from in [
+            "",
+            " from it",
+            " from that permanent",
+            " from that card",
+            " from that permanent or card",
+        ] {
+            assert_legacy(
+                &format!("remove that counter{from}"),
+                CounterAdjustment::Remove,
+            );
+            for on in [
+                "it",
+                "that permanent",
+                "that card",
+                "that permanent or card",
+            ] {
+                assert_legacy(
+                    &format!("remove that counter{from} or put another of those counters on {on}"),
+                    CounterAdjustment::AddOrRemove,
+                );
+            }
+        }
+        for on in [
+            "it",
+            "that permanent",
+            "that card",
+            "that permanent or card",
+        ] {
+            assert_legacy(
+                &format!("put another of those counters on {on}"),
+                CounterAdjustment::Add,
+            );
+        }
+
+        // The earlier complete legacy owner must not consume named-kind forms.
+        for text in [
+            "put a charge counter on target creature or remove one from it",
+            "remove a charge counter from target creature or put one on it",
+        ] {
+            let family = parse_zone_counter_family_ast(text, text, &mut ParseContext::default())
+                .expect("specified counter family");
+            let ImperativeFamilyAst::ZoneCounter(ast) = family else {
+                panic!("valid specified-kind clause: {text}")
+            };
+            assert!(matches!(
+                lower_zone_counter_ast(ast),
+                Effect::ChooseCounterAdjustment {
+                    adjustment: CounterAdjustment::AddOrRemove,
+                    counters: CounterMatch::OfType(CounterType::Generic(kind)),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target,
+                } if kind == "charge" && !target.is_context_ref()
+            ));
+        }
+        for text in [
+            "put a charge counter on target creature or remove two from it",
+            "put a charge counter on target creature or remove an oil counter from it",
+            "put a charge counter on target creature or remove one from ~",
+            "put a charge counter on target creature or remove one from it and draw a card",
+        ] {
+            assert!(
+                matches!(
+                    parse_zone_counter_family_ast(text, text, &mut ParseContext::default()),
+                    Some(ImperativeFamilyAst::Put(PutImperativeAst::Unimplemented {
+                        gap: "put_counter_tail",
+                        fragment,
+                    })) if fragment == text
+                ),
+                "complete malformed fixed-kind clause must remain a gap: {text}"
+            );
+        }
     }
 
     #[test]
