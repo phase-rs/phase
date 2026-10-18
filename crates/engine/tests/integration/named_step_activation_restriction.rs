@@ -11,7 +11,7 @@ use engine::game::restrictions::check_activation_restrictions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ActivationRestriction, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -233,7 +233,7 @@ fn werewolf_combat_at_blocker_prompt() -> (GameRunner, ObjectId, ObjectId, usize
 /// declare blockers step. CR 115.1c + CR 509.1g + CR 509.1h: its target is chosen
 /// on activation from creatures blocking or blocked by the werewolf, so the
 /// blocked bear is the only legal target (the werewolf itself is a creature but
-/// is excluded). P1 activates targeting the bear: the activation is accepted, its
+/// is excluded), so it is auto-selected: the activation is accepted, its
 /// {B} is paid, and the ability goes on the stack. Resolution is not asserted: a pre-existing defect re-prompts the counter's target at resolution (see PR residuals).
 #[test]
 fn lesser_werewolf_activates_only_during_declare_blockers_step() {
@@ -249,30 +249,36 @@ fn lesser_werewolf_activates_only_during_declare_blockers_step() {
             ability_index: index,
         })
         .expect("CR 602.5: the declare blockers step admits the activation");
-    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
-        panic!(
-            "the activation proceeds to target selection, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(
-        target_slots
-            .iter()
-            .map(|slot| slot.legal_targets.clone())
-            .collect::<Vec<_>>(),
-        vec![vec![TargetRef::Object(bear)]],
-        "only a creature blocking or blocked by Lesser Werewolf is a legal target"
+    // The blocked bear is the only legal target (the werewolf itself is
+    // excluded), so the engine auto-selects it and no target prompt opens; an
+    // unrestricted "target creature" would offer both and pause here instead.
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "a single legal target is auto-selected, got {:?}",
+        runner.state().waiting_for
     );
-    runner
-        .act(GameAction::ChooseTarget {
-            target: Some(TargetRef::Object(bear)),
-        })
-        .expect("the blocked bear is a legal target");
     assert_eq!(runner.state().stack.len(), 1, "the ability is on the stack");
+    let entry = runner.state().stack.back().expect("stacked ability");
     assert_eq!(
-        runner.state().stack.back().map(|entry| entry.source_id),
-        Some(werewolf),
+        entry.source_id, werewolf,
         "the stacked ability is Lesser Werewolf's"
+    );
+    let StackEntryKind::ActivatedAbility { ability, .. } = &entry.kind else {
+        panic!("an activated ability, got {:?}", entry.kind);
+    };
+    let chain_targets: Vec<TargetRef> =
+        std::iter::successors(Some(&**ability), |link| link.sub_ability.as_deref())
+            .flat_map(|link| link.targets.iter().cloned())
+            .collect();
+    assert!(
+        !chain_targets.is_empty()
+            && chain_targets
+                .iter()
+                .all(|target| *target == TargetRef::Object(bear)),
+        "only a creature blocking or blocked by Lesser Werewolf is targeted, got {chain_targets:?}"
     );
     assert_eq!(
         runner.state().players[1]
