@@ -9636,9 +9636,9 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         },
         FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
-        | FilterProp::MostPrevalentCreatureTypeIn { scope: controller, .. } => {
-            controller_ref_is_selected_dependent(controller)
-        }
+        | FilterProp::MostPrevalentCreatureTypeIn {
+            scope: controller, ..
+        } => controller_ref_is_selected_dependent(controller),
         FilterProp::Attacking { defender, .. }
         | FilterProp::AttackedThisTurn { defender, .. }
         | FilterProp::HasAttachment {
