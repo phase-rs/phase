@@ -11158,24 +11158,22 @@ fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
     }
 }
 
-/// CR 613.1f + CR 606.2 + CR 607.5: hostile multi-sentence fallback pin — a
+/// CR 613.1f + CR 606.2 + CR 607.5: hostile multi-sentence composition — a
 /// quoted-grant sentence sharing a line with the refused by-reference loyalty
 /// leaf does NOT refuse whole-line. The loyalty segment emits nothing, so the
 /// multi-sentence parse defers and falls through to the single-sentence
-/// fallback per the reviewed chain, and whole-line refusal is unachievable in
-/// predicate-only scope: the fallback re-parses the WHOLE line after the first
-/// " has " as one predicate, the by-reference clause match is `all_consuming`
-/// so it fails over the two-sentence predicate (the predicate never evaluates
-/// and the loyalty leaf is dropped, never emitted), while the quoted emission
-/// fires on the original quoted text. Observable pinned here: the quoted
-/// static IS present carrying only the quoted mod, ZERO kind-Loyalty
-/// by-reference grants are emitted, and ZERO gaps are recorded (the non-empty
-/// defs adopt at Priority 7, so the 14a `static_structure` fallback never runs
-/// — the refused leaf is silently dropped). Refusal signals (empty vec /
-/// `None`) are indistinguishable from non-match throughout the dispatch chain,
-/// so the fallback cannot know a sentence refused; a future
-/// refusal-propagation fix must update this pin (desired churn, not
-/// ossification).
+/// fallback per the reviewed chain: the fallback re-parses the WHOLE line
+/// after the first " has " as one predicate, the by-reference clause match is
+/// `all_consuming` so it fails over the two-sentence predicate (the predicate
+/// never evaluates and the loyalty leaf is never emitted), while the quoted
+/// emission fires on the original quoted text. Observable pinned here: the
+/// quoted static IS present carrying only the quoted mod, ZERO kind-Loyalty
+/// by-reference grants are emitted, and exactly ONE `static_structure` gap
+/// records the refused leaf (the non-empty defs adopt at Priority 7, and the
+/// recognized refusal is carried across the fallback boundary as the same
+/// typed residual 14a would have emitted — Matt review 5564241267 MED).
+/// Coupling trap: re-admitting the `:1360` loyalty emission makes the finder
+/// a false positive, so the finder and the early return must change together.
 #[test]
 fn quoted_grant_with_refused_loyalty_leaf_falls_back_to_quoted_static() {
     for line in [
@@ -11239,14 +11237,109 @@ fn quoted_grant_with_refused_loyalty_leaf_falls_back_to_quoted_static() {
             }
         }
 
-        // 0-gap observation: the non-empty fallback defs adopt at Priority 7,
-        // so no static_structure gap records the dropped leaf.
+        // Carried-marker observation: the non-empty fallback defs adopt at
+        // Priority 7, and the refused leaf is recorded as exactly one
+        // `static_structure` gap whose fragment names the leaf (unit-scoped,
+        // not whole-line).
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "expected one carried gap for the refused leaf; line: {line}\n{:?}",
+            parsed.abilities
+        );
         assert!(
-            parsed.abilities.is_empty(),
-            "expected zero gaps (fallback defs adopt, 14a never runs); line: {line}\n{:?}",
+            matches!(&*parsed.abilities[0].effect, Effect::Unimplemented { name, .. } if name == "static_structure"),
+            "the carried gap must be the static_structure honest gap; line: {line}\n{:?}",
+            parsed.abilities
+        );
+        assert!(
+            matches!(&*parsed.abilities[0].effect, Effect::Unimplemented { description: Some(desc), .. } if desc.contains("all loyalty abilities of all other planeswalkers on the battlefield")),
+            "the carried gap fragment must name the refused leaf; line: {line}\n{:?}",
             parsed.abilities
         );
     }
+}
+
+/// CR 606.3 + CR 606.2: adjacent-grammar negative (V8) — the Oath sentence
+/// names "the loyalty abilities of ..." but is an activation-limit static, not
+/// a by-reference grant, so the refusal finder must stay silent (the sentence
+/// carries no get/has/have/lose marker and fails the `all_consuming` clause
+/// match regardless — a substring finder would fire here). Reach-guard: the
+/// `ModifyActivationLimit` static itself proves the line parsed.
+#[test]
+fn oath_sentence_gains_no_refusal_marker() {
+    let parsed = parse_card(
+        "You may activate the loyalty abilities of planeswalkers you control twice each turn rather than only once.",
+        "Oath of Teferi",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "the Oath static must survive; got {:?}",
+        parsed.statics
+    );
+    assert_eq!(
+        parsed.statics[0].mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 2,
+        },
+        "reach-guard: the activation-limit static must parse; got {:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.abilities.is_empty(),
+        "expected zero gaps for the Oath sentence; got {:?}",
+        parsed.abilities
+    );
+}
+
+/// CR 613.1f + CR 606.2 + CR 607.5: single-sentence hybrid negative (V10) —
+/// `~ has "X" and all loyalty abilities of ...` — the quote-stripped
+/// predicate fails the `all_consuming` clause match at the emission site AND
+/// at the finder identically, so no refusal exists to carry and no gap is
+/// recorded. Reach-guard: the adopted quoted static proves the line parsed.
+#[test]
+fn hybrid_single_sentence_gains_no_refusal_marker() {
+    let line = "Grant Recipient has \"[0]: Proliferate\" and all loyalty abilities of all other planeswalkers on the battlefield.";
+    let parsed = parse_card(line, "Grant Recipient", &[], &["Artifact"], &[]);
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "the quoted static must survive; line: {line}\n{:?}",
+        parsed.statics
+    );
+    assert_eq!(
+        parsed.statics[0].modifications.len(),
+        1,
+        "the static must carry only the quoted mod; line: {line}\n{:?}",
+        parsed.statics
+    );
+    let ContinuousModification::GrantAbility { definition } = &parsed.statics[0].modifications[0]
+    else {
+        panic!(
+            "the surviving mod must be the quoted GrantAbility; line: {line}\n{:?}",
+            parsed.statics
+        );
+    };
+    assert!(
+        matches!(definition.cost, Some(AbilityCost::Loyalty { amount: 0 })),
+        "the quoted grant must be the [0] loyalty ability; line: {line}\n{:?}",
+        parsed.statics
+    );
+    assert!(
+        matches!(*definition.effect, Effect::Proliferate),
+        "the quoted grant must be Proliferate; line: {line}\n{:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.abilities.is_empty(),
+        "expected zero gaps for the hybrid sentence; line: {line}\n{:?}",
+        parsed.abilities
+    );
 }
 
 /// CR 613.1f + CR 108.3: "all artifact cards in your graveyard" — ownership-based

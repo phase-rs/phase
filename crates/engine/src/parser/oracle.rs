@@ -133,12 +133,13 @@ use super::oracle_special::{
     parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    is_graveyard_cast_permission_lead, is_speed_unlock_sentence, lower_static_ir,
-    parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_collect_evidence_alt_cost, parse_flashback_trailing_self_spell_cost_reduction,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
-    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
+    find_refused_loyalty_grant_sentence, is_graveyard_cast_permission_lead,
+    is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
+    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
+    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
+    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
+    GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{
     lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
@@ -7392,6 +7393,25 @@ fn parse_normalized_oracle_ir(
                         emitter.static_ir_at(
                             item_line,
                             StaticIr::from_definition(&static_line, __item),
+                        );
+                    }
+                    // CR 606.2 + CR 607.5: a refused by-reference loyalty sentence
+                    // composed with an adopted static sibling (the whole-line fallback
+                    // keeps the sibling and drops the leaf). Carry the refusal as the
+                    // same typed `static_structure` residual 14a would have emitted —
+                    // Matt review 5564241267 MED. Exactly-once: 14a owns empty-defs
+                    // lines, so this arm and 14a are mutually exclusive.
+                    if let Some(refused) = find_refused_loyalty_grant_sentence(&static_line) {
+                        emitter.unsupported_ir_at(
+                            item_line,
+                            UnsupportedAbilityIr::new(
+                                UnsupportedAbilityCategory::StaticStructure,
+                                format!(
+                                    "Static fallback adopted statics but dropped a refused loyalty-grant sentence: {refused}"
+                                ),
+                                line,
+                            ),
+                            min_x_value,
                         );
                     }
                     i += 1;

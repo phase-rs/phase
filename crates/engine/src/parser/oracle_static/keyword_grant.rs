@@ -1348,7 +1348,8 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // (Myr Welder / Agatha activated; Koh, the Face Stealer activated AND
     // triggered, source = the last chosen card). Typed/counter-gated sources stay
     // a gap (follow-ups).
-    if let Some((kinds, source)) = parse_grant_all_abilities_clause(unquoted_tp.lower) {
+    if let Some((kinds, source)) = parse_grant_all_abilities_clause(&grant_clause_probe_lower(text))
+    {
         // CR 607.5 + CR 606.2 + Bolas ruling 2024-01-12: a kind-selected loyalty
         // grant donates linked pairs (e.g. Karn −3 + Ashiok −X onto one Bolas)
         // that the source-level exile ledger cannot attribute to their donor pair
@@ -1759,6 +1760,70 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     ));
 
     modifications
+}
+
+/// The clause-probe recipe the by-reference grant match evaluates: lowercase →
+/// where-X strip (unless quoted) → `nom_tag_tp "also "` →
+/// `strip_quoted_segments` → lowercase. Shared by the `:1351` emission-site
+/// call and [`find_refused_loyalty_grant_sentence`] so the finder and the
+/// emission site can never disagree about what the clause parser saw.
+fn grant_clause_probe_lower(text: &str) -> String {
+    let text_lower = text.to_lowercase();
+    let text_tp = TextPair::new(text, &text_lower);
+    // allow-noncombinator: structural normalization branch, not dispatch
+    let (stripped_tp, _) = if text.contains('"') {
+        (text_tp, None)
+    } else {
+        super::oracle_effect::strip_trailing_where_x(text_tp)
+    };
+    let tp = nom_tag_tp(&stripped_tp, "also ").unwrap_or(stripped_tp);
+    let text_stripped = tp.original;
+    let unquoted_text = strip_quoted_segments(text_stripped);
+    unquoted_text.to_lowercase()
+}
+
+/// CR 606.2 + CR 607.5: locate the first refused by-reference loyalty sentence
+/// (`:1360` shape) on an adopted static line, so the Priority-7 gate can carry
+/// the recognized refusal as the same typed `static_structure` residual 14a
+/// would have emitted (Matt review 5564241267 MED).
+///
+/// Exact-mirror contract: the verdict runs the EXACT clause parser
+/// ([`parse_grant_all_abilities_clause`]) over the EXACT emission-site clause
+/// probe ([`grant_clause_probe_lower`]) per quote-aware sentence, so
+/// finder-verdict ⟺ `:1360` would-have-refused for direct-dispatch sentences.
+/// Bound: emission applies anthem-level predicate transforms the finder does
+/// not replicate (turn-suffix strip, for-each/as-long-as routing), so a
+/// turn-suffixed loyalty sentence refuses at emission yet fails the finder's
+/// clause — a false negative for which the old silent drop persists; no
+/// in-repo or printed instance exists.
+///
+/// Re-admission coupling trap: deleting the `:1360` early return makes this
+/// finder a FALSE POSITIVE (honestly-emitted loyalty grants would also match),
+/// so re-admission must delete or gate the finder in the same change.
+///
+/// One-gap-per-line boundary: returns the FIRST refused sentence only. If a
+/// multi-leaf composed line ever prints, widen to one gap per leaf plus a
+/// multi-leaf positive leg.
+pub(crate) fn find_refused_loyalty_grant_sentence(static_line: &str) -> Option<String> {
+    let line_lower = static_line.to_lowercase();
+    if !nom_primitives::scan_contains(&line_lower, "loyalty abilities of") {
+        return None;
+    }
+    for sentence in split_static_sentences(static_line) {
+        let sentence_lower = sentence.to_lowercase();
+        let Some(subject_end) = find_continuous_predicate_start(&sentence_lower) else {
+            continue;
+        };
+        let predicate = sentence[subject_end + 1..].trim();
+        let probe = grant_clause_probe_lower(predicate);
+        if let Some((kinds, _)) = parse_grant_all_abilities_clause(&probe) {
+            // Same expression as the `:1360` early return — grep-able coupling.
+            if matches!(kinds, GrantedAbilityKinds::Loyalty) {
+                return Some(sentence);
+            }
+        }
+    }
+    None
 }
 
 /// CR 613.4c + CR 702: In a granted-keyword "where X is its `<P/T/mana value>`"

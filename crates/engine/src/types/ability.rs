@@ -35174,9 +35174,11 @@ pub enum ContinuousModification {
         /// hold non-loyalty activated abilities, which the unqualified grant
         /// would over-grant. A typed `Option<ActivatedAbilityKind>` rather
         /// than a bool so the axis can grow to other kind subsets.
-        /// CR 606.3: loyalty frequency is governed by the per-permanent gate,
-        /// so the parser never pairs `Some(Loyalty)` with `Some(cap)` —
-        /// enforced at the rider fold in `fold_grant_cap_rider`.
+        /// The parser never pairs `Some(Loyalty)` with `Some(cap)` — an
+        /// implementation limitation (the rider fold declines kind-selected
+        /// grants), not a rules exemption: a use-restriction acquired with an
+        /// ability still applies to it (CR 602.5c). Enforced at the rider fold
+        /// in `fold_grant_cap_rider`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<ActivatedAbilityKind>,
     },
