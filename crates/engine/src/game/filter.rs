@@ -3970,6 +3970,7 @@ fn bind_absent_search_property_after_children(prop: &mut FilterProp) {
 fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
     match filter {
         TargetFilter::Any => Some(true),
+        TargetFilter::None => Some(false),
         TargetFilter::Typed(typed) => kleene_and(
             std::iter::once(
                 (typed.type_filters.is_empty() && typed.controller.is_none()).then_some(true),
@@ -3983,7 +3984,58 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
             kleene_or(filters.iter().map(absent_search_predicate_truth))
         }
         TargetFilter::Not { filter } => absent_search_predicate_truth(filter).map(|v| !v),
-        _ => None,
+        TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => None,
     }
 }
 
@@ -3991,7 +4043,104 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
     match prop {
         FilterProp::AnyOf { props } => kleene_or(props.iter().map(absent_search_property_truth)),
         FilterProp::Not { prop } => absent_search_property_truth(prop).map(|v| !v),
-        _ => None,
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => None,
     }
 }
 
@@ -12630,6 +12779,199 @@ mod tests {
         assert!(
             matches!(player, TargetFilter::PlayerMatching { player } if matches!(*player, PlayerFilter::ControlsCount { filter: TargetFilter::Or { ref filters }, .. } if filters.is_empty()))
         );
+    }
+
+    #[test]
+    fn absent_search_binding_summarizes_none_without_rewriting_boolean_descriptors() {
+        let live = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Tapped]),
+        );
+        for (original, expected) in [
+            (TargetFilter::None, Some(false)),
+            (TargetFilter::Any, Some(true)),
+            (live.clone(), None),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::None),
+                },
+                Some(true),
+            ),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(live.clone()),
+                },
+                None,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, TargetFilter::Or { filters: vec![] }],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, TargetFilter::Any],
+                },
+                Some(true),
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, live.clone()],
+                },
+                None,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![live.clone(), TargetFilter::None],
+                },
+                None,
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![TargetFilter::None, TargetFilter::Any],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![TargetFilter::None, live.clone()],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![live.clone(), TargetFilter::None],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::None),
+                        },
+                        TargetFilter::Any,
+                    ],
+                },
+                Some(true),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![TargetFilter::Any, live],
+                },
+                None,
+            ),
+        ] {
+            let mut bound = original.clone();
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(expected),
+                "{original:?}"
+            );
+            assert_eq!(bound, original);
+        }
+    }
+
+    #[test]
+    fn absent_search_binding_preserves_property_truth_and_live_unknowns() {
+        let false_prop = FilterProp::AnyOf { props: vec![] };
+        let true_prop = FilterProp::Not {
+            prop: Box::new(false_prop.clone()),
+        };
+        for (properties, expected) in [
+            (vec![], Some(true)),
+            (vec![false_prop.clone()], Some(false)),
+            (vec![true_prop.clone()], Some(true)),
+            (vec![FilterProp::Tapped], None),
+            (
+                vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Tapped),
+                }],
+                None,
+            ),
+            (
+                vec![FilterProp::AnyOf {
+                    props: vec![false_prop.clone(), FilterProp::Tapped],
+                }],
+                None,
+            ),
+            (
+                vec![FilterProp::AnyOf {
+                    props: vec![true_prop.clone(), FilterProp::Tapped],
+                }],
+                Some(true),
+            ),
+            (vec![false_prop, FilterProp::Tapped], Some(false)),
+            (vec![true_prop, FilterProp::Tapped], None),
+        ] {
+            let original = TargetFilter::Typed(TypedFilter::default().properties(properties));
+            let mut bound = original.clone();
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(expected),
+                "{original:?}"
+            );
+            assert_eq!(bound, original);
+        }
+    }
+
+    #[test]
+    fn absent_search_binding_rewrites_distinct_from_a_known_false_reference() {
+        let live = TargetFilter::Typed(TypedFilter::creature());
+        for reference in [
+            TargetFilter::None,
+            TargetFilter::Or {
+                filters: vec![TargetFilter::None, TargetFilter::Or { filters: vec![] }],
+            },
+            TargetFilter::And {
+                filters: vec![live.clone(), TargetFilter::None],
+            },
+        ] {
+            let mut bound = TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::DistinctFrom {
+                    reference: Box::new(reference),
+                },
+            ]));
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(Some(true))
+            );
+            assert_eq!(
+                bound,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::AnyOf { props: vec![] }),
+                }]))
+            );
+        }
+        for reference in [
+            live,
+            TargetFilter::SpecificObject { id: ObjectId(77) },
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::None),
+            },
+        ] {
+            let original = TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::DistinctFrom {
+                    reference: Box::new(reference),
+                },
+            ]));
+            let mut bound = original.clone();
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(None)
+            );
+            assert_eq!(bound, original);
+        }
     }
 
     #[test]
