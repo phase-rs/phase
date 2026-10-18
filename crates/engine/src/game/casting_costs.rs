@@ -1,3 +1,4 @@
+use super::filter::CastSpellContext;
 use std::collections::HashSet;
 
 use crate::game::functioning_abilities::static_kind_present;
@@ -456,18 +457,31 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     if total.is_without_paying_mana() {
         return Ok(true);
     }
-    let can_pay_normally =
-        super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total);
+    let can_pay_normally = super::casting::can_feasibly_pay_mana_cost_with_probe_for_cast(
+        state,
+        player,
+        Some(pending.object_id),
+        &total,
+        None,
+        Some(CastSpellContext {
+            object_id: pending.object_id,
+            casting_variant: pending.casting_variant,
+        }),
+    );
     if can_pay_normally {
         return Ok(true);
     }
     Ok(split.payment_mode.is_some_and(|mode| {
-        super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
+        super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode_for_cast(
             state,
             player,
             pending.object_id,
             &total,
             mode,
+            CastSpellContext {
+                object_id: pending.object_id,
+                casting_variant: pending.casting_variant,
+            },
         )
     }))
 }
@@ -923,7 +937,23 @@ pub(crate) fn payable_spell_alternative_cost(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<AbilityCost> {
-    payable_spell_alternative_cost_details(state, player, object_id).map(|details| details.cost)
+    payable_spell_alternative_cost_for_cast(
+        state,
+        player,
+        object_id,
+        CastSpellContext::for_spell(state, object_id),
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(crate) fn payable_spell_alternative_cost_for_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_spell: CastSpellContext,
+) -> Option<AbilityCost> {
+    payable_spell_alternative_cost_details_for_cast(state, player, object_id, casting_spell)
+        .map(|details| details.cost)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -941,6 +971,21 @@ pub(crate) fn payable_spell_alternative_cost_details(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+) -> Option<PayableSpellAlternativeCost> {
+    payable_spell_alternative_cost_details_for_cast(
+        state,
+        player,
+        object_id,
+        CastSpellContext::for_spell(state, object_id),
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(crate) fn payable_spell_alternative_cost_details_for_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_spell: CastSpellContext,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
     if obj.controller != player {
@@ -984,7 +1029,13 @@ pub(crate) fn payable_spell_alternative_cost_details(
                     return None;
                 }
             };
-            if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
+            if spell_alternative_cost_is_payable_for_cast(
+                state,
+                player,
+                object_id,
+                &cost,
+                casting_spell,
+            ) {
                 Some(PayableSpellAlternativeCost {
                     cost,
                     timing_permission: None,
@@ -1033,7 +1084,15 @@ pub(crate) fn payable_spell_alternative_cost_details(
             } => Some((cost.clone(), *timing_permission)),
             _ => None,
         })
-        .find(|(cost, _)| spell_alternative_cost_is_payable(state, player, object_id, cost));
+        .find(|(cost, _)| {
+            spell_alternative_cost_is_payable_for_cast(
+                state,
+                player,
+                object_id,
+                cost,
+                casting_spell,
+            )
+        });
     if let Some((cost, timing_permission)) = granted_self {
         return Some(PayableSpellAlternativeCost {
             cost,
@@ -1049,14 +1108,24 @@ pub(crate) fn payable_spell_alternative_cost_details(
     // CR 118.9 + CR 601.2a (#7575): zone reach is decided INSIDE
     // `granted_spell_alternative_cost` — hand casts match normally, a non-hand
     // origin only through an origin-scoped filter branch.
-    let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
-    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
-        PayableSpellAlternativeCost {
-            cost: granted.cost,
-            timing_permission: granted.timing_permission,
-            once_per_turn_source: granted.once_per_turn_source,
-        },
+    let granted = super::casting::granted_spell_alternative_cost_for_cast(
+        state,
+        player,
+        object_id,
+        casting_spell,
+    )?;
+    spell_alternative_cost_is_payable_for_cast(
+        state,
+        player,
+        object_id,
+        &granted.cost,
+        casting_spell,
     )
+    .then_some(PayableSpellAlternativeCost {
+        cost: granted.cost,
+        timing_permission: granted.timing_permission,
+        once_per_turn_source: granted.once_per_turn_source,
+    })
 }
 
 pub(crate) fn payable_spell_alternative_cost_for_timing(
@@ -1065,22 +1134,49 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     object_id: ObjectId,
     timing_permission: CastTimingPermission,
 ) -> Option<PayableSpellAlternativeCost> {
+    payable_spell_alternative_cost_for_timing_for_cast(
+        state,
+        player,
+        object_id,
+        timing_permission,
+        CastSpellContext::for_spell(state, object_id),
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(crate) fn payable_spell_alternative_cost_for_timing_for_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    timing_permission: CastTimingPermission,
+    casting_spell: CastSpellContext,
+) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
     if obj.zone != Zone::Hand || obj.controller != player || obj.additional_cost.is_some() {
         return None;
     }
 
-    let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
+    let granted = super::casting::granted_spell_alternative_cost_for_cast(
+        state,
+        player,
+        object_id,
+        casting_spell,
+    )?;
     if granted.timing_permission != Some(timing_permission) {
         return None;
     }
-    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
-        PayableSpellAlternativeCost {
-            cost: granted.cost,
-            timing_permission: granted.timing_permission,
-            once_per_turn_source: granted.once_per_turn_source,
-        },
+    spell_alternative_cost_is_payable_for_cast(
+        state,
+        player,
+        object_id,
+        &granted.cost,
+        casting_spell,
     )
+    .then_some(PayableSpellAlternativeCost {
+        cost: granted.cost,
+        timing_permission: granted.timing_permission,
+        once_per_turn_source: granted.once_per_turn_source,
+    })
 }
 
 fn spell_alternative_cost_is_payable(
@@ -1089,16 +1185,46 @@ fn spell_alternative_cost_is_payable(
     object_id: ObjectId,
     cost: &AbilityCost,
 ) -> bool {
+    spell_alternative_cost_is_payable_for_cast(
+        state,
+        player,
+        object_id,
+        cost,
+        CastSpellContext::for_spell(state, object_id),
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+fn spell_alternative_cost_is_payable_for_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+    casting_spell: CastSpellContext,
+) -> bool {
     match cost {
         AbilityCost::Mana { cost } => {
-            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
+            super::casting::can_pay_cost_after_auto_tap_with_probe_for_cast(
+                state,
+                player,
+                object_id,
+                cost,
+                None,
+                casting_spell,
+            )
         }
         // CR 118.3 + CR 601.2h: every leg must be payable, and multiple chosen
         // hand-discard legs must be payable together (one card cannot serve two).
         // Spell costs prompt their object legs without look-ahead.
         AbilityCost::Composite { costs } => {
             costs.iter().all(|sub_cost| {
-                spell_alternative_cost_is_payable(state, player, object_id, sub_cost)
+                spell_alternative_cost_is_payable_for_cast(
+                    state,
+                    player,
+                    object_id,
+                    sub_cost,
+                    casting_spell,
+                )
             }) && super::cost_payability::object_cost_legs_jointly_payable(
                 state,
                 player,
@@ -3240,11 +3366,16 @@ fn auto_activate_spell_mana_abilities_before_deferred_sacrifice(
     if pending.activation_ability_index.is_some()
         || pending.payment_mode != CastPaymentMode::Auto
         || cost_has_x(&pending.cost)
-        || !super::casting::can_pay_cost_after_auto_tap(
+        || !super::casting::can_pay_cost_after_auto_tap_with_probe_for_cast(
             &simulated,
             player,
             pending.object_id,
             &pending.cost,
+            None,
+            CastSpellContext {
+                object_id: pending.object_id,
+                casting_variant: pending.casting_variant,
+            },
         )
     {
         return Ok(());
@@ -3255,7 +3386,14 @@ fn auto_activate_spell_mana_abilities_before_deferred_sacrifice(
     // a non-mana additional cost. The final spend remains in `finalize_cast`.
     let mut simulated_events = events.clone();
     let events_before = simulated_events.len();
-    let spell_meta = super::casting::build_spell_meta(&simulated, player, pending.object_id);
+    let spell_meta = super::casting::build_spell_meta_for_cast(
+        &simulated,
+        player,
+        CastSpellContext {
+            object_id: pending.object_id,
+            casting_variant: pending.casting_variant,
+        },
+    );
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     auto_tap_mana_sources_with_context_and_resume(
         &mut simulated,
@@ -7916,12 +8054,15 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // cast (marker not yet set at this pre-payment additional-cost seam) so a
     // value-keyed granted Flash is not dropped on the front half.
     if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
-        && !super::restrictions::target_dependent_flash_permission_satisfied(
+        && !super::restrictions::target_dependent_flash_permission_satisfied_for_cast(
             state,
             player,
             object_id,
             &ability,
-            casting_variant == CastingVariant::Fuse,
+            CastSpellContext {
+                object_id,
+                casting_variant,
+            },
         )
     {
         let pending_for_cancel = pending_cast_keeping(
@@ -11530,17 +11671,23 @@ pub(super) fn pay_and_push_adventure(
     // CR 702.102b: derive the pre-payment fused hint from the casting variant so a
     // `CastWithKeyword`-granted tap-payment keyword keyed on the combined mana
     // value / colors is seen on a fused split spell before its marker is set.
-    let convoke_mode = super::casting::spell_tap_payment_mode_for(
+    let convoke_mode = super::casting::spell_tap_payment_mode_for_cast(
         state,
         player,
         object_id,
-        casting_variant == CastingVariant::Fuse,
+        CastSpellContext {
+            object_id,
+            casting_variant,
+        },
     );
-    let has_delve = super::casting::spell_has_delve_payment_for(
+    let has_delve = super::casting::spell_has_delve_payment_for_cast(
         state,
         player,
         object_id,
-        casting_variant == CastingVariant::Fuse,
+        CastSpellContext {
+            object_id,
+            casting_variant,
+        },
     );
     // Gate on eligible creatures/artifacts being present.
     // CR 702.66a: delve needs at least one fuel card in the caster's graveyard.
@@ -11616,12 +11763,15 @@ pub(super) fn pay_and_push_adventure(
     // step pending), so before finalizing, a spell with assist and a generic
     // component lets the caster choose another player to help pay it. Stash the
     // pending cast so the assist answer handlers can resume via `enter_payment_step`.
-    if let Some((generic, candidates)) = assist_offer_params(
+    if let Some((generic, candidates)) = assist_offer_params_for_cast(
         state,
         player,
         object_id,
         cost,
-        casting_variant == CastingVariant::Fuse,
+        CastSpellContext {
+            object_id,
+            casting_variant,
+        },
     ) {
         pending.assist_state = AssistState::Offered;
         state.pending_cast = Some(Box::new(pending));
@@ -11721,12 +11871,15 @@ fn finalize_cast_pre_payment_checks(
     // Timely Ward), targets must satisfy that condition before costs are paid.
     // CR 702.102b: fuse-project the real-flash short-circuit for fused split casts.
     if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
-        && !super::restrictions::target_dependent_flash_permission_satisfied(
+        && !super::restrictions::target_dependent_flash_permission_satisfied_for_cast(
             state,
             player,
             object_id,
             ability,
-            casting_variant == CastingVariant::Fuse,
+            CastSpellContext {
+                object_id,
+                casting_variant,
+            },
         )
     {
         let pending_for_cancel =
@@ -13625,7 +13778,28 @@ pub(super) fn auto_tap_non_sacrificial_mana_sources(
     source_id: ObjectId,
     excluded: &HashSet<ObjectId>,
 ) {
-    let spell_meta = super::casting::build_spell_meta(state, player, source_id);
+    auto_tap_non_sacrificial_mana_sources_for_cast(
+        state,
+        player,
+        cost,
+        events,
+        source_id,
+        excluded,
+        CastSpellContext::for_spell(state, source_id),
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(super) fn auto_tap_non_sacrificial_mana_sources_for_cast(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    source_id: ObjectId,
+    excluded: &HashSet<ObjectId>,
+    casting_spell: CastSpellContext,
+) {
+    let spell_meta = super::casting::build_spell_meta_for_cast(state, player, casting_spell);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     auto_tap_mana_sources_inner(
         state,
@@ -13654,17 +13828,35 @@ pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap(
     source_id: ObjectId,
     cost: &ManaCost,
 ) -> bool {
+    spell_cost_is_payable_after_non_sacrificial_auto_tap_for_cast(
+        state,
+        player,
+        source_id,
+        cost,
+        CastSpellContext::for_spell(state, source_id),
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap_for_cast(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+    casting_spell: CastSpellContext,
+) -> bool {
     let mut simulated = state.clone();
     let mut events = Vec::new();
-    auto_tap_non_sacrificial_mana_sources(
+    auto_tap_non_sacrificial_mana_sources_for_cast(
         &mut simulated,
         player,
         cost,
         &mut events,
         source_id,
         &HashSet::new(),
+        casting_spell,
     );
-    spell_cost_is_payable_from_pool(&simulated, player, source_id, cost)
+    spell_cost_is_payable_from_pool_for_cast(&simulated, player, source_id, cost, casting_spell)
 }
 
 /// CR 601.2g-h + CR 605.3a: The sources the first leg of
@@ -13715,7 +13907,24 @@ pub(crate) fn spell_cost_is_payable_from_pool(
     object_id: ObjectId,
     cost: &ManaCost,
 ) -> bool {
-    let spell_meta = super::casting::build_spell_meta(state, player, object_id);
+    spell_cost_is_payable_from_pool_for_cast(
+        state,
+        player,
+        object_id,
+        cost,
+        CastSpellContext::for_spell(state, object_id),
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(crate) fn spell_cost_is_payable_from_pool_for_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+    casting_spell: CastSpellContext,
+) -> bool {
+    let spell_meta = super::casting::build_spell_meta_for_cast(state, player, casting_spell);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
         state,
@@ -15426,11 +15635,30 @@ pub(super) fn assist_offer_params(
     cost: &ManaCost,
     fused: bool,
 ) -> Option<(u32, Vec<PlayerId>)> {
+    let casting_spell = if fused {
+        CastSpellContext {
+            object_id: object_id,
+            casting_variant: CastingVariant::Fuse,
+        }
+    } else {
+        CastSpellContext::for_spell(state, object_id)
+    };
+    assist_offer_params_for_cast(state, player, object_id, cost, casting_spell)
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(super) fn assist_offer_params_for_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+    casting_spell: CastSpellContext,
+) -> Option<(u32, Vec<PlayerId>)> {
     let generic = match cost {
         ManaCost::Cost { generic, .. } if *generic > 0 => *generic,
         _ => return None,
     };
-    if !super::casting::effective_spell_keywords_for(state, player, object_id, fused)
+    if !super::casting::effective_spell_keywords_for_cast(state, player, object_id, casting_spell)
         .contains(&Keyword::Assist)
     {
         return None;
@@ -15460,11 +15688,14 @@ fn eligible_tap_payment_mode(
     explicit_mode
         .or(pending.additional_cost_payment_mode)
         .or_else(|| {
-            super::casting::spell_tap_payment_mode_for(
+            super::casting::spell_tap_payment_mode_for_cast(
                 state,
                 player,
                 pending.object_id,
-                pending.casting_variant == CastingVariant::Fuse,
+                CastSpellContext {
+                    object_id: pending.object_id,
+                    casting_variant: pending.casting_variant,
+                },
             )
         })
 }
@@ -15733,12 +15964,15 @@ pub fn enter_payment_step(
         }
         // CR 702.102b: fuse-project the assist grant read for a fused split cast so
         // a value-keyed `CastWithKeyword{Assist}` is not dropped on the front half.
-        assist_offer_params(
+        assist_offer_params_for_cast(
             state,
             player,
             pending.object_id,
             &pending.cost,
-            pending.casting_variant == CastingVariant::Fuse,
+            CastSpellContext {
+                object_id: pending.object_id,
+                casting_variant: pending.casting_variant,
+            },
         )
     });
     if let Some((generic, candidates)) = assist_offer {

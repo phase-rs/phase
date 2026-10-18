@@ -1381,8 +1381,17 @@ pub struct CastSpellContext {
 }
 
 impl CastSpellContext {
-    pub fn for_spell(state: &GameState, object_id: ObjectId) -> Self {
-        let casting_variant = super::casting::announced_spell_entry(state, object_id)
+    /// CR 601.2a + CR 601.2b: recover only this object's current announcement.
+    pub fn announced(state: &GameState, object_id: ObjectId) -> Option<Self> {
+        let casting_variant = state
+            .objects
+            .get(&object_id)
+            .filter(|object| object.zone == Zone::Stack || object.spell_announcement.is_some())
+            .and_then(|_| {
+                state.stack.iter().find(|entry| {
+                    entry.id == object_id && matches!(entry.kind, StackEntryKind::Spell { .. })
+                })
+            })
             .and_then(|entry| match &entry.kind {
                 StackEntryKind::Spell {
                     casting_variant, ..
@@ -1391,26 +1400,41 @@ impl CastSpellContext {
             })
             .or_else(|| {
                 state
-                    .pending_cast
-                    .as_ref()
-                    .filter(|pending| pending.object_id == object_id)
+                    .waiting_for
+                    .pending_cast_ref()
+                    .filter(|pending| {
+                        pending.object_id == object_id && pending.activation_ability_index.is_none()
+                    })
                     .map(|pending| pending.casting_variant)
             })
-            .unwrap_or_else(|| {
-                if state
-                    .objects
-                    .get(&object_id)
-                    .is_some_and(|object| object.fused_split_spell)
-                {
-                    CastingVariant::Fuse
-                } else {
-                    CastingVariant::Normal
-                }
-            });
-        Self {
+            .or_else(|| {
+                state
+                    .pending_cast
+                    .as_ref()
+                    .filter(|pending| {
+                        pending.object_id == object_id && pending.activation_ability_index.is_none()
+                    })
+                    .map(|pending| pending.casting_variant)
+            })?;
+        Some(Self {
             object_id,
             casting_variant,
-        }
+        })
+    }
+
+    pub fn for_spell(state: &GameState, object_id: ObjectId) -> Self {
+        Self::announced(state, object_id).unwrap_or_else(|| Self {
+            object_id,
+            casting_variant: if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.fused_split_spell)
+            {
+                CastingVariant::Fuse
+            } else {
+                CastingVariant::Normal
+            },
+        })
     }
 }
 
@@ -7315,7 +7339,41 @@ pub fn spell_object_matches_filter_from_for(
     all_creature_types: &[String],
     fused: bool,
 ) -> bool {
-    let record = spell_cast_record_from_object_for(spell_obj, fused);
+    let casting_spell = CastSpellContext {
+        object_id: spell_obj.id,
+        casting_variant: if fused || spell_obj.fused_split_spell {
+            CastingVariant::Fuse
+        } else {
+            CastingVariant::Normal
+        },
+    };
+    spell_object_matches_filter_from_for_cast(
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_controller,
+        all_creature_types,
+        casting_spell,
+    )
+}
+
+/// CR 601.2b + CR 708.4: an explicitly selected state-free record.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_for_cast(
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    all_creature_types: &[String],
+    casting_spell: CastSpellContext,
+) -> bool {
+    let record = crate::game::restrictions::live_spell_cast_record_for(
+        spell_obj,
+        origin_zone,
+        casting_spell.casting_variant,
+    );
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -7366,10 +7424,49 @@ pub fn spell_object_matches_filter_from_state_for(
     all_creature_types: &[String],
     fused: bool,
 ) -> bool {
+    let casting_spell = if fused {
+        CastSpellContext {
+            object_id: spell_obj.id,
+            casting_variant: CastingVariant::Fuse,
+        }
+    } else {
+        CastSpellContext::for_spell(state, spell_obj.id)
+    };
+    spell_object_matches_filter_from_state_for_cast(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        casting_spell,
+    )
+}
+
+/// CR 601.2b + CR 708.4: filter the exact selected spell before announcement.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_state_for_cast(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    casting_spell: CastSpellContext,
+) -> bool {
+    if casting_spell.object_id != spell_obj.id {
+        return false;
+    }
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
-    let record = spell_cast_record_from_object_for(spell_obj, fused);
+    let record = crate::game::restrictions::live_spell_cast_record_for(
+        spell_obj,
+        origin_zone,
+        casting_spell.casting_variant,
+    );
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -7392,14 +7489,7 @@ pub fn spell_object_matches_filter_from_state_for(
             // itself from the command zone — Eminence must not reduce its
             // own cost).
             spell_object_id: Some(spell_obj.id),
-            casting_spell: Some(CastSpellContext {
-                object_id: spell_obj.id,
-                casting_variant: if fused {
-                    CastingVariant::Fuse
-                } else {
-                    CastSpellContext::for_spell(state, spell_obj.id).casting_variant
-                },
-            }),
+            casting_spell: Some(casting_spell),
         }),
     )
 }
@@ -7421,8 +7511,17 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
 /// COMBINED-characteristics projection (CR 702.102b) for a pre-payment fused
 /// split spell whose `fused_split_spell` marker is not yet set; the non-`_for`
 /// entry delegates with `fused = false`.
+#[cfg(test)]
 fn spell_cast_record_from_object_for(spell_obj: &GameObject, fused: bool) -> SpellCastRecord {
-    crate::game::restrictions::live_spell_cast_record_for(spell_obj, spell_obj.zone, fused)
+    crate::game::restrictions::live_spell_cast_record_for(
+        spell_obj,
+        spell_obj.zone,
+        if fused || spell_obj.fused_split_spell {
+            CastingVariant::Fuse
+        } else {
+            CastingVariant::Normal
+        },
+    )
 }
 
 #[derive(Clone, Copy)]

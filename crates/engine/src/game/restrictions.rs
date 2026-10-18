@@ -1,3 +1,4 @@
+use super::filter::CastSpellContext;
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
@@ -214,28 +215,18 @@ pub fn record_spell_cast(
     )
 }
 
-/// CR 708.4: Project a spell-cast record for a LIVE per-spell filter seam, which
-/// has no announced cast variant to record.
-///
-/// The ledger writes the variant its caller announced (`record_spell_cast_from_zone`).
-/// The live seams — cost modifiers (CR 601.2f) and per-turn cast limits — filter a
-/// spell mid-cast and can only state what the object itself evidences, so they
-/// asked for `CastingVariant::Normal` and `FilterProp::FaceDown` had nothing to
-/// read. A face-down cast is the one variant the object does evidence before it
-/// is filtered: `apply_face_down_entry_profile` has already blanked it
-/// (CR 708.2), which is what [`GameObject::spell_is_cast_face_down`] reads. Every
-/// other variant stays `Normal` here — this states a fact, it does not guess one.
+/// CR 601.2b + CR 708.4: live filters read the selected casting variant.
 pub(crate) fn live_spell_cast_record_for(
     obj: &GameObject,
     from_zone: Zone,
-    fused_hint: bool,
+    cast_variant: crate::types::game_state::CastingVariant,
 ) -> SpellCastRecord {
-    let cast_variant = if obj.spell_is_cast_face_down() {
-        crate::types::game_state::CastingVariant::FaceDown
-    } else {
-        crate::types::game_state::CastingVariant::Normal
-    };
-    spell_cast_record_for(obj, from_zone, cast_variant, fused_hint)
+    spell_cast_record_for(
+        obj,
+        from_zone,
+        cast_variant,
+        cast_variant == crate::types::game_state::CastingVariant::Fuse,
+    )
 }
 
 /// The single fuse-aware authority for spell-cast record projection. `fused_hint` is the caller's
@@ -2033,12 +2024,38 @@ pub(crate) fn triggering_spell_targets_filter(
 /// `finalize_cast_with_phyrexian_choices`, so pre-payment fused callers pass
 /// `casting_variant == CastingVariant::Fuse`; all non-fused / single-face callers
 /// pass `false` (byte-identical to the pre-fix behavior).
+#[cfg(test)]
 pub(crate) fn target_dependent_flash_permission_satisfied(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     object_id: ObjectId,
     ability: &crate::types::ability::ResolvedAbility,
     fused: bool,
+) -> bool {
+    let casting_spell = if fused {
+        CastSpellContext {
+            object_id: object_id,
+            casting_variant: CastingVariant::Fuse,
+        }
+    } else {
+        CastSpellContext::for_spell(state, object_id)
+    };
+    target_dependent_flash_permission_satisfied_for_cast(
+        state,
+        player,
+        object_id,
+        ability,
+        casting_spell,
+    )
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(crate) fn target_dependent_flash_permission_satisfied_for_cast(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &crate::types::ability::ResolvedAbility,
+    casting_spell: CastSpellContext,
 ) -> bool {
     use crate::types::ability::{ParsedCondition, SpellCastingOptionKind, TargetRef};
     let Some(obj) = state.objects.get(&object_id) else {
@@ -2048,9 +2065,13 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     // authorizes instant-speed casting independent of any conditional flash
     // option. If the spell has Flash, the cast is legal regardless of any
     // `AsThoughHadFlash` option's condition.
-    let has_real_flash =
-        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
-            .contains(&crate::types::keywords::KeywordKind::Flash);
+    let has_real_flash = super::casting::effective_spell_keyword_kinds_for_cast(
+        state,
+        player,
+        object_id,
+        casting_spell,
+    )
+    .contains(&crate::types::keywords::KeywordKind::Flash);
     if has_real_flash {
         return true;
     }
@@ -2103,20 +2124,43 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
 /// `CastWithKeyword{Flash}` grant (CR 702.8a) is seen for the fused spell during
 /// candidate generation, before the `fused_split_spell` marker is set. Non-fused /
 /// single-face callers pass `false` (byte-identical to the pre-fix behavior).
+#[cfg(test)]
 pub(crate) fn target_dependent_flash_permission_feasible(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     object_id: ObjectId,
     fused: bool,
 ) -> bool {
+    let casting_spell = if fused {
+        CastSpellContext {
+            object_id: object_id,
+            casting_variant: CastingVariant::Fuse,
+        }
+    } else {
+        CastSpellContext::for_spell(state, object_id)
+    };
+    target_dependent_flash_permission_feasible_for_cast(state, player, object_id, casting_spell)
+}
+
+/// CR 601.2b: retain the selected cast through this projection.
+pub(crate) fn target_dependent_flash_permission_feasible_for_cast(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_spell: CastSpellContext,
+) -> bool {
     use crate::types::ability::{SpellCastingOptionKind, TargetRef};
 
     // CR 702.8a: A real Flash keyword (printed or granted via continuous
     // effect) authorizes instant-speed casting independent of any conditional
     // flash option — short-circuit before any feasibility analysis.
-    let has_real_flash =
-        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
-            .contains(&crate::types::keywords::KeywordKind::Flash);
+    let has_real_flash = super::casting::effective_spell_keyword_kinds_for_cast(
+        state,
+        player,
+        object_id,
+        casting_spell,
+    )
+    .contains(&crate::types::keywords::KeywordKind::Flash);
     if has_real_flash {
         return true;
     }

@@ -968,7 +968,7 @@ fn locket_foretell_face_up_name() {
         assert!(
             matches!(&entry.kind, StackEntryKind::Spell { casting_variant: CastingVariant::Foretell, actual_mana_spent, .. } if *actual_mana_spent == if matching { 1 } else { 2 })
         );
-        assert!(!committed.state().objects[&spell].spell_is_cast_face_down());
+        assert!(!committed.state().objects[&spell].face_down);
         let outcome = committed.resolve();
         outcome.assert_zone(&[spell], Zone::Graveyard);
         outcome.assert_hand_drawn(P0, 2);
@@ -1025,13 +1025,152 @@ fn locket_concealed_exile_ordinary_cost_name() {
         );
         assert_eq!(locket_count(&runner, source, spell), i32::from(matching));
         let committed = runner.cast(spell).commit();
-        assert!(!committed.state().objects[&spell].spell_is_cast_face_down());
+        assert!(!committed.state().objects[&spell].face_down);
         assert_eq!(committed.state().players[0].mana_pool.total(), 0);
         let outcome = committed.resolve();
         outcome.assert_zone(&[spell], Zone::Graveyard);
         outcome.assert_hand_drawn(P0, 2);
         assert_eq!(outcome.mana_pool_total(P0), 0);
     }
+}
+
+fn assert_restoration_front(state: &GameState, spell: ObjectId, back: &BackFaceData) {
+    use engine::types::card_type::{CardType, CoreType};
+    let parsed = engine::parser::parse_oracle_text(
+        SEA_GATE_RESTORATION,
+        "Sea Gate Restoration",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    assert!(!parsed.abilities.is_empty());
+    let object = &state.objects[&spell];
+    assert_eq!(object.name, "Sea Gate Restoration");
+    assert_eq!(object.base_name, "Sea Gate Restoration");
+    let types = CardType {
+        core_types: vec![CoreType::Sorcery],
+        ..Default::default()
+    };
+    assert_eq!(object.card_types, types);
+    assert_eq!(object.base_card_types, types);
+    assert_eq!(object.mana_cost, blue_cost(4, 3));
+    assert_eq!(object.base_mana_cost, blue_cost(4, 3));
+    assert_eq!(object.abilities.as_ref(), &parsed.abilities);
+    assert_eq!(object.base_abilities.as_ref(), &parsed.abilities);
+    assert_eq!(object.back_face.as_ref(), Some(back));
+    assert_eq!(back.name, "Sea Gate, Reborn");
+    assert_eq!(back.layout_kind, Some(LayoutKind::Modal));
+    assert_eq!(back.mana_cost, ManaCost::NoCost);
+    assert_eq!(back.card_types.core_types, vec![CoreType::Land]);
+}
+
+fn cancel_concealed_restoration(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    variant: engine::types::game_state::CastingVariant,
+    expected_cost: ManaCost,
+    back: &BackFaceData,
+) {
+    let original = runner.state().objects[&spell].clone();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: original.card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .unwrap();
+    if let WaitingFor::CastingVariantChoice { options, .. } = &runner.state().waiting_for {
+        let index = options
+            .iter()
+            .position(|option| option.variant == variant)
+            .unwrap();
+        runner
+            .act(GameAction::ChooseCastingVariant { index })
+            .unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    let pending = runner.state().pending_cast.as_ref().unwrap();
+    assert_eq!(pending.casting_variant, variant);
+    assert_eq!(pending.cost, expected_cost);
+    assert!(runner.state().objects[&spell].face_down);
+    assert_restoration_front(runner.state(), spell, back);
+    // CR 733.1: reversal retains the concealed origin and its cast permissions.
+    runner.act(GameAction::CancelCast).unwrap();
+    let object = &runner.state().objects[&spell];
+    assert_eq!(object.zone, Zone::Exile);
+    assert!(object.face_down);
+    assert!(object.effective_names().is_empty());
+    assert_eq!(object.foretold, original.foretold);
+    assert_eq!(object.casting_permissions, original.casting_permissions);
+    assert_restoration_front(runner.state(), spell, back);
+    assert!(engine::game::filter::CastSpellContext::announced(runner.state(), spell).is_none());
+    assert!(object.spell_announcement.is_none());
+}
+
+fn second_restoration_uses_resolved_front(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    first: ObjectId,
+    second: ObjectId,
+    witness: ObjectId,
+    back: &BackFaceData,
+) {
+    use engine::types::game_state::{CastingVariant, StackEntryKind};
+    // Fixture setup removes only the separate original witness. The first
+    // resolved object must be the sole remaining common-name graveyard card.
+    engine::game::zones::move_to_zone(runner.state_mut(), witness, Zone::Exile, &mut vec![]);
+    engine::game::zones::move_to_zone(runner.state_mut(), second, Zone::Hand, &mut vec![]);
+    assert_restoration_front(runner.state(), first, back);
+    assert!(!runner.state().objects[&first].face_down);
+    let matches: Vec<_> = runner.state().players[0]
+        .graveyard
+        .iter()
+        .copied()
+        .filter(|id| {
+            runner.state().objects[id]
+                .effective_names()
+                .contains(&"sea gate restoration".to_string())
+        })
+        .collect();
+    assert_eq!(matches, vec![first]);
+    assert_eq!(locket_count(runner, source, second), 1);
+    runner.state_mut().players[0].mana_pool = (0..6)
+        .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+        .collect();
+    let offered = engine::game::casting::display_spell_cost(runner.state(), P0, second).unwrap();
+    assert_eq!(offered, blue_cost(3, 3));
+    let committed = runner
+        .cast(second)
+        .casting_variant(CastingVariant::Normal)
+        .commit();
+    assert_restoration_front(committed.state(), second, back);
+    assert!(!committed.state().objects[&second].face_down);
+    assert!(committed
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.id == second
+            && matches!(
+                &entry.kind,
+                StackEntryKind::Spell {
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 6,
+                    ..
+                }
+            )));
+    assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+    let outcome = committed.resolve();
+    outcome.assert_zone(&[first, second], Zone::Graveyard);
+    assert_restoration_front(outcome.state(), first, back);
+    assert_restoration_front(outcome.state(), second, back);
+    assert!(!outcome.state().objects[&second].face_down);
+    assert!(outcome.hand_drawn(P0) > 0);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
 }
 
 #[test]
@@ -1055,23 +1194,36 @@ fn locket_granted_foretell_concealed_modal_name() {
             .add_spell_to_hand_from_oracle(P0, "Sea Gate Restoration", false, SEA_GATE_RESTORATION)
             .with_mana_cost(blue_cost(4, 3))
             .id();
-        scenario.add_spell_to_graveyard(
-            P0,
-            if matching {
-                "Sea Gate Restoration"
-            } else {
-                "Other name"
-            },
-            false,
-        );
+        let witness = scenario
+            .add_spell_to_graveyard(
+                P0,
+                if matching {
+                    "Sea Gate Restoration"
+                } else {
+                    "Other name"
+                },
+                false,
+            )
+            .id();
+        let second = scenario
+            .add_spell_to_exile(P0, "Sea Gate Restoration", false)
+            .with_mana_cost(blue_cost(4, 3))
+            .from_oracle_text(SEA_GATE_RESTORATION)
+            .id();
         for _ in 0..2 {
             scenario.add_spell_to_hand(P0, "Synthetic retained hand card", false);
         }
-        for _ in 0..5 {
+        for _ in 0..32 {
             scenario.add_spell_to_library_top(P0, "Synthetic restoration draw marker", false);
         }
         let mut runner = scenario.build();
         let back_face = sea_gate_reborn_face();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .back_face = Some(back_face.clone());
         runner
             .state_mut()
             .objects
@@ -1117,6 +1269,13 @@ fn locket_granted_foretell_concealed_modal_name() {
             .collect();
         assert_eq!(locket_count(&runner, source, spell), i32::from(matching));
         // CR 601.2f + CR 118.7a: {4}UUU -> Foretell {2}UUU -> {1}UUU.
+        cancel_concealed_restoration(
+            &mut runner,
+            spell,
+            CastingVariant::Foretell,
+            blue_cost(if matching { 1 } else { 2 }, 3),
+            &back_face,
+        );
         let committed = runner
             .cast(spell)
             .casting_variant(CastingVariant::Foretell)
@@ -1133,10 +1292,22 @@ fn locket_granted_foretell_concealed_modal_name() {
                 if *actual_mana_spent == paid
         )));
         assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        assert_restoration_front(committed.state(), spell, &back_face);
+        assert!(!committed.state().objects[&spell].face_down);
         let outcome = committed.resolve();
         outcome.assert_zone(&[spell], Zone::Graveyard);
         outcome.assert_hand_drawn(P0, 3);
         assert_eq!(outcome.mana_pool_total(P0), 0);
+        assert_restoration_front(outcome.state(), spell, &back_face);
+        assert!(!outcome.state().objects[&spell].face_down);
+        second_restoration_uses_resolved_front(
+            &mut runner,
+            source,
+            spell,
+            second,
+            witness,
+            &back_face,
+        );
     }
 }
 
@@ -1156,16 +1327,23 @@ fn locket_concealed_modal_ordinary_cost_name() {
             .with_mana_cost(blue_cost(4, 3))
             .from_oracle_text(SEA_GATE_RESTORATION)
             .id();
-        scenario.add_spell_to_graveyard(
-            P0,
-            if matching {
-                "Sea Gate Restoration"
-            } else {
-                "Other name"
-            },
-            false,
-        );
-        for _ in 0..3 {
+        let witness = scenario
+            .add_spell_to_graveyard(
+                P0,
+                if matching {
+                    "Sea Gate Restoration"
+                } else {
+                    "Other name"
+                },
+                false,
+            )
+            .id();
+        let second = scenario
+            .add_spell_to_exile(P0, "Sea Gate Restoration", false)
+            .with_mana_cost(blue_cost(4, 3))
+            .from_oracle_text(SEA_GATE_RESTORATION)
+            .id();
+        for _ in 0..32 {
             scenario.add_spell_to_library_top(
                 P0,
                 "Synthetic ordinary restoration draw marker",
@@ -1187,6 +1365,12 @@ fn locket_concealed_modal_ordinary_cost_name() {
         *cost_provenance = ExileGrantCostProvenance::NormalCost;
         *cast_cost_modifier = None;
         let back_face = sea_gate_reborn_face();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .back_face = Some(back_face.clone());
         let object = runner.state_mut().objects.get_mut(&spell).unwrap();
         object.back_face = Some(back_face.clone());
         object.face_down = true;
@@ -1200,6 +1384,13 @@ fn locket_concealed_modal_ordinary_cost_name() {
         assert!(object.effective_names().is_empty());
         assert_eq!(locket_count(&runner, source, spell), i32::from(matching));
         // CR 406.3a + CR 712.8f: selected Normal uses the named front face.
+        cancel_concealed_restoration(
+            &mut runner,
+            spell,
+            CastingVariant::Normal,
+            blue_cost(if matching { 3 } else { 4 }, 3),
+            &back_face,
+        );
         let committed = runner
             .cast(spell)
             .casting_variant(CastingVariant::Normal)
@@ -1217,10 +1408,22 @@ fn locket_concealed_modal_ordinary_cost_name() {
                 if *actual_mana_spent == u32::try_from(paid).unwrap()
         )));
         assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        assert_restoration_front(committed.state(), spell, &back_face);
+        assert!(!committed.state().objects[&spell].face_down);
         let outcome = committed.resolve();
         outcome.assert_zone(&[spell], Zone::Graveyard);
         outcome.assert_hand_drawn(P0, 1);
         assert_eq!(outcome.mana_pool_total(P0), 0);
+        assert_restoration_front(outcome.state(), spell, &back_face);
+        assert!(!outcome.state().objects[&spell].face_down);
+        second_restoration_uses_resolved_front(
+            &mut runner,
+            source,
+            spell,
+            second,
+            witness,
+            &back_face,
+        );
     }
 }
 

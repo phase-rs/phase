@@ -5144,6 +5144,13 @@ pub(crate) fn priority_actions_with_probe(
                         &prepared_cost,
                         selections,
                         probe,
+                        crate::game::filter::CastSpellContext {
+                            object_id: hand_id,
+                            casting_variant: crate::types::game_state::CastingVariant::Sneak {
+                                returned_creature: creature_id,
+                                placement: None,
+                            },
+                        },
                     ) else {
                         continue;
                     };
@@ -5214,6 +5221,13 @@ pub(crate) fn priority_actions_with_probe(
                         &prepared_cost,
                         selections,
                         probe,
+                        crate::game::filter::CastSpellContext {
+                            object_id: hand_id,
+                            casting_variant:
+                                crate::types::game_state::CastingVariant::WebSlinging {
+                                    returned_creature: creature_id,
+                                },
+                        },
                     ) else {
                         continue;
                     };
