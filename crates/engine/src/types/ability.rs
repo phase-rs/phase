@@ -25902,9 +25902,9 @@ impl Effect {
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
-            // CR 122.1: parent count is forwarded verbatim into the per-kind
-            // PutCounter/RemoveCounter branches, whose own `count` is resolved at
-            // the branch level by `resolve_branch`; never resolved generically here.
+            // CR 608.2h: the adjustment resolver binds the count against the
+            // original resolving ability before constructing counter branches;
+            // generic scalar accessors leave that instruction-specific binding to it.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
@@ -26167,9 +26167,9 @@ impl Effect {
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
-            // CR 122.1: parent count is forwarded verbatim into the per-kind
-            // PutCounter/RemoveCounter branches, whose own `count` is resolved at
-            // the branch level by `resolve_branch`; never resolved generically here.
+            // CR 608.2h: the adjustment resolver binds the count against the
+            // original resolving ability before constructing counter branches;
+            // generic scalar accessors leave that instruction-specific binding to it.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
