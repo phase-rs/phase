@@ -11284,8 +11284,9 @@ fn cast_can_have_cost_modifiers(state: &GameState, pending: &PendingCast) -> boo
 }
 
 /// CR 601.2a + CR 601.2f: a preview may survive announcement only when
-/// every possibly applicable dynamic multiplier is proven cast-stable. This
-/// proof enumerates the collector's source classes without collecting costs.
+/// every possibly applicable modifier's predicates and multiplier are proven
+/// cast-stable. This proof enumerates the collector's source classes without
+/// collecting costs or using a current predicate result to exclude a source.
 fn spell_cost_preview_is_cast_stable(
     state: &GameState,
     caster: PlayerId,
@@ -11293,56 +11294,47 @@ fn spell_cost_preview_is_cast_stable(
 ) -> bool {
     let stable = |definition: &StaticDefinition| match &definition.mode {
         StaticMode::ModifyCost {
-            dynamic_count: Some(quantity),
+            spell_filter,
+            dynamic_count,
             ..
-        } => super::quantity::quantity_ref_is_cast_stable_for_pre_cast(quantity),
+        } => {
+            // A fixed multiplier does not make its applicability fixed. No
+            // condition is proven here; the existing quantity proof admits
+            // only property-free, context-free filters. Other predicates,
+            // including nested live thresholds, require ordinary recomputation
+            // whether they currently match or not (CR 601.2f).
+            definition.condition.is_none()
+                && spell_filter.as_ref().is_none_or(|filter| {
+                    super::quantity::quantity_ref_is_cast_stable_for_pre_cast(
+                        &QuantityRef::ObjectCount {
+                            filter: filter.clone(),
+                        },
+                    )
+                })
+                && dynamic_count
+                    .as_ref()
+                    .is_none_or(super::quantity::quantity_ref_is_cast_stable_for_pre_cast)
+        }
         _ => true,
     };
-    let variant = Some(pending.casting_variant);
-    let fused = variant == Some(CastingVariant::Fuse);
     if let Some(spell) = state.objects.get(&pending.object_id) {
-        if spell.static_definitions.iter_all().any(|definition| {
-            self_spell_cost_modifier_applies_before_targets(
-                state,
-                caster,
-                pending.object_id,
-                definition,
-                variant,
-            ) && !stable(definition)
-        }) {
+        if spell
+            .static_definitions
+            .iter_all()
+            .any(|definition| !stable(definition))
+        {
             return false;
         }
     }
     if static_kind_present(state, StaticModeKind::ModifyCost)
-        && super::functioning_abilities::game_functioning_statics(state).any(
-            |(source, definition)| {
-                battlefield_cost_modifier_applies_before_targets(
-                    state,
-                    caster,
-                    pending.object_id,
-                    source,
-                    definition,
-                    fused,
-                    variant,
-                ) && !stable(definition)
-            },
-        )
+        && super::functioning_abilities::game_functioning_statics(state)
+            .any(|(_, definition)| !stable(definition))
     {
         return false;
     }
     if transient_modify_cost_present(state) {
         for effect in &state.transient_continuous_effects {
-            if !super::layers::transient_effect_is_live(state, effect)
-                || !matches!(effect.affected, TargetFilter::SpecificPlayer { .. })
-                || !super::layers::transient_gate_conditions(effect).all(|condition| {
-                    super::layers::evaluate_condition(
-                        state,
-                        condition,
-                        effect.controller,
-                        effect.source_id,
-                    )
-                })
-            {
+            if !matches!(effect.affected, TargetFilter::SpecificPlayer { .. }) {
                 continue;
             }
             for modification in &effect.modifications {
@@ -11355,20 +11347,18 @@ fn spell_cost_preview_is_cast_stable(
                 if !modifier.caster_scope.admits(caster, effect.controller) {
                     continue;
                 }
-                if definition.condition.as_ref().is_some_and(|condition| {
-                    !evaluate_cost_mod_static_condition(
-                        state,
-                        condition,
-                        caster,
-                        effect.controller,
-                        effect.source_id,
-                        variant,
-                    )
-                }) {
+                // Liveness itself reads the retained condition and duration
+                // gate. Prove those before asking whether the effect is live:
+                // a false gate now cannot erase a pre-announcement discount.
+                if super::layers::transient_gate_conditions(effect)
+                    .next()
+                    .is_some()
+                {
+                    return false;
+                }
+                if !super::layers::transient_effect_is_live(state, effect) {
                     continue;
                 }
-                // Unknown/target-dependent filters remain possibly applicable;
-                // refusing reuse is safe and the ordinary collector owns truth.
                 if !stable(definition) {
                     return false;
                 }

@@ -6,7 +6,7 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, ContinuousModification, ControllerRef, Duration, Effect, FilterProp, QuantityExpr,
-    QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+    QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
@@ -1285,6 +1285,270 @@ fn population_modifier(dynamic: bool) -> engine::types::ability::StaticDefinitio
     definition
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplicabilitySource {
+    SelfSpell,
+    Battlefield,
+    Command,
+    ObjectGrant,
+    TransientDefinition,
+    TransientGate,
+    TransientDuration,
+}
+
+fn applicability_fixture(
+    source_kind: ApplicabilitySource,
+    generic: u32,
+    dynamic: bool,
+    condition: Option<StaticCondition>,
+    filter: Option<TargetFilter>,
+) -> (GameRunner, ObjectId) {
+    use engine::types::ability::StaticDefinition;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut definition = population_modifier(dynamic);
+    let mut gate = None;
+    let mut duration = Duration::UntilEndOfTurn;
+    match source_kind {
+        ApplicabilitySource::TransientGate => gate = condition,
+        ApplicabilitySource::TransientDuration => {
+            duration = Duration::ForAsLongAs {
+                condition: condition.expect("duration needs its initial true condition"),
+            };
+        }
+        ApplicabilitySource::SelfSpell
+        | ApplicabilitySource::Battlefield
+        | ApplicabilitySource::Command
+        | ApplicabilitySource::ObjectGrant
+        | ApplicabilitySource::TransientDefinition => definition.condition = condition,
+    }
+    let StaticMode::ModifyCost { spell_filter, .. } = &mut definition.mode else {
+        unreachable!()
+    };
+    *spell_filter = filter;
+    if source_kind == ApplicabilitySource::SelfSpell {
+        definition.affected = Some(TargetFilter::SelfRef);
+    } else if source_kind == ApplicabilitySource::Command {
+        definition.active_zones = vec![Zone::Command];
+    }
+    let spell = if source_kind == ApplicabilitySource::SelfSpell {
+        scenario
+            .add_artifact_to_hand_from_oracle(P0, "Synthetic applicability spell", "")
+            .with_mana_cost(ManaCost::generic(generic))
+            .with_static_definition(definition.clone())
+            .id()
+    } else {
+        scenario
+            .add_artifact_to_hand_from_oracle(P0, "Synthetic applicability spell", "")
+            .with_mana_cost(ManaCost::generic(generic))
+            .id()
+    };
+    // The spell is the third hand artifact before announcement. Together
+    // with the battlefield artifact it makes the repeated population four.
+    scenario.add_artifact_to_hand_from_oracle(P0, "Applicability hand member one", "");
+    scenario.add_artifact_to_hand_from_oracle(P0, "Applicability hand member two", "");
+    scenario.add_artifact_from_oracle(P0, "Applicability battlefield member", "");
+    let host = if matches!(
+        source_kind,
+        ApplicabilitySource::Battlefield | ApplicabilitySource::Command
+    ) {
+        scenario
+            .add_enchantment_from_oracle(P0, "Synthetic applicability host", "")
+            .with_static_definition(definition.clone())
+            .id()
+    } else {
+        scenario
+            .add_enchantment_from_oracle(P0, "Synthetic applicability host", "")
+            .id()
+    };
+    if source_kind == ApplicabilitySource::ObjectGrant {
+        scenario
+            .add_enchantment_from_oracle(P0, "Synthetic applicability granter", "")
+            .with_static_definition(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: host })
+                    .modifications(vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(definition.clone()),
+                    }]),
+            );
+    }
+    let mut runner = scenario.build();
+    if source_kind == ApplicabilitySource::Command {
+        engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Command, &mut Vec::new());
+    } else if matches!(
+        source_kind,
+        ApplicabilitySource::TransientDefinition
+            | ApplicabilitySource::TransientGate
+            | ApplicabilitySource::TransientDuration
+    ) {
+        let id = runner
+            .state_mut()
+            .add_transient_continuous_effect(
+                host,
+                P0,
+                duration,
+                TargetFilter::SpecificPlayer { id: P0 },
+                vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(definition),
+                }],
+                gate,
+            )
+            .expect("the public producer installs this effect before announcement");
+        assert!(runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
+        assert!(!runner
+            .state()
+            .static_mode_presence
+            .contains(engine::types::statics::StaticModeKind::ModifyCost));
+        assert!(runner.state().objects[&spell].static_definitions.is_empty());
+    }
+    (runner, spell)
+}
+
+fn assert_applicability_payment(
+    mut runner: GameRunner,
+    spell: ObjectId,
+    preview: u32,
+    locked: u32,
+    source_kind: ApplicabilitySource,
+) {
+    assert_eq!(
+        engine::game::casting::effective_spell_cost(runner.state(), P0, spell),
+        Some(ManaCost::generic(preview)),
+        "{source_kind:?}: preview must reach the opposite predicate result"
+    );
+    begin_manual(&mut runner, spell);
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Hand)), 2);
+    assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 1);
+    assert_eq!(
+        runner.state().pending_cast.as_ref().unwrap().cost,
+        ManaCost::generic(locked),
+        "{source_kind:?}: announcement changes applicability"
+    );
+    // CR 601.2f + CR 601.2h: pay the newly locked amount exactly; neither
+    // a stale free preview nor a stale full-cost preview can satisfy this.
+    runner.state_mut().players[0].mana_pool = (0..locked)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(runner.state().pending_cast.is_none(), "{source_kind:?}");
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "{source_kind:?}"
+    );
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Battlefield,
+        "{source_kind:?}"
+    );
+}
+
+#[test]
+fn pending_population_condition_applicability_crosses_announcement() {
+    use engine::types::ability::Comparator;
+    for source_kind in [
+        ApplicabilitySource::SelfSpell,
+        ApplicabilitySource::Battlefield,
+        ApplicabilitySource::Command,
+        ApplicabilitySource::ObjectGrant,
+        ApplicabilitySource::TransientDefinition,
+        ApplicabilitySource::TransientGate,
+        ApplicabilitySource::TransientDuration,
+    ] {
+        for disappears in [true, false] {
+            // A false initial ForAsLongAs duration must never start. Exercise
+            // that source's actual true-to-false lifetime only.
+            if source_kind == ApplicabilitySource::TransientDuration && !disappears {
+                continue;
+            }
+            let condition = StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: artifact_in(Zone::Hand),
+                    },
+                },
+                comparator: if disappears {
+                    Comparator::GE
+                } else {
+                    Comparator::LE
+                },
+                rhs: QuantityExpr::Fixed {
+                    value: if disappears { 3 } else { 2 },
+                },
+            };
+            // Nested conditions use the same conservative applicability proof.
+            let condition = StaticCondition::And {
+                conditions: vec![StaticCondition::Not {
+                    condition: Box::new(StaticCondition::Not {
+                        condition: Box::new(condition),
+                    }),
+                }],
+            };
+            let (generic, preview, locked) = if disappears { (4, 0, 4) } else { (2, 2, 1) };
+            let (runner, spell) =
+                applicability_fixture(source_kind, generic, disappears, Some(condition), None);
+            assert_applicability_payment(runner, spell, preview, locked, source_kind);
+        }
+    }
+}
+
+#[test]
+fn pending_population_spell_filter_applicability_crosses_announcement() {
+    use engine::types::ability::Comparator;
+    for source_kind in [
+        ApplicabilitySource::SelfSpell,
+        ApplicabilitySource::Battlefield,
+        ApplicabilitySource::Command,
+        ApplicabilitySource::ObjectGrant,
+        ApplicabilitySource::TransientDefinition,
+    ] {
+        for disappears in [true, false] {
+            let definition = population_modifier(true);
+            let StaticMode::ModifyCost {
+                dynamic_count: Some(repeated),
+                ..
+            } = definition.mode
+            else {
+                unreachable!()
+            };
+            let threshold = if disappears {
+                repeated
+            } else {
+                QuantityRef::ObjectCount {
+                    filter: artifact_in(Zone::Hand),
+                }
+            };
+            // Nested filter logic must not use today's false result to erase
+            // yesterday's contribution, or to miss tomorrow's fixed reduction.
+            let filter = TargetFilter::And {
+                filters: vec![TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Typed(TypedFilter::default().properties(
+                            vec![FilterProp::Cmc {
+                                comparator: if disappears {
+                                    Comparator::LE
+                                } else {
+                                    Comparator::GE
+                                },
+                                value: QuantityExpr::Ref { qty: threshold },
+                            }],
+                        ))),
+                    }),
+                }],
+            };
+            let (generic, preview, locked) = if disappears { (4, 0, 4) } else { (2, 2, 1) };
+            let (runner, spell) =
+                applicability_fixture(source_kind, generic, disappears, None, Some(filter));
+            assert_applicability_payment(runner, spell, preview, locked, source_kind);
+        }
+    }
+}
+
 #[test]
 fn pending_population_transient_grant_lock() {
     use engine::types::statics::StaticModeKind;
@@ -1696,7 +1960,7 @@ fn pending_population_selected_permission_cost() {
     *granted_to = Some(P0);
     runner
         .act(GameAction::ChooseTarget {
-            target: TargetRef::Player(P0),
+            target: Some(TargetRef::Player(P0)),
         })
         .unwrap();
     assert_eq!(
