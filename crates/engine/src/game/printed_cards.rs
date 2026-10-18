@@ -4788,7 +4788,12 @@ mod tests {
 
         let obj = state.objects.get(&aura_id).unwrap();
         assert_eq!(obj.zone, Zone::Battlefield);
-        assert_eq!(obj.bestow_form, Some(BestowFormState));
+        assert_eq!(
+            obj.bestow_form,
+            Some(BestowFormState {
+                removed_creature_subtypes: vec!["Insect".into(), "Monk".into()],
+            })
+        );
         assert!(
             obj.card_types.subtypes.iter().any(|s| s == "Aura"),
             "live subtypes must include Aura after rehydrate, got {:?}",
@@ -4803,6 +4808,9 @@ mod tests {
             !obj.card_types.core_types.contains(&CoreType::Creature),
             "bestowed object must not keep Creature core type"
         );
+        // CR 205.1a: a bestowed Aura is not a creature, so it has no creature types.
+        assert_eq!(obj.card_types.subtypes, vec!["Aura".to_string()]);
+        assert_eq!(obj.base_card_types.subtypes, vec!["Aura".to_string()]);
     }
 
     /// A graveyard object whose live face is the BACK half and whose stashed

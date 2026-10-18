@@ -3114,6 +3114,26 @@ pub(super) fn apply_post_replacement_effect(
     };
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    // CR 400.7d + CR 608.2k: an enters-with replacement printed on the entering
+    // permanent may read what was paid to cast the spell that became it
+    // ("…with X +1/+1 counters on it, where X is the discarded card's mana
+    // value", Dralnu's Pet). The spell's carrier reached the permanent through
+    // the `CastLinkSnapshot` restore, so stamp it across this continuation —
+    // only for a battlefield-entry `Moved` event, only when the chain reads the
+    // cost-paid object (`ResolvedAbility::references_cost_paid_object`, the same
+    // gate the ETB-trigger stamp in `triggers.rs` uses), and never over a
+    // referent the chain already carries.
+    if matches!(event, Some(ReplacementEvent::Moved)) && resolved.cost_paid_object.is_none() {
+        let carrier = object_id
+            .and_then(|id| state.entering_or_live_object(id))
+            .filter(|obj| obj.zone == Zone::Battlefield)
+            .and_then(|obj| obj.cast_cost_paid_object.clone());
+        if let Some(snapshot) = carrier {
+            if resolved.references_cost_paid_object() {
+                resolved.set_cost_paid_object_recursive(snapshot);
+            }
+        }
+    }
     // CR 121.6b + CR 616.1g: a nested replacement may temporarily become the
     // resident drain while this chain is suspended on its child draw. Capture
     // this continuation's own event target on the chain now so a later sibling

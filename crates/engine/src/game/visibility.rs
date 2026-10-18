@@ -2709,7 +2709,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // cards are eligible instant/sorcery spells within the MV budget. Redact the
     // candidate list to opaque placeholders for viewers who cannot see the
     // controller's private zones — `remaining_casts`, `remaining_mv_budget`, and
-    // the rider stay public (CR 601.2 + CR 408 — the resolving spell is public).
+    // the rider stay public (CR 601.2 + CR 400.2 — the stack is a public zone).
     if let WaitingFor::CastOffer {
         player,
         kind:
@@ -2720,6 +2720,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 ref face_policy,
                 ref zones,
                 ref graveyard_replacement,
+                ref enters_with_modifications,
                 ref member_pool,
             },
     } = state.waiting_for
@@ -2734,6 +2735,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     face_policy: face_policy.clone(),
                     zones: zones.clone(),
                     graveyard_replacement: graveyard_replacement.clone(),
+                    // CR 608.2c: the gains-modifications rider is public (the
+                    // resolving grant is public, CR 601.2 + CR 400.2) — pass it
+                    // through unredacted, exactly like the destination rider.
+                    enters_with_modifications: enters_with_modifications.clone(),
                     // CR 400.2: the member pool can reference the same private
                     // candidates (a hand/graveyard window would leak eligible
                     // ids through it); redact it to placeholders exactly like
@@ -2753,14 +2758,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // `cards.len()` reveals the count of blue cards in the caster's hand minus
     // one). Redact `cards` to opaque placeholders for viewers who cannot see
     // the caster's hand. `count` and `pending_cast` are public (CR 601.2 +
-    // CR 408 — the spell on the stack is public information).
+    // CR 400.2 — the spell on the stack is public information).
     // The graveyard variant of `ExileForCost` is intentionally NOT redacted
     // because the graveyard is a public zone (CR 400.2).
     // CR 400.2: Hand and library are hidden zones. The eligible-objects list
     // for a `PayCost` choice can leak hidden-zone contents to opponents
     // (e.g. the count of blue cards in the caster's hand). Redact the
     // `choices` for viewers who cannot see the caster's private zones; `count`
-    // and `resume` stay public (CR 601.2 + CR 408 — the spell on the stack is
+    // and `resume` stay public (CR 601.2 + CR 400.2 — the spell on the stack is
     // public information). Public-zone choices (graveyard / battlefield) and
     // public-zone exile costs are intentionally NOT redacted.
     if let WaitingFor::PayCost {
@@ -2973,7 +2978,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .outside_game_cards_brought_in
         .retain(|record| viewer.is_some_and(|viewer| record.player == viewer));
 
-    // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
+    // CR 601.2 + CR 400.2: A spell being cast is on the stack and is public information —
     // caster, targets, chosen X values, and pending mana payment are all visible to
     // opponents. The old behavior of clearing `pending_cast` for non-casters was both
     // rules-incorrect and inconsistent with the inline `pending_cast` fields embedded in
@@ -9734,7 +9739,7 @@ mod tests {
         );
     }
 
-    // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
+    // CR 601.2 + CR 400.2: A spell being cast is on the stack and is public information —
     // opponents see the caster, the spell, chosen targets, and mana payment progress
     // as it happens (the MTGA "Opponent is casting X" experience). The tests below guard
     // against regression of the pre-correction behavior that cleared `pending_cast` for
@@ -9756,7 +9761,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during ManaPayment (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during ManaPayment (CR 601.2 + CR 400.2)"
         );
         let pc = filtered.pending_cast.as_ref().unwrap();
         assert_eq!(pc.object_id, ObjectId(10));
@@ -9782,7 +9787,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during ChooseXValue (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during ChooseXValue (CR 601.2 + CR 400.2)"
         );
     }
 
@@ -9804,7 +9809,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during TargetSelection (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during TargetSelection (CR 601.2 + CR 400.2)"
         );
     }
 
@@ -9830,7 +9835,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during ModeChoice (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during ModeChoice (CR 601.2 + CR 400.2)"
         );
     }
 
@@ -11239,6 +11244,14 @@ mod tests {
                 graveyard_replacement: Some(
                     crate::types::ability::SpellStackToGraveyardReplacement::Exile,
                 ),
+                enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Haste,
+                        },
+                    ],
+                    cast_filter: None,
+                },
                 member_pool: vec![hand_candidate],
             },
         };
@@ -11274,6 +11287,7 @@ mod tests {
                         remaining_casts,
                         remaining_mv_budget,
                         graveyard_replacement,
+                        enters_with_modifications,
                         member_pool,
                         ..
                     },
@@ -11296,6 +11310,15 @@ mod tests {
                 assert_eq!(
                     graveyard_replacement.as_ref(),
                     Some(&crate::types::ability::SpellStackToGraveyardReplacement::Exile)
+                );
+                // CR 608.2c: the gains-modifications rider is public — the
+                // opponent-facing redaction must pass it through unredacted.
+                assert_eq!(
+                    enters_with_modifications.modifications,
+                    vec![crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }],
+                    "the public gains rider must survive opponent redaction"
                 );
             }
             other => panic!("expected FreeCastWindow for opponent, got {other:?}"),
@@ -13998,7 +14021,7 @@ mod tests {
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             }];
@@ -14311,7 +14334,7 @@ mod tests {
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }
