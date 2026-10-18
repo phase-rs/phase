@@ -6347,7 +6347,6 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::GrantStaticAbility { .. }
         | ContinuousModification::AddKeywordWithDerivedCost { .. }
@@ -7552,6 +7551,7 @@ mod tests {
         ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
     };
     use crate::types::counter::CounterType;
+    use crate::types::events::ActivatedAbilityKind;
     use crate::types::identifiers::{ExtraPhaseId, ObjectId};
     use crate::types::keywords::CostBearingKeywordKind;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -11172,12 +11172,15 @@ mod tests {
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::Any,
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::Any,
             },
-            ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::Any,
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
             },
             ContinuousModification::RetainPrintedTriggerFromSource {
                 source_trigger_index: 0,

@@ -2939,8 +2939,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
             legacy_replacement_definition(replacement)
         }
         ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => {
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
             legacy_target_filter(source)
         }
         ContinuousModification::SetDynamicPower { value }

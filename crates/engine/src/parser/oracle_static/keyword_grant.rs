@@ -856,8 +856,9 @@ pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<Target
 /// different stores via different continuous modifications
 /// (`GrantAllActivatedAbilitiesOf` → `obj.abilities`;
 /// `GrantAllTriggeredAbilitiesOf` → `obj.trigger_definitions`), and loyalty
-/// abilities donate via their own sibling (`GrantAllLoyaltyAbilitiesOf` →
-/// `obj.abilities`, since loyalty abilities ARE activated abilities),
+/// abilities donate via the kind selector on the activated authority
+/// (`GrantAllActivatedAbilitiesOf { kind: Some(Loyalty) }` → `obj.abilities`,
+/// since loyalty abilities ARE activated abilities),
 /// so the parser captures which categories the phrase named.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GrantedAbilityKinds {
@@ -969,10 +970,16 @@ pub(super) fn fold_grant_cap_rider(segment: &str, defs: &mut [StaticDefinition])
         return false;
     };
     // Attach to the most recent grant modification that is still uncapped.
+    // CR 602.5b + CR 606.3: loyalty grants are never fold targets — loyalty
+    // frequency is governed by the per-permanent gate, which replaces CR
+    // 602.5b rider caps, so a rider after a loyalty grant falls through to
+    // the loud whole-line path instead of inventing capped-loyalty semantics.
     for def in defs.iter_mut().rev() {
         for modification in def.modifications.iter_mut().rev() {
-            if let ContinuousModification::GrantAllActivatedAbilitiesOf { cap, .. } = modification {
-                if cap.is_none() {
+            if let ContinuousModification::GrantAllActivatedAbilitiesOf { cap, kind, .. } =
+                modification
+            {
+                if cap.is_none() && kind.is_none() {
                     *cap = Some(restriction);
                     return true;
                 }
@@ -1356,15 +1363,20 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             mods.push(ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: source.clone(),
                 cap: None,
+                kind: None,
             });
         }
         // CR 606.1 + CR 606.2: a loyalty grant donates the loyalty abilities
         // (activated abilities with a loyalty symbol in the cost) of the source
-        // set. No cap channel — loyalty frequency is governed by the CR 606.3
-        // per-permanent gate, which replaces CR 602.5b rider caps.
+        // set, via the kind selector on the activated authority. No cap channel
+        // pairing — loyalty frequency is governed by the CR 606.3 per-permanent
+        // gate, which replaces CR 602.5b rider caps, so loyalty grants are
+        // never fold targets in `fold_grant_cap_rider`.
         if matches!(kinds, GrantedAbilityKinds::Loyalty) {
-            mods.push(ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+            mods.push(ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: source.clone(),
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
             });
         }
         if matches!(

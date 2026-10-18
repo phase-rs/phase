@@ -712,10 +712,9 @@ pub fn record_combat_shadow_block_scan() {
 }
 
 /// Counts every per-provider `matches_target_filter` evaluation done while
-/// populating the per-controller provider cache in
-/// `expand_granted_activated_abilities`. Memoizing the matching-provider set by
-/// recipient controller collapses the O(recipients×objects) filter sweep to
-/// O(controllers×objects).
+/// populating the per-controller provider cache in the referenced-grant
+/// expanders. Memoizing the matching-provider set by recipient controller
+/// collapses the O(recipients×objects) filter sweep to O(controllers×objects).
 pub fn record_granted_ability_provider_scan() {
     with_mut(|s| s.granted_ability_provider_scans += 1);
 }

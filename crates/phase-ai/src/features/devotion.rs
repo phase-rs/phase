@@ -416,7 +416,6 @@ fn continuous_modification_quantity(
         | CM::GrantAbility { .. }
         | CM::GrantAllActivatedAbilitiesOf { .. }
         | CM::GrantAllTriggeredAbilitiesOf { .. }
-        | CM::GrantAllLoyaltyAbilitiesOf { .. }
         | CM::GrantTrigger { .. }
         | CM::GrantReplacement { .. }
         | CM::RemoveAllAbilities

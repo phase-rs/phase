@@ -9553,7 +9553,6 @@ fn resolve_guards_in_continuous_mod(modification: &mut ContinuousModification) {
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
@@ -10569,7 +10568,6 @@ fn demote_lifetimes_in_modification(modification: &mut ContinuousModification) {
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
@@ -11182,7 +11180,6 @@ pub(crate) fn render_modification_descriptions(
         // description was simply false.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::CopyValues { .. }
         | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }

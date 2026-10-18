@@ -10427,6 +10427,7 @@ fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
             vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::ExiledBySource,
                 cap: None,
+                kind: None,
             }],
             "predicate: {predicate}"
         );
@@ -10455,6 +10456,7 @@ fn parse_continuous_modifications_grants_each_activated_ability_of_craft_pile() 
                 // so the craft grant is uncapped here (the cap appears only on the
                 // full two-sentence Locus line; see the whole-line test below).
                 cap: None,
+                kind: None,
             }],
             "predicate: {predicate}"
         );
@@ -10481,6 +10483,7 @@ fn locus_of_enlightenment_grant_static_parses_whole_line() {
         vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::ExiledBySource,
             cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+            kind: None,
         }]
     );
 
@@ -10500,6 +10503,7 @@ fn locus_of_enlightenment_grant_static_parses_whole_line() {
         vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::ExiledBySource,
             cap: None,
+            kind: None,
         }]
     );
 }
@@ -10533,7 +10537,60 @@ fn grant_cap_rider_folds_over_any_grant_source() {
                     }]),
             ),
             cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+            kind: None,
         }]
+    );
+}
+
+/// CR 602.5b + CR 606.3: the once-per-turn rider NEVER folds onto a loyalty
+/// grant. After the sibling-to-parameter merge a Bolas-style grant IS a
+/// `GrantAllActivatedAbilitiesOf`, so without the `kind.is_none()` guard in
+/// `fold_grant_cap_rider` the fold would attach CR 602.5b rider caps to loyalty
+/// grants — inventing semantics for a combination the CR 606.3 per-permanent
+/// gate already governs and no card prints. Synthetic text (no card prints a
+/// loyalty grant with a rider): the rider must fall through to the loud path,
+/// leaving no capped loyalty mod behind. Reverting the guard folds the cap
+/// onto the loyalty mod (RED).
+#[test]
+fn grant_cap_rider_never_folds_onto_loyalty_grant() {
+    // Hostile leg: loyalty grant + rider. No returned modification may be a
+    // capped loyalty grant.
+    let defs = parse_static_line_multi(
+        "~ has all loyalty abilities of all lands on the battlefield. You may activate each of those abilities only once each turn.",
+    );
+    for def in &defs {
+        for modification in &def.modifications {
+            if let ContinuousModification::GrantAllActivatedAbilitiesOf { cap, kind, .. } =
+                modification
+            {
+                assert!(
+                    *kind != Some(ActivatedAbilityKind::Loyalty) || cap.is_none(),
+                    "rider must never fold a cap onto a loyalty grant; got {modification:?}",
+                );
+            }
+        }
+    }
+
+    // Reach-guard leg: the SAME rider after an ACTIVATED grant still folds —
+    // proving the guard discriminates by kind instead of breaking the fold.
+    let activated = parse_static_line_multi(
+        "~ has all activated abilities of all lands on the battlefield. You may activate each of those abilities only once each turn.",
+    );
+    assert_eq!(
+        activated.len(),
+        1,
+        "expected one grant static, got {activated:?}"
+    );
+    assert_eq!(
+        activated[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]),),
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+            kind: None,
+        }],
+        "the same rider must still fold onto an activated grant; got {activated:?}",
     );
 }
 
@@ -10563,6 +10620,7 @@ fn locus_cap_via_standard_oracle_dispatch() {
         vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::ExiledBySource,
             cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+            kind: None,
         }]
     );
 }
@@ -10581,6 +10639,7 @@ fn parse_continuous_modifications_grants_creature_cards_exiled() {
             ],
         },
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all creature cards exiled with it",
@@ -10609,6 +10668,7 @@ fn parse_continuous_modifications_grants_land_cards_exiled() {
             ],
         },
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all land cards exiled with it",
@@ -10656,6 +10716,7 @@ fn land_cards_exiled_grant_declines_mis_scoped_sets() {
                 ],
             },
             cap: None,
+            kind: None,
         }]
     );
     let grants_exiled = |mods: &[ContinuousModification]| {
@@ -10724,6 +10785,7 @@ fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
                 }]),
         ),
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of creatures you control that don't have the same name as it",
@@ -10760,6 +10822,7 @@ fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
             ],
         },
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of each other creature with a +1/+1 counter on it",
@@ -10787,6 +10850,7 @@ fn parse_grant_all_activated_abilities_opponents_creatures() {
                 }]),
         ),
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all creatures your opponents control",
@@ -10810,6 +10874,7 @@ fn parse_grant_all_activated_abilities_creature_cards_in_graveyards() {
             zone: Zone::Graveyard,
         }])),
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all creature cards in all graveyards",
@@ -10833,6 +10898,7 @@ fn parse_grant_all_activated_abilities_all_lands() {
             zone: Zone::Battlefield,
         }])),
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all lands on the battlefield",
@@ -10878,8 +10944,10 @@ fn all_other_planeswalkers_source() -> TargetFilter {
 /// assertion (red).
 #[test]
 fn parse_grant_all_loyalty_abilities_all_other_planeswalkers() {
-    let expected = ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: all_other_planeswalkers_source(),
+        cap: None,
+        kind: Some(ActivatedAbilityKind::Loyalty),
     };
     for predicate in [
         "all loyalty abilities of all other planeswalkers on the battlefield",
@@ -10907,6 +10975,7 @@ fn parse_grant_new_source_arm_composes_with_activated() {
         vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: all_other_planeswalkers_source(),
             cap: None,
+            kind: None,
         }],
     );
 }
@@ -10922,16 +10991,19 @@ fn parse_grant_new_category_arm_composes_with_land_source() {
     use crate::types::zones::Zone;
     assert_eq!(
         parse_continuous_modifications("has all loyalty abilities of all lands on the battlefield"),
-        vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
                 zone: Zone::Battlefield,
             }]),),
+            cap: None,
+            kind: Some(ActivatedAbilityKind::Loyalty),
         }],
     );
 }
 
 /// CR 613.1f + CR 606.2: the verbatim Bolas grant clause parses typed end to
-/// end — one `GrantAllLoyaltyAbilitiesOf` static affecting SelfRef, zero
+/// end — one parametrized-loyalty `GrantAllActivatedAbilitiesOf` static
+/// affecting SelfRef, zero
 /// `Effect::Unimplemented` anywhere in the parse (the production
 /// `static_structure` honest gap, closed). Reverting any of the three
 /// production arms (category leaf, source arm, emission arm) strands the
@@ -10984,8 +11056,10 @@ fn bolas_grant_clause_parses_typed_with_no_unimplemented() {
     );
     assert_eq!(
         parsed.statics[0].modifications,
-        vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: all_other_planeswalkers_source(),
+            cap: None,
+            kind: Some(ActivatedAbilityKind::Loyalty),
         }],
         "the Bolas grant static must carry the typed loyalty grant; got {:?}",
         parsed.statics[0].modifications
@@ -11012,6 +11086,7 @@ fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
                 ]),
         ),
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all legendary creatures you control",
@@ -11043,6 +11118,7 @@ fn parse_grant_all_activated_abilities_artifact_cards_in_your_graveyard() {
             },
         ])),
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all artifact cards in your graveyard",
@@ -11076,6 +11152,7 @@ fn parse_grant_all_activated_abilities_subtype_cards_in_graveyard() {
             ]),
         ),
         cap: None,
+        kind: None,
     };
     for predicate in [
         "all activated abilities of all elf cards in your graveyard",
@@ -11097,6 +11174,7 @@ fn parse_grant_all_activated_abilities_subtype_cards_in_graveyard() {
             ]),
         ),
         cap: None,
+        kind: None,
     };
     assert_eq!(
         parse_continuous_modifications(

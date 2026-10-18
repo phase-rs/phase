@@ -428,13 +428,12 @@ where
             visit_copiable_values_scoped(values, scope, visit)?
         }
         // Remaining modifications carry no nested ability/effect carriers.
-        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf /
-        // GrantAllLoyaltyAbilitiesOf only hold a source `TargetFilter`; the
-        // granted abilities/triggers are pulled live from the provider objects
-        // at layer collection time, not nested here.
+        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only
+        // hold a source `TargetFilter`; the granted abilities/triggers are
+        // pulled live from the provider objects at layer collection time,
+        // not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
         // nested ability/effect carrier to walk (the copy grant is the runtime TCE).
         | ContinuousModification::CopyChosen

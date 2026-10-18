@@ -197,7 +197,6 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }

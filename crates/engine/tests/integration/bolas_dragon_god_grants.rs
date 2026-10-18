@@ -5,9 +5,10 @@
 //!
 //! Exercises the grant end-to-end against the REAL parse → layer → activation
 //! pipeline:
-//!   * `ContinuousModification::GrantAllLoyaltyAbilitiesOf { And[Typed
-//!     (planeswalker + InZone{Battlefield}), Not{SelfRef}] }` →
-//!     `expand_granted_loyalty_abilities` → `GrantAbility` on Bolas.
+//!   * `ContinuousModification::GrantAllActivatedAbilitiesOf { And[Typed
+//!     (planeswalker + InZone{Battlefield}), Not{SelfRef}], kind:
+//!     Some(Loyalty) }` → `expand_granted_activated_abilities` → `GrantAbility`
+//!     on Bolas.
 //!   * The donated def activates through the public
 //!     `GameAction::ActivateAbility` route with Bolas paying loyalty and the
 //!     effect resolving.
@@ -110,8 +111,10 @@ fn full_card_parses_with_no_unimplemented() {
     );
     assert_eq!(
         parsed.statics[0].modifications,
-        vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: bolas_grant_source(),
+            cap: None,
+            kind: Some(engine::types::events::ActivatedAbilityKind::Loyalty),
         }],
         "the grant static must carry the typed loyalty grant; got {:?}",
         parsed.statics[0].modifications

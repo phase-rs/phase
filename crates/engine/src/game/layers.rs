@@ -47,6 +47,7 @@ use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
 use crate::types::counter::{has_positive_counters, CounterType};
+use crate::types::events::ActivatedAbilityKind;
 use crate::types::game_state::{
     DayNight, GameState, LayersDirty, StaticGateKey, TransientContinuousEffect,
     TransientContinuousEffectBindings,
@@ -5215,8 +5216,7 @@ fn live_characteristic_reads(
         // an entering object into a provider for an existing recipient.
         match &e.modification {
             ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-            | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
-            | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => {
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
                 global = global.union(target_filter_characteristic_reads(source));
             }
             _ => {}
@@ -5617,7 +5617,6 @@ fn modification_characteristic_writes_at(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
         // CR 707.9a: retaining a printed ability through a copy still only
@@ -5697,8 +5696,7 @@ fn active_effects_force_incremental_escalation(
         // recipient on entry, even when that recipient's affected set cannot.
         // Test each live controller because "you" is bound at the recipient.
         if let ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } = &e.modification
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = &e.modification
         {
             let controllers: HashSet<_> =
                 state.objects.values().map(|obj| obj.controller).collect();
@@ -8033,6 +8031,12 @@ struct ExpandedReferencedGrants {
 /// the acquired ability carries (and is enforced under) the granting card's
 /// frequency limit (Locus of Enlightenment's "once each turn"). `None` leaves the
 /// donated abilities uncapped — the required default for every other grant.
+///
+/// CR 606.2: When `kind` is `Some(k)`, only activated abilities whose
+/// `ActivatedAbilityKind::of_definition` classification equals `k` are donated
+/// (Nicol Bolas, Dragon-God's `Some(Loyalty)` loyalty subset). `None` donates
+/// all activated abilities. The kind and cap axes are orthogonal: the filter
+/// applies iff `Some`, the injection iff `Some`, independently.
 fn expand_granted_activated_abilities(
     state: &GameState,
     host_source_id: ObjectId,
@@ -8040,6 +8044,7 @@ fn expand_granted_activated_abilities(
     affected_ids: &[ObjectId],
     source: &TargetFilter,
     cap: Option<&ActivationRestriction>,
+    kind: Option<ActivatedAbilityKind>,
 ) -> ExpandedReferencedGrants {
     let mut out = ExpandedReferencedGrants {
         output: ReferencedGrantOutput::default(),
@@ -8107,6 +8112,13 @@ fn expand_granted_activated_abilities(
             };
             for ability in provider.abilities.iter() {
                 if ability.kind != crate::types::ability::AbilityKind::Activated {
+                    continue;
+                }
+                // CR 606.2: the kind selector narrows the donated set to the
+                // exact `of_definition` classification — NOT
+                // `satisfies_prohibition_kind`, whose `Normal`-covers-`Mana`
+                // semantics belong to the prohibition axis (CR 602.5/605.1a).
+                if kind.is_some_and(|k| ActivatedAbilityKind::of_definition(ability) != k) {
                     continue;
                 }
                 // CR 602.5b + CR 602.5c: A granting card's use-restriction (Locus
@@ -8240,123 +8252,6 @@ fn expand_granted_triggered_abilities(
                     transient_id: None,
                     trigger_producer_origin: Some(host_origin.clone()),
                     expanded_trigger_provider: Some(provider_ref),
-                    mod_index: next_mod_index,
-                    layer: Layer::Ability,
-                    timestamp: host_timestamp,
-                    modification,
-                    affected_filter: TargetFilter::SelfRef,
-                    condition: None,
-                    mode: StaticMode::Continuous,
-                    characteristic_defining: false,
-                    granter: None,
-                });
-                next_mod_index += 1;
-            }
-        }
-    }
-    out
-}
-
-/// CR 613.1f + CR 606.2: Loyalty-ability mirror of
-/// [`expand_granted_activated_abilities`]. Expands a
-/// `GrantAllLoyaltyAbilitiesOf { source }` host modification into one
-/// `GrantAbility` effect per loyalty ability of each object matching `source`
-/// (Nicol Bolas, Dragon-God — "all loyalty abilities of all other
-/// planeswalkers on the battlefield"). Providers are scanned across all zones
-/// in deterministic `ObjectId` order with the `source` filter resolved against
-/// the host id with each recipient's controller, memoized per controller —
-/// mirroring the activated expander exactly; the recipient-equality self-skip
-/// (CR 613.1f) stays per-recipient at emission. Each provider's LIVE
-/// `abilities` is read, filtered to loyalty abilities: `kind == Activated`
-/// with a loyalty cost per `is_loyalty_ability_cost` (CR 606.2 — loyalty
-/// abilities ARE activated abilities; `AbilityKind` has no loyalty kind), so
-/// donated defs land in `obj.abilities` via the shared `GrantAbility` apply +
-/// structural-equality dedup. Whole-def wholesale clone, like the siblings. No
-/// `cap`: loyalty frequency is governed by the CR 606.3 per-permanent gate,
-/// which replaces CR 602.5b rider caps.
-fn expand_granted_loyalty_abilities(
-    state: &GameState,
-    host_source_id: ObjectId,
-    host_timestamp: u64,
-    affected_ids: &[ObjectId],
-    source: &TargetFilter,
-) -> ExpandedReferencedGrants {
-    let mut out = ExpandedReferencedGrants {
-        output: ReferencedGrantOutput::default(),
-        effects: Vec::new(),
-    };
-    let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
-    provider_ids.sort_unstable_by_key(|id| id.0);
-    // CR 109.5: per-controller memoization of the matching-provider set, mirroring
-    // the activated expander exactly — the recipient-equality self-skip stays
-    // per-recipient at emission (CR 613.1f).
-    let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
-        std::collections::HashMap::new();
-    for &recipient_id in affected_ids {
-        out.output.recipients.push(recipient_id);
-        let recipient_controller = match state.objects.get(&recipient_id) {
-            Some(obj) => obj.controller,
-            None => continue,
-        };
-        // CR 109.5 + CR 113.7: object-self references resolve against the host
-        // id with the recipient's controller — verbatim mirror of the activated
-        // expander's context split.
-        let matching = providers_by_controller
-            .entry(recipient_controller)
-            .or_insert_with(|| {
-                let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
-                    host_source_id,
-                    recipient_controller,
-                );
-                provider_ids
-                    .iter()
-                    .copied()
-                    .filter(|&provider_id| {
-                        crate::game::perf_counters::record_granted_ability_provider_scan();
-                        crate::game::filter::matches_target_filter(
-                            state,
-                            provider_id,
-                            source,
-                            &provider_ctx,
-                        )
-                    })
-                    .collect()
-            });
-        let mut next_mod_index = 0usize;
-        for &provider_id in matching.iter() {
-            if provider_id == recipient_id {
-                continue;
-            }
-            out.output.providers.push((recipient_id, provider_id));
-            let Some(provider) = state.objects.get(&provider_id) else {
-                continue;
-            };
-            for ability in provider.abilities.iter() {
-                // CR 606.2: an activated ability with a loyalty symbol in its
-                // cost is a loyalty ability — the ONLY behavioral delta from
-                // the activated mirror. Non-loyalty activated abilities (and
-                // non-activated kinds) are excluded.
-                if ability.kind != crate::types::ability::AbilityKind::Activated
-                    || !ability
-                        .cost
-                        .as_ref()
-                        .is_some_and(crate::types::ability::is_loyalty_ability_cost)
-                {
-                    continue;
-                }
-                let modification = ContinuousModification::GrantAbility {
-                    definition: Box::new(ability.clone()),
-                };
-                out.output
-                    .grants
-                    .push((recipient_id, provider_id, modification.clone(), None));
-                out.effects.push(ActiveContinuousEffect {
-                    source_id: recipient_id,
-                    controller: recipient_controller,
-                    def_index: None,
-                    transient_id: None,
-                    trigger_producer_origin: None,
-                    expanded_trigger_provider: None,
                     mod_index: next_mod_index,
                     layer: Layer::Ability,
                     timestamp: host_timestamp,
@@ -9356,8 +9251,7 @@ impl ReferencedGrantSelectionCache {
             let reader = &pending[reader_index];
             let source = match &reader.modification {
                 ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
-                | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => source,
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
                 _ => unreachable!("selection metadata is only requested for referenced grants"),
             };
             let parent = referenced_granted_static_parent(state, reader);
@@ -9456,8 +9350,7 @@ impl ReferencedGrantSelectionCache {
             let original_static_granter = data.original_static_granter;
             let source = match &reader.modification {
                 ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
-                | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => source,
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
                 _ => unreachable!("reach is only requested for referenced grants"),
             };
             let candidate_ids = self.writer_candidates[writer_index].get_or_insert_with(|| {
@@ -9849,7 +9742,6 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-            | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
@@ -10414,7 +10306,6 @@ fn is_referenced_grant_modification(modification: &ContinuousModification) -> bo
         modification,
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-            | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
     )
 }
 
@@ -10761,7 +10652,7 @@ fn apply_continuous_effect_filtered(
     // recipient restriction have been resolved by the ordinary apply path.
     // Install each donated definition at this effect's layer-6 position.
     let expanded = match &effect.modification {
-        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } => {
+        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap, kind } => {
             Some(expand_granted_activated_abilities(
                 state,
                 effect.source_id,
@@ -10769,6 +10660,7 @@ fn apply_continuous_effect_filtered(
                 affected_ids,
                 source,
                 cap.as_ref(),
+                *kind,
             ))
         }
         ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
@@ -10779,15 +10671,6 @@ fn apply_continuous_effect_filtered(
                 affected_ids,
                 source,
                 trigger_origin(effect),
-            ))
-        }
-        ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => {
-            Some(expand_granted_loyalty_abilities(
-                state,
-                effect.source_id,
-                effect.timestamp,
-                affected_ids,
-                source,
             ))
         }
         _ => None,
@@ -11633,8 +11516,6 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {}
             // CR 613.1f: Triggered-ability mirror of the activated expansion.
             ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {}
-            // CR 613.1f: Loyalty-ability mirror of the activated expansion.
-            ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. } => {}
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
@@ -12000,7 +11881,6 @@ pub(crate) fn apply_type_or_color_modification(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::RemoveAllAbilities
@@ -19447,6 +19327,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
                     cap: None,
+                    kind: None,
                 }])]
             .into();
         }
@@ -19488,11 +19369,11 @@ mod tests {
         );
     }
 
-    /// CR 613.1f + CR 606.2: `GrantAllLoyaltyAbilitiesOf` — loyalty-category
-    /// mirror of the Myr Welder reference grant. A loyalty-empty planeswalker
-    /// host carrying a hand-built `GrantAllLoyaltyAbilitiesOf { planeswalkers
-    /// on the battlefield }` static (host-inclusive source — the
-    /// `Not{SelfRef}` conjunct is Phase 3 emission) gains exactly the provider
+    /// CR 613.1f + CR 606.2: `GrantAllActivatedAbilitiesOf { kind:
+    /// Some(Loyalty) }` — the loyalty-subset reference grant. A loyalty-empty
+    /// planeswalker host carrying a hand-built parametrized-loyalty
+    /// `{ planeswalkers on the battlefield }` static (host-inclusive source —
+    /// the `Not{SelfRef}` conjunct is Phase 3 emission) gains exactly the provider
     /// walker's loyalty abilities after layer evaluation: the `[+1]`/`[-3]`
     /// fixed-loyalty defs and the `[-X]` `RemoveCounter{X}`-shaped def (per
     /// `is_loyalty_ability_cost`), each with its `AsSorcery` restriction
@@ -19526,8 +19407,10 @@ mod tests {
         let grant_static = || {
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: grant_source(),
+                    cap: None,
+                    kind: Some(ActivatedAbilityKind::Loyalty),
                 }])
         };
         // Battlefield planeswalker with no abilities of its own (baseline zero).
@@ -19693,8 +19576,10 @@ mod tests {
             ]));
         let grant_static = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
-            .modifications(vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+            .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: grant_source,
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
             }]);
         fn make_walker(
             state: &mut GameState,
@@ -19838,7 +19723,10 @@ mod tests {
         assert!(
             matches!(
                 parsed.statics[0].modifications.as_slice(),
-                [ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }]
+                [ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    kind: Some(ActivatedAbilityKind::Loyalty),
+                    ..
+                }]
             ),
             "verbatim Bolas grant clause must lower to the loyalty grant; got {:?}",
             parsed.statics[0].modifications
@@ -21389,6 +21277,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
                     cap: None,
+                    kind: None,
                 }])]
             .into();
         }
@@ -21437,7 +21326,8 @@ mod tests {
         // isolates one pass). Single controller ⟹ exactly M provider scans.
         crate::game::perf_counters::reset();
         let effects =
-            expand_granted_activated_abilities(&state, host, 1, &recipients, &source, None).effects;
+            expand_granted_activated_abilities(&state, host, 1, &recipients, &source, None, None)
+                .effects;
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans, m,
@@ -21493,6 +21383,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
                     cap: None,
+                    kind: None,
                 }])]
             .into();
         }
@@ -21536,6 +21427,7 @@ mod tests {
             1,
             &[recipient_p0, recipient_p1],
             &source,
+            None,
             None,
         )
         .effects;
@@ -31199,12 +31091,15 @@ mod tests {
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SelfRef,
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::SelfRef,
             },
-            ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SelfRef,
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
             },
             ContinuousModification::GrantTrigger {
                 trigger: Box::new(TriggerDefinition::new(TriggerMode::ChangesZone)),
@@ -31258,13 +31153,16 @@ mod tests {
     /// `RemoveAllAbilities` sits in layer 6 but is classified `ALL` because it
     /// turns off characteristic-defining abilities (CR 604.3).
     ///
-    /// CR 613.1f: the loyalty reference grant is an ability-adding effect
-    /// (Layer 6), beside its activated/triggered siblings.
+    /// CR 613.1f: the parametrized loyalty reference grant is an
+    /// ability-adding effect (Layer 6), beside its unqualified activated and
+    /// triggered siblings.
     #[test]
-    fn grant_all_loyalty_abilities_of_maps_to_layer_6() {
+    fn grant_all_loyalty_subset_abilities_of_maps_to_layer_6() {
         assert_eq!(
-            ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SelfRef,
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
             }
             .layer(),
             Layer::Ability

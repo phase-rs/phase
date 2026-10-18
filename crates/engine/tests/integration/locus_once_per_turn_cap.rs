@@ -96,6 +96,7 @@ fn build_locus_state(cap: Option<ActivationRestriction>) -> (GameState, ObjectId
             .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::ExiledBySource,
                 cap,
+                kind: None,
             }])]
         .into();
     }
