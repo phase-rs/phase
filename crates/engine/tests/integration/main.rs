@@ -2015,6 +2015,7 @@ mod event_source_lift_referent_stops;
 mod exile_origin_target_acquisition;
 mod issue_9886_dralnus_pet;
 mod keyword_activation_cancel;
+mod partner_family_keyword_remainder;
 mod rally_the_righteous_radiance_pump;
 mod starting_intensity_keyword;
 mod tidebinder_source_type_gate;
