@@ -24650,13 +24650,23 @@ mod tests {
                     comparator: Comparator::GE,
                     count: Box::new(quantity.clone()),
                 };
-                let recipient = matches!(
+                let uses_source_fallback = matches!(
                     &quantity,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize { .. }
+                        qty: QuantityRef::NameStickerLetterCount {
+                            stickers: NameStickerSet::OnObject {
+                                scope: ObjectScope::Recipient
+                            },
+                            ..
+                        } | QuantityRef::HandSize {
+                            player: PlayerScope::RecipientController
+                        }
                     }
                 );
-                assert_eq!(declined_search_player_dependency(&state, &raw), !recipient);
+                assert_eq!(
+                    declined_search_player_dependency(&state, &raw),
+                    !uses_source_fallback
+                );
             }
         }
         node.target_pins.clear();
