@@ -10,6 +10,13 @@ use super::sba;
 use super::triggers;
 use super::triggers::DeferredTriggerDrainPolicy;
 
+/// CR 608.2n: whether a paused spell's final part ran before this pass began.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpellFinalPartBoundary {
+    AtPassTop,
+    RanBeforePass,
+}
+
 pub(super) fn run_post_action_pipeline(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -50,6 +57,7 @@ pub(crate) fn run_post_action_pipeline_from(
             DeferredTriggerDrainPolicy::ResolutionSafe
         },
         None,
+        SpellFinalPartBoundary::AtPassTop,
     )
 }
 
@@ -92,10 +100,33 @@ pub(crate) fn run_post_action_pipeline_from_settled_priority(
         false,
         DeferredTriggerDrainPolicy::SettledPriority,
         Some(player),
+        SpellFinalPartBoundary::AtPassTop,
     )?;
     Ok(triggers::finish_trigger_construction_action(
         state, events, produced,
     ))
+}
+
+/// CR 608.2n + CR 117.5: the pass pipeline after `stack::resolve_top`'s net
+/// ran a resolution's final part in this pass. Identical to
+/// `run_post_action_pipeline` except that the final part ran before the pass
+/// (`SpellFinalPartBoundary::RanBeforePass`).
+pub(super) fn run_post_action_pipeline_after_spell_final_part(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
+) -> Result<WaitingFor, EngineError> {
+    run_post_action_pipeline_from_with_policy(
+        state,
+        events,
+        0,
+        default_wf,
+        skip_trigger_scan,
+        DeferredTriggerDrainPolicy::ResolutionSafe,
+        None,
+        SpellFinalPartBoundary::RanBeforePass,
+    )
 }
 
 /// The shared post-action settlement core. Every ordinary wrapper reaches it
@@ -109,6 +140,7 @@ pub(crate) fn run_post_action_pipeline_from_settled_priority(
 /// stack-growth exit, and the fact that any ordering or construction prompt the
 /// pipeline opens persists that player so the construction finisher can hand
 /// priority back to them once the batch is fully announced.
+#[allow(clippy::too_many_arguments)]
 fn run_post_action_pipeline_from_with_policy(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -117,6 +149,7 @@ fn run_post_action_pipeline_from_with_policy(
     skip_trigger_scan: bool,
     drain_policy: DeferredTriggerDrainPolicy,
     carried_priority_recipient: Option<PlayerId>,
+    final_part_boundary: SpellFinalPartBoundary,
 ) -> Result<WaitingFor, EngineError> {
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_post_action_pipeline_pass();
@@ -129,6 +162,7 @@ fn run_post_action_pipeline_from_with_policy(
         skip_trigger_scan,
         drain_policy,
         carried_priority_recipient,
+        final_part_boundary,
     );
     // The pass scanned the buffer through its end; later announcement staging
     // in this action starts after it.
@@ -145,7 +179,30 @@ fn run_post_action_pipeline_core(
     skip_trigger_scan: bool,
     drain_policy: DeferredTriggerDrainPolicy,
     carried_priority_recipient: Option<PlayerId>,
+    final_part_boundary: SpellFinalPartBoundary,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 608.2c + CR 608.2n: an instant or sorcery whose instructions paused
+    // is put into its owner's graveyard as the final part of its resolution,
+    // once those instructions are done. This boundary completes it, before the
+    // scan below; the final part's triggers wait for this pass's batch.
+    let final_part_ran = super::engine::run_spell_final_part_if_due(state, events)
+        || final_part_boundary == SpellFinalPartBoundary::RanBeforePass;
+    // CR 608.2n + CR 117.5 + CR 603.3: once the final part has run the resolution
+    // is over, so the batch it completes goes on the stack above any spell still
+    // below it (that spell has not begun to resolve, CR 405.5). The #1793 guard
+    // is for a resolution still under way, which never reaches this point.
+    //
+    // CR 603.3b: batch ownership is read from the policy the pass was entered
+    // with: `after_spell_final_part` shifts `ResolutionSafe` to `SettledPriority`
+    // for the drain, and a batch of announced casts latched by the resolution
+    // that just finished belongs to the same pass whose final part ran.
+    let seam_drain_policy = drain_policy;
+    let drain_policy = if final_part_ran {
+        drain_policy.after_spell_final_part()
+    } else {
+        drain_policy
+    };
+
     // CR 117.3c + CR 117.5: the wait a completed no-choice pass hands back. With
     // no carried recipient this is exactly baseline's active-player wait.
     let settled_priority_wait = WaitingFor::Priority {
@@ -177,7 +234,7 @@ fn run_post_action_pipeline_core(
     // resolution are put on the stack with this action's fresh observers as
     // ONE batch, above the cast spells; the fresh observers join the queue
     // instead of being dispatched ahead of it.
-    let announced_cast_batch = drain_policy == DeferredTriggerDrainPolicy::ResolutionSafe
+    let announced_cast_batch = seam_drain_policy == DeferredTriggerDrainPolicy::ResolutionSafe
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && triggers::deferred_triggers_hold_announced_casts(state);
 
@@ -298,6 +355,11 @@ fn run_post_action_pipeline_core(
             || state.pending_replacement.is_some()
             || state.pending_resolution_completion.is_some()
             || deferred_trigger_batch_was_sba_choice_parked
+            // CR 603.3 + CR 603.3b: a pass that completed a paused resolution
+            // puts everything that triggered since a player last received
+            // priority — the parked triggers, its final part's and this
+            // answer's — on the stack as one batch, through the drain below.
+            || final_part_ran
         {
             triggers::collect_triggers_into_deferred(state, &filtered_events);
         } else if announced_cast_batch && state.game_end.is_none() {
@@ -401,7 +463,12 @@ fn run_post_action_pipeline_core(
             );
             // CR 603.3b: SBA-generated triggers join the terminal batch rather
             // than being ordered before its final cast trigger is collected.
-            if state.pending_resolution_completion.is_some() || announced_cast_batch {
+            // CR 117.5 + CR 603.3b: in the pass that ran a spell's final part,
+            // they join that resolution's batch the same way.
+            if state.pending_resolution_completion.is_some()
+                || announced_cast_batch
+                || final_part_ran
+            {
                 triggers::collect_triggers_into_deferred(state, &sba_events);
             } else {
                 triggers::process_triggers(state, &sba_events);
@@ -456,10 +523,12 @@ fn run_post_action_pipeline_core(
             &consumed_exile_return_events,
         );
         // CR 603.3b: Exile-return triggers also join a terminal batch so they
-        // cannot be ordered before the final cast trigger is collected.
+        // cannot be ordered before the final cast trigger is collected, and
+        // join the batch of a resolution whose final part ran in this pass.
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || state.pending_resolution_completion.is_some()
             || announced_cast_batch
+            || final_part_ran
         {
             triggers::collect_triggers_into_deferred(state, &unconsumed_exile_return_events);
         } else {
@@ -492,7 +561,7 @@ fn run_post_action_pipeline_core(
     // / mid-spell settles; same-controller groups get `OrderTriggers` first).
     // A drained trigger that itself needs input returns its own WaitingFor,
     // handled by the check below.
-    if settle_pending_resolution_completion(state) {
+    if settle_pending_resolution_completion(state, events) {
         if let Some(wf) =
             triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
         {
@@ -542,14 +611,14 @@ fn run_post_action_pipeline_core(
         } else {
             // CR 603.3: the observers of spells cast and announced during a
             // finished resolution go on the stack above those spells.
-            let policy = if announced_cast_batch {
+            let policy = if announced_cast_batch || final_part_ran {
                 // CR 603.2 + CR 603.3b: the action's delayed observers (of its
                 // own events, its state-based actions and its exile returns)
-                // join the same batch, through the one delayed scan the bottom
-                // of this pass would otherwise make. Scanned here, before the
-                // drain can stop on an ordering prompt; the bottom scan then
-                // reads only what the drain appends, so each occurrence is
-                // scanned once.
+                // join the announced-cast or final-part batch, through the one
+                // delayed scan the bottom of this pass would otherwise make.
+                // Scanned here, before the drain can stop on an ordering
+                // prompt; the bottom scan then reads only what the drain
+                // appends, so each occurrence is scanned once.
                 let delayed_input = unclaimed_delayed_trigger_input(
                     state,
                     events,
@@ -562,7 +631,11 @@ fn run_post_action_pipeline_core(
                     &delayed_input,
                 );
                 delayed_scan_start = events.len();
-                DeferredTriggerDrainPolicy::SettledPriority
+                if announced_cast_batch {
+                    DeferredTriggerDrainPolicy::SettledPriority
+                } else {
+                    drain_policy
+                }
             } else {
                 drain_policy
             };
@@ -745,7 +818,10 @@ pub(crate) fn retained_logical_zone_events(state: &GameState) -> Vec<GameEvent> 
 /// final free cast has actually been announced. The drain uses the
 /// stack-announcement boundary so B/C's triggers may be ordered above their
 /// still-stacked spells, rather than the ordinary resolution drain's spell guard.
-pub(super) fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
+pub(super) fn settle_pending_resolution_completion(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
     let Some(completion) = state.pending_resolution_completion.as_ref() else {
         return false;
     };
@@ -770,12 +846,22 @@ pub(super) fn settle_pending_resolution_completion(state: &mut GameState) -> boo
     // resolution. Now its terminal instruction has completed, so clear the
     // resolution-only LKI before the explicit post-announcement drain.
     state.pending_resolution_completion = None;
-    super::stack::finish_resolving_stack_entry(
-        state,
-        super::lifecycle::DelayedTerminalDisposition::Resolved,
-    );
-    state.resolution_source_relatch = None;
-    true
+    // CR 608.2n: the rippled spell's own final part runs first, through the
+    // single final-part authority; should it park a question of its own, the
+    // carrier stays and the parked triggers wait for the ordinary
+    // priority-boundary drain instead of the post-announcement one. A carrier
+    // that owes no final part is retired here as at any completed resolution.
+    if super::stack::resolving_spell_owes_final_part(state) {
+        super::engine::run_spell_final_part_if_due(state, events);
+    } else {
+        super::stack::finish_resolving_stack_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        // CR 400.7j: resolution-scoped self-move state ends with its carrier.
+        state.resolution_source_relatch = None;
+    }
+    state.resolving_stack_entry.is_none()
 }
 
 /// CR 603.2 + CR 603.3b + CR 608.2g: replacement-resume casts can complete

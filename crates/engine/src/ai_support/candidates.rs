@@ -575,6 +575,26 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // Digital-only Alchemy (no CR entry): a batch-semantics boon's "one
+        // of them" token-host pick — one candidate per legal entrant. The
+        // token resolver only pauses with 2+ candidates, so no `None` arm
+        // is needed.
+        WaitingFor::ChooseTokenHost {
+            player,
+            legal_targets,
+            ..
+        } => legal_targets
+            .iter()
+            .map(|target| {
+                candidate(
+                    GameAction::ChooseTarget {
+                        target: Some(target.clone()),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::CastOffer {
             player,
             kind: CastOfferKind::Discover { .. },
@@ -3522,6 +3542,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::Discover { .. },
             ..
@@ -3550,6 +3571,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::MulliganDecision { .. }
@@ -6869,7 +6891,8 @@ mod tests {
             predicted_winner: Some(PlayerId(0)),
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
@@ -9738,7 +9761,8 @@ mod tests {
             predicted_winner: None,
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: crate::analysis::loop_check::WinKind::Advantage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::Advantage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
                 per_cycle: None,

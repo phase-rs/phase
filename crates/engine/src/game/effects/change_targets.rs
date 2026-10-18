@@ -924,15 +924,21 @@ mod tests {
                 TypedFilter::creature(),
             ))];
         }
-        let aura_spell_ability = ResolvedAbility::new(
+        let mut aura_spell_ability = ResolvedAbility::new(
             Effect::Unimplemented {
                 name: String::new(),
                 description: None,
             },
-            vec![TargetRef::Object(host_a)],
+            vec![],
             aura_id,
             PlayerId(0),
         );
+        ability_utils::assign_targets_in_chain(
+            &state,
+            &mut aura_spell_ability,
+            &[TargetRef::Object(host_a)],
+        )
+        .expect("the Aura spell takes one target");
         state.stack.push_back(StackEntry {
             id: aura_id,
             source_id: aura_id,

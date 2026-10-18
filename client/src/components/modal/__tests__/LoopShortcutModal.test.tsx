@@ -709,6 +709,53 @@ describe("LoopShortcutModal", () => {
     expect(screen.getByText("-40 life — P2")).toBeInTheDocument();
   });
 
+  // CR 732.2a: a certificate naming no outcome states none, and an outcome the engine decided at
+  // one count is stated beside that count only — on the picker and on a proposal alike.
+  it("states an outcome only at the count it is decided at", () => {
+    const lethal = "This loop deals lethal damage.";
+    seed(
+      buildLoopShortcutWaitingFor({
+        certificate: { win_kind: undefined, unbounded: [] },
+        schema: { iteration_count: { Fixed: 2 } },
+      }),
+      {},
+      shortcutInteraction({ count: { type: "fixed", data: { min: 1, max: 2, suggested: 2 } } }),
+    );
+    render(<DeclareShortcutModal />);
+    expect(screen.getByText("Repeat at most 2 times.")).toBeInTheDocument();
+    expect(screen.queryByText(/^This loop|comboShortcut\.winKind/)).toBeNull();
+
+    cleanup();
+    seed(
+      buildLoopShortcutWaitingFor({
+        certificate: { win_kind: "LethalDamage", win_kind_at: 2 },
+        schema: { iteration_count: { Fixed: 2 } },
+      }),
+      {},
+      shortcutInteraction({ count: { type: "fixed", data: { min: 1, max: 2, suggested: 2 } } }),
+    );
+    render(<DeclareShortcutModal />);
+    expect(screen.getByText(lethal)).toBeInTheDocument();
+    fireEvent.change(countBox(), { target: { value: "1" } });
+    expect(screen.queryByText(lethal)).toBeNull();
+    fireEvent.change(countBox(), { target: { value: "2" } });
+    expect(screen.getByText(lethal)).toBeInTheDocument();
+
+    for (const [declared, shown] of [
+      [2, true],
+      [1, false],
+    ] as const) {
+      cleanup();
+      seed(
+        buildRespondToShortcutWaitingFor({
+          proposal: { count: { Fixed: declared }, win_kind: "LethalDamage", win_kind_at: 2 },
+        }),
+      );
+      render(<RespondToShortcutModal />);
+      expect(screen.queryByText(lethal) !== null).toBe(shown);
+    }
+  });
+
   // T4: the respond window renders the proposal and Accept dispatches Accept.
   it("renders the proposal and dispatches Accept (T4)", () => {
     seed(buildRespondToShortcutWaitingFor());

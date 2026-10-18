@@ -247,7 +247,7 @@ fn cruise_in_exile(constraint_value: QuantityExpr) -> (GameRunner, ObjectId, Vec
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
         });
     (runner, cruise, ids)

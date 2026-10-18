@@ -1415,6 +1415,12 @@ pub enum StaticMode {
     /// a keyword tag. E.g., "Creatures you control can boast twice during each of
     /// your turns rather than once" → overrides `OnlyOnceEachTurn` to `MaxTimesEachTurn(2)`
     /// for boast-tagged abilities on affected permanents.
+    ///
+    /// CR 606.3 loyalty reading: with `keyword: "loyalty"`, raises the
+    /// per-permanent loyalty-ability cap (Oath of Teferi class — "You may
+    /// activate the loyalty abilities of planeswalkers you control twice each
+    /// turn rather than only once"). Matched by the loyalty legality gate
+    /// against `is_loyalty_ability_cost`, not by `AbilityTag`.
     ModifyActivationLimit {
         /// The keyword tag whose activation limit is modified.
         keyword: String,

@@ -34,6 +34,8 @@ import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
+import { CardTextReference } from "../components/card/CardTextReference.tsx";
 import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
@@ -125,6 +127,8 @@ import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { MutateMergeChoiceModalContent } from "../components/modal/MutateMergeChoiceModal.tsx";
 import { CipherEncodeChoiceModalContent } from "../components/modal/CipherEncodeChoiceModal.tsx";
+import { ContestOverlay } from "../components/contest/ContestOverlay.tsx";
+import { useContestStore } from "../stores/contestStore.ts";
 import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -161,6 +165,9 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
+import { usePriorityAttentionController } from "../hooks/usePriorityAttention.ts";
+import { usePriorityChime } from "../hooks/usePriorityChime.ts";
+import { usePriorityTabTitle } from "../hooks/usePriorityTabTitle.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
@@ -472,6 +479,9 @@ export function GamePage() {
           3000,
         );
         break;
+      case "contestProgress":
+        useContestStore.getState().setProgress(event.contest, event.clicks);
+        break;
       case "timerUpdate":
         setTimerRemaining((prev) => ({
           ...prev,
@@ -538,7 +548,12 @@ export function GamePage() {
             : [...s.spectators, event.name],
         }));
         break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
+        break;
       case "error":
+        // Also the terminal surface for a native AI driver fault (the adapter
+        // emits `aiDriverFault`, then this `error`): the game cannot continue.
         useMultiplayerStore.getState().showToast(event.message);
         // Native engine sockets emit an error before close; the provider disposes
         // that terminal adapter, so no reconnectFailed event follows.
@@ -703,6 +718,9 @@ export function GamePage() {
             joinCode,
           },
         });
+        break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
@@ -1199,6 +1217,11 @@ function GamePageContent({
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
   useKeyboardShortcuts();
+
+  // Priority-attention cues: one controller writes the store; each cue reads it.
+  usePriorityAttentionController();
+  usePriorityChime();
+  usePriorityTabTitle();
 
   // Toggle debug layout bounds with Ctrl+Shift+D
   useEffect(() => {
@@ -1987,6 +2010,9 @@ function GamePageContent({
               Wrapped in DialogHost so any active dialog can be peeked away to
               reveal the battlefield underneath; peek state resets on every
               new WaitingFor so a fresh prompt is always visible. */}
+          {/* Eye to Eye / Mouth to Mouth: real-time clicking contest + result banner. */}
+          <ContestOverlay />
+
           <DialogHost>
             {waitingFor != null &&
               isClickThroughWaitingFor(waitingFor, objects) &&
@@ -3325,6 +3351,7 @@ function AbilityChoiceModal() {
   const obj = useGameStore((s) =>
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
+  const localized = useLocalizedCardContent(obj?.name ?? null);
   const objects = useGameStore((s) => s.gameState?.objects);
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
@@ -3380,7 +3407,9 @@ function AbilityChoiceModal() {
 
   return (
     <ChoiceModal
-      title={obj.name}
+      title={localized?.name || obj.name}
+      scrollable
+      footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
       previewCardTypes={obj.card_types}

@@ -971,8 +971,13 @@ fn handle_replacement_choice_inner(
                     match effects::roll_die::resume_roll_dice_after_replacement(
                         state, event, events,
                     ) {
-                        Ok(Some(waiting)) => return Ok(waiting),
-                        Ok(None) => {}
+                        Ok(effects::ResolutionProgress::Waiting) => {
+                            return Ok(state.waiting_for.clone())
+                        }
+                        Ok(effects::ResolutionProgress::Complete) => {
+                            effects::roll_die::publish_completed_result_to_parent(state);
+                        }
+                        Ok(effects::ResolutionProgress::Queued) => {}
                         Err(error) => return Err(EngineError::InvalidAction(format!("{error}"))),
                     }
                 }
@@ -3109,6 +3114,26 @@ pub(super) fn apply_post_replacement_effect(
     };
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    // CR 400.7d + CR 608.2k: an enters-with replacement printed on the entering
+    // permanent may read what was paid to cast the spell that became it
+    // ("…with X +1/+1 counters on it, where X is the discarded card's mana
+    // value", Dralnu's Pet). The spell's carrier reached the permanent through
+    // the `CastLinkSnapshot` restore, so stamp it across this continuation —
+    // only for a battlefield-entry `Moved` event, only when the chain reads the
+    // cost-paid object (`ResolvedAbility::references_cost_paid_object`, the same
+    // gate the ETB-trigger stamp in `triggers.rs` uses), and never over a
+    // referent the chain already carries.
+    if matches!(event, Some(ReplacementEvent::Moved)) && resolved.cost_paid_object.is_none() {
+        let carrier = object_id
+            .and_then(|id| state.entering_or_live_object(id))
+            .filter(|obj| obj.zone == Zone::Battlefield)
+            .and_then(|obj| obj.cast_cost_paid_object.clone());
+        if let Some(snapshot) = carrier {
+            if resolved.references_cost_paid_object() {
+                resolved.set_cost_paid_object_recursive(snapshot);
+            }
+        }
+    }
     // CR 121.6b + CR 616.1g: a nested replacement may temporarily become the
     // resident drain while this chain is suspended on its child draw. Capture
     // this continuation's own event target on the chain now so a later sibling
@@ -3892,7 +3917,7 @@ mod tests {
     use crate::game::replacement::{self as replacement_mod, ReplacementResult};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        AbilityKind, ChooseOneOfKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -5350,6 +5375,7 @@ mod tests {
                             make_branch("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
                             make_branch("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]),
                         ],
+                        kind: ChooseOneOfKind::Ordinary,
                     },
                 )),
         );
@@ -5495,6 +5521,7 @@ mod tests {
                     make_token("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
                     dog_then_cat,
                 ],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         jinnie.replacement_definitions.push(
@@ -5509,6 +5536,7 @@ mod tests {
                             nested_choice,
                             make_token("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]),
                         ],
+                        kind: ChooseOneOfKind::Ordinary,
                     },
                 )),
         );
@@ -5674,6 +5702,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![make_gain_life(1), make_gain_life(2)],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         choose_then_token.sub_ability = Some(Box::new(make_token(
@@ -5959,6 +5988,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![make_gain_life(), make_gain_life()],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         branch_with_nontoken_choice.sub_ability = Some(Box::new(make_token(
@@ -5978,6 +6008,7 @@ mod tests {
                             branch_with_nontoken_choice,
                             make_token("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
                         ],
+                        kind: ChooseOneOfKind::Ordinary,
                     },
                 )),
         );
@@ -6138,6 +6169,7 @@ mod tests {
         state.push_repeat_until(PendingRepeatUntil {
             ability: Box::new(repeat_ability),
             stop_progress: None,
+            iteration_progress: None,
         });
         // Simulate the moment the review describes: a paused repeat-until
         // frame re-entering from priority.
@@ -8494,6 +8526,7 @@ mod tests {
             continuation: None,
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
+            trigger_context: None,
         };
         state.priority_player = PlayerId(0);
         assert!(

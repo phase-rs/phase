@@ -33,6 +33,21 @@ pub(crate) fn is_instead_replacement_line(text: &str) -> bool {
     })
 }
 
+/// Digital-only Alchemy (no CR entry): true when the line grants a one-time
+/// boon — "you get a one-time boon with …", "target opponent gets a one-time
+/// boon with …", "that player gets a one-time boon with …", or the same grant
+/// as a trigger/activated consequence ("Whenever …, you get a one-time boon
+/// with …"). The quoted ability inside routinely contains replacement-shaped
+/// tokens ("enters", "counter"), so the top-level router must exclude these
+/// lines from the replacement interceptor and the replacement gate and let
+/// the effect chain parse the grant via `try_parse_boon_creation` instead.
+/// Matches on the wrapper head only — never on the quoted body — so
+/// "if you have a boon" (Underbridge Warlock, no "one-time boon with")
+/// never matches.
+pub(crate) fn is_one_time_boon_grant_line(lower: &str) -> bool {
+    scan_contains(lower, "one-time boon with \"")
+}
+
 /// CR 603.1: `When`/`Whenever`/`At` are the printed templating for triggered
 /// abilities. CR 701.27e adds one more head that is a triggered ability without
 /// using those words — `As ⟨this permanent⟩ transforms into ⟨name⟩, …` — and
@@ -280,25 +295,15 @@ fn is_self_conditional_flash_grant(lower: &str) -> bool {
     nom_primitives::parse_self_spell_has_flash_prefix(lower).is_ok()
 }
 
+/// CR 502.3 + CR 611.2a: Lines on an instant or sorcery containing a "doesn't/don't untap
+/// during ... next untap step" restriction are resolution-time continuous effects of the spell,
+/// not permanent-hosted static abilities.
 fn is_spell_resolution_next_untap_restriction(lower: &str) -> bool {
-    let has_next_untap_restriction = (scan_contains(lower, "doesn't untap during")
-        || scan_contains(lower, "doesn’t untap during"))
-        && scan_contains(lower, "next untap step");
-    if !has_next_untap_restriction {
-        return false;
-    }
-
-    alt((
-        tag::<_, _, OracleError<'_>>("put "),
-        tag("tap "),
-        tag("untap "),
-        tag("target "),
-        tag("that "),
-        tag("it "),
-        tag("those "),
-    ))
-    .parse(lower)
-    .is_ok()
+    (scan_contains(lower, "doesn't untap during")
+        || scan_contains(lower, "doesn’t untap during")
+        || scan_contains(lower, "don't untap during")
+        || scan_contains(lower, "don’t untap during"))
+        && scan_contains(lower, "next untap step")
 }
 
 fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
@@ -445,6 +450,14 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // The "of ..." infix between "abilities" and "can't be activated" blocks the contiguous
     // scan above; recognize the dispatched prefix separately so parse_static_line is reached.
     "activated abilities of ",
+    // CR 606.3: loyalty-activation SET-cap statics — "You may activate the
+    // loyalty abilities of [subject] twice each turn rather than only once"
+    // (Oath of Teferi, Urza, Planeswalker). Census: exactly 4 distinct cards
+    // carry this tail, all loyalty-activation lines; the trigger-led
+    // (Kaito, Dancing Shadow) and saga-chapter (Urza Assembles the Titans III)
+    // members never reach the static slot, so only the Oath/Urza-PW lines can
+    // be claimed here.
+    "rather than only once",
     // CR 701.23 + CR 101.2: Ashiok-class search prohibition — a "can't search"
     // effect takes precedence over any effect directing a search.
     "can't cause their controller to search their library",
@@ -1805,6 +1818,17 @@ mod tests {
                 "a non-rider sentence must be handed back untouched: {retained}"
             );
         }
+    }
+
+    /// CR 606.3: Oath of Teferi's loyalty-activation static tail routes to the
+    /// static parser.
+    #[test]
+    fn rather_than_only_once_tail_is_static() {
+        assert!(is_static_pattern(
+            "you may activate the loyalty abilities of planeswalkers you control twice each turn rather than only once."
+        ));
+        // Existing guard preserved: an effect-shaped line stays non-static.
+        assert!(!is_static_pattern("target creature gets +1/+1."));
     }
 }
 

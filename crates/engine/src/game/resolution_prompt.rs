@@ -222,6 +222,8 @@ fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
+        // "note <number>" evaluates its operand silently — no player prompt.
+        Effect::NoteNumber { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -357,6 +359,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -426,6 +429,11 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        // Digital-only Alchemy (no CR entry): installing the boon opens no
+        // prompt itself, but the granted body resolves later as its own
+        // ability and may prompt then (Valiant Batrider's "you may pay") —
+        // probe-worthy like a delayed body.
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -476,6 +484,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -598,6 +607,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         target_incarnations: _, // CR 400.7 referent pins, no choice
         target_pins: _, // CR 400.7 selected-target pins, no choice
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _,  // CR 115.1 announced-target record, no choice
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice

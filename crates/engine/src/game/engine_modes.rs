@@ -566,6 +566,10 @@ fn handle_triggered_mode_choice(
     };
     let target_constraints = target_constraints_from_modal(&modal);
 
+    let mut resolved = resolved;
+    // CR 603.3c + CR 603.3d: the chosen modes declare only the targets chosen
+    // for them.
+    resolved.start_target_record_recursive();
     trigger.ability = Box::new(resolved);
     trigger.target_constraints = target_constraints.clone();
     trigger.modal = None;

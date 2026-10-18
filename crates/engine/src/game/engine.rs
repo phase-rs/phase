@@ -1654,29 +1654,21 @@ fn apply_action_boundary_core(
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
     let scan_from = result.events.len();
-    if effects::token::realize_settled_token_battlefield_entry(state, &mut result.events) {
-        let wf = match engine_priority::run_post_action_pipeline_from(
-            state,
-            &mut result.events,
-            scan_from,
-            &result.waiting_for,
-            false,
-            false,
-        ) {
-            Ok(wf) => wf,
-            Err(err) => {
-                *state = boundary_snapshot;
-                return Err(err);
-            }
-        };
-        // The pipeline's terminal return hands back `flush_pending_priority_intercepts(..)` WITHOUT
-        // writing `state.waiting_for`, and the drain can raise `OrderTriggers` (CR 603.3b; measured
-        // on the Fanatic route). BOTH writes are load-bearing: `finish_action_boundary` copies
-        // `result.waiting_for` INTO the state at `sync_waiting_for`, and
-        // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without ever
-        // calling `finish_action_boundary`.
-        state.waiting_for = wf.clone();
-        result.waiting_for = wf;
+    let realized_token_entry =
+        effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+    // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+    // completed on a route that never reached the pipeline (a spell cast during
+    // a resolution, CR 608.2g, finishes its announcement here): the resolving
+    // instant or sorcery still owes its final part — leaving the stack — and the
+    // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
+    // triggers. A token realization and an owed final part on the same action
+    // share one pass.
+    let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+    if realized_token_entry || owed_spell_final_part_is_due {
+        if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
+            *state = boundary_snapshot;
+            return Err(err);
+        }
     }
     // CR 603.2 + CR 603.3: events this action emitted while the announcement
     // stays paused are staged into its carrier; a spell's carrier returns to
@@ -1699,6 +1691,87 @@ fn apply_action_boundary_core(
         preserve_interaction,
         lifecycle,
     })
+}
+
+/// CR 608.2c + CR 608.2n: whether the action's result leaves a Priority window
+/// in which the resolving instant or sorcery owes its final part and every
+/// instruction has been followed. The handler's result already names the
+/// Priority window; the state's copy is only synchronized at
+/// `finish_action_boundary`, and the final-part authority reads it, so it is
+/// synchronized first.
+fn owed_spell_final_part_is_due(state: &mut GameState, result: &ActionResult) -> bool {
+    let owes_spell_final_part = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && super::stack::resolving_spell_owes_final_part(state);
+    if owes_spell_final_part {
+        sync_waiting_for(state, &result.waiting_for);
+    }
+    owes_spell_final_part && resolution_instructions_are_done(state)
+}
+
+/// The action boundary's convergence pass: the ordinary post-action pipeline,
+/// scanning only `result.events[scan_from..]`, whose top runs an owed final
+/// part (`run_spell_final_part_if_due`) and whose drain puts the batch on the
+/// stack. The caller restores its own snapshot on `Err`.
+fn run_boundary_convergence_pipeline(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<(), EngineError> {
+    let wf = engine_priority::run_post_action_pipeline_from(
+        state,
+        &mut result.events,
+        scan_from,
+        &result.waiting_for,
+        false,
+        false,
+    )?;
+    // The pipeline's terminal return hands back `flush_pending_priority_intercepts(..)` WITHOUT
+    // writing `state.waiting_for`, and the drain can raise `OrderTriggers` (CR 603.3b; measured
+    // on the Fanatic route). BOTH writes are load-bearing: `finish_action_boundary` copies
+    // `result.waiting_for` INTO the state at `sync_waiting_for`, and
+    // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without ever
+    // calling `finish_action_boundary`.
+    state.waiting_for = wf.clone();
+    result.waiting_for = wf;
+    Ok(())
+}
+
+/// CR 608.2c + CR 608.2n: an action whose result completed a paused instant
+/// or sorcery's instructions on a route that reached no pipeline — a handler
+/// that returned its result directly, or an elimination by the CR 704.5a net
+/// that canonically declined the departed player's pending choice (CR 800.4a +
+/// CR 608.2m) — still owes the spell's final part. Run the pipeline from
+/// `scan_from`: its top runs that part (`run_spell_final_part_if_due`) and its
+/// drain puts the batch on the stack before the action returns.
+fn converge_owed_spell_final_part(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<bool, EngineError> {
+    if !owed_spell_final_part_is_due(state, result) {
+        return Ok(false);
+    }
+    run_boundary_convergence_pipeline(state, result, scan_from)?;
+    Ok(true)
+}
+
+/// CR 704.5a + CR 800.4a: the player-loss net, then the convergence of a
+/// resolution the net's elimination completed. `reconcile` is the net each
+/// side of the convergence runs: the full [`reconcile_terminal_result`], or,
+/// after an auto-pass drive that did not advance, only its terminal half
+/// ([`reconcile_terminal_sba`]) so the loop shortcut is evaluated once per
+/// priority frame (CR 732.2a).
+fn reconcile_terminal_result_completing_resolution(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    reconcile: fn(&mut GameState, &mut ActionResult),
+) -> Result<(), EngineError> {
+    reconcile(state, result);
+    let scan_from = result.events.len();
+    if converge_owed_spell_final_part(state, result, scan_from)? {
+        reconcile(state, result);
+    }
+    Ok(())
 }
 
 /// CR 117.3b + CR 608.2c + CR 614.12a + CR 614.13a: A completed Devour entry
@@ -1893,6 +1966,13 @@ fn recover_ownerless_post_replacement_completion_at_priority_boundary(
         || state.pending_cast.is_some()
         || state.pending_resolution_completion.is_some()
         || state.resolving_stack_entry.is_none()
+        // CR 608.2n: a carrier still owing its spell's final part is live work
+        // for the ordinary drain, not a stale rest.
+        || super::stack::resolving_spell_owes_final_part(state)
+        // CR 608.2n: an instant or sorcery still on the stack has not made its
+        // move to the graveyard; settling its carrier would strand it in the
+        // stack zone, so the shape is not a stale rest.
+        || super::stack::resolving_instant_or_sorcery_on_stack(state).is_some()
     {
         return false;
     }
@@ -1921,6 +2001,13 @@ fn is_orphaned_devour_completion_at_priority_boundary(state: &GameState) -> bool
         && state
             .active_post_replacement_drains()
             .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
+        // CR 608.2n: a carrier still owing its spell's final part is live work
+        // for the final part's authority, not a terminal rest.
+        && !super::stack::resolving_spell_owes_final_part(state)
+        // CR 608.2n: an instant or sorcery still on the stack has not made its
+        // move to the graveyard; settling its carrier would strand it in the
+        // stack zone, so the frame is not a terminal rest.
+        && super::stack::resolving_instant_or_sorcery_on_stack(state).is_none()
 }
 
 fn is_orphaned_spell_resolution_at_priority_boundary(state: &GameState) -> bool {
@@ -1941,6 +2028,13 @@ fn is_orphaned_spell_resolution_at_priority_boundary(state: &GameState) -> bool 
                 ..
             }) if *id == pending.object_id
         )
+        // CR 608.2n: a carrier still owing its spell's final part is live work
+        // for the final part's authority, not a terminal rest.
+        && !super::stack::resolving_spell_owes_final_part(state)
+        // CR 608.2n: an instant or sorcery still on the stack has not made its
+        // move to the graveyard; settling its carrier would strand it in the
+        // stack zone, so the frame is not a terminal rest.
+        && super::stack::resolving_instant_or_sorcery_on_stack(state).is_none()
 }
 
 /// Finalize a checked persisted restore after its runtime-only data is present.
@@ -2081,7 +2175,15 @@ fn finish_action_boundary_with_lifecycle(
         preserve_interaction,
         lifecycle,
     } = raw;
-    reconcile_terminal_result(state, &mut result);
+    if let Err(err) = reconcile_terminal_result_completing_resolution(
+        state,
+        &mut result,
+        reconcile_terminal_result,
+    ) {
+        lifecycle.discard();
+        *state = boundary_snapshot;
+        return Err(err);
+    }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
@@ -2100,10 +2202,17 @@ fn finish_action_boundary_with_lifecycle(
     } else {
         run_auto_pass_loop(state, &mut result)
     };
-    if auto_pass_advanced {
-        reconcile_terminal_result(state, &mut result);
+    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+    let reconcile: fn(&mut GameState, &mut ActionResult) = if auto_pass_advanced {
+        reconcile_terminal_result
     } else {
-        reconcile_terminal_sba(state, &mut result);
+        reconcile_terminal_sba
+    };
+    if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
+    {
+        lifecycle.discard();
+        *state = boundary_snapshot;
+        return Err(err);
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         take_and_restore_stack_resolution_session(state);
@@ -2740,11 +2849,12 @@ fn build_cert(
     };
     crate::analysis::loop_check::LoopCertificate {
         unbounded: delta.unbounded_axes_for(winner),
-        win_kind: crate::analysis::loop_check::classify_win_kind(
+        win_kind: Some(crate::analysis::loop_check::classify_win_kind(
             winner,
             &win_kind_delta,
             Some(state),
-        ),
+        )),
+        win_kind_at: None,
         // The offer is only reached for an OPTIONAL loop.
         mandatory: false,
         residual_board_delta: crate::analysis::resource::board_delta(prior, state),
@@ -3512,7 +3622,9 @@ fn bounded_offer_tail(
         base.unbounded.push(ResourceAxis::ExtraTurns);
     }
     let certificate = crate::analysis::loop_check::LoopCertificate {
-        per_cycle: Some(periodic),
+        per_cycle: Some(crate::analysis::resource::PeriodSignature::EveryRepetition(
+            periodic,
+        )),
         // CR 732.5: honest, and currently read by nothing in production — a loop nobody can
         // break is still not forced to end, so this records the fact without acting on it.
         mandatory,
@@ -3680,7 +3792,7 @@ fn build_bounded_declaration(
     state: &GameState,
     proposer: PlayerId,
     schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
-    per_cycle: Option<&crate::analysis::resource::PeriodicDelta>,
+    per_cycle: Option<&crate::analysis::resource::PeriodSignature>,
     recorded: Option<&[crate::analysis::decision_template::PinnedDecision]>,
 ) -> Option<crate::analysis::decision_template::DecisionTemplate> {
     use crate::analysis::decision_template::ReplayMode;
@@ -3801,15 +3913,16 @@ fn pin_journalled_declaration(
 /// as a pure classifier so the exhaustive `WinKind` mapping is unit-testable without a
 /// `GameState`.
 fn shortcut_iteration_count(
-    win_kind: crate::analysis::loop_check::WinKind,
+    win_kind: Option<crate::analysis::loop_check::WinKind>,
 ) -> crate::analysis::decision_template::IterationCount {
     use crate::analysis::decision_template::IterationCount;
     use crate::analysis::loop_check::WinKind;
     match win_kind {
-        WinKind::LethalDamage | WinKind::PoisonLoss => IterationCount::UntilLethal,
-        WinKind::Decking | WinKind::ExtraTurns | WinKind::ImmediateWin | WinKind::Advantage => {
-            IterationCount::Fixed(1)
-        }
+        Some(WinKind::LethalDamage | WinKind::PoisonLoss) => IterationCount::UntilLethal,
+        Some(
+            WinKind::Decking | WinKind::ExtraTurns | WinKind::ImmediateWin | WinKind::Advantage,
+        )
+        | None => IterationCount::Fixed(1),
     }
 }
 
@@ -3817,7 +3930,7 @@ fn shortcut_iteration_count(
 /// `pins` is the confirmed period's choice list — never re-derived here. Legal sets come from live
 /// engine queries (`is_convoke_eligible`); the frontend computes nothing. Targets resolve at the
 /// incarnation the replay will meet, since CR 400.7 replaces a recorded object between cycles.
-fn pinned_decisions_to_points(
+pub(crate) fn pinned_decisions_to_points(
     pins: &[crate::analysis::decision_template::PinnedDecision],
     state: &GameState,
     controller: PlayerId,
@@ -4882,6 +4995,10 @@ enum ConsumptionDerivation {
     NoMeasurement,
     /// Signed, with the threshold the reduction measured.
     Measured(ConsumptionBound),
+    /// CR 732.2a: a period the counting replay counted. Its take answers to the reducer and the
+    /// replay's cap, never to the threshold reduction; these are the departures the count saw
+    /// within the accepted count.
+    Replayed(Vec<crate::analysis::resource::PredictedDeparture>),
 }
 
 impl ConsumptionDerivation {
@@ -4892,6 +5009,7 @@ impl ConsumptionDerivation {
             ConsumptionDerivation::Unsigned => None,
             ConsumptionDerivation::NoMeasurement => Some(&[]),
             ConsumptionDerivation::Measured(bound) => Some(&bound.entries),
+            ConsumptionDerivation::Replayed(entries) => Some(entries),
         }
     }
 }
@@ -4901,8 +5019,23 @@ fn shortcut_consumption_bound(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     accepted: u32,
 ) -> ConsumptionDerivation {
-    let Some(per_cycle) = proposal.per_cycle.as_ref() else {
-        return ConsumptionDerivation::Unsigned;
+    if let Some(departures) = proposal.period.replayed_departures() {
+        return ConsumptionDerivation::Replayed(
+            departures
+                .iter()
+                .filter(|entry| entry.repetition <= accepted)
+                .cloned()
+                .collect(),
+        );
+    }
+    let per_cycle = match proposal.per_cycle.as_ref() {
+        None => return ConsumptionDerivation::Unsigned,
+        Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) => per_cycle,
+        // CR 732.2a: one repetition's signature bounds no other; a take of it predicts no
+        // departure, so any departure refuses it whole.
+        Some(crate::analysis::resource::PeriodSignature::OneRepetition(_)) => {
+            return ConsumptionDerivation::Replayed(Vec::new());
+        }
     };
     // CR 732.2a + CR 601.2c: the declaration the drive REPLAYS is the one the cascade is taken
     // under, resolved exactly as `handle_declare_shortcut` resolves it — the proposal's own
@@ -5079,6 +5212,8 @@ fn shortcut_count_is_drivable(
             // measured none — so the budget conjunct above is the only bound either gets.
             ConsumptionDerivation::Unsigned | ConsumptionDerivation::NoMeasurement => true,
             ConsumptionDerivation::Measured(bound) => count <= bound.ceiling,
+            // The cap is the only ceiling known before the period is performed.
+            ConsumptionDerivation::Replayed(_) => count <= super::period_confirm::COUNT_CAP,
         }
 }
 
@@ -5363,7 +5498,10 @@ fn apply_until_lethal_shortcut(
                     proposal.template.as_ref(),
                     i,
                     cap,
-                    proposal.per_cycle.as_ref().map(|pd| pd.frames_per_period),
+                    proposal
+                        .per_cycle
+                        .as_ref()
+                        .map(crate::analysis::resource::PeriodSignature::frames_per_period),
                 ) {
                     CycleOutcome::Recurred { state: s, .. } => running = *s,
                     CycleOutcome::CrossLethal {
@@ -6141,11 +6279,11 @@ enum TakeRoute {
 /// CR 732.2c: the one route decision for an accepted proposal. The mark stands only where it
 /// reaches what the replay would: a zero or shortened count is performed as agreed (CR 732.2b),
 /// a period standing on the stack cannot be performed from the step-end collapse's empty stack,
-/// the mark would refill restricted mana without its restriction (CR 106.6), its mint makes
-/// bare tapped copies under the proposer, without a keyword, delayed trigger, other controller or
-/// certified departure the cover admitted as growth, its batched collapse must not miss what the
-/// board observes, and a signed proposal's departures are seen only as its repetitions cross them
-/// (CR 704.3).
+/// the mark would refill restricted mana without its restriction (CR 106.6), it batches none of
+/// the damage a period marks (CR 120.3e), its mint makes bare tapped copies under the proposer,
+/// without a keyword, delayed trigger, other controller or certified departure the cover admitted
+/// as growth, its batched collapse must not miss what the board observes, and a signed proposal's
+/// departures are seen only as its repetitions cross them (CR 704.3).
 fn take_route(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
@@ -6164,7 +6302,7 @@ fn take_route(
     }
     // Every accept-time derivation below reads this one driven cycle.
     let frames = drive_one_period_frames(state, &proposal.period, proposal.proposer);
-    if adds_restricted_mana(frames.as_ref(), proposal.proposer) {
+    if adds_restricted_mana(frames.as_ref(), proposal.proposer) || marks_damage(frames.as_ref()) {
         return TakeRoute::Replay;
     }
     let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);
@@ -6286,6 +6424,17 @@ fn adds_restricted_mana(frames: Option<&(GameState, GameState)>, controller: Pla
             })
     };
     frames.is_some_and(|(before, after)| restricted(after) > restricted(before))
+}
+
+/// CR 120.3e + CR 120.6: whether one driven cycle leaves more damage marked on a battlefield
+/// permanent, whoever controls it, than it found there.
+fn marks_damage(frames: Option<&(GameState, GameState)>) -> bool {
+    frames.is_some_and(|(before, after)| {
+        after.battlefield.iter().any(|id| {
+            let marked = |state: &GameState| state.objects.get(id).map_or(0, |o| o.damage_marked);
+            marked(after) > marked(before)
+        })
+    })
 }
 
 /// PR-7 Phase 4b: CR 732.2a finite materialization of a confirmed `Fixed(N)` loop
@@ -6464,7 +6613,7 @@ fn materialize_fixed_shortcut(
             template.as_ref(),
             i,
             cycle_beat_cap,
-            per_cycle.map(|pd| pd.frames_per_period),
+            per_cycle.map(crate::analysis::resource::PeriodSignature::frames_per_period),
         ) {
             CycleOutcome::Recurred {
                 state: s,
@@ -6481,7 +6630,14 @@ fn materialize_fixed_shortcut(
                 // victim-INVARIANT rather than exact: CR 601.2c lets one declaration aim an
                 // announced slot at a different seat each iteration, and `conforms` states
                 // both what that licenses and what it still refuses.
-                if let Some(pd) = per_cycle {
+                if let Some(signature) = per_cycle {
+                    let pd = match signature {
+                        crate::analysis::resource::PeriodSignature::EveryRepetition(pd) => pd,
+                        // CR 732.2a: one repetition's signature checks no cycle of a ring drive.
+                        crate::analysis::resource::PeriodSignature::OneRepetition(_) => {
+                            break 'cycles
+                        }
+                    };
                     let pins = template
                         .as_ref()
                         .map_or(&[][..], |t| t.decisions.as_slice());
@@ -6660,6 +6816,8 @@ fn materialize_fixed_shortcut(
                     // dropped whole. Row:
                     // `a_signed_proposal_measuring_nothing_drops_the_cycle_a_departure_ends`.
                     ConsumptionDerivation::NoMeasurement => break 'cycles,
+                    // A counted period carries its period, whose take is never the ring's.
+                    ConsumptionDerivation::Replayed(_) => break 'cycles,
                     ConsumptionDerivation::Measured(bound) => {
                         match departure_verdict(&bound.entries, &committed, &s, i + 1) {
                             // CR 732.2a: a predicted departure is a beat the accepted count
@@ -7027,11 +7185,33 @@ pub(crate) fn certify_object_growth_frames(
     crate::analysis::resource::ObjectGrowthVerdict,
     crate::analysis::resource::CoveredGrowth,
 ) {
-    use crate::analysis::resource::{CoveredGrowth, ObjectGrowthVerdict};
+    use crate::analysis::resource::{CoveredGrowth, ObjectGrowthVerdict, PairCover};
     let [s_n, s_n1, s_n2] = frames;
     // CR 400.7: normalize each frame BEFORE the cover fork so both arms share the normalized
     // frames.
     let (cs_n, cs_n1, cs_n2) = (normalize(s_n), normalize(s_n1), normalize(s_n2));
+    // CR 732.2a: a token the period spent and made again is the same permanent to the board's
+    // recurrence, so each pair is compared without it; a period that mints nothing else is
+    // covered as one that mints nothing.
+    let (first_remade, second_remade) = (remade_tokens(s_n, s_n1), remade_tokens(s_n1, s_n2));
+    if !first_remade.is_empty() || !second_remade.is_empty() {
+        let without = |prior: &GameState, current: &GameState, remade: &[(ObjectId, ObjectId)]| {
+            let (spent, made): (Vec<ObjectId>, Vec<ObjectId>) = remade.iter().copied().unzip();
+            (
+                crate::analysis::resource::frame_without(prior, &spent),
+                crate::analysis::resource::frame_without(current, &made),
+            )
+        };
+        let first = without(&cs_n, &cs_n1, &first_remade);
+        if derived_fodder_class(&first.0, &first.1).is_none() {
+            let second = without(&cs_n1, &cs_n2, &second_remade);
+            let covers = |(prior, current): &(GameState, GameState)| {
+                crate::analysis::resource::resource_recurrence_covers(prior, current, caster)
+            };
+            let (verdict, _) = PairCover::of_pairs(covers(&first), covers(&second));
+            return (verdict, CoveredGrowth::PerformedOnly);
+        }
+    }
     // CR 732.2a board recurrence on BOTH pairs — two disjoint recurrence shapes:
     //  - fodder-growth (one HOMOGENEOUS class of k >= 1 members was reproduced each period,
     //    `derived_fodder_class` is `Some`): cover modulo the inert reproduced fodder class (the
@@ -7058,18 +7238,7 @@ pub(crate) fn certify_object_growth_frames(
                 crate::analysis::resource::resource_recurrence_covers(&cs_n, &cs_n1, caster);
             let second =
                 crate::analysis::resource::resource_recurrence_covers(&cs_n1, &cs_n2, caster);
-            first.zip(second).map_or(
-                (
-                    ObjectGrowthVerdict::ResourceRecurrence(None),
-                    CoveredGrowth::Mintable,
-                ),
-                |((a, a_cover), (b, b_cover))| {
-                    (
-                        ObjectGrowthVerdict::ResourceRecurrence(Some(a_cover.max(b_cover))),
-                        a.max(b),
-                    )
-                },
-            )
+            PairCover::of_pairs(first, second)
         }
     }
 }
@@ -7109,15 +7278,57 @@ pub fn certify_object_growth_frames_for_tests(
 /// direction an extra member matching the class does not make the class heterogeneous, so the
 /// count would silently rise.
 ///
-/// ONE test, TWO readers: the class derivation and the producer's token-axis feed, which must
-/// publish the count the boundary mint will reproduce.
+/// CR 111.1 + CR 111.3: a token the period made in place of one it spent ([`remade_tokens`]) is
+/// not a mint either, since the board holds the same permanents after it as before.
+///
+/// ONE test, THREE readers: the class derivation, the sign check's token-axis feed and
+/// `ResourceVector::period`, which must publish the count the boundary mint will reproduce.
 pub(crate) fn minted_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
+    let remade = remade_tokens(before, after);
+    new_battlefield_ids(before, after)
+        .into_iter()
+        .filter(|id| remade.iter().all(|(_, made)| made != id))
+        .collect()
+}
+
+/// The battlefield objects of `after` that `before` holds in no zone.
+fn new_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
     after
         .battlefield
         .iter()
         .copied()
         .filter(|id| !before.battlefield.contains(id) && !before.objects.contains_key(id))
         .collect()
+}
+
+/// CR 111.7 + CR 111.3: each battlefield object of `before` that has ceased to exist in `after`,
+/// with one object `after` made that has its tapped status, its content and its copiable values.
+fn remade_tokens(before: &GameState, after: &GameState) -> Vec<(ObjectId, ObjectId)> {
+    let spent: Vec<_> = before
+        .battlefield
+        .iter()
+        .filter(|id| !after.objects.contains_key(id))
+        .filter_map(|id| before.objects.get(id))
+        .collect();
+    if spent.is_empty() {
+        return Vec::new();
+    }
+    let values = crate::game::printed_cards::intrinsic_copiable_values;
+    let mut made = new_battlefield_ids(before, after);
+    let mut pairs = Vec::new();
+    for spent in spent {
+        let twin = made.iter().position(|candidate| {
+            after.objects.get(candidate).is_some_and(|candidate| {
+                spent.tapped == candidate.tapped
+                    && crate::analysis::resource::fodder_content_eq(spent, candidate)
+                    && values(spent) == values(candidate)
+            })
+        });
+        if let Some(twin) = twin {
+            pairs.push((spent.id, made.remove(twin)));
+        }
+    }
+    pairs
 }
 
 /// CR 111.3 / CR 707.2: the content class of the reproduced fodder, and the per-cycle count `k` of
@@ -7331,7 +7542,8 @@ fn try_offer_object_growth_shortcut(
         let confirmation = super::period_confirm::confirm(state, span).ok()?;
         Some((span, confirmation))
     })?;
-    // CR 704.5a + CR 732.2a: a loss period is offered at the threshold authority's count.
+    // CR 732.2a: a period is offered at its stated count — the threshold authority's for a loss
+    // period (CR 704.5a), the counting replay's for a spend.
     if let Some((certificate, schema, declaration)) = confirmation.bounded {
         super::play_trace::note_offered(state, span);
         return Some((certificate, schema, confirmation.period, declaration));
@@ -7432,30 +7644,40 @@ pub(crate) fn replay_bounded_offer(
     )
 }
 
-/// The sign check on a period's second frame pair: net progress for the caster, no loss axis for
-/// anyone, and no driving resource consumed; the delta and any certified departure on success.
+/// CR 732.2a: what the sign check answers of a period that makes progress for its proposer.
+pub(crate) enum PeriodSign {
+    /// It may repeat without bound: its delta and any certified departure.
+    Unbounded(
+        Box<(
+            crate::analysis::resource::ResourceVector,
+            Option<crate::analysis::resource::CertifiedInstructedDeparture>,
+        )>,
+    ),
+    /// CR 704.5a: it moves some player toward losing the game, and nothing of its proposer's own
+    /// falls.
+    LossAxis,
+    /// CR 118.3 + CR 119.4: something of its proposer's own falls across it — its life, or a
+    /// resource that drives the period — so it can be performed only while that lasts.
+    Spend,
+}
+
+/// The sign check on a period's last frame pair: progress for the caster, or no axis; then whether
+/// something of the caster's own falls, whether anyone has a loss axis, or neither.
 pub(crate) fn period_sign_check(
     s_n1: &GameState,
     s_n2: &GameState,
     caster: PlayerId,
-) -> Result<
-    (
-        crate::analysis::resource::ResourceVector,
-        Option<crate::analysis::resource::CertifiedInstructedDeparture>,
-    ),
-    OfferRefusal,
-> {
-    // CR 119 / CR 122.1 / CR 704.5g sign-check on the second pair (RAW un-projected frames):
-    // net progress for the caster, no loss axis for anyone, every driving consumable
-    // non-decreasing (energy / poison / player-counters / object-counters) and no
-    // damage_marked increase.
+) -> Result<PeriodSign, OfferRefusal> {
+    // CR 119 / CR 122.1 / CR 704.5g sign-check on the last pair (RAW un-projected frames):
+    // progress for the caster, then its own life and every driving consumable (energy / poison /
+    // player-counters / object-counters / damage marked), then a loss axis for anyone.
     let mut delta = crate::analysis::resource::ResourceVector::delta(
         &crate::analysis::resource::ResourceVector::snapshot(s_n1),
         &crate::analysis::resource::ResourceVector::snapshot(s_n2),
     );
     // CR 111.1: `tokens_created` is an EVENT-fed axis (0 under a snapshot diff),
     // so the period's MINTED count is fed in as the per-cycle tokens-created count — the
-    // unbounded axis — and `net_progress_for` then sees the progress the certificate names.
+    // unbounded axis — and `progress_for` then sees the progress the certificate names.
     // The count is the MINTED one, not the raw `battlefield.len()` delta, because the boundary
     // mint reproduces minted members and an ARRIVAL grows the battlefield without being one:
     // publishing the raw delta would promise a per-cycle count the collapse cannot reproduce.
@@ -7468,7 +7690,7 @@ pub(crate) fn period_sign_check(
     // ADVANTAGE axis, not a loss one — CR 121.4 / CR 104.3c / CR 704.5b lose a player for
     // DRAWING from an empty library, never for milling one. `has_no_loss_axis` is therefore
     // asked about the delta with the certified departure added back, and ONLY it:
-    // `net_progress_for` and `driving_resources_non_decreasing` keep the full delta, and
+    // `progress_for`, `life_falls_for` and `driving_resources_non_decreasing` keep the full delta, and
     // `has_no_loss_axis` itself is not edited — its other call sites are the CR 732.4
     // mandatory-draw arms, where relieving this would turn an unbreakable mandatory mill loop
     // into a draw (CR 104.4b needs the game state to REPEAT, and a shrinking library does not).
@@ -7480,16 +7702,60 @@ pub(crate) fn period_sign_check(
         Some(certified) => delta.without_certified_departure(&certified.per_victim),
         None => delta.clone(),
     };
-    if !delta.net_progress_for(caster) {
+    if !delta.progress_for(caster) {
         return Err(OfferRefusal::NoAxis);
     }
+    if delta.life_falls_for(caster)
+        || !crate::analysis::resource::driving_resources_non_decreasing(s_n1, s_n2, caster)
+    {
+        return Ok(PeriodSign::Spend);
+    }
     if !has_no_loss_axis(&sign_check_delta) {
-        return Err(OfferRefusal::LossAxis);
+        return Ok(PeriodSign::LossAxis);
     }
-    if !crate::analysis::resource::driving_resources_non_decreasing(s_n1, s_n2, caster) {
-        return Err(OfferRefusal::DrivingResourcesDecrease);
-    }
-    Ok((delta, certified_departure))
+    Ok(PeriodSign::Unbounded(Box::new((
+        delta,
+        certified_departure,
+    ))))
+}
+
+/// CR 732.2a: the offer of a period the counting replay counted. `count`, the repetitions the
+/// reducer performed, is its ceiling; `suggested` of them is its suggestion. `frames` are one
+/// cycle's priority frames in order: their signature describes the period and bounds nothing.
+/// `ending` is how a take of `count` ends the game, which no smaller take reaches.
+pub(crate) fn counted_offer(
+    frames: &[GameState],
+    points: Vec<crate::analysis::decision_template::DecisionPoint>,
+    suggested: u32,
+    count: u32,
+    ending: Option<crate::analysis::loop_check::WinKind>,
+) -> super::period_confirm::BoundedOfferParts {
+    let (prior, current) = (&frames[0], &frames[frames.len() - 1]);
+    // CR 732.2a: every field states what the counting replay performed; one period's delta is
+    // published as one repetition's and classifies nothing.
+    let certificate = crate::analysis::loop_check::LoopCertificate {
+        unbounded: Vec::new(),
+        win_kind: ending,
+        win_kind_at: ending.map(|_| count),
+        mandatory: false,
+        residual_board_delta: crate::analysis::resource::board_delta(prior, current),
+        per_cycle: Some(crate::analysis::resource::PeriodSignature::OneRepetition(
+            crate::analysis::resource::PeriodicDelta {
+                frames_per_period: frames.len() as u32 - 1,
+                delta: crate::analysis::resource::ResourceVector::period(prior, current),
+                victim_slot: Vec::new(),
+                declarable_victims: Vec::new(),
+                seat_life_charge: Vec::new(),
+                cleanup: None,
+            },
+        )),
+    };
+    let schema = build_shortcut_schema(
+        points,
+        crate::analysis::decision_template::IterationCount::Fixed(suggested),
+        Some(count),
+    );
+    (certificate, schema, None)
 }
 
 /// PR-7 Phase 4d-ii / P7 v3 (CR 732.2a): "materialize" a confirmed UNBOUNDED object-growth
@@ -7673,7 +7939,11 @@ pub(crate) fn drive_persistent_axis_collapse(
             // Commit the successful prefix; the caller hands priority back.
             *state = snapshot;
             events.truncate(committed_events);
-            let prefix = delivered;
+            // CR 732.2a: a counted period is taken at the count declared or not at all.
+            let prefix = match period.replayed_departures() {
+                Some(_) => 0,
+                None => delivered,
+            };
             delivered = 0;
             for _ in 0..prefix {
                 reseed(state);
@@ -8013,6 +8283,7 @@ fn handle_declare_shortcut(
         count,
         unbounded: offer.certificate.unbounded.clone(),
         win_kind: offer.certificate.win_kind,
+        win_kind_at: offer.certificate.win_kind_at,
         template,
         // CR 732.2a: the drive reads ONE authority for what a conformant cycle looks like —
         // the confirmed certificate's own signature, copied, never re-derived.
@@ -8289,17 +8560,21 @@ fn check_actor_authorization(
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
-    if authorized.is_empty() {
-        return Err(EngineError::WrongPlayer);
-    }
     if let GameAction::Concede { player_id } = action {
         // CR 104.3a: A player may concede at any time in an unfinished game —
         // but only themselves. `GameOver` has no authorized submitter, so it
-        // cannot admit a second concession.
-        if *player_id != actor {
+        // cannot admit a second concession. A host-driven contest
+        // (`WaitingFor::PhysicalContest`) is also actorless, yet its game is
+        // unfinished: a contestant must still be able to leave it.
+        let unfinished_host_driven =
+            matches!(state.waiting_for, WaitingFor::PhysicalContest { .. });
+        if *player_id != actor || (authorized.is_empty() && !unfinished_host_driven) {
             return Err(EngineError::WrongPlayer);
         }
         return Ok(());
+    }
+    if authorized.is_empty() {
+        return Err(EngineError::WrongPlayer);
     }
     if !authorized.contains(&actor) {
         return Err(EngineError::WrongPlayer);
@@ -8686,14 +8961,6 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
         }
     }
-    // CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
-    // window is put into its zone as the final part of its resolution, now
-    // that the window and everything parked behind it are done.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && resolution_instructions_are_done(state)
-    {
-        super::stack::deliver_deferred_spell(state, events);
-    }
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
 }
@@ -8716,10 +8983,19 @@ pub(super) fn settle_resolving_stack_entry_after_continuation_resume(state: &mut
 /// stack object. Unlike the priority-boundary wrapper above, this is called at
 /// the exact completion point when the prompt has already replaced Priority.
 pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut GameState) {
+    // CR 608.2n: a carrier that owes its spell's final part is refused here
+    // (`resolving_stack_entry_can_settle`); `run_spell_final_part_if_due` runs it.
     if !resolving_stack_entry_can_settle(state) {
         return;
     }
     settle_finished_resolving_stack_entry(state);
+}
+
+/// CR 608.2n: an instant or sorcery whose final part is still owed is still
+/// resolving; its carrier may settle only after `run_spell_final_part_if_due`,
+/// which owns the event stream, has run that part.
+fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
+    resolution_instructions_are_done(state) && !super::stack::resolving_spell_owes_final_part(state)
 }
 
 /// CR 608.2c + CR 608.2m: An object that has left the stack keeps resolving
@@ -8734,15 +9010,6 @@ pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut 
 /// exists to clear it. Carrier/firing parity is a separate question, answered
 /// by `resolving_carrier_parity_is_coherent` and reported on the settle path
 /// rather than gating it.
-fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
-    resolution_instructions_are_done(state) && state.deferred_spell_delivery.is_none()
-}
-
-/// CR 608.2c + CR 608.2n: whether the carrier's resolution has followed all of
-/// its instructions. Its carrier still may not settle while a spell paused on
-/// its own free-cast window owes its final move (`deferred_spell_delivery`):
-/// only a site that can deliver that move (`stack::deliver_deferred_spell`,
-/// which needs the event stream) may do so first.
 pub(super) fn resolution_instructions_are_done(state: &GameState) -> bool {
     state.resolving_stack_entry.is_some()
         && state.active_ability_continuation().is_none()
@@ -8801,6 +9068,54 @@ fn settle_finished_resolving_stack_entry(state: &mut GameState) {
     );
     // CR 400.7j: resolution-scoped self-move state ends with its carrier.
     state.resolution_source_relatch = None;
+}
+
+/// CR 608.2c + CR 608.2n: the single authority that completes an instant or
+/// sorcery whose instructions paused. It acts only at a priority boundary,
+/// only while the carrier owes its final part, and only once every
+/// instruction has been followed.
+///
+/// It runs the hooks, destination, move and report
+/// (`stack::finish_deferred_spell_resolution`), then retires the carrier. A
+/// final part that parks a question of its own (CR 616.1, CR 702.99a) clears
+/// the marker, and the carrier then settles through the ordinary wrapper.
+///
+/// CR 603.2 + CR 603.3 + CR 603.3b: the final part's events trigger now and
+/// wait in `deferred_triggers` for the resolution's batch. They are claimed
+/// for the ordinary collector, so a scan of the same buffer does not collect
+/// them twice; CR 603.7 delayed collectors still see them.
+///
+/// Returns whether a final part ran.
+pub(super) fn run_spell_final_part_if_due(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || !super::stack::resolving_spell_owes_final_part(state)
+        || !resolution_instructions_are_done(state)
+    {
+        return false;
+    }
+    let final_part_start = events.len();
+    match super::stack::finish_deferred_spell_resolution(state, events) {
+        super::stack::DeferredFinalPart::Parked => {}
+        super::stack::DeferredFinalPart::Completed | super::stack::DeferredFinalPart::NotOwed => {
+            super::stack::finish_resolving_stack_entry(
+                state,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+            // CR 400.7j: resolution-scoped self-move state ends with its carrier.
+            state.resolution_source_relatch = None;
+        }
+    }
+    let final_part_events: Vec<GameEvent> = events[final_part_start..]
+        .iter()
+        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    triggers::collect_triggers_into_deferred(state, &final_part_events);
+    triggers::claim_events_for_ordinary_collection(state, events, final_part_start);
+    true
 }
 
 /// CR 118.3b + CR 119.4 + CR 616.1: Resume the exact outer cost action after
@@ -9068,6 +9383,7 @@ fn pass_priority_once_with_pipeline(
     // submitter (the controller), which would mis-count consecutive passes and
     // soft-lock the game.
     let current_seat = turn_control::priority_seat(state);
+    let final_part_owed_before_pass = super::stack::resolving_spell_owes_final_part(state);
     let priority_outcome = priority::handle_priority_pass_with_limit(
         current_seat,
         state,
@@ -9124,13 +9440,23 @@ fn pass_priority_once_with_pipeline(
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let mut wf = match engine_priority::run_post_action_pipeline(
-        state,
-        events,
-        &state.waiting_for.clone(),
-        skip_triggers,
-        false,
-    ) {
+    // CR 608.2n + CR 117.5: if `resolve_top`'s net ran a final part in this
+    // pass, the resolution is over, so its batch goes on the stack above any
+    // spell still below it before another object begins resolving.
+    let final_part_ran_in_pass =
+        final_part_owed_before_pass && !super::stack::resolving_spell_owes_final_part(state);
+    let pass_wf = state.waiting_for.clone();
+    let pipeline = if final_part_ran_in_pass {
+        engine_priority::run_post_action_pipeline_after_spell_final_part(
+            state,
+            events,
+            &pass_wf,
+            skip_triggers,
+        )
+    } else {
+        engine_priority::run_post_action_pipeline(state, events, &pass_wf, skip_triggers, false)
+    };
+    let mut wf = match pipeline {
         Ok(waiting_for) => waiting_for,
         Err(error) => {
             if let Some(snapshot) = boundary_snapshot.as_ref() {
@@ -9363,13 +9689,31 @@ pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> A
     let journal_start = state.resolved_rules_journal.entries().len();
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
 
-    reconcile_terminal_result(state, &mut result);
+    // This seam has no error channel: a failed convergence restores the
+    // seam's entry state and reports it unchanged. The owed carrier is then
+    // still found by `stack::resolve_top`'s net at the next pass.
+    if reconcile_terminal_result_completing_resolution(
+        state,
+        &mut result,
+        reconcile_terminal_result,
+    )
+    .is_err()
+    {
+        *state = boundary_snapshot;
+        return ActionResult::applied(Vec::new(), state.waiting_for.clone());
+    }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    if run_auto_pass_loop(state, &mut result) {
-        reconcile_terminal_result(state, &mut result);
+    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+    let reconcile: fn(&mut GameState, &mut ActionResult) = if run_auto_pass_loop(state, &mut result)
+    {
+        reconcile_terminal_result
     } else {
-        reconcile_terminal_sba(state, &mut result);
+        reconcile_terminal_sba
+    };
+    if reconcile_terminal_result_completing_resolution(state, &mut result, reconcile).is_err() {
+        *state = boundary_snapshot;
+        return ActionResult::applied(Vec::new(), state.waiting_for.clone());
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         take_and_restore_stack_resolution_session(state);
@@ -9941,11 +10285,29 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
     // sides of the internal auto-pass drive. The resume seam bypasses
     // `finish_action_boundary`, so without this a loss created by its final
     // resolution could remain at Priority instead of becoming GameOver.
-    reconcile_terminal_result(state, &mut result);
-    if run_auto_pass_loop(state, &mut result) {
-        reconcile_terminal_result(state, &mut result);
+    // This seam has no error channel: a failed convergence restores the
+    // seam's entry state and leaves `batch` untouched. The owed carrier is then
+    // still found by `stack::resolve_top`'s net at the next pass.
+    if reconcile_terminal_result_completing_resolution(
+        state,
+        &mut result,
+        reconcile_terminal_result,
+    )
+    .is_err()
+    {
+        *state = before;
+        return;
+    }
+    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+    let reconcile: fn(&mut GameState, &mut ActionResult) = if run_auto_pass_loop(state, &mut result)
+    {
+        reconcile_terminal_result
     } else {
-        reconcile_terminal_sba(state, &mut result);
+        reconcile_terminal_sba
+    };
+    if reconcile_terminal_result_completing_resolution(state, &mut result, reconcile).is_err() {
+        *state = before;
+        return;
     }
 
     let log_entries = super::log::resolve_log_entries(&result.events, &before, state);
@@ -11206,10 +11568,23 @@ pub(super) fn settle_deferred_phase_transition(
     // CR 608.2g + CR 502.4: retire a completed resolution-cast marker and its
     // carrier, as the pipeline's settlement step would, but leave the triggers
     // it parked held for the next time a player would receive priority.
-    engine_priority::settle_pending_resolution_completion(state);
+    engine_priority::settle_pending_resolution_completion(state, events);
+    // CR 608.2n: a completed resolution's final part runs here, and its
+    // triggers are collected with the batch. At the cleanup step, the retry
+    // below reaches `execute_cleanup`, whose tail puts that batch on the stack
+    // and gives the active player priority before the turn can end
+    // (CR 514.3a). At an untap step's turn-ending leave they are held for the
+    // next time a player receives priority (CR 502.4).
+    run_spell_final_part_if_due(state, events);
     // CR 608.2c: a carrier whose resolution has finished settles before the
     // transition is retried.
     settle_resolving_stack_entry_after_continuation_resume(state);
+    // CR 608.2n + CR 616.1: the settling spell's final part may itself have
+    // asked a question; that prompt, not the provisional window, now owns the
+    // waiting state.
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return state.waiting_for.clone();
+    }
     if state.stack.is_empty() && !turns::phase_transition_requires_settlement(state) {
         // CR 514.1 + CR 514.2: a transition deferred as the cleanup step began
         // came before the step's actions, so the interpreter resumes the step.
@@ -14363,6 +14738,104 @@ fn apply_non_priority_pass_action(
             if state.active_batch_delivery().is_some() {
                 super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
             }
+            resume_pending_continuation_if_priority(state, &mut events)?;
+            state.waiting_for.clone()
+        }
+        (
+            WaitingFor::ChooseTokenHost {
+                player,
+                source_id: _,
+                legal_targets,
+                pending_ability,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            if turn_control::authorized_submitter(state) != Some(*player) {
+                return Err(EngineError::WrongPlayer);
+            }
+            let chosen = match target {
+                Some(target) if legal_targets.contains(&target) => target.clone(),
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ChooseTokenHost: invalid or missing legal target".to_string(),
+                    ));
+                }
+            };
+            // Fail-closed liveness backstop: the choice was offered moments
+            // ago against incarnation-current battlefield objects, and
+            // nothing resolves during a prompt — but a stale answer must
+            // never bind a departed host.
+            let host = match &chosen {
+                TargetRef::Object(id) => {
+                    let live = state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield);
+                    if !live {
+                        return Err(EngineError::InvalidAction(
+                            "ChooseTokenHost: chosen host is no longer legal".to_string(),
+                        ));
+                    }
+                    super::game_object::AttachTarget::Object(*id)
+                }
+                TargetRef::Player(id) => super::game_object::AttachTarget::Player(*id),
+            };
+            // CR 400.7 (F2): the stamped incarnation pin must still be
+            // current. At the sandbox/debug boundary an offered object can
+            // leave and return during the prompt with the same stored
+            // ObjectId and a new incarnation — a new object that must not
+            // receive the Role. The pin lives in the pending ability's
+            // stamped batch (the single stamp authority); absence of a pin
+            // means a non-boon prompt, which skips this check.
+            if let TargetRef::Object(id) = &chosen {
+                let stale = pending_ability
+                    .context
+                    .boon_trigger_batch_objects
+                    .iter()
+                    .find(|pin| pin.object_id == *id)
+                    .is_some_and(|pin| !pin.is_current(state));
+                if stale {
+                    return Err(EngineError::InvalidAction(
+                        "ChooseTokenHost: chosen host is no longer the stamped object".to_string(),
+                    ));
+                }
+            }
+            // CR 303.4c + CR 608.2d: re-verify projected attach legality at
+            // accept time — a protection grant could have landed between the
+            // offer snapshot and this answer (only prompt answers interleave,
+            // but the check is cheap and load-bearing against tag forgery).
+            if !super::effects::token::boon_host_passes_projected_legality(
+                state,
+                pending_ability,
+                &chosen,
+            ) {
+                return Err(EngineError::InvalidAction(
+                    "ChooseTokenHost: chosen host cannot be enchanted".to_string(),
+                ));
+            }
+            // Digital-only Alchemy (no CR entry): resume the paused token
+            // creation with the choice bound. The pause pass mutated nothing
+            // (it returned before proposing), so re-entry applies exactly
+            // once; the override skips the pause branch, so a resumed
+            // resolution never prompts twice.
+            //
+            // CR 616.1: clear the answered host prompt BEFORE re-entering the
+            // token resolver, so anything non-Priority afterwards is a pause
+            // the resumed creation opened itself (replacement ordering on
+            // the token event). Preserve every such pause; settle the
+            // priority player and drain continuation only when resolution
+            // truly returned to Priority.
+            let pending = pending_ability.clone();
+            let active_player = *player;
+            state.waiting_for = WaitingFor::Priority {
+                player: active_player,
+            };
+            super::effects::token::resolve_with_host_override(state, &pending, &mut events, Some(host))
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+            }
+            state.priority_player = active_player;
             resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
@@ -19833,29 +20306,30 @@ mod shortcut_schema_tests {
     #[test]
     fn iteration_count_maps_every_win_kind() {
         assert_eq!(
-            shortcut_iteration_count(WinKind::LethalDamage),
+            shortcut_iteration_count(Some(WinKind::LethalDamage)),
             IterationCount::UntilLethal
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::PoisonLoss),
+            shortcut_iteration_count(Some(WinKind::PoisonLoss)),
             IterationCount::UntilLethal
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::Decking),
+            shortcut_iteration_count(Some(WinKind::Decking)),
             IterationCount::Fixed(1)
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::ExtraTurns),
+            shortcut_iteration_count(Some(WinKind::ExtraTurns)),
             IterationCount::Fixed(1)
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::ImmediateWin),
+            shortcut_iteration_count(Some(WinKind::ImmediateWin)),
             IterationCount::Fixed(1)
         );
         assert_eq!(
-            shortcut_iteration_count(WinKind::Advantage),
+            shortcut_iteration_count(Some(WinKind::Advantage)),
             IterationCount::Fixed(1)
         );
+        assert_eq!(shortcut_iteration_count(None), IterationCount::Fixed(1));
     }
 
     /// The constructor NARROWS a published suggestion to the capacity it derives and never
@@ -20820,7 +21294,8 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
-            win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             template: Some(template),
             per_cycle: None,
             shortened_by: None,
@@ -20956,7 +21431,8 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
-            win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             template: Some(sched),
             per_cycle: None,
             shortened_by: None,
@@ -22602,7 +23078,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            52,
+            53,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -22610,9 +23086,9 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (4, 11, 37),
+            (4, 11, 38),
             "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
-             readers (including the two new optional-subject projection reads), and 37 \
+             readers (including the two new optional-subject projection reads), and 38 \
              `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
@@ -23388,7 +23864,8 @@ mod stage2_injector_tests {
             predicted_winner: None,
             certificate: LoopCertificate {
                 unbounded: vec![],
-                win_kind: WinKind::LethalDamage,
+                win_kind: Some(WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: BoardDelta::default(),
                 per_cycle: None,
@@ -24458,6 +24935,7 @@ mod bounded_offer_conjunct_tests {
             ConsumptionDerivation::Unsigned => "Unsigned",
             ConsumptionDerivation::NoMeasurement => "NoMeasurement",
             ConsumptionDerivation::Measured(_) => "Measured",
+            ConsumptionDerivation::Replayed(_) => "Replayed",
         };
         assert!(
             crate::game::players::is_alive(&state, doomed)
@@ -24621,6 +25099,9 @@ mod bounded_offer_conjunct_tests {
             ConsumptionDerivation::NoMeasurement => panic!(
                 "REACH-GUARD: the helper must MEASURE on this board; its reduction consumed no \
                  living seat"
+            ),
+            ConsumptionDerivation::Replayed(_) => panic!(
+                "REACH-GUARD: the helper must MEASURE; the counting replay counted this period"
             ),
         }
     }
@@ -24917,6 +25398,7 @@ mod bounded_offer_conjunct_tests {
                     let charge = &certificate
                         .per_cycle
                         .as_ref()
+                        .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
                         .expect("a bounded offer publishes its per-period signature")
                         .seat_life_charge;
                     let [(_, published_magnitude)] = charge.as_slice() else {
@@ -24952,6 +25434,7 @@ mod bounded_offer_conjunct_tests {
                 &certificate
                     .per_cycle
                     .as_ref()
+                    .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
                     .expect("a bounded offer publishes its per-period signature")
                     .seat_life_charge,
             );
@@ -24996,6 +25479,7 @@ mod bounded_offer_conjunct_tests {
                 certificate
                     .per_cycle
                     .as_ref()
+                    .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
                     .expect("a bounded offer publishes its per-period signature")
                     .victim_slot
                     .is_empty(),
@@ -25061,6 +25545,7 @@ mod bounded_offer_conjunct_tests {
         let delta = &certificate
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature")
             .delta;
 
@@ -25162,6 +25647,7 @@ mod bounded_offer_conjunct_tests {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature");
         assert!(
             per_cycle.frames_per_period >= 1,
@@ -25920,6 +26406,7 @@ mod bounded_offer_conjunct_tests {
         let per_cycle = proposal
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer carries its per-period signature onto the proposal");
 
         // ── CARDINALITY REACH-GUARDS: every map the derivation walks holds ≥ 2 entries ──
@@ -26064,9 +26551,11 @@ mod bounded_offer_conjunct_tests {
             else {
                 panic!("legs {legs:?} must mint a bounded offer; got {outcome:?}");
             };
-            let per_cycle = certificate
-                .per_cycle
-                .expect("a bounded offer states its period");
+            let Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) =
+                certificate.per_cycle
+            else {
+                panic!("a bounded offer states its period");
+            };
             assert_eq!(
                 meter.certification,
                 Some(PeriodCertification::ResourceSignatureOnly),
@@ -26491,6 +26980,77 @@ mod resolving_carrier_settle_tests {
             "the settled continuation must cross exactly one turn boundary"
         );
     }
+
+    /// CR 608.2n + CR 514.3a: a sorcery whose paused instructions are done
+    /// still owes its final part when a transition deferred at the cleanup
+    /// step is settled. The final part runs there and its own move triggers
+    /// ("Whenever a card is put into your graveyard from anywhere"); the retry
+    /// reaches the cleanup step's actions, whose tail puts that trigger on the
+    /// stack and gives the active player priority, so the turn does not end.
+    #[test]
+    fn a_deferred_cleanup_transition_puts_the_final_parts_trigger_on_the_stack_before_the_turn_ends(
+    ) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::zones::move_to_zone;
+        use crate::types::game_state::{CastingVariant, OwedSpellFinalPart};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::End);
+        let archivist = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Graveyard Archivist",
+                "Whenever a card is put into your graveyard from anywhere, you gain 1 life.",
+            )
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Plain Draw", false, "Draw a card.")
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        move_to_zone(state, spell, Zone::Stack, &mut Vec::new());
+        state.phase = Phase::Cleanup;
+        state.active_player = P0;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: P0,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(spell.0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let starting_turn = state.turn_number;
+
+        let mut events = Vec::new();
+        let waiting_for = super::settle_deferred_phase_transition(state, &mut events);
+
+        // Reach guard: the final part ran.
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_spell_final_part.is_none());
+
+        assert_eq!(waiting_for, WaitingFor::Priority { player: P0 });
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert_eq!(state.turn_number, starting_turn, "the turn does not end");
+        assert_eq!(
+            state
+                .stack
+                .iter()
+                .filter(
+                    |entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                        && entry.source_id == archivist
+                )
+                .count(),
+            1,
+            "the final part's trigger is on the stack"
+        );
+        assert!(state.deferred_triggers.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -26630,6 +27190,55 @@ mod minted_battlefield_set_tests {
             vec![ObjectId(2), ObjectId(3)],
             "the same arrival counts as MINTED once `before` no longer knows the id"
         );
+    }
+
+    /// CR 111.7 + CR 111.3: a token made in place of one that ceased to exist is not a mint; a
+    /// second one, one of another name, one of another tapped status, and one with other
+    /// copiable values each are.
+    #[test]
+    fn a_token_made_again_is_not_minted() {
+        let mut before = GameState::new_two_player(7);
+        put(&mut before, 1, "Engine", Zone::Battlefield);
+        let spent = put(&mut before, 2, "Treasure", Zone::Battlefield);
+        let mut ceased = before.clone();
+        ceased.objects.remove(&spent);
+        ceased.battlefield.retain(|id| *id != spent);
+        let made = |name: &str| {
+            let mut after = ceased.clone();
+            let id = put(&mut after, 3, name, Zone::Battlefield);
+            (after, id)
+        };
+
+        let (remade, twin) = made("Treasure");
+        assert_eq!(minted_battlefield_ids(&before, &remade), vec![]);
+
+        let mut two = remade.clone();
+        let second = put(&mut two, 4, "Treasure", Zone::Battlefield);
+        assert_eq!(minted_battlefield_ids(&before, &two), vec![second]);
+
+        let (renamed, gold) = made("Gold");
+        assert_eq!(minted_battlefield_ids(&before, &renamed), vec![gold]);
+
+        let mut tapped = remade.clone();
+        tapped
+            .objects
+            .get_mut(&twin)
+            .expect("the made token is live")
+            .tapped = true;
+        assert_eq!(minted_battlefield_ids(&before, &tapped), vec![twin]);
+
+        let mut keyworded = remade.clone();
+        keyworded
+            .objects
+            .get_mut(&twin)
+            .expect("the made token is live")
+            .base_keywords
+            .push(crate::types::keywords::Keyword::Flying);
+        assert_eq!(minted_battlefield_ids(&before, &keyworded), vec![twin]);
+
+        let mut moved = remade.clone();
+        put(&mut moved, spent.0, "Treasure", Zone::Graveyard);
+        assert_eq!(minted_battlefield_ids(&before, &moved), vec![twin]);
     }
 
     /// **`derived_fodder_class` reports `k` over the MINTED members only.**

@@ -728,8 +728,8 @@ mod tests {
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ControllerRef, QuantityExpr, QuantityRef, SharedQuality,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        AggregateFunction, ChooseOneOfKind, ControllerRef, QuantityExpr, QuantityRef,
+        SharedQuality, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1754,6 +1754,7 @@ mod tests {
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![branch],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ))]
         .into();
@@ -1819,6 +1820,7 @@ mod tests {
                             player: TargetFilter::Controller,
                         },
                     )],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ))]
         .into();

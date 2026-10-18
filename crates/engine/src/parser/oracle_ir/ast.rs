@@ -882,6 +882,16 @@ pub(crate) enum ImperativeFamilyAst {
     /// Ice Cauldron's "note the type AND AMOUNT..." sibling is intentionally
     /// left unmatched (see `parse_imperative_family_ast`).
     NoteManaSpent,
+    /// Digital-only Alchemy (no CR entry): "note <quantity>" — record a
+    /// number for the resolving player ("note its power", Dragonborn
+    /// Immolator; "note that excess damage", Mephit's Enthusiasm / Molten
+    /// Impact), overwriting any previous note. Read back by
+    /// `QuantityRef::NotedNumber`. The "that excess damage" demonstrative is
+    /// licensed at parse time by trigger-context (see
+    /// `parse_note_number_clause`), not by a sibling condition.
+    NoteNumber {
+        value: QuantityExpr,
+    },
     /// CR 701.40a: Manifest the top card(s) of library.
     Manifest {
         target: TargetFilter,
@@ -3029,6 +3039,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -3090,6 +3101,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
@@ -3131,6 +3143,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -3142,6 +3155,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -3316,7 +3330,7 @@ fn masked_outer_bound_fragment(duration: &Option<Duration>) -> Option<String> {
     }
 }
 
-fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
+pub(crate) fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
     match duration {
         duration if is_play_from_exile_lifetime_duration(&duration) => {
             // CR 400.7i + CR 611.2a: exile-play permissions persist until the
@@ -3492,6 +3506,7 @@ mod duration_distribution_tests_7923 {
             // play-from-exile construction in `oracle_effect/mod.rs`.
             mode: CardPlayMode::Cast,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             granted_to: crate::types::player::PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
