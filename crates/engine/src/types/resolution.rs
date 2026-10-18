@@ -356,7 +356,9 @@ pub struct PendingDieRoll {
     /// base, captured via `targeting::capture_parked_slot_context`. Resume
     /// indexes these — never the legacy chain-root list — so modal bases,
     /// downstream offsets, and repeated IDs resolve exactly like the live
-    /// authority. Empty on pre-M2 frames, which keep the legacy root path.
+    /// authority. Empty both on pre-M2 frames (which keep the legacy root
+    /// path) and on authoritative empty captures — `declared_targets_recorded`
+    /// tells the two apart.
     #[serde(default)]
     pub declared_targets: Vec<TargetRef>,
     /// CR 400.7: the announced pin of each declared entry, aligned with
@@ -368,6 +370,13 @@ pub struct PendingDieRoll {
     /// authority. Zero on pre-M2 frames (raw root indexing).
     #[serde(default)]
     pub declared_ahead: usize,
+    /// CR 608.2c: whether `declared_targets` was authoritatively captured
+    /// (possibly empty) rather than absent. A recorded empty list stays
+    /// empty on resume — only a genuinely absent capture falls back to the
+    /// legacy root/local lists. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub declared_targets_recorded: bool,
     /// CR 400.7: the suspending node's own positional pins, aligned with
     /// `targets`, for the local fallback and occurrence-aware parked reads.
     #[serde(default)]
@@ -466,6 +475,13 @@ pub struct PendingDieRollInstruction {
     /// serialized before this field existed.
     #[serde(default)]
     pub declared_ahead: usize,
+    /// CR 608.2c: whether `declared_targets` was authoritatively captured
+    /// (possibly empty) rather than absent, carried across the CR 616.1
+    /// choice so it survives into the `PendingDieRoll` this instruction
+    /// produces. `#[serde(default)]` for in-flight states serialized before
+    /// this field existed.
+    #[serde(default)]
+    pub declared_targets_recorded: bool,
     /// CR 400.7: the suspending node's positional pins aligned with
     /// `targets`, carried across the CR 616.1 choice. `#[serde(default)]`
     /// for in-flight states serialized before this field existed.

@@ -11,9 +11,9 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, CountScope,
-    DieResultBranch, DieRollIgnoreRule, DieRollModifier, Effect, ObjectProperty, QuantityExpr,
-    QuantityRef, TargetFilter, TargetRef, ZoneRef,
+    AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, ChosenTargetSlots,
+    CountScope, DieResultBranch, DieRollIgnoreRule, DieRollModifier, Effect, ObjectProperty,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -618,6 +618,7 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
         declared_targets: vec![],
         declared_target_pins: vec![],
         declared_ahead: 0,
+        declared_targets_recorded: false,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     });
@@ -723,6 +724,7 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         declared_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
         declared_target_pins: vec![None, None],
         declared_ahead: 0,
+        declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -794,6 +796,7 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
         declared_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
         declared_target_pins: vec![None, None],
         declared_ahead: 0,
+        declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -893,6 +896,7 @@ fn parked_indexed_roll_reads_departure_lki_for_selected_slot_with_stale_pin() {
         declared_targets: vec![TargetRef::Object(brute)],
         declared_target_pins: vec![Some(pin)],
         declared_ahead: 0,
+        declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -991,6 +995,7 @@ fn parked_indexed_roll_does_not_judge_local_fallback_by_root_pins() {
         declared_targets: vec![],
         declared_target_pins: vec![],
         declared_ahead: 0,
+        declared_targets_recorded: false,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -1061,6 +1066,7 @@ fn parked_indexed_roll_root_only_frame_keeps_legacy_selection() {
         declared_targets: vec![],
         declared_target_pins: vec![],
         declared_ahead: 0,
+        declared_targets_recorded: false,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -1136,6 +1142,7 @@ fn parked_indexed_roll_resolves_modal_slot_against_its_base() {
         declared_targets: vec![TargetRef::Object(brute)],
         declared_target_pins: vec![None],
         declared_ahead: 1,
+        declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -1236,6 +1243,7 @@ fn parked_indexed_roll_reads_repeated_id_through_its_own_pin() {
         declared_targets: vec![TargetRef::Object(brute), TargetRef::Object(brute)],
         declared_target_pins: vec![Some(stale_pin), Some(current_pin)],
         declared_ahead: 0,
+        declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -1345,6 +1353,7 @@ fn parked_unslotted_roll_reads_departed_member_from_departure_lki() {
         declared_targets: vec![],
         declared_target_pins: vec![],
         declared_ahead: 0,
+        declared_targets_recorded: false,
         local_target_pins: vec![Some(pin)],
         keyed_target_incarnations: vec![],
     };
@@ -1420,6 +1429,7 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
         ],
         declared_target_pins: vec![None, None],
         declared_ahead: 0,
+        declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
     };
@@ -1558,5 +1568,301 @@ fn song_keep_choice_pause_is_production_created() {
         None,
         "post-completion restore discipline: the inner aggregate must not leak \
          into the outer context once the instruction finishes"
+    );
+}
+
+/// MED2 — Barbarian Class level 1 (copied from
+/// `barbarian_class_die_roll_replacement.rs`, whose const is private): the
+/// roll-raiser that forces a deterministic d1 tie and a real keep-prompt
+/// pause below.
+const BARBARIAN_CLASS_L1: &str = "If you would roll one or more dice, instead roll that many \
+dice plus one and ignore the lowest roll.";
+
+/// MED2 — `Sum(Power, TargetedObjects { slot: Some(0) })` as a roll addend:
+/// the indexed slot read whose capture presence is under test.
+fn med2_slot_zero_power_modifier() -> DieRollModifier {
+    DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                engine::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(0) },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    }
+}
+
+/// MED2 — the single d1 `DieRolled` total. Reach-guarded like `d20_total`:
+/// exactly one d1 roll must have happened.
+fn d1_total(events: &[GameEvent]) -> u8 {
+    let mut totals = events.iter().filter_map(|event| match event {
+        GameEvent::DieRolled {
+            result: Some(total),
+            sides: 1,
+            ..
+        } => Some(*total),
+        _ => None,
+    });
+    let total = totals.next().expect("the cast must roll exactly one d1");
+    assert!(totals.next().is_none(), "the cast must roll exactly one d1");
+    total
+}
+
+/// MED2 PRIMARY — an authoritative empty chosen-slot list must stay empty
+/// across a REAL keep-prompt pause. `Recorded([])` (no declared slots) plus
+/// a held-but-unannounced 5-power local object: the live read is 0, and the
+/// resumed read must also be 0 — the held object must not backfill slot 0.
+/// Pre-fix the resume promotes the held object and totals 6 instead of 1.
+#[test]
+fn recorded_empty_slot_ignores_held_local_across_a_real_keep_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let held = scenario.add_creature(P0, "Held", 5, 5).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    scenario.add_enchantment_from_oracle(P0, "Barbarian Class", BARBARIAN_CLASS_L1);
+    let mut runner = scenario.build();
+
+    let mut ability = ResolvedAbility::new(
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            results: vec![],
+            modifier: Some(med2_slot_zero_power_modifier()),
+        },
+        vec![],
+        roller,
+        P0,
+    );
+    engine::game::ability_utils::assign_targets_in_chain(runner.state(), &mut ability, &[])
+        .expect("assigning no targets to a sinkless roll records");
+    assert_eq!(
+        ability.chosen_target_slots,
+        ChosenTargetSlots::Recorded(vec![]),
+        "NON-VACUITY: the no-target sink must record an authoritative empty list"
+    );
+    ability.push_target(TargetRef::Object(held));
+    assert_eq!(
+        ability.targets,
+        vec![TargetRef::Object(held)],
+        "NON-VACUITY: the held object rides the local list"
+    );
+    assert_eq!(
+        ability.chosen_target_slots,
+        ChosenTargetSlots::Recorded(vec![]),
+        "NON-VACUITY: the unannounced push must not rewrite the recorded choice"
+    );
+
+    let mut events = Vec::new();
+    engine::game::effects::roll_die::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("the raised roll proposes");
+    match runner.state().waiting_for.clone() {
+        WaitingFor::DieKeepChoice {
+            results,
+            ignorable_indices,
+            ignore_count,
+            ..
+        } => {
+            assert_eq!(
+                results,
+                vec![1, 1],
+                "REACH-GUARD: d1 plus Barbarian must tie and open the keep prompt"
+            );
+            assert_eq!(ignorable_indices, vec![0, 1]);
+            assert_eq!(ignore_count, 1);
+        }
+        other => panic!("REACH-GUARD: the raised tie must suspend on DieKeepChoice, got {other:?}"),
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DieRolled { .. })),
+        "CR 706.6: nothing is emitted while the ignore choice is open"
+    );
+
+    let outcome = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![0],
+        })
+        .expect("the roller may ignore a tied-lowest roll");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected a clean return to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        d1_total(&outcome.events),
+        1,
+        "MED2: authoritative empty slot 0 reads 0 after the pause (natural 1 + 0); \
+         the held 5-power object must not backfill it"
+    );
+}
+
+/// MED2 CONTROL — the same Recorded-empty plus held setup WITHOUT a pause
+/// reads 0 through the live slot authority: the unraised d1 never prompts,
+/// and the total is the bare natural. Green pre- and post-fix; guards the
+/// instrument the primary test measures against.
+#[test]
+fn recorded_empty_slot_reads_zero_inline_without_a_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let held = scenario.add_creature(P0, "Held", 5, 5).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let mut runner = scenario.build();
+
+    let mut ability = ResolvedAbility::new(
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            results: vec![],
+            modifier: Some(med2_slot_zero_power_modifier()),
+        },
+        vec![],
+        roller,
+        P0,
+    );
+    engine::game::ability_utils::assign_targets_in_chain(runner.state(), &mut ability, &[])
+        .expect("assigning no targets to a sinkless roll records");
+    ability.push_target(TargetRef::Object(held));
+
+    let mut events = Vec::new();
+    engine::game::effects::roll_die::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("the unreplaced roll resolves");
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::DieKeepChoice { .. }),
+        "REACH-GUARD: the unraised d1 cannot tie and must not prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        d1_total(&events),
+        1,
+        "the live slot authority reads Recorded([]) as no target (natural 1 + 0)"
+    );
+}
+
+/// MED2 CONTROL — a legacy frame whose capture is genuinely ABSENT (empty
+/// declared context, populated local list) keeps the local fallback: the
+/// resumed total is the natural plus the held power. Production always
+/// captures now, so the frame and prompt are staged — but the prompt answer
+/// and the resume are real. Green pre- and post-fix; guards the fallback
+/// the fix must preserve.
+#[test]
+fn legacy_frame_without_capture_still_falls_back_to_local() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let held = scenario.add_creature(P0, "Held", 5, 5).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let mut runner = scenario.build();
+
+    runner.state_mut().push_die_roll_frame(PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Object(held)],
+        sides: 1,
+        results: vec![1, 1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(med2_slot_zero_power_modifier()),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
+        declared_targets_recorded: false,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    });
+    runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
+        player: P0,
+        results: vec![1, 1],
+        ignorable_indices: vec![0, 1],
+        ignore_count: 1,
+    };
+
+    let outcome = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![1],
+        })
+        .expect("the staged keep prompt answers");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected a clean return to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        d1_total(&outcome.events),
+        6,
+        "legacy absent capture keeps the local fallback (natural 1 + held 5)"
+    );
+}
+
+/// MED2 CONTROL — a Recorded-NONEMPTY slot reads through the same real
+/// keep-prompt pause: slot 0 names the recorded brute, and the resumed
+/// total carries its power. Green pre- and post-fix; guards the preferred
+/// declared arm the fix must not disturb.
+#[test]
+fn recorded_nonempty_slot_reads_through_a_real_keep_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brute = scenario.add_creature(P0, "Brute", 5, 5).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    scenario.add_enchantment_from_oracle(P0, "Barbarian Class", BARBARIAN_CLASS_L1);
+    let mut runner = scenario.build();
+
+    let mut ability = ResolvedAbility::new(
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            results: vec![],
+            modifier: Some(med2_slot_zero_power_modifier()),
+        },
+        vec![],
+        roller,
+        P0,
+    );
+    engine::game::ability_utils::assign_targets_in_chain(
+        runner.state(),
+        &mut ability,
+        &[TargetRef::Object(brute)],
+    )
+    .expect("assigning the brute to a sinkless roll records");
+    assert_eq!(
+        ability.chosen_target_slots,
+        ChosenTargetSlots::Recorded(vec![0]),
+        "NON-VACUITY: the sinkless assignment must record slot 0"
+    );
+
+    let mut events = Vec::new();
+    engine::game::effects::roll_die::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("the raised roll proposes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::DieKeepChoice { .. }),
+        "REACH-GUARD: d1 plus Barbarian must tie and open the keep prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let outcome = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![0],
+        })
+        .expect("the roller may ignore a tied-lowest roll");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected a clean return to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        d1_total(&outcome.events),
+        6,
+        "Recorded slot 0 names the brute through the pause (natural 1 + 5)"
     );
 }

@@ -1479,8 +1479,9 @@ pub struct ParkedTargets<'a> {
     /// players and unpinned occurrences).
     pub root_pins: &'a [Option<ObjectIncarnationRef>],
     /// The declared (target, pin) entries counted from the slot base —
-    /// resume's preferred indexed list. Empty on pre-M2 frames, which keep
-    /// the legacy root path.
+    /// resume's preferred indexed list. Empty both on pre-M2 frames (which
+    /// keep the legacy root path) and on authoritative empty captures.
+    /// `declared_recorded` tells the two apart.
     pub declared: &'a [TargetRef],
     /// Announced pins aligned with `declared`. Positional — repeated IDs
     /// keep distinct pins.
@@ -1488,6 +1489,11 @@ pub struct ParkedTargets<'a> {
     /// The slot base's offset in root numbering: resume judges the
     /// root-numbered stamp at `ahead + index`. Zero on pre-M2 frames.
     pub ahead: usize,
+    /// Whether `declared` was authoritatively captured (possibly empty)
+    /// rather than absent. A recorded empty list stays empty on resume;
+    /// only a genuinely absent capture falls back to the legacy root/local
+    /// lists.
+    pub declared_recorded: bool,
     /// The keyed delayed-referent pins captured at park time. An indexed
     /// selection judges the selected object id against these with the
     /// shared keyed predicate — the same guard the live slot authority
@@ -10981,7 +10987,7 @@ fn matches_crew_relation(
 /// the shared keyed delayed-referent guard to the selected object id
 /// (fail-open when unrecorded). The aligned announced pin is carried into
 /// the shared occurrence reader — a stale pin reads exact departure LKI
-/// like the live path — and never excludes. An empty root list (legacy
+/// like the live path — and never excludes. An ABSENT capture (legacy
 /// in-flight frames, attraction rolls) falls back to local positional
 /// indexing — the only numbering those frames ever carried.
 /// One parked referent with the occurrence pin that selected it. The pin
@@ -11016,7 +11022,10 @@ pub(crate) fn referenced_parked_targets_for_filter<'a>(
             // offset; then the legacy chain-root list (pre-M2 frames); then
             // the local list with the node's own pins. Each list is judged
             // by the pins aligned with IT — never a neighbor's.
-            let (list, pins, ahead) = if !parked.declared.is_empty() {
+            let (list, pins, ahead) = if parked.declared_recorded {
+                // Authoritative capture, even when empty: a recorded empty
+                // list stays empty. Only a genuinely absent capture falls
+                // through to the legacy lists below.
                 (parked.declared, parked.declared_pins, parked.ahead)
             } else if !parked.root.is_empty() {
                 (parked.root, parked.root_pins, 0)

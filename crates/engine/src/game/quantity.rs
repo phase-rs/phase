@@ -22131,6 +22131,7 @@ mod tests {
             declared_targets: captured.declared_targets,
             declared_target_pins: captured.declared_pins,
             declared_ahead: captured.declared_ahead,
+            declared_targets_recorded: true,
             local_target_pins: captured.local_pins,
             keyed_target_incarnations: captured.keyed_target_incarnations,
         };
@@ -22321,6 +22322,7 @@ mod tests {
             declared_targets: captured.declared_targets,
             declared_target_pins: captured.declared_pins,
             declared_ahead: captured.declared_ahead,
+            declared_targets_recorded: true,
             local_target_pins: captured.local_pins,
             keyed_target_incarnations: captured.keyed_target_incarnations,
         };
@@ -22475,6 +22477,7 @@ mod tests {
                 declared_targets: captured.declared_targets.clone(),
                 declared_target_pins: captured.declared_pins.clone(),
                 declared_ahead: captured.declared_ahead,
+                declared_targets_recorded: true,
                 local_target_pins: captured.local_pins.clone(),
                 keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
             };
@@ -22585,6 +22588,7 @@ mod tests {
                 declared_targets: captured.declared_targets.clone(),
                 declared_target_pins: captured.declared_pins.clone(),
                 declared_ahead: captured.declared_ahead,
+                declared_targets_recorded: true,
                 local_target_pins: captured.local_pins.clone(),
                 keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
             };
@@ -22755,6 +22759,7 @@ mod tests {
             declared_targets: captured.declared_targets,
             declared_target_pins: captured.declared_pins,
             declared_ahead: captured.declared_ahead,
+            declared_targets_recorded: true,
             local_target_pins: captured.local_pins,
             keyed_target_incarnations: captured.keyed_target_incarnations,
         };
@@ -27453,6 +27458,7 @@ mod tests {
             declared_targets: Vec::new(),
             declared_target_pins: Vec::new(),
             declared_ahead: 0,
+            declared_targets_recorded: false,
             local_target_pins: Vec::new(),
             keyed_target_incarnations: Vec::new(),
         };
