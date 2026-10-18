@@ -2592,11 +2592,11 @@ impl GameObject {
         &self,
         variant: crate::types::game_state::CastingVariant,
     ) -> Vec<String> {
-        if variant == crate::types::game_state::CastingVariant::FaceDown
-            || self.spell_is_cast_face_down()
-        {
+        if variant == crate::types::game_state::CastingVariant::FaceDown {
             return Vec::new();
         }
+        // Concealment can coexist with a printed alternative face. The selected
+        // variant determines the cast; already-blanked characteristics have no name.
         self.names_with_other_half(
             self.fused_split_half_for(variant == crate::types::game_state::CastingVariant::Fuse),
         )
@@ -5730,7 +5730,31 @@ mod casting_name_set_tests {
             object.spell_names_for(CastingVariant::Normal),
             vec!["alpha"]
         );
+        // Natural alternative-face metadata survives concealment. CR 406.3a
+        // makes these selected casts face up, regardless of that stored face.
+        for layout in [LayoutKind::Split, LayoutKind::Modal, LayoutKind::Adventure] {
+            object.back_face = Some(BackFaceData {
+                name: "Beta".into(),
+                layout_kind: Some(layout),
+                ..Default::default()
+            });
+            assert!(object.effective_names().is_empty());
+            for variant in [CastingVariant::Normal, CastingVariant::Foretell] {
+                assert_eq!(object.spell_names_for(variant), vec!["alpha"]);
+            }
+            assert!(object.spell_names_for(CastingVariant::FaceDown).is_empty());
+        }
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Adventure),
+            vec!["alpha"]
+        );
+        object.back_face.as_mut().unwrap().layout_kind = Some(LayoutKind::Split);
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Fuse),
+            vec!["alpha", "beta"]
+        );
         assert!(object.spell_names_for(CastingVariant::FaceDown).is_empty());
+        object.back_face = None;
         object.name.clear();
         assert!(object.spell_names_for(CastingVariant::Normal).is_empty());
         object.face_down = false;
