@@ -6,8 +6,9 @@
 use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
-    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
+    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -818,6 +819,13 @@ pub(crate) struct ParseContext {
     /// `ParentTarget` — it must inherit the population FILTER itself. `None` when
     /// no such producer exists in this chain, or during standalone clause parsing.
     pub chain_prior_mass_population: Option<TargetFilter>,
+    /// CR 608.2c: the object set the NEAREST earlier clause of this chain acts on,
+    /// when that clause's direct operand is the chain's tracked set ("Untap those
+    /// creatures" → `TrackedSet`). A following bare "they" that a continuous
+    /// modification affects names this set, even under an iterated-player frame
+    /// (`subject.rs` · `resolve_they_pronoun`). Seeded per chunk from the chain;
+    /// `None` on every standalone parse.
+    pub chain_prior_object_set: Option<TargetFilter>,
     /// True when the SAME chain's most recent producer was a self-library peek
     /// (look at the top N cards of YOUR library without exiling/moving them).
     /// The bare "from among them" cast anaphor that follows must route to the
@@ -873,6 +881,16 @@ pub(crate) struct ParseContext {
     /// [`Self::clone_for_independent_body`] or [`Self::clone_throwaway`]. See
     /// [`TriggerZoneChangeProvenance`].
     pub trigger_zone_change: TriggerZoneChangeProvenance,
+    /// CR 608.2k: the owner a possessive PRONOUN ("its"/"his"/"her"/"their")
+    /// characteristic binds to while this context is active. Set ONLY by
+    /// quantity interpreters parsing a clause whose subject position is known
+    /// (`parse_where_x_quantity_expression_with_owner`, for boon-granted
+    /// "it"/"that" perpetual tails, where the pronoun names the triggering
+    /// object). `None` (the default every other caller carries) preserves the
+    /// long-standing `Source` binding. Explicit self-references ("~'s",
+    /// "this creature's") NEVER consult this field — only the four genuinely
+    /// anaphoric pronoun surfaces do.
+    pub characteristic_pronoun_owner: Option<ObjectScope>,
 }
 
 impl ParseContext {
@@ -896,16 +914,6 @@ impl ParseContext {
         self.source_core_types
             .iter()
             .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
-    }
-
-    /// The nearest player referent a third-person pronoun could name, counting
-    /// the "you may" / "any opponent may" `actor`. Read only by detectors;
-    /// controller phrases bind through `bind_controller_phrase`, which does not
-    /// read `actor`.
-    pub fn third_person_player_controller_ref(&self) -> Option<ControllerRef> {
-        self.relative_player_scope
-            .clone()
-            .or_else(|| self.actor.clone())
     }
 
     /// The antecedents `bind_controller_phrase` reads for an anaphoric
@@ -1024,7 +1032,6 @@ impl ParseContext {
 
     /// Execute `f` with a temporary relative-player scope, restoring the prior
     /// value on return. Replaces thread-local ScopeGuard RAII pattern.
-    #[allow(dead_code)] // Available for nested-scope uses (e.g., nested triggers).
     pub fn with_player_scope<R>(
         &mut self,
         scope: ControllerRef,

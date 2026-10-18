@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition, Duration,
-    Effect, EffectError, EffectKind, EventCounterReproductionCount, QuantityExpr, ResolvedAbility,
-    TargetChoiceTiming, TargetFilter, TargetRef,
+    AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition,
+    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, EventCounterReproductionCount,
+    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -778,6 +778,7 @@ fn apply_pending_counter_post_action(
                     controller,
                     source_id,
                     one_shot: true,
+                    kind: DelayedTriggerKind::Ordinary,
                     provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
                 };
                 crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
@@ -2029,12 +2030,8 @@ pub fn resolve_add_all(
         .into_iter()
         .map(|obj_id| {
             let counter_num = if count_uses_recipient {
-                crate::game::quantity::resolve_quantity_with_recipient(
-                    state,
-                    &count,
-                    ability.controller,
-                    ability.source_id,
-                    obj_id,
+                crate::game::quantity::resolve_quantity_with_targets_and_recipient(
+                    state, &count, ability, obj_id,
                 )
                 .max(0) as u32
             } else {

@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stos",
     "collapsePanel": "Zwiń panel stosu",
     "expandPanel": "Rozwiń panel stosu",
@@ -865,6 +874,7 @@
     "chooseCreatureToEquip": "Wybierz stwora do wyposażenia",
     "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
+    "chooseTokenHost": "Wybierz gospodarza dla żetonu",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
@@ -2624,8 +2634,8 @@
     "close": "Zamknij nakładkę decyzji SI"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Twój priorytet",
+    "yourPriorityReason": "Twój priorytet — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2669,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Pojedynek na spojrzenia",
+      "breathHolding": "Zawody w wstrzymywaniu oddechu"
+    },
+    "versus": "{{first}} kontra {{second}}",
+    "instructions": "Klikaj, stukaj lub naciskaj spację tak długo, jak potrafisz. Pierwszy gracz, który przestanie na {{seconds}} s, przegrywa.",
+    "status": {
+      "pending": "Oczekiwanie na rozpoczęcie zawodów…",
+      "preparing": "Przygotuj się…",
+      "go": "START! Klikaj dalej!",
+      "paused": "Zawody wstrzymane, dopóki gracz się nie połączy ponownie…",
+      "spectating": "Oglądasz zawody…",
+      "resolving": "Ustalanie wyniku…"
+    },
+    "button": {
+      "wait": "Czekaj na START…",
+      "active": "Klikaj dalej!"
+    },
+    "you": "Ty",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "Wygrywasz zawody!",
+      "lost": "Przegrywasz zawody.",
+      "winner": "{{name}} wygrywa zawody.",
+      "tie": "Remis – nic się nie dzieje.",
+      "cancelled": "Zawody anulowano – nic się nie dzieje."
+    }
   }
 }

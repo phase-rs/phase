@@ -6,7 +6,7 @@ import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
-import { restrictAiPoolByBracket } from "../../services/aiRandomPool";
+import { candidatePassesFilters, restrictAiPoolByBracket } from "../../services/aiRandomPool";
 import { isCommanderFamilyFormat } from "../../types/bracket";
 import {
   AI_DECK_RANDOM,
@@ -18,6 +18,7 @@ import { isProfileUsable, profileForSeat, useLlmStore } from "../../stores/llmSt
 import { useLlmProviderCatalog } from "../../hooks/useLlmProviderCatalog";
 import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
+import { AiDeckPicker } from "./AiDeckPicker";
 import { BracketFilter } from "./BracketFilter";
 
 const AI_MENU_CLASS =
@@ -130,15 +131,10 @@ export function AiOpponentConfig({
       }),
     [candidates, bracketFilter, cedhMode, selectedFormat],
   );
-  const filteredDecks = useMemo(() => {
-    return bracketPool.filter((d) => {
-      if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
-      if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
-        return false;
-      }
-      return true;
-    });
-  }, [bracketPool, coverageFloor, archetypeFilter]);
+  const filteredDecks = useMemo(
+    () => bracketPool.filter((d) => candidatePassesFilters(d, archetypeFilter, coverageFloor)),
+    [bracketPool, coverageFloor, archetypeFilter],
+  );
   // Soft gate: the catalog is non-empty but the bracket constraint matched
   // nothing, so game start will fall back to the full legal catalog. Warn
   // here (Start stays enabled) rather than failing the game.
@@ -333,24 +329,6 @@ function AiSeatPanel({
 }: AiSeatPanelProps) {
   const { t } = useTranslation("menu");
   const isRandom = seat.deckId === AI_DECK_RANDOM;
-  // When the user has pinned a deck, expose the full list so they can switch
-  // to another pinned deck; otherwise scope to the filtered Random pool so
-  // the "Random" summary count matches the options shown.
-  const deckOptions = isRandom ? filteredDecks : candidates;
-  const selectionValid = isRandom || deckOptions.some((d) => d.id === seat.deckId);
-  const effectiveSelection: AiDeckSelection = selectionValid ? seat.deckId : AI_DECK_RANDOM;
-
-  const sourceLabel = (candidate: AiDeckCandidate): string => {
-    switch (candidate.source.type) {
-      case "saved":
-        return candidate.source.feedId ? t("aiOpponent.source.feed") : t("aiOpponent.source.user");
-      case "feed":
-        return candidate.source.feedId;
-      case "precon":
-        return t("aiOpponent.source.precon");
-    }
-  };
-
   const selectedCandidate = candidates.find((d) => d.id === seat.deckId);
   const summaryDeck = isRandom
     ? t("aiOpponent.deckRandomCount", { count: filteredDecks.length })
@@ -358,26 +336,6 @@ function AiSeatPanel({
   const summaryDifficulty = cedhMode
     ? t("aiOpponent.cedhToggle.badge")
     : t(`aiDifficulty.levels.${seat.difficulty}`);
-
-  const formatDeckLabel = (candidate: AiDeckCandidate): string => {
-    const suffix = [sourceLabel(candidate), candidate.archetype, candidate.coveragePct != null ? `${candidate.coveragePct}%` : null]
-      .filter(Boolean)
-      .join(" · ");
-    return suffix ? `${candidate.name} — ${suffix}` : candidate.name;
-  };
-
-  const randomDeckLabel = t("aiOpponent.deckRandomCount", { count: filteredDecks.length });
-  const deckMenuItems = useMemo(
-    () => [
-      { value: AI_DECK_RANDOM, label: randomDeckLabel },
-      ...deckOptions.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
-    ],
-    [deckOptions, randomDeckLabel],
-  );
-  const selectedDeckLabel =
-    effectiveSelection === AI_DECK_RANDOM
-      ? randomDeckLabel
-      : (deckMenuItems.find((item) => item.value === effectiveSelection)?.label ?? randomDeckLabel);
 
   const difficultyItems = useMemo(
     () =>
@@ -396,14 +354,11 @@ function AiSeatPanel({
       {!hideDeckPicker && (
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.deck")}</span>
-        <MenuSelect
-          ariaLabel={t("aiOpponent.deck")}
-          label={selectedDeckLabel}
-          selectedValue={effectiveSelection}
-          items={deckMenuItems}
-          onSelect={(value) => onDeckChange(value as AiDeckSelection)}
-          menuLayout={AI_MENU_LAYOUT}
-          fitContainer
+        <AiDeckPicker
+          value={seat.deckId}
+          candidates={candidates}
+          randomPool={filteredDecks}
+          onChange={onDeckChange}
           wrapperClassName={AI_MENU_WRAPPER}
           className={`${AI_MENU_CLASS} text-white`}
         />

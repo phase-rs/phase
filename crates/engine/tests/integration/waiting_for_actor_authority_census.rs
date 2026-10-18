@@ -75,6 +75,7 @@ use syn::{Expr, ImplItem, Item, Pat, Stmt};
 
 const GAME_STATE: &str = include_str!("../../src/types/game_state.rs");
 const RESOLVE_BATCH: &str = include_str!("../../src/game/engine_resolve_batch.rs");
+const CONTEST: &str = include_str!("../../src/game/contest.rs");
 
 /// Every production source this census can search FOR A CONSUMER, keyed the way
 /// `ACTORLESS` names it. `include_str!` takes a literal path, so THIS TABLE IS
@@ -84,7 +85,10 @@ const RESOLVE_BATCH: &str = include_str!("../../src/game/engine_resolve_batch.rs
 /// deliberately NOT in this table — it is the census's *subject*, not a consumer
 /// source — so "held by an `include_str!`" and "searchable by `A9`" are different
 /// questions and `A9`'s message must not conflate them.
-const SOURCES: &[(&str, &str)] = &[("game/engine_resolve_batch.rs", RESOLVE_BATCH)];
+const SOURCES: &[(&str, &str)] = &[
+    ("game/engine_resolve_batch.rs", RESOLVE_BATCH),
+    ("game/contest.rs", CONTEST),
+];
 
 /// THE ADJUDICATION TABLE. Every actorless `WaitingFor` variant, the `NoActor`
 /// answer its arm names, the (source file, free function) that actually advances
@@ -114,6 +118,18 @@ const ACTORLESS: &[(&str, &str, (&str, &str), &str)] = &[
          consumes it. EVERY transport able to MINT this latch must also call that \
          consumer — a server-driven AI seat that minted one without a consumer hung a \
          3-player Commander game permanently.",
+    ),
+    (
+        "PhysicalContest",
+        "HostContestDriver",
+        ("game/contest.rs", "advance_contest"),
+        "Eye to Eye / Mouth to Mouth: a real-time clicking contest. No player submits a \
+         `GameAction` — the host stamps clicks and clock ticks and drives the engine's \
+         contest state machine through `game::contest::advance_contest` (and its click / \
+         connection / cancel siblings). EVERY transport that can enter the state \
+         (phase-server's `run_contest_driver`, the WASM `drive_contest_js`) must drive it, \
+         or the game parks with nobody able to move it. Concession stays legal \
+         (`check_actor_authorization`).",
     ),
 ];
 
@@ -590,7 +606,7 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // ---- Phase 2 — whole-census findings, in assertion-number order. ----
     assert_eq!(
         ACTORLESS.len(),
-        2,
+        3,
         "reach-guard: the adjudication table in this file lost a row"
     );
 
@@ -801,9 +817,19 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // activating the mana ability — and is classified by
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the window cannot close without that player's payment.
-    if declared.len() != 142 {
+    // 142 -> 143 is adjudicated: the one-time-boon token-host choice (CR
+    // 608.2d, Dunbarrow Revivalist) added `ChooseTokenHost`. It names one
+    // acting `player` — the resolving controller choosing among the stamped
+    // entrants — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::ChooseTarget`.
+    // 143 -> 144 is adjudicated: the Eye to Eye / Mouth to Mouth contest added
+    // `PhysicalContest`. It is ACTORLESS — nobody submits a `GameAction` while it
+    // runs — and is declared in `ACTORLESS` with `NoActor::HostContestDriver`,
+    // advanced by `game::contest::advance_contest`.
+    if declared.len() != 144 {
         failures.push(format!(
-            "PIN declared.len()={} != 142.\n\
+            "PIN declared.len()={} != 144.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

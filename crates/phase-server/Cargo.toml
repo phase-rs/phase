@@ -9,6 +9,7 @@ name = "phase-server"
 path = "src/main.rs"
 
 [dependencies]
+parking_lot = "0.12"
 server-core = { path = "../server-core" }
 lobby-broker = { path = "../lobby-broker" }
 engine = { path = "../engine", package = "phase-engine" }
@@ -33,6 +34,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 url = "2"
+futures-util = { version = "0.3", features = ["sink"] }
 ngrok = { version = "0.18", optional = true }
 
 [features]
@@ -42,5 +44,5 @@ ngrok = { version = "0.18", optional = true }
 ngrok = ["dep:ngrok"]
 
 [dev-dependencies]
-futures-util = "0.3"
 tokio-tungstenite = "0.29"
+tokio = { version = "1", features = ["test-util"] }

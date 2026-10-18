@@ -1403,6 +1403,16 @@ impl<'a> FilterContext<'a> {
             ..*self
         }
     }
+
+    /// Rebind the per-object recipient for one nested evaluation — the object a
+    /// shared-quality reference population is relative to. Takes `&self` and
+    /// returns a fresh value; the caller's context is untouched.
+    fn with_recipient(&self, recipient: ObjectId) -> FilterContext<'a> {
+        FilterContext {
+            recipient_id: Some(recipient),
+            ..*self
+        }
+    }
 }
 
 /// CR 608.2h + CR 111.7: The controller of a filter context's SOURCE, from live
@@ -2794,6 +2804,7 @@ fn quantity_ref_contains_filter_prop(
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -2917,6 +2928,60 @@ pub(crate) fn bind_declaring_owner_authority(
             {
                 *prop = FilterProp::Owned {
                     controller: ControllerRef::SpecificPlayer { id: controller },
+                };
+            }
+        },
+        &mut complete,
+    );
+    if complete {
+        *filter = rewritten;
+    }
+    complete
+}
+
+/// Re-anchor holder-relative ("you") references in one boon-granted trigger
+/// MATCHER filter to the concrete holder.
+///
+/// Delayed-trigger matchers resolve "you" through the trigger source's
+/// controller — the boon's CREATOR. When the holder differs (Loch Larent,
+/// Valiant Batrider), an un-rewritten reference watches the wrong player's
+/// events. Binding unconditionally (even when holder == creator) additionally
+/// immunizes self-held boons against the creating object changing controller
+/// mid-flight; in the common case the bound filter matches exactly what the
+/// relative one would.
+///
+/// Reuses the shared [`rewrite_filter_props`] traversal (the same seam as
+/// [`bind_declaring_owner_authority`]), so nested descendants an ad-hoc
+/// recursion would miss — `TrackedSetFiltered` filters, `DistinctFrom` /
+/// `SharesQuality` / comparator references, `Typed` properties — re-anchor
+/// too. Rewritten leaves: bare `Controller` nodes, `Typed.controller == You`,
+/// and `Owned { You }` props. `Opponent` and the other relative
+/// `ControllerRef`s have no concrete singular form and are left untouched, as
+/// are event-determined (`Triggering*`) and source-identity
+/// (`SourceController`) leaves. Transactional like its sibling: an incomplete
+/// bounded walk leaves the input unchanged and reports `false`.
+pub(crate) fn reanchor_filter_to_holder(filter: &mut TargetFilter, holder: PlayerId) -> bool {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    rewrite_filter_props(
+        &mut rewritten,
+        &mut |node| {
+            if matches!(node, TargetFilter::Controller) {
+                *node = TargetFilter::SpecificPlayer { id: holder };
+            }
+            if let TargetFilter::Typed(typed) = node {
+                if typed.controller == Some(ControllerRef::You) {
+                    typed.controller = Some(ControllerRef::SpecificPlayer { id: holder });
+                }
+            }
+        },
+        &mut |prop| {
+            if let FilterProp::Owned {
+                controller: ControllerRef::You,
+            } = prop
+            {
+                *prop = FilterProp::Owned {
+                    controller: ControllerRef::SpecificPlayer { id: holder },
                 };
             }
         },
@@ -3740,6 +3805,7 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -9068,6 +9134,9 @@ fn matches_filter_prop(
         }
         // CR 613.4c: In per-recipient layer contexts, "other" is relative to
         // the affected object. Outside those contexts, it remains source-relative.
+        // A shared-quality reference scan binds the compared object as the
+        // recipient when it belongs to the reference population
+        // (`object_shares_quality_with_reference_filter`).
         FilterProp::Another => source.recipient_id.map_or_else(
             || !source_is_current_object(state, source, object_id),
             |recipient| object_id != recipient,
@@ -9434,8 +9503,6 @@ fn matches_filter_prop(
                 .fold(0, |sum: u32, record| sum.saturating_add(record.count));
             comparator.evaluate(i32::try_from(total).unwrap_or(i32::MAX), *count as i32)
         }
-        // CR 115.7: Stack entry has exactly one target — permissive at filter level,
-        // validated by retarget effects at resolution time.
         FilterProp::HasSingleTarget => true,
         // CR 700.2: The object is modal iff its printed modality is present. Read
         // from the static printed characteristic populated at object creation,
@@ -9539,7 +9606,8 @@ fn stack_entry_targets_satisfy(
     let Some(ability) = entry.ability() else {
         return true; // KeywordAction entries carry no ability targets — permissive.
     };
-    if ability.targets.is_empty() {
+    let targets = crate::game::ability_utils::declared_targets_in_chain(ability);
+    if targets.is_empty() {
         return false; // "targets X" with no targets cannot be satisfied.
     }
     let ctx = match source_controller {
@@ -9557,9 +9625,9 @@ fn stack_entry_targets_satisfy(
         ),
     };
     if require_all {
-        ability.targets.iter().all(check)
+        targets.iter().all(check)
     } else {
-        ability.targets.iter().any(check)
+        targets.iter().any(check)
     }
 }
 
@@ -10660,10 +10728,32 @@ fn object_shares_quality_with_reference_filter(
     // backs bare permanent/card references. `Or` is evaluated per leg so a
     // disjunctive reference (Volo's battlefield-or-graveyard) binds the
     // battlefield default to the zone-less leg only. Battlefield- and
-    // graveyard-to-object comparisons keep their existing self-inclusive
-    // semantics; only the previously-unguarded library/hand self-match (the
+    // graveyard-to-object comparisons keep their self-inclusive semantics unless
+    // the reference says "other"/"another": then the compared object is excluded
+    // whenever it is itself a member of the reference population (recipient
+    // binding below). The previously-unguarded library/hand self-match (the
     // Descendants' Path defect, where the revealed library card satisfied its
     // own "a creature you control" reference) is closed.
+    //
+    // Naming Screen's "any other creature" excludes the compared creature;
+    // Pattern Matcher's "another creature" excludes the ability source. Bind the
+    // compared object for the population-relative reading whenever the compared
+    // object is itself one of the objects the reference describes (CR 201.2a: a
+    // name comparison is between two or more objects). Membership is decided by
+    // the same CR 109.2 per-leg authority the scan uses, under the outer
+    // context, and the binding is recomputed on every evaluation (CR 611.3a).
+    // When the compared object cannot belong to the population (Pattern
+    // Matcher's searched library card against "another creature you control"),
+    // excluding it is vacuous and "another" keeps its source-relative meaning
+    // (Pattern Matcher ruling, 2019-07-12); the outer binding is left unchanged.
+    // When no outer recipient is bound and the compared object IS the source,
+    // the outer source-relative `Another` already rejects it, so both readings
+    // coincide.
+    let ctx = if reference_leg_admits(state, obj.id, obj, reference_filter, &ctx) {
+        ctx.with_recipient(obj.id)
+    } else {
+        ctx
+    };
     state.objects.keys().copied().any(|reference_id| {
         state
             .objects
@@ -10868,6 +10958,105 @@ pub(crate) fn extract_targets(filter: &TargetFilter) -> Option<TargetFilter> {
             filters.iter().find_map(extract_targets)
         }
         _ => None,
+    }
+}
+
+/// How a `HasSingleTarget` requirement counts a stack entry's targets.
+pub(crate) enum SingleTargetCount {
+    /// CR 115.9a: "with a single target" counts each time an object or player
+    /// was chosen as a target.
+    Instances,
+    /// CR 115.9c: "that targets only a single …" counts the different objects
+    /// and players chosen as targets.
+    DifferentObjectsOrPlayers,
+}
+
+impl SingleTargetCount {
+    /// Whether `targets` count as a single target.
+    pub(crate) fn admits(self, targets: &[TargetRef]) -> bool {
+        match self {
+            Self::Instances => targets.len() == 1,
+            Self::DifferentObjectsOrPlayers => targets
+                .first()
+                .is_some_and(|first| targets.iter().all(|t| t == first)),
+        }
+    }
+}
+
+/// The `HasSingleTarget` requirement anywhere in `filter`'s tree, if any. It
+/// counts as CR 115.9c's when its property list also carries `TargetsOnly`
+/// (`oracle_target.rs::parse_targets_only_constraint` writes both for "that
+/// targets only a single …"), and as CR 115.9a's otherwise.
+pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetCount> {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let has = |wanted: fn(&FilterProp) -> bool| tf.properties.iter().any(wanted);
+            has(|p| matches!(p, FilterProp::HasSingleTarget)).then(|| {
+                if has(|p| matches!(p, FilterProp::TargetsOnly { .. })) {
+                    SingleTargetCount::DifferentObjectsOrPlayers
+                } else {
+                    SingleTargetCount::Instances
+                }
+            })
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(single_target_count)
+        }
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Not { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => None,
     }
 }
 
@@ -14826,6 +15015,101 @@ mod tests {
         assert!(!matches_target_filter(&state, red, &filter, source));
     }
 
+    /// "[an]other <noun>" inside a shared-quality reference population.
+    ///
+    /// A reference of "any other creature you control" is relative to the
+    /// compared creature when that creature is itself a member of the population:
+    /// a lone "Solo" has no other creature to share its name with, while two
+    /// "Twin"s each do.
+    #[test]
+    fn shares_quality_other_reference_is_relative_to_compared_member() {
+        let mut state = setup();
+        let source_card = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            source_card,
+            PlayerId(0),
+            "Non-creature source".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let twin_a = add_creature(&mut state, PlayerId(0), "Twin");
+        let twin_b = add_creature(&mut state, PlayerId(0), "Twin");
+        let solo = add_creature(&mut state, PlayerId(0), "Solo");
+
+        let shares_name_with = |reference: TargetFilter| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(reference)),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ]))
+        };
+        let other_creature_you_control = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Another]),
+        );
+        let filter = shares_name_with(other_creature_you_control);
+        assert!(
+            matches_target_filter(&state, twin_a, &filter, source),
+            "a Twin shares its name with the other Twin"
+        );
+        assert!(
+            matches_target_filter(&state, twin_b, &filter, source),
+            "the other Twin shares its name with the first Twin"
+        );
+        assert!(
+            !matches_target_filter(&state, solo, &filter, source),
+            "a lone creature is not 'another creature you control' relative to itself"
+        );
+    }
+
+    /// Pattern Matcher shape: when the compared object cannot be a member of the
+    /// reference population (a library card against "another creature you
+    /// control" on the battlefield), "another" keeps its source-relative meaning:
+    /// the ability source is excluded, a second same-named creature is not.
+    #[test]
+    fn shares_quality_other_reference_stays_source_relative_for_non_member() {
+        let mut state = setup();
+        let seeker = add_creature(&mut state, PlayerId(0), "Twin Seeker");
+        let library_card_id = CardId(state.next_object_id);
+        let library_card = create_object(
+            &mut state,
+            library_card_id,
+            PlayerId(0),
+            "Twin Seeker".to_string(),
+            crate::types::zones::Zone::Library,
+        );
+        let another_battlefield_creature = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::Another,
+                    FilterProp::InZone {
+                        zone: crate::types::zones::Zone::Battlefield,
+                    },
+                ]),
+        );
+        let card_filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(another_battlefield_creature)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+        assert!(
+            !matches_target_filter(&state, library_card, &card_filter, seeker),
+            "the source is excluded by 'another', so it cannot be the reference"
+        );
+        add_creature(&mut state, PlayerId(0), "Twin Seeker");
+        assert!(
+            matches_target_filter(&state, library_card, &card_filter, seeker),
+            "a second same-named creature is 'another creature you control'"
+        );
+    }
+
     #[test]
     fn shares_total_power_toughness_with_parent_target_matches_per_object() {
         let mut state = setup();
@@ -16544,6 +16828,72 @@ mod tests {
         let before = other.clone();
         assert!(bind_declaring_owner_authority(&mut other, PlayerId(0)));
         assert_eq!(other, before, "a complete unrelated owner stays untouched");
+    }
+
+    /// M10: boon holder re-anchoring reuses the shared traversal seam, so
+    /// nested descendants the old ad-hoc recursion missed —
+    /// `TrackedSetFiltered` filters, `DistinctFrom` references, `Typed`
+    /// properties, `Owned` props — bind the holder too, while
+    /// opponent-relative leaves (no singular form) stay untouched.
+    #[test]
+    fn boon_holder_reanchor_is_total_over_nested_filter_topology() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let holder = PlayerId(1);
+        let bound = ControllerRef::SpecificPlayer { id: holder };
+
+        let mut bare = TargetFilter::Controller;
+        assert!(reanchor_filter_to_holder(&mut bare, holder));
+        assert_eq!(bare, TargetFilter::SpecificPlayer { id: holder });
+
+        // TrackedSetFiltered descendant the old recursion never entered.
+        let mut tracked = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            caused_by: None,
+        };
+        assert!(reanchor_filter_to_holder(&mut tracked, holder));
+        let TargetFilter::TrackedSetFiltered { filter, .. } = &tracked else {
+            unreachable!()
+        };
+        assert_eq!(
+            filter.as_ref(),
+            &TargetFilter::Typed(TypedFilter::creature().controller(bound.clone())),
+            "tracked-set descendants must re-anchor"
+        );
+
+        // DistinctFrom reference + Owned prop inside Typed.properties.
+        let mut propped = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::Controller),
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+        ]));
+        assert!(reanchor_filter_to_holder(&mut propped, holder));
+        let TargetFilter::Typed(typed) = &propped else {
+            unreachable!()
+        };
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::SpecificPlayer { id: holder }),
+                },
+                FilterProp::Owned { controller: bound },
+            ],
+            "prop-nested You references must re-anchor"
+        );
+
+        // Opponent-relative leaves have no singular form: untouched.
+        let mut opponent =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let before = opponent.clone();
+        assert!(reanchor_filter_to_holder(&mut opponent, holder));
+        assert_eq!(opponent, before);
     }
 
     /// The chosen-type relation rewrites a property wherever the typed filter

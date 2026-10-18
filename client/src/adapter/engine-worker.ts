@@ -10,6 +10,7 @@ import init, {
   initialize_game,
   initialize_multiplayer_host_game,
   submit_action,
+  drive_contest_js,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
@@ -97,6 +98,14 @@ type EngineRequest =
       firstPlayer?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
+  | {
+      type: "driveContest";
+      id: number;
+      nowMs: number;
+      aiPlayers: number[];
+      awayPlayers: number[];
+      clicks: unknown[];
+    }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
@@ -409,6 +418,21 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           events: actionResult.events ?? [],
           log_entries: actionResult.log_entries ?? [],
         });
+        break;
+      }
+
+      case "driveContest": {
+        const outcome = drive_contest_js(
+          msg.nowMs,
+          Uint8Array.from(msg.aiPlayers),
+          Uint8Array.from(msg.awayPlayers),
+          msg.clicks,
+        );
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
+          break;
+        }
+        result(msg.id, outcome);
         break;
       }
 

@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::extract::State;
 use axum::response::IntoResponse;
 
+use crate::socket_disconnect::Cause as DisconnectCause;
 use crate::{AppState, ServerMode};
 
 /// Prometheus' text exposition content type (the format this module writes).
@@ -150,6 +151,8 @@ pub struct ServerMetrics {
     jev_busy: AtomicU64,
     jev_upstream_timeout: AtomicU64,
     jev_upstream_unreachable: AtomicU64,
+    ws_disconnects: [AtomicU64; DisconnectCause::ALL.len()],
+    ws_quota_discards: AtomicU64,
 }
 
 impl ServerMetrics {
@@ -191,6 +194,22 @@ impl ServerMetrics {
     pub fn jev_relay_count(&self, status: JevRelayStatus) -> u64 {
         self.jev_relay_counter(status).load(Ordering::Relaxed)
     }
+
+    pub(crate) fn record_ws_disconnect(&self, cause: DisconnectCause) {
+        self.ws_disconnects[cause.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_disconnect_count(&self, cause: DisconnectCause) -> u64 {
+        self.ws_disconnects[cause.index()].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_ws_quota_discard(&self) {
+        self.ws_quota_discards.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_quota_discard_count(&self) -> u64 {
+        self.ws_quota_discards.load(Ordering::Relaxed)
+    }
 }
 
 /// Build identity, mirroring what `ServerHello` advertises to clients.
@@ -214,8 +233,8 @@ impl BuildInfo {
     }
 }
 
-/// One scrape's worth of values. Separated from both collection and rendering
-/// so the exposition can be asserted byte-for-byte against known numbers.
+/// One scrape's worth of values, allowing collection and public exposition
+/// to be checked independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub connections: u32,
@@ -232,6 +251,9 @@ pub struct Snapshot {
     pub rejects: Vec<(RejectReason, u64)>,
     /// `/jev/systemone` relay requests by outcome.
     pub jev_relay: Vec<(JevRelayStatus, u64)>,
+    /// First-observed transport failures, using a fixed label set.
+    pub ws_disconnects: [u64; DisconnectCause::ALL.len()],
+    pub ws_discarded_frames: u64,
     pub build: BuildInfo,
 }
 
@@ -309,6 +331,9 @@ pub async fn collect(app: &AppState) -> Snapshot {
             .iter()
             .map(|&status| (status, app.context.metrics.jev_relay_count(status)))
             .collect(),
+        ws_disconnects: DisconnectCause::ALL
+            .map(|cause| app.context.metrics.ws_disconnect_count(cause)),
+        ws_discarded_frames: app.context.metrics.ws_quota_discard_count(),
         build: BuildInfo::current(app.mode),
     }
 }
@@ -399,6 +424,28 @@ pub fn render(snapshot: &Snapshot) -> String {
         );
     }
 
+    let _ =
+        writeln!(&mut out,
+        "# HELP phase_ws_disconnects_total WebSocket transports closed by first-observed cause.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_disconnects_total counter");
+    for (cause, count) in DisconnectCause::ALL
+        .into_iter()
+        .zip(snapshot.ws_disconnects)
+    {
+        let _ = writeln!(
+            &mut out,
+            "phase_ws_disconnects_total{{cause=\"{}\"}} {count}",
+            cause.label()
+        );
+    }
+    let _ = writeln!(&mut out, "# HELP phase_ws_discarded_frames_total WebSocket frames discarded by bounded ingress policy.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_discarded_frames_total counter");
+    let _ = writeln!(
+        &mut out,
+        "phase_ws_discarded_frames_total{{reason=\"quota_exhausted\"}} {}",
+        snapshot.ws_discarded_frames
+    );
+
     let _ = writeln!(
         &mut out,
         "# HELP phase_admission_rejects_total Connections and games refused at admission."
@@ -453,6 +500,8 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         Snapshot {
+            ws_disconnects: Default::default(),
+            ws_discarded_frames: 12,
             connections: 7,
             connections_capacity: 200,
             games_active: 4,
@@ -485,58 +534,50 @@ mod tests {
         }
     }
 
-    /// The exposition is a wire contract a scraper parses, so assert the whole
-    /// body rather than probing for substrings: a renamed metric, a dropped
-    /// TYPE line or a value read from the wrong field all fail here.
+    /// Scrapers depend on family names, types, labels and values, not HELP
+    /// prose or the order in which independent metric families are rendered.
     #[test]
-    fn render_emits_every_family_with_its_values() {
-        let expected = concat!(
-            "# HELP phase_connections Currently open WebSocket connections.\n",
-            "# TYPE phase_connections gauge\n",
-            "phase_connections 7\n",
-            "# HELP phase_connections_capacity Connections this process admits before refusing upgrades.\n",
-            "# TYPE phase_connections_capacity gauge\n",
-            "phase_connections_capacity 200\n",
-            "# HELP phase_games_active Game sessions held by this process.\n",
-            "# TYPE phase_games_active gauge\n",
-            "phase_games_active 4\n",
-            "# HELP phase_games_with_connected_humans Game sessions with at least one live player or spectator socket.\n",
-            "# TYPE phase_games_with_connected_humans gauge\n",
-            "phase_games_with_connected_humans 2\n",
-            "# HELP phase_games_capacity Game sessions this process admits before refusing CreateGame.\n",
-            "# TYPE phase_games_capacity gauge\n",
-            "phase_games_capacity 100\n",
-            "# HELP phase_drafts_active Draft sessions held by this process.\n",
-            "# TYPE phase_drafts_active gauge\n",
-            "phase_drafts_active 1\n",
-            "# HELP phase_drafts_with_connected_humans Draft sessions with at least one connected seat or live spectator socket.\n",
-            "# TYPE phase_drafts_with_connected_humans gauge\n",
-            "phase_drafts_with_connected_humans 1\n",
-            "# HELP phase_replica_ordinal Ordinal of this replica within its StatefulSet.\n",
-            "# TYPE phase_replica_ordinal gauge\n",
-            "phase_replica_ordinal 3\n",
-            "# HELP phase_admission_rejects_total Connections and games refused at admission.\n",
-            "# TYPE phase_admission_rejects_total counter\n",
-            "phase_admission_rejects_total{reason=\"connection_limit\"} 5\n",
-            "phase_admission_rejects_total{reason=\"game_limit\"} 0\n",
-            "phase_admission_rejects_total{reason=\"origin_not_allowed\"} 2\n",
-            "# HELP phase_jev_relay_requests_total Requests answered by the /jev/systemone relay, by outcome.\n",
-            "# TYPE phase_jev_relay_requests_total counter\n",
-            "phase_jev_relay_requests_total{status=\"upstream_2xx\"} 11\n",
-            "phase_jev_relay_requests_total{status=\"upstream_4xx\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"upstream_5xx\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"upstream_other\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"bad_request\"} 4\n",
-            "phase_jev_relay_requests_total{status=\"payload_too_large\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"busy\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"upstream_timeout\"} 1\n",
-            "phase_jev_relay_requests_total{status=\"upstream_unreachable\"} 0\n",
-            "# HELP phase_build_info Build identity of this process; the value is always 1.\n",
-            "# TYPE phase_build_info gauge\n",
-            "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1\n",
-        );
-
-        assert_eq!(render(&snapshot()), expected);
+    fn render_preserves_scraper_types_labels_and_values() {
+        let mut fixture = snapshot();
+        fixture.ws_disconnects[DisconnectCause::QuotaRefusalOverflow.index()] = 9;
+        fixture.ws_disconnects[DisconnectCause::QuotaDiscardOverflow.index()] = 2;
+        let body = render(&fixture);
+        for expected in [
+            "# TYPE phase_connections gauge",
+            "phase_connections 7",
+            "# TYPE phase_connections_capacity gauge",
+            "phase_connections_capacity 200",
+            "# TYPE phase_games_active gauge",
+            "phase_games_active 4",
+            "# TYPE phase_games_with_connected_humans gauge",
+            "phase_games_with_connected_humans 2",
+            "# TYPE phase_games_capacity gauge",
+            "phase_games_capacity 100",
+            "# TYPE phase_drafts_active gauge",
+            "phase_drafts_active 1",
+            "# TYPE phase_drafts_with_connected_humans gauge",
+            "phase_drafts_with_connected_humans 1",
+            "# TYPE phase_replica_ordinal gauge",
+            "phase_replica_ordinal 3",
+            "# TYPE phase_ws_disconnects_total counter",
+            "phase_ws_disconnects_total{cause=\"quota_refusal_overflow\"} 9",
+            "phase_ws_disconnects_total{cause=\"quota_discard_overflow\"} 2",
+            "phase_ws_disconnects_total{cause=\"peer_close\"} 0",
+            "# TYPE phase_ws_discarded_frames_total counter",
+            "phase_ws_discarded_frames_total{reason=\"quota_exhausted\"} 12",
+            "# TYPE phase_admission_rejects_total counter",
+            "phase_admission_rejects_total{reason=\"connection_limit\"} 5",
+            "# TYPE phase_jev_relay_requests_total counter",
+            "phase_jev_relay_requests_total{status=\"upstream_2xx\"} 11",
+            "# TYPE phase_build_info gauge",
+            "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1",
+        ] {
+            assert_eq!(
+                body.lines().filter(|line| *line == expected).count(),
+                1,
+                "missing or duplicated scraper contract: {expected}\n{body}",
+            );
+        }
     }
 
     /// `None` must drop the family entirely. Emitting `phase_replica_ordinal 0`

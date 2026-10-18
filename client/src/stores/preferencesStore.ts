@@ -288,6 +288,9 @@ function buildDefaultPreferences(): PreferencesState {
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
     priorityPassingMode: "Standard",
+    priorityAlertVisual: true,
+    priorityAlertSound: true,
+    priorityAlertTitle: true,
     experimentalTournamentsEnabled: false,
     masterVolume: 100,
     sfxVolume: 70,
@@ -362,6 +365,14 @@ interface PreferencesState {
   pacingMultipliers: Record<PacingCategory, number>;
   phaseStops: PhaseStop[];
   priorityPassingMode: PriorityPassingMode;
+  /** Glow the turn-status pill and pass button (stronger once unanswered) when
+   *  a meaningful priority window opens after you were waiting on someone else. */
+  priorityAlertVisual: boolean;
+  /** Play a short cue when a meaningful priority window opens. */
+  priorityAlertSound: boolean;
+  /** Prefix the browser tab title while a priority alert is pending in a
+   *  background tab. */
+  priorityAlertTitle: boolean;
   /** Whether the in-progress tournament UI appears in app navigation. */
   experimentalTournamentsEnabled: boolean;
   masterVolume: number;
@@ -480,6 +491,9 @@ interface PreferencesActions {
   resetAllPreferences: () => void;
   setPhaseStops: (stops: PhaseStop[]) => void;
   setPriorityPassingMode: (mode: PriorityPassingMode) => void;
+  setPriorityAlertVisual: (enabled: boolean) => void;
+  setPriorityAlertSound: (enabled: boolean) => void;
+  setPriorityAlertTitle: (enabled: boolean) => void;
   setExperimentalTournamentsEnabled: (enabled: boolean) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
@@ -635,6 +649,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       resetAllPreferences: () => set(buildDefaultPreferences()),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
       setPriorityPassingMode: (mode) => set({ priorityPassingMode: mode }),
+      setPriorityAlertVisual: (enabled) => set({ priorityAlertVisual: enabled }),
+      setPriorityAlertSound: (enabled) => set({ priorityAlertSound: enabled }),
+      setPriorityAlertTitle: (enabled) => set({ priorityAlertTitle: enabled }),
       setExperimentalTournamentsEnabled: (enabled) => set({ experimentalTournamentsEnabled: enabled }),
       setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
@@ -831,7 +848,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 37,
+      version: 38,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -921,6 +938,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          card animations) through the shallow merge, the same as fresh
       //          stores, so no migrate block is needed.
       // v36 → v37: Consolidate battlefield art to one animated arena per color.
+      // v37 → v38: Add priorityAlertVisual/Sound/Title. Existing users get all
+      //          three on (true) through the shallow merge, the same as fresh
+      //          stores, so no migrate block is needed.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

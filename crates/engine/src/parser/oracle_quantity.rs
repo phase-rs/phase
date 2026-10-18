@@ -820,6 +820,28 @@ pub(crate) fn parse_cda_quantity_with_context(
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
+    // CR 608.2k: owner-bound possessive pronouns ("its power", "2 plus its
+    // power", "half its toughness"). When the context carries a
+    // `characteristic_pronoun_owner` (set only by
+    // `parse_where_x_quantity_expression_with_owner` for boon-granted
+    // "it"/"that" tails, where the pronoun names the triggering object), the
+    // bare pronoun-characteristic surface binds the owner STRUCTURALLY during
+    // this shared parse — every recursive arm below (fractions, multipliers,
+    // offsets, sums) re-enters through this same context, so composed and
+    // nested forms bind the owner at every level with no post-hoc repair.
+    // Explicit self-references ("~'s power") never match the pronoun grammar
+    // and fall through to the `Source` arms below unchanged. `None` (every
+    // other caller) skips this arm entirely: zero behavior change.
+    if let Some(owner) = ctx.characteristic_pronoun_owner {
+        if let Ok((rest, qty)) =
+            nom_quantity::parse_pronoun_characteristic_ref_with_scope(text, owner)
+        {
+            if rest.is_empty() {
+                return Some(QuantityExpr::Ref { qty });
+            }
+        }
+    }
+
     // CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" — the
     // cross-player extremum of the numbers players secretly chose earlier in THIS
     // ability (Wheel of Misfortune, Menacing Ogre, Life at Stake).
@@ -856,8 +878,23 @@ pub(crate) fn parse_cda_quantity_with_context(
     // falls through to `Variable { name: "<whole phrase>" }`, which resolves to 0
     // at runtime (a silent no-op). Tried first so the leading "half " is consumed
     // before the single-ref / binary-arithmetic arms below.
-    if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
-        if rest.is_empty() {
+    //
+    // CR 608.2k exception: in owner mode the general nom grammar hardcodes
+    // `Source` for possessive pronouns, so the CDA-recursive fraction arm
+    // below (which re-enters with this context, binding the owner) runs
+    // FIRST; the nom-direct attempt becomes the fallback after it. Default
+    // mode keeps today's nom-first order exactly.
+    let owner_mode = ctx.characteristic_pronoun_owner.is_some();
+    let try_nom_fraction = || {
+        if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
+            if rest.is_empty() {
+                return Some(expr);
+            }
+        }
+        None
+    };
+    if !owner_mode {
+        if let Some(expr) = try_nom_fraction() {
             return Some(expr);
         }
     }
@@ -895,6 +932,14 @@ pub(crate) fn parse_cda_quantity_with_context(
                 divisor,
                 rounding,
             });
+        }
+    }
+    // CR 608.2k owner-mode fallback: the CDA-recursive fraction declined, so
+    // retry the general nom grammar — today's result for tails only it
+    // accepts (no owner benefit, but no owner-mode gap either).
+    if owner_mode {
+        if let Some(expr) = try_nom_fraction() {
+            return Some(expr);
         }
     }
 
@@ -1909,6 +1954,19 @@ fn parse_anaphoric_power_toughness_sum(
 /// Parse event-context quantity references from Oracle text fragments.
 /// Returns None for unrecognized patterns (caller falls back to Variable).
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
+    parse_event_context_quantity_with_context(text, &ParseContext::default())
+}
+
+/// `parse_event_context_quantity` under the caller's player antecedents. The
+/// composite branch and the named-quantity fallbacks each parse under an
+/// antecedent-only clone of `ctx` (`clone_player_antecedents`), so a "that
+/// player" / "they" inside the amount binds the player the caller's scope names
+/// (CR 608.2c) and nothing else of the caller's context reaches the sub-parse;
+/// the clone's diagnostics are dropped with it.
+pub(crate) fn parse_event_context_quantity_with_context(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
     if let Ok((_, expr)) =
@@ -2117,7 +2175,7 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     // delegate to parse_cda_quantity — the single authority for offset/multiply grammar.
     // Limited to composite variants so atomic refs still flow through the
     // TargetPower/TargetLifeTotal exclusion in the fallback below.
-    match parse_cda_quantity(lower) {
+    match parse_cda_quantity_with_context(lower, &mut ctx.clone_player_antecedents()) {
         Some(qty @ (QuantityExpr::Offset { .. } | QuantityExpr::Multiply { .. })) => {
             return Some(qty);
         }
@@ -2149,7 +2207,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let stripped = tag::<_, _, OracleError<'_>>("the ")
         .parse(lower)
         .map_or(lower, |(r, _)| r);
-    if let Some(qty) = parse_quantity_ref(stripped) {
+    if let Some(qty) =
+        parse_quantity_ref_with_context(stripped, &mut ctx.clone_player_antecedents())
+    {
         if !matches!(
             qty,
             QuantityRef::Power {
@@ -2161,7 +2221,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
             return Some(QuantityExpr::Ref { qty });
         }
     }
-    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) = parse_quantity_ref(lower) {
+    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) =
+        parse_quantity_ref_with_context(lower, &mut ctx.clone_player_antecedents())
+    {
         return Some(QuantityExpr::Ref { qty });
     }
 

@@ -459,7 +459,6 @@ const NESTED_SUB_COST: &[Row] = &[
     ("mc/sol-ring/bronze-sable", "Sol Ring", "{T}: Add {C}{C}.", &[], &[], "Bronze Sable", true, "tt/BF"),
     ("mc/ancient-tomb/bronze-sable", "Ancient Tomb", "{T}: Add {C}{C}. ~ deals 2 damage to you.", &[], &[], "Bronze Sable", true, "tt/BF"),
     ("u/celebrant+swamp/elves", "Blood Celebrant", "{B}, Pay 1 life: Add one mana of any color.", &[("Swamp", B, 'p')], &[], "Llanowar Elves", true, "tt/BF"),
-    ("m/A-Hall of Tagsin", "A-Hall of Tagsin", "{1}, {T}: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Abstergo Entertainment", "Abstergo Entertainment", "{1}, {T}: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Abzan Devotee", "Abzan Devotee", "{1}: Add {W}, {B}, or {G}. Activate only once each turn.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Agent of Stromgald", "Agent of Stromgald", "{R}: Add {B}.", &[("Mountain", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
@@ -632,7 +631,7 @@ const NESTED_SUB_COST: &[Row] = &[
     ("m/Wizards' School (2)", "Wizards' School", "{2}, {T}: Add {W} or {B}.", &[("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Wooded Bastion", "Wooded Bastion", "{G/W}, {T}: Add {G}{G}, {G}{W}, or {W}{W}.", &[("Forest", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Yurlok of Scorch Thrash", "Yurlok of Scorch Thrash", "{1}, {T}: Each player adds {B}{R}{G}.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
-    ("m/Codie, Vociferous Codex (2)", "Codie, Vociferous Codex", "{4}, {T}: Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value. Until end of turn, you may cast that card without paying its mana cost. Put each other card exiled this way on the bottom of your library in a random order.", &[("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Opt", true, "tt/GY"),
+    ("m/Codie, Vociferous Codex (2)", "Codie, Vociferous Codex", "{4}, {T}: Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value. Until end of turn, you may cast that card without paying its mana cost. Put each other card exiled this way on the bottom of your library in a random order.", &[("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Opt", true, "tt/stk"),
     ("m/Azorius Signet (2)", "Azorius Signet", "{1}, {T}: Add {W}{U}.", &[("Wastes", B, 'p')], &[], "Fugitive Wizard", true, "tt/BF"),
 ];
 
@@ -654,7 +653,6 @@ const EXACT_SURPLUS: &[Row] = &[
     ("x/Tinder Farm", "Tinder Farm", "{T}, Sacrifice ~: Add {R}{W}.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Barbarian Horde", true, "tt/BF"),
     ("th/tower+bears/barony-vampire", "Phyrexian Tower", "{T}, Sacrifice a creature: Add {B}{B}.", &[("Grizzly Bears", B, 'f')], &[], "Barony Vampire", false, "ff/H"),
     ("th/holdout-alone/elves", "Holdout Settlement", "{T}, Tap an untapped creature you control: Add one mana of any color.", &[], &[], "Llanowar Elves", false, "ff/H"),
-    ("x/A-Canopy Tactician", "A-Canopy Tactician", "{T}: Add {G}{G}{G}.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Blanchwood Treefolk", true, "tt/BF"),
     ("x/Ancient Tomb", "Ancient Tomb", "{T}: Add {C}{C}. ~ deals 2 damage to you.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("x/Andrios, Roaming Explorer", "Andrios, Roaming Explorer", "{T}: Add {W}{U}{B}{R}{G}. Creature spells you spend this mana to cast have their base power and toughness become 4/3.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Angel of Retribution", true, "tt/BF"),
     ("x/Anina, Natural Parallelist", "Anina, Natural Parallelist", "{T}: Add {G}{U}. Spend this mana only to cast spells with {X} in their mana costs.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Axebane Beast", true, "tt/BF"),

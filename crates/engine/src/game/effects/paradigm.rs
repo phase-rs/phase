@@ -209,6 +209,8 @@ pub fn cast_paradigm_copy(
     // used by normal casting (see `ability_utils`).
     let mut resolved = build_resolved_from_def(&ability_def, copy_id, controller);
     resolved.context.cast_from_zone = Some(origin_zone);
+    // CR 707.12: a cast copy declares only the targets chosen for it.
+    resolved.start_target_record_recursive();
 
     // CR 707.10: the copy-onto-stack authority emits `StackPushed`.
     crate::game::stack::push_copy_to_stack(

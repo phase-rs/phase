@@ -1707,6 +1707,19 @@ fn scoped_player_search_then_shuffles_keeps_the_scoped_player() {
         }
     )));
     assert_eq!(chain_shuffle_target(execute), &TargetFilter::ScopedPlayer);
+
+    // CR 101.2 + CR 121.3 + CR 119.7: both halves of "can't draw cards or gain life".
+    use crate::types::statics::{ProhibitionScope, StaticMode};
+    let modes: Vec<_> = parsed.statics.iter().map(|s| &s.mode).collect();
+    assert_eq!(
+        modes,
+        vec![
+            &StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers
+            },
+            &StaticMode::CantGainLife,
+        ]
+    );
 }
 
 fn declared() -> TargetFilter {

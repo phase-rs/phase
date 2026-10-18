@@ -2438,7 +2438,16 @@
     "leave": "离开",
     "watchingWith": "同时观战：{{names}}"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "activated": "起动式",
     "casting": "正在施放…",
     "collapsePanel": "折叠堆叠面板",
@@ -2533,6 +2542,7 @@
     "chooseTargetForCopy": "为复制品选择目标",
     "chooseTargetForCopySlot": "为复制品选择目标：第 {{current}} 个，共 {{total}} 个",
     "chooseTargetOf": "选择目标：第 {{current}} 个，共 {{total}} 个",
+    "chooseTokenHost": "选择一个衍生物的宿主",
     "collapseDescription": "收起",
     "confirmSacrifice": "牺牲（{{selected}}/{{count}}）",
     "confirmTap": "确认横置（{{selected}}/{{count}}）",
@@ -2674,5 +2684,34 @@
     "substituteTitle": "选择牌手",
     "subtitle": "选择由哪位对手做出选择。",
     "title": "选择对手"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "瞪眼比赛",
+      "breathHolding": "憋气比赛"
+    },
+    "versus": "{{first}} 对 {{second}}",
+    "instructions": "尽可能久地持续点击、轻触或按空格键。第一个停止超过 {{seconds}} 秒的玩家落败。",
+    "status": {
+      "pending": "等待比赛开始…",
+      "preparing": "准备…",
+      "go": "开始！继续点击！",
+      "paused": "比赛已暂停，等待玩家重新连接…",
+      "spectating": "正在观看比赛…",
+      "resolving": "正在判定结果…"
+    },
+    "button": {
+      "wait": "等待开始…",
+      "active": "继续点击！"
+    },
+    "you": "你",
+    "clicks": "{{name}}：{{count}}",
+    "result": {
+      "won": "你赢得了比赛！",
+      "lost": "你输掉了比赛。",
+      "winner": "{{name}} 赢得了比赛。",
+      "tie": "平局：什么也不会发生。",
+      "cancelled": "比赛已取消：什么也不会发生。"
+    }
   }
 }

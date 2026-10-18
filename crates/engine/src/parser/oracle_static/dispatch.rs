@@ -939,6 +939,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 606.3: "You may activate [the] loyalty abilities of <subject> <count>
+    // each turn rather than only once" (Oath of Teferi / Urza, Planeswalker).
+    // Earliest point whose earlier arms provably return None on this shape, so
+    // it takes precedence over the later branches below.
+    if let Some(def) = parse_loyalty_activation_limit_static(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 510.1c: Attached-object conditional variants must precede the generic
     // inverted "As long as ..." rewrite so the condition binds to the
     // enchanted/equipped creature rather than becoming an unrecognized SelfRef

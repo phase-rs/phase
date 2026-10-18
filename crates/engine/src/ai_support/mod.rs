@@ -25,15 +25,15 @@ use crate::game::priority::{standing_priority_pass, StandingPriorityPass};
 use crate::game::restrictions;
 use crate::game::triggers;
 use crate::types::ability::{
-    AbilityBlockEntry, AbilityKind, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
-    TriggerDefinition,
+    AbilityBlockEntry, AbilityKind, ChoiceType, CounterCostSelection, TapCreaturesSelectionMode,
+    TargetRef, TriggerDefinition,
 };
 use crate::types::actions::{GameAction, MulliganChoice};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
-    PendingMulliganAction, PriorityPassingMode, WaitingFor,
+    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, NamedChoiceSourceBinding,
+    PayCostKind, PendingMulliganAction, PriorityPassingMode, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -268,6 +268,75 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
         ConvokeMode::Improvise => {
             obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
         }
+    }
+}
+
+/// CR 608.2d + CR 614.12a: A named choice made while an effect applies, or as a
+/// permanent enters, is announced from the prompt's enumerated domain, and the
+/// reducer accepts any member of it (`engine_resolution_choices.rs`, the
+/// `NamedChoice` arm) — so `SimulationFilter` can skip its clone-and-apply
+/// probe. Mirrors [`structurally_valid_search_selection`].
+///
+/// This is load-bearing for creature-type prompts: each of the several hundred
+/// enumerated answers (one per known creature type) paid a full `GameState`
+/// clone, which is costly on a large board, to re-derive a verdict that
+/// membership alone decides.
+///
+/// CR 601.2f + CR 601.2h + CR 602.2b: while a cast or activation is in progress
+/// (`GameState::withholds_priority`), an answer precedes determining and paying
+/// the total cost and could make that cost unpayable, so the simulation stays
+/// the authority there.
+///
+/// Conservative by design: `false` only costs a simulation, so any shape this
+/// does not fully model must return `false` rather than guess.
+pub(crate) fn structurally_valid_named_choice_answer(
+    state: &GameState,
+    action: &GameAction,
+) -> bool {
+    let (
+        WaitingFor::NamedChoice {
+            choice_type,
+            options,
+            source,
+            ..
+        },
+        GameAction::ChooseOption { choice },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    // CR 601.2f + CR 601.2h + CR 602.2b: an answer given mid-cast or
+    // mid-activation resumes cost determination and payment, which can fail
+    // for that answer; only the simulation observes that.
+    if state.withholds_priority() {
+        return false;
+    }
+
+    // CR 201.4 + CR 107.1a/b: card names (CR 201.4) and free-entry numbers
+    // (CR 107.1a/b) are supplied by the player and validated by rule rather than
+    // by option membership, so they stay on the simulation.
+    if matches!(choice_type, ChoiceType::CardName) || choice_type.free_entry().is_some() {
+        return false;
+    }
+
+    if !options.iter().any(|option| option == choice) {
+        return false;
+    }
+
+    // Whole-prompt checks the reducer applies after membership: a source-bound
+    // prompt must carry its matching context, and CR 614.12a a pre-entry
+    // choice must still answer the live parked entry.
+    match source {
+        None => true,
+        Some(s) if !s.has_matching_context() => false,
+        Some(s) => match s.binding {
+            NamedChoiceSourceBinding::PendingEntry => {
+                crate::game::replacement::pending_entry_named_choice_is_live(state)
+            }
+            NamedChoiceSourceBinding::ResolutionContext
+            | NamedChoiceSourceBinding::ExactObjectAndResolution => true,
+        },
     }
 }
 

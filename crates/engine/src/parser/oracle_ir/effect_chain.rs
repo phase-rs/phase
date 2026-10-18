@@ -856,6 +856,16 @@ pub(crate) enum ReplicateKind {
     PerpetualKeywordGrant,
 }
 
+/// CR 608.2c + CR 608.2d + CR 115.10a: one operand of an accepting-player clause's own
+/// chain as parsed without and with the accepting-player seed. `node` is 0 for the
+/// clause's head and n for the n-th node of `parsed.sub_ability`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AcceptingPlayerBinding {
+    pub(crate) node: usize,
+    pub(crate) unseeded: TargetFilter,
+    pub(crate) seeded: TargetFilter,
+}
+
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.
 ///
 /// Each field corresponds to a local variable extracted during the chunk loop's
@@ -907,6 +917,11 @@ pub(crate) struct ClauseIr {
     pub(crate) is_optional: bool,
     /// CR 608.2d: Opponent-may scope.
     pub(crate) opponent_may_scope: Option<OpponentMayScope>,
+    /// CR 608.2c + CR 608.2d + CR 115.10a: the accepting-player seed's operand bindings
+    /// for this clause's own chain (`lower::accepting_player_bindings`). Read only by
+    /// `lower::lower_effect_chain_ir`, which emits them under its confinement check.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) accepting_player_bindings: Vec<AcceptingPlayerBinding>,
     /// CR 608.2c: "for each" / "N times" repeat quantity.
     pub(crate) repeat_for: Option<QuantityExpr>,
     /// Player scope iteration ("each opponent", "each player").
@@ -1027,6 +1042,7 @@ impl ClauseIr {
             condition,
             is_optional,
             opponent_may_scope,
+            accepting_player_bindings,
             repeat_for,
             player_scope,
             starting_with,
@@ -1057,6 +1073,7 @@ impl ClauseIr {
         *condition = None;
         *is_optional = false;
         *opponent_may_scope = None;
+        accepting_player_bindings.clear();
         *repeat_for = None;
         *player_scope = None;
         *starting_with = None;
@@ -1232,6 +1249,7 @@ impl ClauseIrBuilder {
             condition: None,
             is_optional: false,
             opponent_may_scope: None,
+            accepting_player_bindings: Vec::new(),
             repeat_for: None,
             player_scope: None,
             starting_with: None,
@@ -1317,6 +1335,7 @@ impl ClauseIrBuilder {
         .condition(c.condition)
         .is_optional(c.is_optional)
         .opponent_may_scope(c.opponent_may_scope)
+        .accepting_player_bindings(c.accepting_player_bindings)
         .repeat_for(c.repeat_for)
         .player_scope(c.player_scope)
         .starting_with(c.starting_with)
@@ -1355,6 +1374,7 @@ pub(crate) struct ClauseDraft<'a> {
     condition: Option<AbilityCondition>,
     is_optional: bool,
     opponent_may_scope: Option<OpponentMayScope>,
+    accepting_player_bindings: Vec<AcceptingPlayerBinding>,
     repeat_for: Option<QuantityExpr>,
     player_scope: Option<PlayerFilter>,
     starting_with: Option<ControllerRef>,
@@ -1385,6 +1405,10 @@ impl ClauseDraft<'_> {
     }
     pub(crate) fn opponent_may_scope(mut self, v: Option<OpponentMayScope>) -> Self {
         self.opponent_may_scope = v;
+        self
+    }
+    pub(crate) fn accepting_player_bindings(mut self, v: Vec<AcceptingPlayerBinding>) -> Self {
+        self.accepting_player_bindings = v;
         self
     }
     pub(crate) fn repeat_for(mut self, v: Option<QuantityExpr>) -> Self {
@@ -1688,6 +1712,7 @@ impl ClauseDraft<'_> {
             condition: self.condition,
             is_optional: self.is_optional,
             opponent_may_scope: self.opponent_may_scope,
+            accepting_player_bindings: self.accepting_player_bindings,
             repeat_for: self.repeat_for,
             player_scope: self.player_scope,
             starting_with: self.starting_with,

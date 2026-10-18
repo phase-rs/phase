@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Giocatore in difesa (Travolgere)",
     "pwControllerTrample": "Controllore del PW (Travolgere sul PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Pila",
     "collapsePanel": "Comprimi il pannello della pila",
     "expandPanel": "Espandi il pannello della pila",
@@ -863,6 +872,7 @@
     "chooseCreatureToEquip": "Scegli una creatura da equipaggiare",
     "chooseCreatureTokenToPopulate": "Scegli una pedina creatura da popolare",
     "chooseReturnAsAuraTarget": "Scegli un permanente da incantare",
+    "chooseTokenHost": "Scegli un ospite per la pedina",
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",
@@ -2624,8 +2634,8 @@
     "close": "Chiudi la finestra della decisione IA"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "La tua priorità",
+    "yourPriorityReason": "La tua priorità — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2669,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Gara di sguardi",
+      "breathHolding": "Gara di apnea"
+    },
+    "versus": "{{first}} contro {{second}}",
+    "instructions": "Continua a cliccare, toccare o premere la barra spaziatrice più a lungo che puoi. Il primo giocatore che si ferma per {{seconds}} secondi perde.",
+    "status": {
+      "pending": "In attesa dell'inizio della gara…",
+      "preparing": "Preparati…",
+      "go": "VIA! Continua a cliccare!",
+      "paused": "Gara in pausa mentre un giocatore si riconnette…",
+      "spectating": "Stai guardando la gara…",
+      "resolving": "Determinazione del risultato…"
+    },
+    "button": {
+      "wait": "Aspetta il VIA…",
+      "active": "Continua a cliccare!"
+    },
+    "you": "Tu",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "Hai vinto la gara!",
+      "lost": "Hai perso la gara.",
+      "winner": "{{name}} ha vinto la gara.",
+      "tie": "Pareggio: non succede nulla.",
+      "cancelled": "La gara è stata annullata: non succede nulla."
+    }
   }
 }

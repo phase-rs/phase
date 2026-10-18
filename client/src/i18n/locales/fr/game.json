@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Joueur défenseur (Piétinement)",
     "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Pile",
     "collapsePanel": "Réduire le panneau de la pile",
     "expandPanel": "Développer le panneau de la pile",
@@ -863,6 +872,7 @@
     "chooseCreatureToEquip": "Choisissez une créature à équiper",
     "chooseCreatureTokenToPopulate": "Choisissez un jeton de créature à peupler",
     "chooseReturnAsAuraTarget": "Choisissez un permanent à enchanter",
+    "chooseTokenHost": "Choisissez un hôte pour le jeton",
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",
     "chooseTargetOf": "Choisissez la cible {{current}} sur {{total}}",
@@ -2624,8 +2634,8 @@
     "close": "Fermer la fenêtre de décision de l’IA"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Votre priorité",
+    "yourPriorityReason": "Votre priorité — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2669,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Concours de regard",
+      "breathHolding": "Concours d'apnée"
+    },
+    "versus": "{{first}} contre {{second}}",
+    "instructions": "Continuez à cliquer, à toucher l'écran ou à appuyer sur la barre d'espace aussi longtemps que possible. Le premier joueur qui s'arrête pendant {{seconds}} secondes perd.",
+    "status": {
+      "pending": "En attente du début du concours…",
+      "preparing": "Préparez-vous…",
+      "go": "PARTEZ ! Continuez à cliquer !",
+      "paused": "Concours en pause le temps qu'un joueur se reconnecte…",
+      "spectating": "Vous regardez le concours…",
+      "resolving": "Détermination du résultat…"
+    },
+    "button": {
+      "wait": "Attendez le signal…",
+      "active": "Continuez à cliquer !"
+    },
+    "you": "Vous",
+    "clicks": "{{name}} : {{count}}",
+    "result": {
+      "won": "Vous avez gagné le concours !",
+      "lost": "Vous avez perdu le concours.",
+      "winner": "{{name}} a gagné le concours.",
+      "tie": "Égalité : il ne se passe rien.",
+      "cancelled": "Le concours a été annulé : il ne se passe rien."
+    }
   }
 }

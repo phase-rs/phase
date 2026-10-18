@@ -1947,6 +1947,20 @@ pub enum GameEvent {
         amount_spent: u32,
         new_cumulative: u32,
     },
+    /// Eye to Eye / Mouth to Mouth: the real-time contest between `participants`
+    /// (controller first) has begun. See `types::contest`.
+    PhysicalContestStarted {
+        kind: crate::types::contest::ContestKind,
+        participants: [PlayerId; 2],
+    },
+    /// The contest reached a terminal state and its result was applied to the
+    /// game exactly once. `result` distinguishes a decided win, a tie, and a
+    /// technical cancellation.
+    PhysicalContestResolved {
+        kind: crate::types::contest::ContestKind,
+        participants: [PlayerId; 2],
+        result: crate::types::contest::ContestResult,
+    },
     /// CR 701.30: A clash occurred between two players.
     Clash {
         controller: PlayerId,

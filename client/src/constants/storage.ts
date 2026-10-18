@@ -659,6 +659,18 @@ export function loadActiveDeck(): ParsedDeck | null {
   return loadSavedDeck(activeName);
 }
 
+/**
+ * Read the declared bracket for the currently active deck from localStorage.
+ * Returns `null` when no deck is selected or the deck carries no bracket tag.
+ * This is the sole call site for bracket → active-deck bridging so future
+ * bracket storage changes only need to update this function.
+ */
+export function loadActiveDeckBracket(): CommanderBracket | null {
+  const name = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!name || isRandomDeckSelection(name)) return null;
+  return loadSavedDeckBracket(name);
+}
+
 // --- Feed storage helpers ---
 
 export function loadFeedSubscriptions(): FeedSubscription[] {

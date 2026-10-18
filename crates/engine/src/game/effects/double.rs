@@ -357,6 +357,7 @@ mod tests {
             target_incarnations: Vec::new(),
             target_pins: Vec::new(),
             legacy_selected_target_incarnations: Vec::new(),
+            chosen_target_slots: Default::default(),
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),

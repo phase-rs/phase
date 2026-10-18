@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
     "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stapel",
     "collapsePanel": "Stapelleiste einklappen",
     "expandPanel": "Stapelleiste ausklappen",
@@ -863,6 +872,7 @@
     "chooseCreatureToEquip": "Wähle eine Kreatur zum Ausrüsten",
     "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
+    "chooseTokenHost": "Wähle, woran der Spielstein angelegt wird",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
@@ -2624,8 +2634,8 @@
     "close": "KI-Entscheidungsfenster schließen"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Du hast Priorität",
+    "yourPriorityReason": "Du hast Priorität — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2669,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Anstarr-Wettbewerb",
+      "breathHolding": "Luftanhalte-Wettbewerb"
+    },
+    "versus": "{{first}} gegen {{second}}",
+    "instructions": "Klicke, tippe oder drücke die Leertaste, so lange du kannst. Wer zuerst {{seconds}} Sekunden lang aufhört, verliert.",
+    "status": {
+      "pending": "Warten auf den Beginn des Wettbewerbs…",
+      "preparing": "Mach dich bereit…",
+      "go": "LOS! Weiterklicken!",
+      "paused": "Wettbewerb pausiert, bis ein Spieler sich wieder verbindet…",
+      "spectating": "Du siehst dem Wettbewerb zu…",
+      "resolving": "Ergebnis wird ermittelt…"
+    },
+    "button": {
+      "wait": "Auf LOS warten…",
+      "active": "Weiterklicken!"
+    },
+    "you": "Du",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "Du hast den Wettbewerb gewonnen!",
+      "lost": "Du hast den Wettbewerb verloren.",
+      "winner": "{{name}} hat den Wettbewerb gewonnen.",
+      "tie": "Unentschieden – nichts passiert.",
+      "cancelled": "Der Wettbewerb wurde abgebrochen – nichts passiert."
+    }
   }
 }

@@ -436,7 +436,8 @@ mod tests {
 
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ManaProduction, ManaSpendRestriction, TargetFilter,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, ManaProduction, ManaSpendRestriction,
+        TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -971,6 +972,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         state
@@ -3835,6 +3837,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         state
