@@ -142,47 +142,120 @@ fn refused_search_otherwise_cannot_bind_an_older_represented_condition() {
             );
             assert!(matches!(first.parsed.effect, Effect::DealDamage { .. }));
         }
-        let search = ir
+        let (search_index, search) = ir
             .clauses
             .iter()
-            .find(|clause| {
-                matches!(
-                    clause.parsed.effect,
-                    Effect::SearchLibrary { reveal: true, .. }
-                )
-            })
-            .unwrap();
+            .enumerate()
+            .find(|(_, clause)| matches!(clause.parsed.effect, Effect::SearchLibrary { .. }))
+            .expect("the appended search has its own raw producer");
+        assert!(matches!(
+            search.parsed.effect,
+            Effect::SearchLibrary { reveal: false, .. }
+        ));
+        assert!(matches!(
+            search.disposition,
+            ClauseDisposition::Emit {
+                intrinsic: None,
+                followup: None
+            }
+        ));
+        assert!(search.parsed.sub_ability.is_none());
+        assert_eq!(
+            search.source.fragment(),
+            Some("Search your library for an Equipment card")
+        );
+        assert_eq!(search.boundary, Some(ClauseBoundary::Comma));
+        let reveal = &ir.clauses[search_index + 1];
+        assert_eq!(reveal.source.fragment(), Some("reveal it"));
+        assert_eq!(reveal.boundary, Some(ClauseBoundary::Sentence));
+        assert!(matches!(
+            reveal.disposition,
+            ClauseDisposition::Continue {
+                continuation: Some(ContinuationAst::SearchRevealResult)
+            }
+        ));
+        assert!(reveal.condition.is_none() && reveal.parsed.condition.is_none());
+        assert!(!reveal.is_optional && !reveal.parsed.optional);
+        assert!(reveal.opponent_may_scope.is_none() && reveal.player_scope.is_none());
+        assert!(search.source.span().end_byte < reveal.source.span().start_byte);
+        for clause in [search, reveal] {
+            assert_eq!(
+                clause.source.span().precision,
+                crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+            );
+            assert_eq!(
+                Some(&normalized[clause.source.span().start_byte..clause.source.span().end_byte]),
+                clause.source.fragment()
+            );
+        }
         let gaps: Vec<_> = ir.clauses.iter().filter(|clause| matches!(&clause.parsed.effect, Effect::Unimplemented { name, .. } if name == "search_result_condition")).collect();
         assert_eq!(gaps.len(), 2);
-        assert!(first.id < search.id && search.id < gaps[0].id && gaps[0].id < gaps[1].id);
-        assert_eq!(
-            gaps[0].source.fragment(),
-            Some(
-                "If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield"
-            )
-        );
-        assert_eq!(
-            gaps[1].source.fragment(),
-            Some("Otherwise, put that card into your hand")
-        );
-        let lowered = lower_effect_chain_ir(&ir);
         assert!(
-            lowered.else_ability.is_none(),
-            "the earlier head must not acquire the refused Hand body"
+            first.id < search.id
+                && search.id < reveal.id
+                && reveal.id < gaps[0].id
+                && gaps[0].id < gaps[1].id
         );
+        let refused_fragments = [
+            "If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield",
+            "Otherwise, put that card into your hand",
+        ];
+        let mut previous_end = reveal.source.span().end_byte;
+        for (gap, fragment) in gaps.iter().zip(refused_fragments) {
+            assert!(previous_end < gap.source.span().start_byte);
+            assert_eq!(gap.source.fragment(), Some(fragment));
+            assert_eq!(
+                &normalized[gap.source.span().start_byte..gap.source.span().end_byte],
+                fragment
+            );
+            assert_eq!(
+                gap.source.span().precision,
+                crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+            );
+            assert_eq!(gap.boundary, Some(ClauseBoundary::Sentence));
+            assert_eq!(
+                gap.parsed,
+                parsed_clause(Effect::unimplemented("search_result_condition", fragment))
+            );
+            let mut scrubbed = (*gap).clone();
+            scrubbed.replace_with_gap("search_result_condition");
+            assert_eq!(**gap, scrubbed);
+            previous_end = gap.source.span().end_byte;
+        }
+        let lowered = lower_effect_chain_ir(&ir);
         let parsed = parse_card(&text, "Browbeat", &[], &["Sorcery"]);
-        let mut searches = 0;
-        let mut shuffles = 0;
-        for root in &parsed.abilities {
+        assert_eq!(parsed.abilities.len(), 1);
+        for root in [&lowered, &parsed.abilities[0]] {
+            assert!(
+                root.else_ability.is_none(),
+                "the earlier head must not acquire the refused Hand body: {head}"
+            );
+            assert_eq!(root.condition, first.condition);
+            if head == "If you control a creature, you gain 1 life." {
+                assert!(matches!(root.effect.as_ref(), Effect::GainLife { .. }));
+            } else {
+                assert!(root.optional);
+                assert_eq!(root.optional_for, first.opponent_may_scope);
+                assert!(matches!(root.effect.as_ref(), Effect::DealDamage { .. }));
+            }
+            let mut searches = 0;
+            let mut shuffles = 0;
+            let mut descriptions = Vec::new();
             let _ = crate::types::ability_visit::visit_ability_def(root, &mut |effect| {
                 assert!(!matches!(effect, Effect::ChangeZone { .. }));
-                searches +=
-                    usize::from(matches!(effect, Effect::SearchLibrary { reveal: true, .. }));
+                if let Effect::SearchLibrary { reveal, .. } = effect {
+                    assert!(*reveal);
+                    searches += 1;
+                }
                 shuffles += usize::from(matches!(effect, Effect::Shuffle { .. }));
+                if let Some(description) = effect.unimplemented_description() {
+                    descriptions.push(description.to_string());
+                }
                 std::ops::ControlFlow::Continue(())
             });
+            assert_eq!((searches, shuffles), (1, 1), "{head}");
+            assert_eq!(descriptions.as_slice(), refused_fragments, "{head}");
         }
-        assert_eq!((searches, shuffles), (1, 1));
     }
 }
 
@@ -246,65 +319,270 @@ fn refused_search_pair_preserves_a_represented_neighbor() {
     ] {
         let text = format!("{first} {second}");
         let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        let refused_first = first == REFUSED_NAMED_SEARCH;
+        let searches: Vec<_> = ir
+            .clauses
+            .iter()
+            .enumerate()
+            .filter(|(_, clause)| matches!(clause.parsed.effect, Effect::SearchLibrary { .. }))
+            .collect();
+        assert_eq!(searches.len(), 2);
+        let (named_search, farmer_search) = if refused_first {
+            (searches[0], searches[1])
+        } else {
+            (searches[1], searches[0])
+        };
+        let named_filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()),
+        );
+        let farmer_filter = TargetFilter::Typed(
+            TypedFilter::land()
+                .subtype("Plains".to_string())
+                .properties(vec![FilterProp::HasSupertype {
+                    value: Supertype::Basic,
+                }]),
+        );
+        for ((index, producer), fragment, expected_filter) in [
+            (
+                named_search,
+                "Search your library for an Equipment card",
+                &named_filter,
+            ),
+            (
+                farmer_search,
+                "Search your library for a basic Plains card",
+                &farmer_filter,
+            ),
+        ] {
+            assert_eq!(producer.source.fragment(), Some(fragment));
+            assert_eq!(producer.boundary, Some(ClauseBoundary::Comma));
+            assert!(matches!(
+                &producer.parsed.effect,
+                Effect::SearchLibrary { filter, reveal: false, .. } if filter == expected_filter
+            ));
+            assert!(matches!(
+                producer.disposition,
+                ClauseDisposition::Emit {
+                    intrinsic: None,
+                    followup: None
+                }
+            ));
+            assert!(producer.parsed.sub_ability.is_none());
+            let reveal = &ir.clauses[index + 1];
+            assert!(producer.id < reveal.id);
+            assert_eq!(reveal.source.fragment(), Some("reveal it"));
+            assert_eq!(reveal.boundary, Some(ClauseBoundary::Sentence));
+            assert!(matches!(
+                reveal.disposition,
+                ClauseDisposition::Continue {
+                    continuation: Some(ContinuationAst::SearchRevealResult)
+                }
+            ));
+            assert!(reveal.condition.is_none() && reveal.parsed.condition.is_none());
+            assert!(!reveal.is_optional && !reveal.parsed.optional);
+            assert!(reveal.opponent_may_scope.is_none() && reveal.player_scope.is_none());
+            assert!(producer.source.span().end_byte < reveal.source.span().start_byte);
+            for clause in [producer, reveal] {
+                assert_eq!(
+                    clause.source.span().precision,
+                    crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+                );
+                assert_eq!(
+                    Some(&text[clause.source.span().start_byte..clause.source.span().end_byte]),
+                    clause.source.fragment()
+                );
+            }
+        }
         let gaps: Vec<_> = ir.clauses.iter().filter(|clause| matches!(&clause.parsed.effect, Effect::Unimplemented { name, .. } if name == "search_result_condition")).collect();
         assert_eq!(gaps.len(), 2);
-        assert_eq!(
-            gaps[0].source.fragment(),
-            Some(
-                "If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield"
-            )
-        );
-        assert_eq!(
-            gaps[1].source.fragment(),
-            Some("Otherwise, put that card into your hand")
-        );
+        let mut previous_id = ir.clauses[named_search.0 + 1].id;
+        let mut previous_end = ir.clauses[named_search.0 + 1].source.span().end_byte;
+        for (gap, fragment) in gaps.iter().zip([
+            "If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield",
+            "Otherwise, put that card into your hand",
+        ]) {
+            assert!(previous_id < gap.id);
+            assert!(previous_end < gap.source.span().start_byte);
+            assert_eq!(gap.source.fragment(), Some(fragment));
+            assert_eq!(
+                &text[gap.source.span().start_byte..gap.source.span().end_byte],
+                fragment
+            );
+            assert_eq!(
+                gap.source.span().precision,
+                crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+            );
+            assert_eq!(gap.boundary, Some(ClauseBoundary::Sentence));
+            assert_eq!(
+                gap.parsed,
+                parsed_clause(Effect::unimplemented("search_result_condition", fragment))
+            );
+            let mut scrubbed = (*gap).clone();
+            scrubbed.replace_with_gap("search_result_condition");
+            assert_eq!(**gap, scrubbed);
+            previous_id = gap.id;
+            previous_end = gap.source.span().end_byte;
+        }
         let represented = ir.clauses.iter().find(|clause| clause.source.fragment() == Some("If an opponent controls more lands than you, put it onto the battlefield tapped")).unwrap();
-        assert!(represented.condition.is_some());
+        assert_eq!(
+            represented.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::ControlsCount {
+                            relation: PlayerRelation::Opponent,
+                            filter: TargetFilter::Typed(TypedFilter::land()),
+                            comparator: Comparator::GT,
+                            count: Box::new(QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount {
+                                    filter: TargetFilter::Typed(
+                                        TypedFilter::land().controller(ControllerRef::You),
+                                    ),
+                                },
+                            }),
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
         assert!(matches!(
             represented.parsed.effect,
             Effect::ChangeZone {
+                origin: None,
                 destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 ..
             }
         ));
-        let lowered = lower_effect_chain_ir(&ir);
-        let mut current = Some(&lowered);
-        let mut represented_puts = 0;
-        while let Some(node) = current {
-            if matches!(
-                node.effect.as_ref(),
-                Effect::ChangeZone {
-                    destination: Zone::Battlefield,
-                    ..
-                }
-            ) {
-                represented_puts += 1;
-                assert_eq!(node.condition, represented.condition);
-                assert!(matches!(
-                    node.else_ability
-                        .as_deref()
-                        .expect("represented Hand else")
-                        .effect
-                        .as_ref(),
-                    Effect::ChangeZone {
+        let alternative = ir
+            .clauses
+            .iter()
+            .find(|clause| clause.source.fragment() == Some("Otherwise, put it into your hand"))
+            .expect("Farmer's own Otherwise source clause");
+        assert!(farmer_search.1.id < represented.id && represented.id < alternative.id);
+        assert!(matches!(
+            &alternative.disposition,
+            ClauseDisposition::BranchOtherwise { else_def, kind: OtherwiseKind::Bound }
+                if else_def.condition.is_none()
+                    && matches!(else_def.effect.as_ref(), Effect::ChangeZone {
+                        origin: None,
                         destination: Zone::Hand,
                         target: TargetFilter::ParentTarget,
                         ..
-                    }
-                ));
-            }
-            current = node.sub_ability.as_deref();
+                    })
+        ));
+        assert!(gaps
+            .iter()
+            .all(|gap| gap.id != represented.id && gap.id != alternative.id));
+        let shuffles: Vec<_> = ir
+            .clauses
+            .iter()
+            .filter(|clause| matches!(clause.parsed.effect, Effect::Shuffle { .. }))
+            .collect();
+        assert_eq!(shuffles.len(), 2);
+        for shuffle in &shuffles {
+            assert_eq!(shuffle.source.fragment(), Some("shuffle"));
+            assert_eq!(shuffle.boundary, Some(ClauseBoundary::Sentence));
         }
-        assert_eq!(represented_puts, 1);
-        let mut counts = [0; 3];
+        if refused_first {
+            assert!(gaps[1].id < shuffles[0].id && shuffles[0].id < farmer_search.1.id);
+            assert!(alternative.id < shuffles[1].id);
+        } else {
+            assert!(alternative.id < shuffles[0].id && shuffles[0].id < named_search.1.id);
+            assert!(gaps[1].id < shuffles[1].id);
+        }
+        let lowered = lower_effect_chain_ir(&ir);
+        let spine = chain_effects(&lowered);
+        assert_eq!(spine.len(), 7, "source order: {first}");
+        let (
+            named_index,
+            farmer_index,
+            guard_index,
+            otherwise_index,
+            named_shuffle,
+            put_index,
+            farmer_shuffle,
+        ) = if refused_first {
+            (0, 4, 1, 2, 3, 5, 6)
+        } else {
+            (3, 0, 4, 5, 6, 1, 2)
+        };
+        for (index, expected_filter) in
+            [(named_index, &named_filter), (farmer_index, &farmer_filter)]
+        {
+            assert!(matches!(
+                spine[index],
+                Effect::SearchLibrary { filter, reveal: true, .. } if filter == expected_filter
+            ));
+        }
+        assert_eq!(spine[guard_index], &gaps[0].parsed.effect);
+        assert_eq!(spine[otherwise_index], &gaps[1].parsed.effect);
+        assert_eq!(spine[put_index], &represented.parsed.effect);
+        let (named_source_shuffle, farmer_source_shuffle) = if refused_first {
+            (shuffles[0], shuffles[1])
+        } else {
+            (shuffles[1], shuffles[0])
+        };
+        assert_eq!(spine[named_shuffle], &named_source_shuffle.parsed.effect);
+        assert_eq!(spine[farmer_shuffle], &farmer_source_shuffle.parsed.effect);
+        let nodes: Vec<_> =
+            std::iter::successors(Some(&lowered), |node| node.sub_ability.as_deref()).collect();
+        let battlefield = nodes[put_index];
+        assert_eq!(battlefield.condition, represented.condition);
+        let hand = battlefield
+            .else_ability
+            .as_deref()
+            .expect("represented Hand else");
+        assert!(hand.condition.is_none());
+        assert!(matches!(
+            hand.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+        for (index, node) in nodes.iter().enumerate() {
+            assert_eq!(node.else_ability.is_some(), index == put_index);
+        }
+        assert_eq!(
+            nodes[named_shuffle].sub_link,
+            SubAbilityLink::SequentialSibling
+        );
+        let then_suffix = battlefield
+            .sub_ability
+            .as_deref()
+            .expect("then's independent tail");
+        let else_suffix = hand
+            .sub_ability
+            .as_deref()
+            .expect("else's independent tail");
+        assert_eq!(then_suffix.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(else_suffix.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(
+            then_suffix, else_suffix,
+            "both outcomes keep the complete same tail"
+        );
+        let suffix = chain_effects(then_suffix);
+        assert_eq!(suffix.as_slice(), &spine[farmer_shuffle..]);
+        assert_eq!(suffix.len(), if refused_first { 1 } else { 5 });
+        let mut movements = [0; 2];
         let _ = crate::types::ability_visit::visit_ability_def(&lowered, &mut |effect| {
-            counts[0] += usize::from(matches!(effect, Effect::SearchLibrary { reveal: true, .. }));
-            counts[1] += usize::from(matches!(effect, Effect::Shuffle { .. }));
-            counts[2] += usize::from(matches!(effect, Effect::ChangeZone { .. }));
+            if matches!(effect, Effect::ChangeZone { .. }) {
+                if effect == battlefield.effect.as_ref() {
+                    movements[0] += 1;
+                } else {
+                    assert_eq!(effect, hand.effect.as_ref(), "no refused or extra movement");
+                    movements[1] += 1;
+                }
+            }
             std::ops::ControlFlow::Continue(())
         });
-        assert_eq!(counts, [2, 2, 2]);
+        assert_eq!(movements, [1, 1]);
     }
 }
 
