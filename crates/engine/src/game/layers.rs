@@ -81,7 +81,20 @@ impl LayerZoneObjectCache {
         self.ids_by_zone.entry(zone).or_insert_with(|| {
             #[cfg(test)]
             record_layer_zone_materialization(zone);
-            super::targeting::zone_object_ids(state, zone)
+            let mut ids = super::targeting::zone_object_ids(state, zone);
+            // CR 608.2n + CR 613.1: an instant or sorcery whose resolution is
+            // paused for a choice is popped off `state.stack` but is still on the
+            // stack until its final part. The keyword-reset loop below already
+            // resets it, so a continuous effect granting it a keyword (Taigam's
+            // rebound) must be re-applied to it in the same pass.
+            if zone == Zone::Stack {
+                if let Some(entry) = super::stack::resolving_instant_or_sorcery_on_stack(state) {
+                    if !ids.contains(&entry.id) {
+                        ids.push(entry.id);
+                    }
+                }
+            }
+            ids
         })
     }
 
@@ -3170,11 +3183,13 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     // needed it is the NON-RESOLVING stack exit — a stolen spell countered and
     // exiled (Dissipate), the CR 724.1b "end the turn" / CR 724.2b "end the
     // combat phase" stack exiles, and stack-exile riders. A stolen spell that
-    // exiles ON RESOLUTION (rebound, CR 702.88a) is NOT that class: MEASURED,
-    // the mid-resolution flush re-seeds the object from
-    // `resolving_stack_entry.controller` while the layer-2 scan can no longer
-    // reach it (`zone_object_ids(Stack)` no longer lists the popped entry), so
-    // the caster is already restored before the move.
+    // exiles ON RESOLUTION (rebound, CR 702.88a) is NOT that class: the
+    // mid-resolution flush re-seeds the object from
+    // `resolving_stack_entry.controller` (the `.chain()` above), and the layer-2
+    // scan reaches the popped resolving spell too, because
+    // `LayerZoneObjectCache::ids_for` adds it back into the Stack-zone population
+    // (CR 608.2n). The seed is what restores the caster's control before the move;
+    // the scan only re-applies the continuous effects over that restored state.
 
     // CR 611.2 + CR 613.1: Rebuild the static-effect-source index from the
     // just-reset base `static_definitions` so the Copy / main gathers below

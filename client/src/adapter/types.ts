@@ -2165,10 +2165,11 @@ export interface TriggerContextDisplay {
   player?: PlayerId;
 }
 
-/** Typed form of `StackEntryDisplay.kind_label` for ability entries, so the
- * display layer localizes the label without parsing the English text. */
+/** Mirrors `engine::game::derived_views::StackAbilityKindView`: the typed
+ * template behind `kind_label`, so the display layer localizes the ability
+ * label without parsing English text. */
 export type StackAbilityKindView =
-  | { type: "Activated"; data: { number?: number | null } }
+  | { type: "Activated"; data: { number?: number | null } } // older engines send null; current omits the key
   | { type: "Triggered" };
 
 export interface StackEntryDisplay {
