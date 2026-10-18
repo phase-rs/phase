@@ -42,13 +42,13 @@ In this mode, emit these lines before findings:
 
 ```text
 Review Head: <CANDIDATE_SHA>
-Completion Gate: PASS|FAIL
+Completion Gate: PASS|DEFERRED|FAIL
 Maintainer-Simulation Gate: PASS|FAIL
 ```
 
 `Review Head` must be the supplied `CANDIDATE_SHA`, and the reviewed diff must reproduce from exactly `BASE_SHA..CANDIDATE_SHA`; otherwise report a blocking finding.
 
-`Completion Gate` passes when every check [engine-implementer Step 5](../engine-implementer/SKILL.md#step-5--verify-the-committed-candidate) calls for on the changed surface was run against the committed candidate and passed. Check the set against the candidate diff rather than against the plan, and re-run anything you doubt — you have the candidate SHA and a shell. A check run against uncommitted edits, or against a different tree, does not count. In all engine-implementer review modes, additional checks must address a concrete unresolved claim within the original task. Follow the orchestrator's [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); do not independently construct or repair verification machinery. Return missing evidence to the orchestrator without claiming completion, including when a proposed probe needs redesign before it can run. This does not waive required checks or current-candidate evidence.
+`Completion Gate` follows [engine-implementer Step 5](../engine-implementer/SKILL.md#step-5--verify-the-committed-candidate), including its verification timing. Emit `PASS` when all applicable checks passed with valid candidate evidence; `DEFERRED` when checks due now passed and remaining checks are explicitly scheduled for a later boundary under Step 5; `FAIL` for an observed failure or evidence missing when due. `DEFERRED` does not block phase acceptance or code review and is not a claim of completed verification. Check the set against the candidate diff rather than against the plan. Run an additional check only when it answers a concrete unresolved claim and its result is needed now under Step 5; otherwise defer it. A check run against uncommitted edits, or against a different tree, does not count unless Step 5 permits carrying forward unaffected evidence. In all engine-implementer review modes, additional checks must address a concrete unresolved claim within the original task. Follow the orchestrator's [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); do not independently construct or repair verification machinery. Return missing evidence to the orchestrator without claiming completion, including when a proposed probe needs redesign before it can run. This does not waive required checks or current-candidate evidence.
 
 ## Phase Mode (chartered runs)
 
@@ -57,7 +57,7 @@ Activated when the spawn inputs include a phase charter and **one phase's deferr
 - **Deferred ≠ gap; foreclosure = gap.** An item on the phase's deferral list is chartered to a named later phase: do not report it as missing, dropped, or incomplete. DO report any code that forecloses or contradicts a deferred item.
 - **Lens scoping:** the new-field-threading, sibling-coverage, claim-to-test, and serialized-surface lenses evaluate consumers against the charter's phase attribution — a consumer attributed to a later phase is deferred, not silently dropped. The class-vs-single-case lens is satisfied from the charter's class attribution — an infrastructure phase's class coverage lives in the charter and lands with its consumer phase.
 - **Maintainer-Simulation Gate carve-out:** a matrix row whose consuming function or hostile fixture is deferral-listed to a named later phase is recorded `DEFERRED(phase n)` and does not FAIL the gate; a row the phase's own code forecloses still FAILs. "FAIL when any row is missing" is otherwise unchanged.
-- **Checkpoint mode's gates are untouched** — phase mode scopes what counts as a finding, never what counts as a valid check. The supplied `BASE_SHA` is the phase base, and the reviewed span is that phase's `BASE_SHA..CANDIDATE_SHA`.
+- **Checkpoint mode's evidence rules still apply**, including Step 5's verification deferrals and the `DEFERRED` completion verdict. Deferring test execution does not require deferring the underlying feature or omitting its tests. The supplied `BASE_SHA` is the phase base, and the reviewed span is that phase's `BASE_SHA..CANDIDATE_SHA`.
 
 ## Integration Mode (chartered runs, final review)
 
