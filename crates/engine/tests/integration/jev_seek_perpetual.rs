@@ -1,5 +1,4 @@
-//! Public U5 seek consumers. The exact first-instruction excerpt is explicitly
-//! partial Oracle text; full Circadian retains its separate perpetual-grant gap.
+//! Public U5 selection and U6 exact settled-result perpetual consumers.
 
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
@@ -100,13 +99,16 @@ fn assert_bound_seek(text: &str, full: bool) {
                 _ => None,
             })
             .collect();
+    assert!(gaps.is_empty(), "complete instruction: {parsed:#?}");
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
     if full {
-        assert!(gaps.iter().any(|gap| gap
-            .contains("those cards perpetually gain \"This spell costs {1} less to cast.\"")));
-        assert!(gaps.iter().all(|gap| !gap.contains("Seek X cards")));
-    } else {
-        assert!(gaps.is_empty(), "excerpt must fully execute: {parsed:#?}");
-        assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+        let seek = &parsed.abilities[0];
+        let grant = seek.sub_ability.as_deref().expect("grant");
+        assert!(grant.reads_return_result.is_some());
+        assert_eq!(
+            grant.reads_return_result.as_ref().map(|(id, _)| *id),
+            seek.declares_return_result
+        );
     }
 }
 
@@ -188,34 +190,6 @@ fn jev_dynamic_seek_shared_colors_public() {
     );
     assert_eq!(outcome.events().iter().filter(|e| matches!(e, GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Hand, .. } if picked.contains(object_id))).count(), 2);
     assert_done(&outcome, spell);
-}
-
-#[test]
-fn jev_circadian_u5_full_text_partial() {
-    assert_bound_seek(FULL_CIRCADIAN, true);
-    let mut scenario = scenario();
-    scenario
-        .add_enchantment_from_oracle(P0, "White blue reference", "")
-        .with_color(vec![ManaColor::White, ManaColor::Blue]);
-    let cards = [
-        library_card(&mut scenario, P0, "White", &[ManaColor::White]),
-        library_card(&mut scenario, P0, "Blue", &[ManaColor::Blue]),
-    ];
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Circadian Struggle", true, FULL_CIRCADIAN)
-        .with_mana_cost("{4}{G/U}{G/U}".parse().unwrap())
-        .id();
-    let mut runner = scenario.build();
-    let outcome = runner.cast(spell).resolve();
-    outcome.assert_hand_drawn(P0, 2);
-    outcome.assert_zone(&cards, Zone::Hand);
-    assert_done(&outcome, spell);
-    // Only the first instruction is claimed here. The complete printed grant
-    // remains strict-failed until its exact sought-set consumer lands in phase 8.
-    assert!(outcome
-        .state()
-        .unimplemented_oracle_ids
-        .contains("Circadian Struggle"));
 }
 
 #[test]
@@ -665,4 +639,660 @@ fn jev_seek_replacement_resume_and_reload() {
         picked_moves(&reloaded_events),
         "same chosen order and undelivered tail"
     );
+}
+
+const COST_GRANT: &str = "Those cards perpetually gain \"This spell costs {1} less to cast.\".";
+const DIVINATION: &str = "Draw two cards.";
+const CALL_TO_MIND: &str =
+    "Return target instant or sorcery card from your graveyard to your hand.";
+fn grants(state: &GameState, id: ObjectId) -> usize {
+    state.objects[&id].perpetual_mods.iter().filter(|modification| matches!(modification,
+        engine::types::ability::PerpetualModification::ModifyCost { mode: engine::types::statics::CostModifyMode::Reduce, amount }
+        if *amount == ManaCost::generic(1))).count()
+}
+fn pool(runner: &mut GameRunner, types: &[ManaType]) {
+    runner.state_mut().players[0].mana_pool = types
+        .iter()
+        .map(|kind| ManaUnit::new(*kind, ObjectId(0), false, vec![]))
+        .collect();
+}
+fn complete_shape(text: &str) {
+    let parsed = parse_oracle_text(text, "Labelled U6 synthetic", &[], &["Instant".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    let nodes: Vec<_> = std::iter::successors(Some(&parsed.abilities[0]), |node| {
+        node.sub_ability.as_deref()
+    })
+    .collect();
+    assert!(nodes
+        .iter()
+        .any(|node| matches!(*node.effect, Effect::Seek { .. })));
+    assert!(nodes.iter().any(|node| node.reads_return_result.is_some()));
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !matches!(*node.effect, Effect::Unimplemented { .. })),
+        "{parsed:#?}"
+    );
+}
+
+fn circadian_runner() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId, ObjectId) {
+    assert_bound_seek(FULL_CIRCADIAN, true);
+    let mut scenario = scenario();
+    scenario
+        .add_enchantment_from_oracle(P0, "White blue reference", "")
+        .with_color(vec![ManaColor::White, ManaColor::Blue]);
+    scenario
+        .add_enchantment_from_oracle(P0, "Repeated white", "")
+        .with_color(vec![ManaColor::White]);
+    scenario.add_artifact_from_oracle(P0, "Colorless reference", "");
+    for index in 0..6 {
+        library_card(&mut scenario, P0, &format!("Colorless filler {index}"), &[]);
+    }
+    let divination = scenario
+        .add_spell_to_library_top(P0, "Divination", false)
+        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_color(vec![ManaColor::Blue])
+        .from_oracle_text(DIVINATION)
+        .id();
+    let disperse = scenario
+        .add_spell_to_library_top(P0, "Disperse", true)
+        .with_mana_cost("{1}{U}".parse().unwrap())
+        .with_color(vec![ManaColor::Blue])
+        .from_oracle_text(DISPERSE)
+        .id();
+    let untouched = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
+        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    let opponent = scenario
+        .add_spell_to_hand_from_oracle(P1, "Divination", false, DIVINATION)
+        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    let call = scenario
+        .add_spell_to_hand_from_oracle(P0, "Call to Mind", false, CALL_TO_MIND)
+        .with_mana_cost("{2}{U}".parse().unwrap())
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Circadian Struggle", true, FULL_CIRCADIAN)
+        .with_mana_cost("{4}{G/U}{G/U}".parse().unwrap())
+        .id();
+    let off_color = library_card(
+        &mut scenario,
+        P0,
+        "Off-color same-name decoy",
+        &[ManaColor::Black],
+    );
+    let mut runner = scenario.build();
+    pool(
+        &mut runner,
+        &[
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Blue,
+            ManaType::Blue,
+        ],
+    );
+    let outcome = runner.cast(spell).resolve();
+    outcome.assert_hand_drawn(P0, 2);
+    outcome.assert_zone(&[divination, disperse], Zone::Hand);
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    assert!(
+        runner.state().players[0].mana_pool.is_empty(),
+        "actual hybrid payment"
+    );
+    assert_eq!(grants(runner.state(), divination), 2);
+    assert_eq!(grants(runner.state(), disperse), 2);
+    assert_eq!(runner.state().objects[&off_color].zone, Zone::Library);
+    assert_eq!(grants(runner.state(), off_color), 0);
+    for id in [untouched, opponent, spell, call] {
+        assert_eq!(grants(runner.state(), id), 0);
+    }
+    (runner, divination, untouched, call, spell, disperse)
+}
+
+#[test]
+fn jev_circadian_seek_grant_future_cast() {
+    // CR 118.7a + CR 601.2f: generic reductions preserve the colored U component.
+    let (mut runner, divination, untouched, _, _, _) = circadian_runner();
+    pool(&mut runner, &[ManaType::Blue]);
+    let mut control = GameRunner::from_state(runner.state().clone());
+    assert!(
+        control.cast(untouched).try_resolve().is_err(),
+        "same-name unmodified card still needs 2U"
+    );
+    let mut control = GameRunner::from_state(runner.state().clone());
+    pool(
+        &mut control,
+        &[ManaType::Colorless, ManaType::Colorless, ManaType::Blue],
+    );
+    let paid_control = control.cast(untouched).resolve();
+    paid_control.assert_hand_drawn(P0, 2);
+    paid_control.assert_zone(&[untouched], Zone::Graveyard);
+    let outcome = runner.cast(divination).resolve();
+    outcome.assert_hand_drawn(P0, 2);
+    outcome.assert_zone(&[divination], Zone::Graveyard);
+    assert!(
+        runner.state().players[0].mana_pool.is_empty(),
+        "generic reduction preserves U payment"
+    );
+    assert_eq!(grants(runner.state(), divination), 2);
+}
+
+#[test]
+fn jev_circadian_perpetual_survives_zone_changes_and_reload() {
+    let (mut runner, divination, untouched, call, source, _) = circadian_runner();
+    pool(&mut runner, &[ManaType::Blue]);
+    let first = runner.cast(divination).resolve();
+    first.assert_hand_drawn(P0, 2);
+    first.assert_zone(&[divination, source], Zone::Graveyard);
+    let old_incarnation = runner.state().objects[&divination].incarnation;
+    runner = GameRunner::from_state(
+        serde_json::from_slice::<GameState>(&serde_json::to_vec(runner.state()).unwrap()).unwrap(),
+    );
+    pool(
+        &mut runner,
+        &[ManaType::Colorless, ManaType::Colorless, ManaType::Blue],
+    );
+    let returned = runner.cast(call).target_object(divination).resolve();
+    returned.assert_zone(&[divination], Zone::Hand);
+    assert_eq!(grants(runner.state(), divination), 2);
+    assert!(runner.state().objects[&divination].incarnation > old_incarnation);
+    pool(&mut runner, &[ManaType::Blue]);
+    let recast = runner.cast(divination).resolve();
+    recast.assert_hand_drawn(P0, 2);
+    recast.assert_zone(&[divination], Zone::Graveyard);
+    assert_eq!(grants(runner.state(), untouched), 0);
+    assert_eq!(grants(runner.state(), divination), 2);
+}
+
+#[test]
+fn jev_circadian_empty_result_replaces_prior_producer() {
+    for second in [
+        "Seek zero cards.",
+        "Seek a creature card.",
+        "Seek two cards.",
+    ] {
+        let text = format!("Seek a blue card. {COST_GRANT} {second} {COST_GRANT} You gain 4 life.");
+        complete_shape(&text);
+        let mut scenario = scenario();
+        let decoy = (second != "Seek two cards.").then(|| {
+            library_card(
+                &mut scenario,
+                P0,
+                "Nonmatching resident",
+                &[ManaColor::Black],
+            )
+        });
+        let first = library_card(&mut scenario, P0, "Prior result", &[ManaColor::Blue]);
+        let source = seek_spell(&mut scenario, P0, &text);
+        let mut runner = scenario.build();
+        let outcome = runner.cast(source).resolve();
+        outcome.assert_zone(&[first], Zone::Hand);
+        outcome.assert_life_delta(P0, 4);
+        assert_eq!(
+            grants(runner.state(), first),
+            1,
+            "first named result positively granted once; fresh empty cannot grant it again"
+        );
+        assert_eq!(grants(runner.state(), source), 0);
+        if let Some(decoy) = decoy {
+            assert_eq!(runner.state().objects[&decoy].zone, Zone::Library);
+            assert_eq!(grants(runner.state(), decoy), 0);
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+    let text = format!("Seek five cards. {COST_GRANT} You gain 4 life.");
+    complete_shape(&text);
+    let mut scenario = scenario();
+    let card = library_card(
+        &mut scenario,
+        P0,
+        "Insufficient but present",
+        &[ManaColor::Blue],
+    );
+    let source = seek_spell(&mut scenario, P0, &text);
+    let mut runner = scenario.build();
+    let outcome = runner.cast(source).resolve();
+    outcome.assert_zone(&[card], Zone::Hand);
+    outcome.assert_life_delta(P0, 4);
+    assert_eq!(grants(runner.state(), card), 1);
+}
+
+fn sought_replacement_run(two: bool, reload_at: Option<usize>) -> (Vec<ObjectId>, Vec<GameEvent>) {
+    // Labelled synthetic destination; the GainLife is a complete independent
+    // instruction, so the named reader is beyond the continuation head.
+    let text =
+        format!("Seek two cards and put them into your graveyard. You gain 7 life. {COST_GRANT}");
+    complete_shape(&text);
+    let mut scenario = scenario();
+    scenario
+        .add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE)
+        .with_mana_cost("{1}{W}".parse().unwrap());
+    if two {
+        scenario
+            .add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE)
+            .with_mana_cost("{2}{B}{B}".parse().unwrap());
+    }
+    let cards = [
+        library_card(&mut scenario, P0, "First chosen", &[ManaColor::Blue]),
+        library_card(&mut scenario, P0, "Second chosen", &[ManaColor::White]),
+    ];
+    let source = seek_spell(&mut scenario, P0, &text);
+    let mut runner = scenario.build();
+    let life = runner.state().players[0].life;
+    let outcome = runner.cast(source).resolve();
+    let mut events = outcome.events().to_vec();
+    let mut prompts = 0;
+    for _ in 0..50 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::ReplacementChoice { .. } => {
+                assert_eq!(
+                    runner.state().players[0].life,
+                    life,
+                    "nonhead consumer waits for whole batch"
+                );
+                for card in cards {
+                    assert_eq!(grants(runner.state(), card), 0);
+                }
+                let completion = runner
+                    .state()
+                    .active_batch_delivery()
+                    .expect("real parked batch")
+                    .completion
+                    .as_ref()
+                    .expect("named result completion");
+                let engine::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+                    occurrence_id,
+                    result_id,
+                    settled_records,
+                } = completion
+                else {
+                    panic!("{completion:?}")
+                };
+                assert!(settled_records.is_none());
+                assert!(!runner.state().return_result_frames[occurrence_id].contains_key(result_id));
+                let key = (*occurrence_id, *result_id);
+                if reload_at == Some(prompts) {
+                    let trusted = engine::types::game_state::PersistedGameState::capture(
+                        runner.state().clone(),
+                    );
+                    let loaded: engine::types::game_state::PersistedGameState =
+                        serde_json::from_slice(&serde_json::to_vec(&trusted).unwrap()).unwrap();
+                    runner = GameRunner::from_state(loaded.into_game_state().unwrap());
+                    assert!(runner.state().return_result_frames.contains_key(&key.0));
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ));
+                }
+                prompts += 1;
+                legal_actions(runner.state())
+                    .into_iter()
+                    .find(|a| matches!(a, GameAction::ChooseReplacement { index: 0 }))
+                    .expect("legal response")
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            ref other => panic!("unexpected {other:?}"),
+        };
+        events.extend(runner.act(action).unwrap().events);
+    }
+    assert_eq!(prompts, if two { 2 } else { 0 });
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[0].life, life + 7);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::LifeChanged {
+                    player_id: P0,
+                    amount: 7,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    for card in cards {
+        assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+        assert_eq!(grants(runner.state(), card), 1);
+    }
+    assert_eq!(grants(runner.state(), source), 0);
+    (cards.to_vec(), events)
+}
+#[test]
+fn jev_sought_grant_waits_for_complete_replacement_batch() {
+    sought_replacement_run(false, None);
+    sought_replacement_run(true, None);
+}
+#[test]
+fn jev_sought_result_current_pause_reload() {
+    let (cards, events) = sought_replacement_run(true, None);
+    for pause in [0, 1] {
+        let (loaded_cards, loaded_events) = sought_replacement_run(true, Some(pause));
+        assert_eq!(cards, loaded_cards);
+        let moves = |events: &[GameEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Library),
+                        to: Zone::Exile,
+                        ..
+                    } => Some(*object_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(moves(&events), moves(&loaded_events));
+    }
+}
+
+#[test]
+fn jev_sought_entry_pause_finishes_before_grant() {
+    let text =
+        format!("Seek an Aura card and put it onto the battlefield. You gain 7 life. {COST_GRANT}");
+    complete_shape(&text);
+    for hosts in [0, 2] {
+        let mut scenario = scenario();
+        for index in 0..hosts {
+            scenario.add_creature_from_oracle(P0, &format!("Legal host {index}"), 2, 2, "");
+        }
+        let aura = scenario
+            .add_spell_to_library_top(P0, "Labelled synthetic Aura", false)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text("Enchant creature\nEnchanted creature can't attack or block.")
+            .id();
+        let source = seek_spell(&mut scenario, P0, &text);
+        let mut runner = scenario.build();
+        let life = runner.state().players[0].life;
+        let outcome = runner.cast(source).resolve();
+        if hosts == 0 {
+            // CR 303.4g: an unhosted library Aura remains in its current zone.
+            outcome.assert_zone(&[aura], Zone::Library);
+            outcome.assert_life_delta(P0, 7);
+            assert_eq!(grants(runner.state(), aura), 0);
+        } else {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReturnAsAuraTarget { .. }
+            ));
+            assert_eq!(runner.state().players[0].life, life);
+            assert_eq!(grants(runner.state(), aura), 0);
+            assert!(runner.state().active_batch_delivery().is_some());
+            let action = legal_actions(runner.state())
+                .into_iter()
+                .next()
+                .expect("legal Aura host response");
+            runner.act(action).unwrap();
+            for _ in 0..20 {
+                if runner.state().stack.is_empty()
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&aura].entered_via_ability_source,
+                Some(source)
+            );
+            assert_eq!(runner.state().players[0].life, life + 7);
+            assert_eq!(grants(runner.state(), aura), 1);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn jev_sought_grant_uses_grant_start_color_count() {
+    let text = "Seek X cards and put them onto the battlefield, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    complete_shape(text);
+    let mut scenario = scenario();
+    scenario
+        .add_enchantment_from_oracle(P0, "Initially white", "")
+        .with_color(vec![ManaColor::White]);
+    let card = scenario
+        .add_spell_to_library_top(P0, "Blue green entrant", false)
+        .as_enchantment()
+        .with_color(vec![ManaColor::Blue, ManaColor::Green])
+        .id();
+    let source = seek_spell(&mut scenario, P0, text);
+    let mut runner = scenario.build();
+    let outcome = runner.cast(source).resolve();
+    outcome.assert_zone(&[card], Zone::Battlefield);
+    assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Battlefield, .. } if *object_id == card)).count(), 1);
+    assert_eq!(
+        grants(runner.state(), card),
+        3,
+        "Seek1 followed by grant-start WUG3"
+    );
+}
+
+#[test]
+fn jev_perpetual_recipient_authorities_remain_distinct() {
+    let text = "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"";
+    let mut scenario = scenario();
+    let existing = scenario
+        .add_spell_to_hand_from_oracle(P0, "Existing nonland", true, "Draw a card.")
+        .id();
+    let land = scenario.add_land_to_hand(P0, "Island").id();
+    let cards: Vec<_> = (0..3)
+        .map(|index| {
+            library_card(
+                &mut scenario,
+                P0,
+                &format!("Sought nonland {index}"),
+                &[ManaColor::Blue],
+            )
+        })
+        .collect();
+    let source = scenario
+        .add_spell_to_hand_from_oracle(P0, "Discover the Formula", true, text)
+        .with_mana_cost("{4}{U}{U}".parse().unwrap())
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(source).resolve();
+    outcome.assert_hand_drawn(P0, 3);
+    outcome.assert_zone(&cards, Zone::Hand);
+    for card in cards.into_iter().chain([existing]) {
+        assert_eq!(grants(runner.state(), card), 1);
+    }
+    assert_eq!(grants(runner.state(), land), 0);
+    assert_eq!(grants(runner.state(), source), 0);
+}
+
+#[test]
+fn jev_sought_same_clause_distinct_occurrences() {
+    let text = "{1}: Seek a card from among the top one cards of your library. Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    let mut scenario = scenario();
+    let first_source = scenario
+        .add_artifact_from_oracle(P0, "First labelled Seek source", text)
+        .id();
+    let second_source = scenario
+        .add_artifact_from_oracle(P0, "Second labelled Seek source", text)
+        .id();
+    let cards: Vec<_> = (0..3)
+        .map(|index| {
+            library_card(
+                &mut scenario,
+                P0,
+                &format!("Forced top member {index}"),
+                &[ManaColor::Blue],
+            )
+        })
+        .collect();
+    let mut runner = scenario.build();
+    let first_id = runner.state().objects[&first_source].abilities[0].declares_return_result;
+    assert!(first_id.is_some());
+    assert_eq!(
+        first_id,
+        runner.state().objects[&second_source].abilities[0].declares_return_result
+    );
+    let mut picked = Vec::new();
+    let mut allocator = runner.state().next_return_result_occurrence_id;
+    for source in [first_source, first_source, second_source] {
+        let expected = *runner.state().library_of(P0).front().unwrap();
+        let outcome = runner.activate(source, 0).resolve();
+        assert_eq!(outcome.state().objects[&expected].zone, Zone::Hand);
+        assert!(
+            runner.state().next_return_result_occurrence_id > allocator,
+            "every resolution allocates its own occurrence"
+        );
+        allocator = runner.state().next_return_result_occurrence_id;
+        picked.push(expected);
+        for card in &cards {
+            assert_eq!(
+                grants(runner.state(), *card),
+                usize::from(picked.contains(card))
+            );
+        }
+        for source in [first_source, second_source] {
+            assert_eq!(grants(runner.state(), source), 0);
+        }
+        assert!(runner.state().return_result_frames.is_empty());
+    }
+    picked.sort_unstable();
+    picked.dedup();
+    assert_eq!(picked.len(), 3);
+}
+
+#[test]
+fn jev_sought_activated_grant_survives_source_departure() {
+    // CR 113.7a: the activated ability survives its sacrificed source.
+    let text = "{1}, Sacrifice this artifact: Seek a card. Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    let mut scenario = scenario();
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Labelled departing Seek source", text)
+        .id();
+    let card = library_card(
+        &mut scenario,
+        P0,
+        "Exact recipient after source departure",
+        &[ManaColor::Blue],
+    );
+    let mut runner = scenario.build();
+    let outcome = runner.activate(source, 0).pay_with(&[source]).resolve();
+    assert_eq!(outcome.state().objects[&source].zone, Zone::Graveyard);
+    assert_eq!(outcome.state().objects[&card].zone, Zone::Hand);
+    assert_eq!(grants(runner.state(), card), 1);
+    assert_eq!(grants(runner.state(), source), 0);
+}
+
+#[test]
+fn jev_perpetual_legacy_they_conjure_chosen_and_self_public() {
+    // Labelled cost-grant sisters of the retained full Indris/Racketeer suite.
+    let mut scenario = scenario();
+    let text = "Conjure two cards named Divination into your hand. They perpetually gain \"This spell costs {1} less to cast.\"";
+    let conjure = seek_spell(&mut scenario, P0, text);
+    let chosen_text = "Choose a creature card in your hand. They perpetually gain \"This spell costs {1} less to cast.\"";
+    let chosen = seek_spell(&mut scenario, P0, chosen_text);
+    let self_text = "This card perpetually gains \"This spell costs {1} less to cast.\"";
+    let self_grant = seek_spell(&mut scenario, P0, self_text);
+    let creature = scenario
+        .add_creature_to_hand(P0, "Selected creature", 2, 2)
+        .id();
+    let decoy = scenario.add_spell_to_hand(P0, "Unselected card", true).id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(conjure).resolve();
+    outcome.assert_hand_drawn(P0, 2);
+    let conjured: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.name == "Divination")
+        .map(|object| object.id)
+        .collect();
+    assert_eq!(conjured.len(), 2);
+    for card in conjured {
+        assert_eq!(grants(runner.state(), card), 1);
+    }
+    runner.cast(chosen).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseFromZoneChoice { .. }
+    ));
+    let action = legal_actions(runner.state()).into_iter().find(|action| matches!(action, GameAction::SelectCards { cards } if cards == &vec![creature])).expect("actual chosen-card response");
+    runner.act(action).unwrap();
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(grants(runner.state(), creature), 1);
+    runner.cast(self_grant).resolve();
+    assert_eq!(grants(runner.state(), self_grant), 1);
+    for id in [conjure, chosen, decoy] {
+        assert_eq!(grants(runner.state(), id), 0);
+    }
+}
+
+#[test]
+fn jev_perpetual_event_recipient_remains_distinct() {
+    let mut scenario = scenario();
+    let whelp = scenario.add_creature_from_oracle(P0, "Darigaaz's Whelp", 2, 2,
+        "Kicker {1}{R}\nFlying\nWhenever you draw a Dragon card, it perpetually gets +1/+1.\nWhen Darigaaz's Whelp enters, if it was kicked, seek a Dragon card. Darigaaz's Whelp and that Dragon card each perpetually get +1/+1.")
+        .with_mana_cost("{1}{B}".parse().unwrap()).id();
+    let dragon = scenario
+        .add_spell_to_library_top(P0, "Drawn Dragon", false)
+        .as_creature()
+        .with_subtypes(vec!["Dragon"])
+        .id();
+    let other = library_card(&mut scenario, P0, "Unrelated draw", &[]);
+    let draw = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
+        .with_mana_cost("{2}{U}".parse().unwrap())
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(draw).resolve();
+    outcome.assert_hand_drawn(P0, 2);
+    outcome.assert_zone(&[dragon, other], Zone::Hand);
+    assert_eq!(runner.state().objects[&dragon].perpetual_mods.len(), 1);
+    assert!(runner.state().objects[&whelp].perpetual_mods.is_empty());
+    assert!(runner.state().objects[&other].perpetual_mods.is_empty());
+}
+
+#[test]
+fn jev_sought_grant_preserves_independently_targeted_tail() {
+    let text = format!("Seek a card. {COST_GRANT} Target creature gets +1/+1 until end of turn.");
+    complete_shape(&text);
+    let mut scenario = scenario();
+    let card = library_card(&mut scenario, P0, "Exact sought card", &[ManaColor::Blue]);
+    let target = scenario
+        .add_creature_from_oracle(P0, "Independent tail target", 2, 2, "")
+        .id();
+    let source = seek_spell(&mut scenario, P0, &text);
+    let mut runner = scenario.build();
+    let outcome = runner.cast(source).target_object(target).resolve();
+    outcome.assert_zone(&[card], Zone::Hand);
+    outcome.assert_power_toughness(target, 3, 3);
+    assert_eq!(grants(runner.state(), card), 1);
+    assert_eq!(grants(runner.state(), target), 0);
+    assert_eq!(grants(runner.state(), source), 0);
 }

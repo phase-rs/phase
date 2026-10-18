@@ -14824,3 +14824,68 @@ mod tests {
         assert!(serde_json::from_value::<GameState>(malformed).is_err());
     }
 }
+
+#[cfg(test)]
+mod sought_result_privacy_tests {
+    use super::*;
+    #[test]
+    fn sought_result_pause_is_private_and_trusted_reloadable() {
+        let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let mut state = runner.state().clone();
+        // Labelled sentinel isolation inside an ACTUAL populated private result.
+        let records = state
+            .return_result_frames
+            .values_mut()
+            .flat_map(|frame| frame.values_mut())
+            .find(|records| !records.is_empty())
+            .unwrap();
+        records[0].name = "PRIVATE_SOUGHT_RESULT_SENTINEL".into();
+        let original = serde_json::to_string(&state).unwrap();
+        assert!(original.contains("PRIVATE_SOUGHT_RESULT_SENTINEL"));
+        assert!(!state.resolution_stack.is_empty());
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let filtered = viewer.map_or_else(
+                || filter_state_for_unseated_viewer(&state),
+                |viewer| filter_state_for_viewer(&state, viewer),
+            );
+            assert!(filtered.return_result_frames.is_empty());
+            assert!(filtered.active_return_result_occurrence.is_none());
+            assert_eq!(filtered.next_return_result_occurrence_id, 1);
+            assert!(filtered.resolution_stack.is_empty());
+            assert!(matches!(
+                filtered.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            for value in [
+                serde_json::to_value(&filtered).unwrap(),
+                serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+                    &state, viewer,
+                ))
+                .unwrap(),
+                serde_json::to_value(
+                    crate::game::derived_views::ClientGameStateRef::wrap_filtered(
+                        &state, &filtered, viewer,
+                    ),
+                )
+                .unwrap(),
+            ] {
+                assert!(!value.to_string().contains("PRIVATE_SOUGHT_RESULT_SENTINEL"));
+            }
+        }
+        assert_eq!(
+            serde_json::to_string(&state).unwrap(),
+            original,
+            "projection never mutates trusted authority"
+        );
+        let loaded: crate::types::game_state::PersistedGameState = serde_json::from_slice(
+            &serde_json::to_vec(&crate::types::game_state::PersistedGameState::capture(
+                state,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut runner =
+            crate::game::scenario::GameRunner::from_state(loaded.into_game_state().unwrap());
+        crate::game::effects::seek::tests::finish_sought_pause(&mut runner, &cards);
+    }
+}

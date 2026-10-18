@@ -144,7 +144,7 @@ fn target_defined_token_ordinary_public_document() {
 
 #[test]
 fn outer_spell_instruction_owns_nested_static_text() {
-    // SHAPE: full cards retain honest gaps until their named consumers land.
+    // SHAPE: the complete outer spells own their nested definitions and grants.
     for (name, text) in [
         ("Broken Visage", FULL_BROKEN),
         ("Circadian Struggle", FULL_CIRCADIAN),
@@ -181,10 +181,7 @@ fn outer_spell_instruction_owns_nested_static_text() {
         assert!(parsed.statics.is_empty(), "{name}: {parsed:#?}");
         assert_eq!(parsed.abilities.len(), 1);
         assert_eq!(parsed.abilities[0].description.as_deref(), Some(text));
-        assert_eq!(
-            has_unimplemented(&parsed.abilities[0]),
-            name == "Circadian Struggle"
-        );
+        assert!(!has_unimplemented(&parsed.abilities[0]));
         let gaps: Vec<_> = scope_chain(&parsed.abilities[0])
             .iter()
             .filter_map(|d| match d.effect.as_ref() {
@@ -207,10 +204,49 @@ fn outer_spell_instruction_owns_nested_static_text() {
                     ..
                 }
             )));
-            assert!(!gaps.iter().any(|f| f.contains(CIRCADIAN_SEEK)));
-            assert!(gaps.iter().any(|f| f.contains(CIRCADIAN_GRANT)));
+            assert!(gaps.is_empty());
+            let seek = &parsed.abilities[0];
+            let grant = seek.sub_ability.as_deref().expect("perpetual grant");
+            assert!(seek.declares_return_result.is_some());
+            assert_eq!(
+                grant.reads_return_result.as_ref().map(|(id, _)| *id),
+                seek.declares_return_result
+            );
+            assert!(matches!(
+                grant.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctColorsAmong { .. }
+                })
+            ));
+            assert!(
+                matches!(grant.effect.as_ref(), Effect::ApplyPerpetual { modification: crate::types::ability::PerpetualModification::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount }, .. } if *amount == crate::types::mana::ManaCost::generic(1))
+            );
+            assert!(parsed.parse_warnings.is_empty());
         }
     }
+}
+
+#[test]
+fn jev_circadian_complete_public_shape() {
+    assert_eq!(
+        FULL_CIRCADIAN,
+        format!("Vivid — {CIRCADIAN_SEEK}. {CIRCADIAN_GRANT}")
+    );
+    let parsed = scope_spell(FULL_CIRCADIAN);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.statics.is_empty());
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert!(!has_unimplemented(&parsed.abilities[0]));
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some(FULL_CIRCADIAN)
+    );
+    let grant = parsed.abilities[0].sub_ability.as_deref().unwrap();
+    assert_eq!(
+        grant.reads_return_result.as_ref().map(|(id, _)| *id),
+        parsed.abilities[0].declares_return_result
+    );
+    assert!(grant.reads_return_result.is_some());
 }
 
 #[test]

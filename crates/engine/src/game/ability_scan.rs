@@ -11335,3 +11335,40 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sought_reader_scan_tests {
+    use super::*;
+    #[test]
+    fn sought_parsed_chain_retains_dynamic_result_and_color_reads() {
+        let parsed = crate::parser::parse_oracle_text(
+            r#"Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain "This spell costs {1} less to cast.""#,
+            "Circadian Struggle",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let root = &parsed.abilities[0];
+        let grant = root.sub_ability.as_deref().unwrap();
+        assert!(grant.reads_return_result.is_some());
+        assert!(ability_definition_reads_sibling_mutable(root));
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            grant,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(ability_uses_event_context(&resolved));
+        assert!(ability_reads_sibling_mutable(&resolved));
+        assert!(ability_reads_projected_resource(&resolved));
+        let plain = crate::types::ability::ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(!ability_uses_event_context(&plain));
+    }
+}

@@ -7517,3 +7517,123 @@ mod hand_entry_receiver_tests {
         assert_eq!(rebound_owners(&state), vec![Some(P0), Some(P0)]);
     }
 }
+
+#[cfg(test)]
+mod sought_completion_order_tests {
+    use super::*;
+    #[test]
+    fn sought_batch_result_is_unpublished_through_repeated_and_final_pause() {
+        let (mut runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        for pause in 0..2 {
+            let batch = runner
+                .state()
+                .active_batch_delivery()
+                .expect("parked batch");
+            let Some(BatchCompletion::RecordInstructionZoneResult {
+                occurrence_id,
+                result_id,
+                settled_records,
+            }) = &batch.completion
+            else {
+                panic!("missing named completion")
+            };
+            assert!(settled_records.is_none());
+            assert!(!runner.state().return_result_frames[occurrence_id].contains_key(result_id));
+            assert_eq!(
+                batch.remaining.len(),
+                1 - pause,
+                "final member still has a completion owner"
+            );
+            assert!(batch.paused_current.is_some());
+            let action = crate::ai_support::legal_actions(runner.state())
+                .into_iter()
+                .find(|action| {
+                    matches!(
+                        action,
+                        crate::types::actions::GameAction::ChooseReplacement { index: 0 }
+                    )
+                })
+                .unwrap();
+            runner.act(action).unwrap();
+        }
+        for _ in 0..20 {
+            if runner.state().stack.is_empty()
+                && matches!(
+                    runner.state().waiting_for,
+                    crate::types::game_state::WaitingFor::Priority { .. }
+                )
+            {
+                break;
+            }
+            runner
+                .act(crate::types::actions::GameAction::PassPriority)
+                .unwrap();
+        }
+        for card in cards {
+            assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+            assert_eq!(runner.state().objects[&card].perpetual_mods.len(), 1);
+        }
+        assert!(runner.state().active_batch_delivery().is_none());
+        assert!(
+            runner.state().return_result_frames.is_empty(),
+            "completed occurrence retires normally"
+        );
+    }
+    #[test]
+    fn sought_terminal_records_exclude_no_move_and_unrelated_nested_occurrences() {
+        let (runner, _, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let mut group = runner
+            .state()
+            .active_batch_delivery()
+            .unwrap()
+            .logical_zone_change_group
+            .clone();
+        let record = runner
+            .state()
+            .return_result_frames
+            .values()
+            .flat_map(|frame| frame.values())
+            .find(|records| !records.is_empty())
+            .unwrap()[0]
+            .clone();
+        let event = crate::types::events::GameEvent::ZoneChanged {
+            object_id: record.object_id,
+            from: record.from_zone,
+            to: record.to_zone,
+            record: Box::new(record.clone()),
+        };
+        let mut nested = record.clone();
+        nested.object_id = ObjectId(99999);
+        let nested_event = crate::types::events::GameEvent::ZoneChanged {
+            object_id: nested.object_id,
+            from: nested.from_zone,
+            to: nested.to_zone,
+            record: Box::new(nested),
+        };
+        // Typed settlement isolation: only the selected member's terminal move
+        // names occurrence0; an unrelated nested move must not enter the result.
+        group.all_origin_occurrences = vec![
+            crate::types::game_state::LogicalZoneChangeOccurrence { ordinal: 0, event },
+            crate::types::game_state::LogicalZoneChangeOccurrence {
+                ordinal: 1,
+                event: nested_event,
+            },
+        ];
+        group.terminal_outcomes = vec![
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Moved {
+                occurrence_ordinal: 0,
+            },
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Prevented,
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Remained,
+        ];
+        assert_eq!(
+            crate::types::game_state::settled_logical_zone_change_records(&group),
+            vec![record]
+        );
+        group.terminal_outcomes = vec![
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Prevented,
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Remained,
+        ];
+        assert!(crate::types::game_state::settled_logical_zone_change_records(&group).is_empty());
+    }
+}

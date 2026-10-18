@@ -9834,3 +9834,43 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sought_reader_rw_tests {
+    use super::*;
+    #[test]
+    fn sought_parsed_chain_is_member_bound_with_persistent_card_writes() {
+        let parsed = crate::parser::parse_oracle_text(
+            r#"Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain "This spell costs {1} less to cast.""#,
+            "Circadian Struggle",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let root = crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(root
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .reads_return_result
+            .is_some());
+        let profile = ability_rw_profile(&root);
+        assert!(profile.reads_member_bound());
+        assert!(profile.reads_board.any());
+        assert!(profile.writes_external.any());
+        let unbound = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(!ability_rw_profile(&unbound).reads_member_bound());
+    }
+}

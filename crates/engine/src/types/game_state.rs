@@ -48301,3 +48301,91 @@ mod shared_zone_storage_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sought_result_current_tests {
+    use super::*;
+    use crate::game::effects::seek::tests::{finish_sought_pause, sought_pause_fixture};
+    #[test]
+    fn jev_sought_result_current_pause_reload() {
+        let (runner, cards, _) = sought_pause_fixture();
+        let state = runner.state();
+        assert!(validate_return_result_occurrence_coherence(state).is_ok());
+        let raw: GameState = serde_json::from_slice(&serde_json::to_vec(state).unwrap()).unwrap();
+        let trusted: PersistedGameState = serde_json::from_slice(
+            &serde_json::to_vec(&PersistedGameState::capture(state.clone())).unwrap(),
+        )
+        .unwrap();
+        for loaded in [raw, trusted.into_game_state().unwrap()] {
+            assert_eq!(loaded.return_result_frames, state.return_result_frames);
+            assert_eq!(
+                loaded.next_return_result_occurrence_id,
+                state.next_return_result_occurrence_id
+            );
+            let mut runner = crate::game::scenario::GameRunner::from_state(loaded);
+            finish_sought_pause(&mut runner, &cards);
+        }
+        for mutation in 0..5 {
+            let mut bad = state.clone();
+            match mutation {
+                0 => bad.return_result_frames.clear(),
+                1 => bad.next_return_result_occurrence_id = 0,
+                2 => {
+                    let BatchCompletion::RecordInstructionZoneResult {
+                        occurrence_id,
+                        result_id,
+                        ..
+                    } = bad
+                        .active_batch_delivery()
+                        .unwrap()
+                        .completion
+                        .as_ref()
+                        .unwrap()
+                    else {
+                        panic!()
+                    };
+                    let (occurrence_id, result_id) = (*occurrence_id, *result_id);
+                    bad.return_result_frames
+                        .get_mut(&occurrence_id)
+                        .unwrap()
+                        .insert(result_id, Vec::new());
+                }
+                3 => {
+                    let completion = bad.active_batch_delivery().unwrap().completion.clone();
+                    let delivery = bad.active_batch_delivery_mut().unwrap();
+                    if let Some(BatchCompletion::RecordInstructionZoneResult {
+                        settled_records,
+                        ..
+                    }) = &mut delivery.completion
+                    {
+                        *settled_records = Some(Vec::new());
+                    }
+                    assert!(completion.is_some());
+                }
+                4 => {
+                    let duplicate = bad.active_batch_delivery().unwrap().clone();
+                    bad.push_batch_delivery(duplicate);
+                    assert!(validate_return_result_occurrence_coherence(&bad)
+                        .unwrap_err()
+                        .contains("duplicate parked publishers"));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_slice::<GameState>(&serde_json::to_vec(&bad).unwrap()).is_err(),
+                "malformed current mutation {mutation}"
+            );
+        }
+        let historical = GameState::new_two_player(42);
+        let mut value = serde_json::to_value(historical).unwrap();
+        for field in [
+            "return_result_frames",
+            "active_return_result_occurrence",
+            "next_return_result_occurrence_id",
+        ] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        let loaded: GameState = serde_json::from_value(value).unwrap();
+        assert!(loaded.return_result_frames.is_empty());
+    }
+}

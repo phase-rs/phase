@@ -12950,6 +12950,38 @@ fn parse_quoted_self_spell_cost_body(
 /// [`PerpetualModification::ModifyCost`]. The quoted self-spell cost modifier is
 /// realized at resolution by injecting a synthetic [`StaticMode::ModifyCost`]
 /// into the card's persistent static baseline.
+pub(crate) fn parse_sought_perpetual_cost(
+    input: &str,
+) -> OracleResult<'_, (ManaCost, crate::types::statics::CostModifyMode)> {
+    let (input, _) = alt((tag("those cards "), tag("they "))).parse(input)?;
+    let (input, _) = tag("perpetually ").parse(input)?;
+    let (input, _) = alt((tag("gain "), tag("gains "))).parse(input)?;
+    let (input, parameters) = nom::sequence::delimited(
+        nom::character::complete::char('"'),
+        parse_quoted_self_spell_cost_body,
+        nom::character::complete::char('"'),
+    )
+    .parse(input)?;
+    let (input, _) = all_consuming(opt(nom::character::complete::char('.'))).parse(input)?;
+    Ok((input, parameters))
+}
+
+/// Complete source proof for an independent scalar-life instruction.
+pub(crate) fn sought_corridor_life_amount(text: &str) -> Option<QuantityExpr> {
+    let text = strip_leading_sequence_connector(text).trim();
+    let lower = text.to_lowercase();
+    let ((_, amount, _, _), _) = nom_on_lower(text, &lower, |input| {
+        all_consuming((
+            tag("you gain "),
+            nom_quantity::parse_quantity_expr_number,
+            tag(" life"),
+            opt(nom::character::complete::char('.')),
+        ))
+        .parse(input)
+    })?;
+    Some(amount)
+}
+
 fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."

@@ -27487,11 +27487,14 @@ impl ChosenGroupId {
     }
 }
 
-/// Identity of one return instruction in a parsed ability chain.
+/// Identity of one zone-result instruction in a parsed ability chain.
+/// The historical wire name is retained for returns and digital Seek results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReturnResultId(pub u32);
 
-/// The prior-object predicate and final destination read by a delayed effect.
+/// Printed relation to a zone-result producer. Delayed return consumers apply
+/// the noun/destination/recipient predicate; digital Seek grants consume that
+/// producer's completed moved cards, including redirected arrivals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReturnResultReadSpec {
     pub noun: TargetFilter,
@@ -44771,5 +44774,84 @@ mod chain_description_backfill_tests {
                 .as_deref(),
             Some("tap"),
         );
+    }
+}
+
+#[cfg(test)]
+mod sought_result_serde_tests {
+    use super::*;
+    #[test]
+    fn sought_result_populated_existing_shape_roundtrips_and_converts() {
+        let text =
+            "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Synthetic result codec",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let definition = &parsed.abilities[0];
+        assert!(definition.declares_return_result.is_some());
+        assert_eq!(
+            definition
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .reads_return_result
+                .as_ref()
+                .unwrap()
+                .0,
+            definition.declares_return_result.unwrap()
+        );
+        let restored: AbilityDefinition =
+            serde_json::from_slice(&serde_json::to_vec(definition).unwrap()).unwrap();
+        assert_eq!(&restored, definition);
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            &restored,
+            crate::types::identifiers::ObjectId(99),
+            crate::types::player::PlayerId(0),
+        );
+        assert_eq!(
+            resolved.declares_return_result,
+            definition.declares_return_result
+        );
+        assert_eq!(
+            resolved.sub_ability.as_ref().unwrap().reads_return_result,
+            definition.sub_ability.as_ref().unwrap().reads_return_result
+        );
+        let restored: ResolvedAbility =
+            serde_json::from_slice(&serde_json::to_vec(&resolved).unwrap()).unwrap();
+        assert_eq!(restored.reads_return_result, resolved.reads_return_result);
+        assert_eq!(
+            restored.sub_ability.as_ref().unwrap().reads_return_result,
+            resolved.sub_ability.as_ref().unwrap().reads_return_result
+        );
+        let swapped = crate::game::ability_utils::apply_instead_swap(
+            &resolved,
+            resolved.sub_ability.as_ref().unwrap(),
+        );
+        assert_eq!(
+            swapped.reads_return_result,
+            resolved.sub_ability.as_ref().unwrap().reads_return_result
+        );
+        let plain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let mut historical = serde_json::to_value(plain).unwrap();
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("reads_return_result");
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("declares_return_result");
+        let legacy: AbilityDefinition = serde_json::from_value(historical).unwrap();
+        assert!(legacy.reads_return_result.is_none());
     }
 }

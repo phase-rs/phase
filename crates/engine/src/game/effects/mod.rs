@@ -15894,6 +15894,9 @@ fn resolve_chain_body(
         return Ok(());
     }
 
+    let prepared_sought_grant = perpetual::prepare_sought_cost_grant(state, ability)?;
+    let ability = prepared_sought_grant.as_ref().unwrap_or(ability);
+
     if repeat_for_outermost_with_scope_or_unless(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
     {
@@ -19051,10 +19054,11 @@ fn resolve_chain_body(
                 }
                 _ => None,
             };
-            if (sub_clone.reads_return_result.is_some()
-                || state
-                    .resolution_stack
-                    .copy_token_at_child_boundary(child_stack_start))
+            if (ability.declares_return_result.is_some_and(|result_id| {
+                crate::types::game_state::reads_return_result_id(&sub_clone, result_id)
+            }) || state
+                .resolution_stack
+                .copy_token_at_child_boundary(child_stack_start))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,
@@ -46007,5 +46011,40 @@ mod dandan_read_sweep_tests {
             "reach: Standard counts the seat's own pile"
         );
         assert_eq!(read(&standard, 0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod sought_chain_order_tests {
+    #[test]
+    fn sought_nonhead_reader_is_visible_before_child_continuation_insertion() {
+        let text = "Seek two cards. You gain 7 life. Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Synthetic nonhead",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        let result_id = resolved.declares_return_result.expect("bound producer");
+        let head = resolved.sub_ability.as_ref().unwrap();
+        assert!(head.reads_return_result.is_none());
+        assert!(crate::types::game_state::reads_return_result_id(
+            head, result_id
+        ));
+        let mut budget = crate::analysis::resource::ProbeBudget::for_test(10);
+        assert!(matches!(
+            crate::game::resolution_prompt::ability_resolution_choice_freedom(
+                &crate::types::game_state::GameState::new_two_player(42),
+                &resolved,
+                &mut budget
+            ),
+            crate::game::resolution_prompt::ResolutionChoiceFreedom::MayPrompt
+        ));
     }
 }

@@ -2019,6 +2019,63 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// Validate the stored relation; source adjacency never reselects its id here.
+fn valid_sought_cost_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {
+    let Some((id, spec)) = &reader.reads_return_result else {
+        return false;
+    };
+    let Some(reader_index) = ir
+        .clauses
+        .iter()
+        .position(|clause| std::ptr::eq(clause, reader))
+    else {
+        return false;
+    };
+    let mut producers = ir
+        .clauses
+        .iter()
+        .enumerate()
+        .filter(|(_, clause)| clause.id == *id);
+    let Some((producer_index, producer)) = producers.next() else {
+        return false;
+    };
+    if producers.next().is_some()
+        || producer_index >= reader_index
+        || producer.id >= reader.id
+        || !producer.sought_result_shell_is_empty()
+        || producer.repeat_for.is_some()
+        || producer.reads_return_result.is_some()
+        || !reader.sought_result_shell_is_empty()
+    {
+        return false;
+    }
+    let Effect::Seek { destination, .. } = &producer.parsed.effect else {
+        return false;
+    };
+    let Effect::ApplyPerpetual {
+        target: TargetFilter::None,
+        modification: crate::types::ability::PerpetualModification::ModifyCost { amount, mode },
+    } = &reader.parsed.effect
+    else {
+        return false;
+    };
+    let (repeat, difference, body) = super::lower::strip_for_each_prefix_with_difference(
+        reader.source.fragment().unwrap_or_default(),
+    );
+    let parameters = super::parse_sought_perpetual_cost(&body.to_lowercase())
+        .ok()
+        .map(|(_, parameters)| parameters);
+    parameters.as_ref() == Some(&(amount.clone(), *mode))
+        && repeat == reader.repeat_for
+        && difference.is_none()
+        && spec.destination == *destination
+        && spec.recipient == ControllerRef::You
+        && spec.noun
+            == TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                crate::types::ability::TypeFilter::Card,
+            ))
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -2875,6 +2932,18 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // effect, so it travels the ordinary def-construction path (boundary
         // link, condition, provenance) rather than a bespoke emit.
         let clause_effect = unabsorbed_rider_gap.unwrap_or_else(|| clause_ir.parsed.effect.clone());
+        let invalid_sought_reader = matches!(&clause_effect, Effect::ApplyPerpetual {
+            target, modification: crate::types::ability::PerpetualModification::ModifyCost { .. }
+        } if (*target == TargetFilter::None || clause_ir.reads_return_result.is_some())
+            && !valid_sought_cost_reader(ir, clause_ir));
+        let clause_effect = if invalid_sought_reader {
+            Effect::unimplemented(
+                "sought_cost_antecedent",
+                clause_ir.source.fragment().unwrap_or_default(),
+            )
+        } else {
+            clause_effect
+        };
         let is_target_only = matches!(clause_effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_effect);
         def.declares_chosen_group = clause_ir
@@ -2888,12 +2957,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .reads_return_result
                 .as_ref()
                 .is_some_and(|(id, _)| *id == clause_ir.id)
+                && (!matches!(reader.parsed.effect, Effect::ApplyPerpetual { modification: crate::types::ability::PerpetualModification::ModifyCost { .. }, .. }) || valid_sought_cost_reader(ir, reader))
         }) {
             def.declares_return_result = Some(ReturnResultId(clause_ir.id.0));
         }
         def.reads_return_result = clause_ir
             .reads_return_result
             .as_ref()
+            .filter(|_| !invalid_sought_reader)
             .map(|(id, spec)| (ReturnResultId(id.0), spec.clone()));
         // CR 702.26a: Preserve clause provenance on parent-target tap riders so
         // host-bound phase-in rewrites can match the exact printed phrase without
@@ -3630,7 +3701,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
 
         // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger
         // and bind direct follow-up ParentTarget references to the affected set.
-        if !current_defs.is_empty() {
+        if !current_defs.is_empty() && clause_ir.reads_return_result.is_none() {
             let source_text_lower = clause_ir
                 .source
                 .fragment()

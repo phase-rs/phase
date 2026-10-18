@@ -219,7 +219,7 @@ fn jev_outer_scope_circadian() {
     assert!(lowered.statics.is_empty());
     assert_eq!(lowered.abilities.len(), 1);
     assert_eq!(lowered.abilities[0].description.as_deref(), Some(text));
-    assert!(ability_has_unimplemented(&lowered.abilities[0]));
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
     let gaps: Vec<_> =
         std::iter::successors(Some(&lowered.abilities[0]), |d| d.sub_ability.as_deref())
             .filter_map(|d| match d.effect.as_ref() {
@@ -236,8 +236,19 @@ fn jev_outer_scope_circadian() {
             ..
         }
     ));
-    assert!(!gaps.iter().any(|f| f.contains(OUTER_CIRCADIAN_SEEK)));
-    assert!(gaps.iter().any(|f| f.contains(OUTER_CIRCADIAN_GRANT)));
+    assert!(gaps.is_empty());
+    let grant = lowered.abilities[0].sub_ability.as_deref().unwrap();
+    assert!(grant.reads_return_result.is_some());
+    assert_eq!(
+        grant.reads_return_result.as_ref().map(|(id, _)| *id),
+        lowered.abilities[0].declares_return_result
+    );
+    assert!(matches!(
+        grant.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { .. }
+        })
+    ));
     insta::assert_json_snapshot!("jev_outer_scope_circadian_ir", &ir);
     insta::assert_json_snapshot!("jev_outer_scope_circadian_lowered", &lowered);
 }
@@ -296,7 +307,7 @@ fn jev_seek_public_ir_binding_and_coverage() {
     })
     .filter_map(|node| node.effect.unimplemented_description())
     .collect();
-    assert_eq!(gaps, vec![OUTER_CIRCADIAN_GRANT]);
+    assert!(gaps.is_empty());
 
     // Change only the binding on the named clause. Raw/prepared/source text still
     // says colors, so a text rescan instead of ClauseIr consumption fails this.
@@ -330,7 +341,7 @@ fn jev_seek_public_ir_binding_and_coverage() {
         rebound.abilities[0].description.as_deref(),
         Some(text.as_str())
     );
-    assert!(ability_has_unimplemented(&rebound.abilities[0]));
+    assert!(!ability_has_unimplemented(&rebound.abilities[0]));
 }
 
 #[test]
@@ -446,7 +457,7 @@ fn ability_word_boundary_preserves_complete_circadian_source_and_audit() {
         Some("Draw a card.")
     );
     assert_eq!(lowered.abilities[1].description.as_deref(), Some(circadian));
-    assert!(ability_has_unimplemented(&lowered.abilities[1]));
+    assert!(!ability_has_unimplemented(&lowered.abilities[1]));
     assert!(matches!(
         lowered.abilities[1].effect.as_ref(),
         Effect::Seek {

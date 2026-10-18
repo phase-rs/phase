@@ -85813,3 +85813,122 @@ fn jev_seek_chain_uses_one_where_x_binding_and_keeps_independent_tail() {
     );
     assert!(std::iter::successors(Some(&bad), |d| d.sub_ability.as_deref()).any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { name, description: Some(fragment) } if name == "where_x_binding" && fragment == "where X is the number of mysteries you control")));
 }
+
+#[test]
+fn jev_sought_cost_subject_variants() {
+    // SHAPE: synthetic grammar twins; runtime coverage lives in jev_seek_perpetual.
+    for subject in ["Those cards", "They"] {
+        for verb in ["gain", "gains"] {
+            let text = format!("Seek two cards. {subject} perpetually {verb} \"This spell costs {{1}} less to cast.\"");
+            let def = parse_effect_chain(&text, AbilityKind::Spell);
+            assert!(matches!(*def.effect, Effect::Seek { .. }), "{def:#?}");
+            let grant = def.sub_ability.as_deref().expect("cost grant");
+            assert!(
+                matches!(grant.effect.as_ref(), Effect::ApplyPerpetual { modification: crate::types::ability::PerpetualModification::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount }, .. } if *amount == ManaCost::generic(1)),
+                "{def:#?}"
+            );
+            assert_eq!(
+                grant.reads_return_result.as_ref().map(|(id, _)| *id),
+                def.declares_return_result
+            );
+        }
+    }
+    for text in [
+        "Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Conjure a card named Divination into your hand. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Choose a creature card in your hand. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast and draw a card.\"",
+        "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.",
+        "Seek two cards. For each mystery among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "You may seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Seek two cards. Draw a card. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(std::iter::successors(Some(&def), |node| node.sub_ability.as_deref()).any(|node| matches!(*node.effect, Effect::Unimplemented { .. })), "must reject complete unsupported reader: {text}: {def:#?}");
+    }
+}
+
+#[test]
+fn sought_standalone_leaf_and_legacy_they_authorities() {
+    // SHAPE: direct leaf parsing has no ClauseId authority to bind.
+    for text in [
+        "Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "They perpetually gain \"This spell costs {1} less to cast.\"",
+    ] {
+        assert!(
+            matches!(parse_effect(text), Effect::Unimplemented { .. }),
+            "{text}"
+        );
+    }
+    for (text, expected) in [
+        ("Conjure two cards named Divination into your hand. They perpetually gain \"This spell costs {1} less to cast.\"", TargetFilter::LastCreated),
+        ("Choose a creature card in your hand. They perpetually gain \"This spell costs {1} less to cast.\"", TargetFilter::ParentTarget),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let grant = def.sub_ability.as_deref().unwrap();
+        assert!(matches!(grant.effect.as_ref(), Effect::ApplyPerpetual { target, modification: PerpetualModification::ModifyCost { .. } } if *target == expected), "{def:#?}");
+        assert!(grant.reads_return_result.is_none());
+    }
+}
+
+#[test]
+fn sought_reader_respects_public_paragraph_modal_and_repeat_boundaries() {
+    // SHAPE: each boundary has a complete same-builder positive twin.
+    let good = parse_effect_chain(
+        "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert!(good
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .reads_return_result
+        .is_some());
+    for text in [
+        "Seek two cards.\nThose cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Choose one —\n• Seek two cards.\n• Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Seek two cards. Repeat this process any number of times. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "If you control a creature, seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+    ] {
+        let parsed = parse_oracle_text(text, "Labelled binding boundary", &[], &["Instant".into()], &[]);
+        assert!(!parsed.abilities.is_empty(), "{parsed:#?}");
+        let face = CardFace { abilities: parsed.abilities, triggers: parsed.triggers,
+            static_abilities: parsed.statics, replacements: parsed.replacements,
+            additional_cost: parsed.additional_cost, ..Default::default() };
+        assert!(card_face_has_unimplemented_parts(&face), "boundary must retain a strict failure: {face:#?}");
+    }
+}
+
+#[test]
+fn sought_failed_relation_retains_the_complete_reader_fragment() {
+    // SHAPE: supported Seek and scalar-life sisters guard the failing route.
+    let fragment = "Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    let valid = parse_effect_chain(
+        &format!("Seek two cards. You gain 9 life. {fragment}"),
+        AbilityKind::Spell,
+    );
+    assert!(valid
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .reads_return_result
+        .is_some());
+    let invalid = parse_effect_chain(
+        &format!("Seek two cards. Draw a card. {fragment}"),
+        AbilityKind::Spell,
+    );
+    let gap = invalid
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .sub_ability
+        .as_ref()
+        .unwrap();
+    assert!(
+        matches!(gap.effect.as_ref(), Effect::Unimplemented { description: Some(description), .. } if description == fragment),
+        "{invalid:#?}"
+    );
+}
