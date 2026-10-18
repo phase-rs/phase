@@ -660,7 +660,9 @@ pub(crate) fn parse_animation_modifications(text: &str) -> Vec<ContinuousModific
         }
     }
 
-    modifications
+    // CR 205.1a / CR 205.1b: animation replaces prior card types unless it
+    // explicitly retains them or makes an artifact creature.
+    super::type_change::maybe_replace_card_types(modifications, &body_lower)
 }
 
 pub(crate) fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {

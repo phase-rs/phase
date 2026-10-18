@@ -13672,8 +13672,8 @@ fn parse_compound_static_kaito_animation() {
         .contains(&ContinuousModification::SetToughness { value: 4 }));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddType {
-            core_type: crate::types::card_type::CoreType::Creature,
+        .contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Creature],
         }));
     assert!(def
         .modifications
@@ -21163,8 +21163,8 @@ fn omo_nonland_creature_counter_subject_is_all_creature_types() {
 // [non-creature type]" with no CR 205.1b retention marker REPLACES the object's
 // card types, so the Kraken stops being a creature while it slumbers. The
 // modification must be a REPLACING `SetCardTypes`, not an additive `AddType`
-// (which left the impossible "Creature Land"). Creature animations, "artifact
-// creature" forms, and "in addition to its other types" stay additive.
+// (which left the impossible "Creature Land"). Explicit retention and "artifact
+// creature" forms stay additive under CR 205.1b.
 #[test]
 fn arixmethes_bare_is_a_land_replaces_card_types() {
     use crate::types::card_type::CoreType;
@@ -21204,13 +21204,162 @@ fn arixmethes_bare_is_a_land_replaces_card_types() {
     );
     // An artifact-creature compound retains its prior types (CR 205.1b).
     let artifact_creature = parse_static_line("~ is an artifact creature.").unwrap();
-    assert!(
+    assert_eq!(
+        artifact_creature.modifications,
+        vec![
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            },
+        ],
+        "'artifact creature' must retain both additive types"
+    );
+}
+
+// SHAPE: CR 205.1a + CR 613.1d + CR 613.4b: Futurist sets subtypes and base
+// P/T without setting a card type, even though its subject says "this creature".
+#[test]
+fn futurist_operative_subtype_animation_preserves_card_types_shape() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as this creature is tapped, it's a Human Citizen with base power and toughness 1/1 and can't be blocked.\n{2}{U}: Untap this creature.",
+        "Futurist Operative",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Ninja".to_string()],
+    );
+    let animation = parsed
+        .statics
+        .iter()
+        .find(|definition| {
+            definition
+                .modifications
+                .contains(&ContinuousModification::SetPower { value: 1 })
+        })
+        .expect("Futurist must parse its base-P/T animation");
+    assert_eq!(animation.affected, Some(TargetFilter::SelfRef));
+    for modification in [
+        ContinuousModification::SetPower { value: 1 },
+        ContinuousModification::SetToughness { value: 1 },
+        ContinuousModification::AddSubtype {
+            subtype: "Human".to_string(),
+        },
+        ContinuousModification::AddSubtype {
+            subtype: "Citizen".to_string(),
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+    ] {
+        assert!(animation.modifications.contains(&modification));
+    }
+    assert!(!animation
+        .modifications
+        .iter()
+        .any(|modification| matches!(modification, ContinuousModification::SetCardTypes { .. })));
+}
+
+// SHAPE: CR 205.1a / CR 205.1b: mixed animation modifications do not imply
+// retention; explicit retention and artifact-creature wording do.
+#[test]
+fn self_animation_card_type_replacement_preserves_other_modifications() {
+    let mixed = vec![
+        ContinuousModification::SetPower { value: 3 },
+        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::AddSubtype {
+            subtype: "Ninja".to_string(),
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof,
+        },
+    ];
+    let replaced = super::type_change::maybe_replace_card_types(
+        mixed.clone(),
+        "3/4 ninja creature with hexproof",
+    );
+    assert_eq!(
+        replaced[0],
+        ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
+        }
+    );
+    let non_types: Vec<_> = mixed
+        .iter()
+        .filter(|modification| !matches!(modification, ContinuousModification::AddType { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(&replaced[1..], non_types);
+    for explicit in [
+        "legendary blue and red ninja creature with hexproof",
+        "3/4 ninja creature.",
+        "3/4 ninja creature, with hexproof",
+    ] {
+        assert_eq!(
+            super::type_change::maybe_replace_card_types(mixed.clone(), explicit),
+            replaced
+        );
+    }
+    // CR 205.1a: inferred Creature does not make a subtype-only predicate
+    // replace card types. Core words in granted abilities are outside it.
+    for (first, second) in [("Human", "Citizen"), ("Elf", "Scout")] {
+        let inferred = vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::AddSubtype {
+                subtype: first.to_string(),
+            },
+            ContinuousModification::AddSubtype {
+                subtype: second.to_string(),
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ];
+        let descriptor = format!("{} {}", first.to_lowercase(), second.to_lowercase());
+        for body in [
+            descriptor.clone(),
+            format!("1/1 {descriptor}"),
+            format!("{descriptor} with base power and toughness 1/1"),
+            format!("{descriptor} with \"Whenever this creature attacks, draw a card.\""),
+            format!("{descriptor} and has \"Whenever this creature attacks, draw a card.\""),
+            format!("{descriptor} where X is the number of creature cards in your graveyard"),
+            format!("{descriptor} creaturely"),
+        ] {
+            assert_eq!(
+                super::type_change::maybe_replace_card_types(inferred.clone(), &body),
+                inferred,
+                "subtype-only descriptor must preserve its modifications: {body}"
+            );
+        }
+    }
+    for retention in [
+        "in addition to its other types",
+        "that's still a planeswalker",
+        "that's still an enchantment",
+    ] {
+        assert_eq!(
+            super::type_change::maybe_replace_card_types(mixed.clone(), retention),
+            mixed
+        );
+    }
+    let mut artifact_creature = mixed.clone();
+    artifact_creature.push(ContinuousModification::AddType {
+        core_type: CoreType::Artifact,
+    });
+    assert_eq!(
+        super::type_change::maybe_replace_card_types(
+            artifact_creature.clone(),
+            "3/4 ninja artifact creature with hexproof"
+        ),
         artifact_creature
-            .modifications
-            .iter()
-            .all(|m| matches!(m, ContinuousModification::AddType { .. })),
-        "'artifact creature' must stay additive: {:?}",
-        artifact_creature.modifications
+    );
+    assert_eq!(
+        super::type_change::maybe_replace_card_types(non_types.clone(), "with hexproof"),
+        non_types
     );
 }
 
@@ -27510,6 +27659,46 @@ fn static_life_total_cant_change_opponent_scope() {
             }))
         ));
     }
+}
+
+/// CR 101.2 + CR 121.3 + CR 119.7: "[Subject] can't draw cards or gain life." emits both
+/// prohibitions, and the life clause binds the same subject as the draw clause
+/// (Mornsong Aria: "Players"; an opponent subject scopes both to opponents).
+#[test]
+fn static_cant_draw_cards_or_gain_life_binds_one_subject() {
+    let defs = parse_static_line_multi("Players can't draw cards or gain life.");
+    let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers
+            },
+            StaticMode::CantGainLife,
+        ]
+    );
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(TypedFilter::default()))
+    );
+
+    let defs = parse_static_line_multi("Each opponent can't draw cards or gain life.");
+    let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantDraw {
+                who: ProhibitionScope::Opponents
+            },
+            StaticMode::CantGainLife,
+        ]
+    );
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
 }
 
 #[test]

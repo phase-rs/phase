@@ -4098,6 +4098,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
             d.push(("player".into(), format!("{player:?}")));
         }
+        Effect::PhysicalContest { kind, contestant } => {
+            d.push(("contest".into(), format!("{kind:?}")));
+            d.push(("contestant".into(), format!("{contestant:?}")));
+        }
         // Heist (Arena digital-only): look step records the look count.
         Effect::Heist { look_count, .. } => {
             d.push(("look".into(), look_count.to_string()));
@@ -4410,6 +4414,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Clash
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }
@@ -5178,6 +5183,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsFaceUp => "source plane is face up".into(),
         SC::AdditionalCostPaid => "additional cost was paid".into(),
         SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
+        SC::FirstCombatPhaseOfTurn => "it's the first combat phase of the turn".into(),
         SC::None => "none".into(),
     }
 }
@@ -7987,7 +7993,7 @@ fn visit_effect_modification_carriers(
             ..
         } => visit_all(additional_modifications),
         Effect::ReturnAsAura { grants, .. } => visit_all(grants),
-        Effect::AddPendingEntersModifications { modifications } => visit_all(modifications),
+        Effect::AddPendingEntersModifications { rider } => visit_all(&rider.modifications),
         Effect::EachPlayerCopyChosen {
             copy_modifications, ..
         } => visit_all(copy_modifications),
@@ -10650,6 +10656,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         }
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
+        StaticCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
         StaticCondition::DuringOpponentsTurn => ("DuringOpponentsTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {

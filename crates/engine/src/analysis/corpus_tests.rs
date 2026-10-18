@@ -363,7 +363,8 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Wrong win_kind ⇒ Failed. Revert "classify any Some(cert) as Confirmed" flips this.
     let wrong_win = LoopCertificate {
         unbounded: vec![ResourceAxis::DamageDealt(P1)],
-        win_kind: WinKind::LethalDamage,
+        win_kind: Some(WinKind::LethalDamage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -379,7 +380,8 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Right win_kind but wrong family ⇒ Failed. Revert "drop the family check" flips this.
     let wrong_family = LoopCertificate {
         unbounded: vec![ResourceAxis::TokensCreated],
-        win_kind: WinKind::Advantage,
+        win_kind: Some(WinKind::Advantage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -405,7 +407,8 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // the three Failed assertions above are discriminating, not always-Failed.
     let right = LoopCertificate {
         unbounded: vec![ResourceAxis::Mana(ManaType::Green)],
-        win_kind: WinKind::Advantage,
+        win_kind: Some(WinKind::Advantage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -476,7 +479,7 @@ fn assert_combo(idx: usize, cert: &LoopCertificate) {
         cert.unbounded,
         row.family,
     );
-    assert_eq!(cert.win_kind, row.win_kind, "{}: win_kind", row.name);
+    assert_eq!(cert.win_kind, Some(row.win_kind), "{}: win_kind", row.name);
 }
 
 /// HELIOD, SUN-CROWNED + WALKING BALLISTA — the canonical driving combo.
@@ -486,7 +489,7 @@ fn drive_heliod_ballista_certificate() {
     let cert = corpus::drive_offline_heliod_ballista(card_db()).expect(
         "Heliod + Ballista must be confirmed: board identical modulo life/damage, +1 damage/cycle",
     );
-    assert_eq!(cert.win_kind, WinKind::LethalDamage);
+    assert_eq!(cert.win_kind, Some(WinKind::LethalDamage));
     assert!(
         cert.covers(&[ResourceAxis::DamageDealt(P1)]),
         "certificate must name unbounded damage to the opponent (got {:?})",
@@ -570,7 +573,7 @@ fn drive_pentad_prism_charge_growth_certificate() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::Advantage,
+        Some(WinKind::Advantage),
         "a charge-counter growth loop is a CR 104.4b optional advantage engine, not a win"
     );
     assert!(
@@ -629,7 +632,7 @@ fn drive_kilo_freed_relic_ballista_certificate() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::LethalDamage,
+        Some(WinKind::LethalDamage),
         "a +1 damage/cycle ping on the opponent is an unbounded CR 704.5a lethal-damage loop"
     );
     assert!(
@@ -661,7 +664,7 @@ fn drive_kilo_freed_relic_ballista_x0_no_damage_axis() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::Advantage,
+        Some(WinKind::Advantage),
         "with a dead Ballista the only unbounded axis is the proliferate trigger — an \
          advantage engine, not a lethal win"
     );
@@ -695,7 +698,7 @@ fn one_ring_burden_growth_certificate() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::Advantage,
+        Some(WinKind::Advantage),
         "a burden-counter growth loop is a CR 104.4b optional advantage engine, not a win"
     );
     assert!(
@@ -899,7 +902,7 @@ fn drive_damage_loop_certificate() {
     let cert = detect_loop(&cycle_start, &cycle_end, &delta, P0, true)
         .expect("board-identical +damage cycle must be confirmed as a net-progress loop");
 
-    assert_eq!(cert.win_kind, WinKind::LethalDamage);
+    assert_eq!(cert.win_kind, Some(WinKind::LethalDamage));
     assert!(
         cert.covers(&[ResourceAxis::DamageDealt(P1)]),
         "the certificate must name unbounded damage to the opponent (got {:?})",

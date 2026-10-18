@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Jugador defensor (Arrollar)",
     "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Pila",
     "collapsePanel": "Contraer el panel de la pila",
     "expandPanel": "Expandir el panel de la pila",
@@ -2670,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Concurso de miradas",
+      "breathHolding": "Concurso de aguantar la respiración"
+    },
+    "versus": "{{first}} contra {{second}}",
+    "instructions": "Sigue haciendo clic, tocando o pulsando la barra espaciadora todo el tiempo que puedas. El primer jugador que pare durante {{seconds}} segundos pierde.",
+    "status": {
+      "pending": "Esperando a que empiece el concurso…",
+      "preparing": "Prepárate…",
+      "go": "¡YA! ¡Sigue haciendo clic!",
+      "paused": "Concurso en pausa mientras un jugador se reconecta…",
+      "spectating": "Viendo el concurso…",
+      "resolving": "Decidiendo el resultado…"
+    },
+    "button": {
+      "wait": "Espera al YA…",
+      "active": "¡Sigue haciendo clic!"
+    },
+    "you": "Tú",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "¡Has ganado el concurso!",
+      "lost": "Has perdido el concurso.",
+      "winner": "{{name}} ha ganado el concurso.",
+      "tie": "Empate: no pasa nada.",
+      "cancelled": "El concurso se canceló: no pasa nada."
+    }
   }
 }

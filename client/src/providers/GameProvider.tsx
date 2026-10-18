@@ -1398,13 +1398,17 @@ export function GameProvider({
             useMultiplayerStore.getState().setConnectionStatus("disconnected");
             useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
           }
+          if (event.type === "operationFailed" && !onWsEventRef.current) {
+            useMultiplayerStore.getState().showToast(event.message);
+          }
           if (event.type === "reconnecting") {
             useMultiplayerStore.getState().setConnectionStatus("connecting");
           }
           if (event.type === "reconnected") {
             useMultiplayerStore.getState().setConnectionStatus("connected");
             onReadyRef.current?.();
-            audioManager.setContext("battlefield");
+            // A hosting reconnect resumes into the lobby, which is not battlefield audio.
+            if (event.inGame) audioManager.setContext("battlefield");
           }
           if (event.type === "playerEliminated" && event.becameSpectator) {
             useMultiplayerStore.getState().setIsSpectator(true);
@@ -1891,19 +1895,16 @@ export function GameProvider({
                 waitingFor: { type: "GameOver", data: { winner: event.winner } },
               });
             }
-            if (event.type === "requestRejected") {
-              // A NEW forwarding branch, not an addition to an existing group:
-              // `stateChanged` and `gameOver` above are handled inline and are
-              // never forwarded, so the only pre-existing `onWsEventRef` call
-              // in this handler is the terminal one below. This event must
-              // reach GamePage (which toasts it) while touching nothing else —
-              // it must not null `nativeAdapter`, dispose the controller, or
-              // clear the store adapter. `nativeSessionLive` is the existing
-              // guard against firing into a torn-down page.
-              //
-              // The online path needs no counterpart: its listener forwards
-              // every event unconditionally.
-              if (nativeSessionLive) onWsEventRef.current?.(event);
+            if (event.type === "requestRejected" || event.type === "operationFailed") {
+              // Application failures leave transport and adapter ownership intact.
+              // (An AI driver fault is not one: the adapter follows it with a
+              // terminal `error`, handled below.)
+              if (nativeSessionLive) {
+                if (onWsEventRef.current) onWsEventRef.current(event);
+                else useMultiplayerStore.getState().showToast(
+                  event.type === "requestRejected" ? event.reason : event.message,
+                );
+              }
             }
             if (event.type === "reconnectFailed" || event.type === "error") {
               const adapter = nativeAdapter;

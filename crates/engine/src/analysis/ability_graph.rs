@@ -1,25 +1,17 @@
 //! Engine B — the **static ability-graph extractor** (offline candidate generator).
 //!
-//! This module is **purely additive** and changes no game behavior. It never
-//! calls `apply()`, never drives a `GameRunner`, and never touches a
-//! `GameState`. Given a list of card faces it builds a directed
+//! This module never calls `apply()`, never drives a `GameRunner`, and never
+//! touches a `GameState`. Given a list of card faces it builds a directed
 //! ability/resource graph, finds strongly-connected components (Tarjan SCC),
-//! and emits **candidate cycles** whose summed per-cycle [`ResourceVector`] is
-//! *coverable* (net-progress: ≥1 axis strictly up — or unbounded-up — with no
-//! controller-side consumed axis net-negative unless that axis is unbounded-up).
+//! and emits each component that holds a cycle as a **candidate cycle**. Whether a
+//! cycle pays for itself, gains, or makes progress is the confirmer's answer.
 //!
-//! It is the over-approximate, fast, card-list stage of the two-engine combo
-//! detector: Engine B (here) *proposes* candidates; Engine A
-//! ([`crate::analysis::detect_loop`], already shipped) is the sound, stateful
-//! stage that *confirms* them by driving the reducer. A candidate is
-//! **unconfirmed by construction** — it ignores targeting legality, timing
+//! A candidate is **unconfirmed by construction** — it ignores targeting legality, timing
 //! windows, "may" choices, and replacement interactions — so it is a
 //! [`CandidateCycle`], deliberately **never** a [`crate::analysis::LoopCertificate`]
 //! (whose soundness invariant requires a driven board-equality proof).
 //!
-//! Theory references (CS, not CR): Tarjan SCC for cycle finding; Karp–Miller /
-//! Petri-net coverability for the net-progress test (see
-//! `FEASIBILITY-AND-PLAN.md` §3).
+//! Theory reference (CS, not CR): Tarjan SCC for cycle finding.
 //!
 //! # PR-4a scope
 //!
@@ -36,21 +28,22 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::analysis::loop_check::{classify_win_kind, WinKind};
 use crate::analysis::resource::{
     CounterClass, ObjectClass, ResourceAxis, ResourceVector, TriggerKind,
 };
+use crate::game::effects::token::materialize_token_ability_payload;
+use crate::game::mana_abilities::is_mana_ability;
 use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, ManaProduction,
-    QuantityExpr, ReplacementDefinition, StaticDefinition, TapStateChange, TargetFilter,
-    TriggerDefinition, TypeFilter, VoteSubject,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, DamageKindFilter, Effect,
+    ManaProduction, PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, VoteSubject,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterMatch;
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
-use crate::types::phase::{PhaseGroup, TurnSegment};
+use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -58,9 +51,7 @@ use crate::types::zones::Zone;
 /// CR 101: Static analysis has no concrete `PlayerId`, so the player-keyed
 /// `ResourceVector` axes use a documented sentinel convention — the loop's
 /// controller is `PlayerId(0)`, its opponent `PlayerId(1)`. Damage / mill aimed
-/// at "any target" / "target player" / "each opponent" is keyed to [`OPPONENT`];
-/// this keeps the candidate net vector compatible with the controller-scoped
-/// coverability test and lets a candidate's axes feed Engine A's `covers()`.
+/// at "any target" / "target player" is keyed to [`OPPONENT`].
 const CONTROLLER: PlayerId = PlayerId(0);
 const OPPONENT: PlayerId = PlayerId(1);
 
@@ -137,6 +128,9 @@ pub enum AxisKey {
     /// CR 608.2n + CR 304.1 + CR 307.1: a card returned from a graveyard to a hand, where a
     /// resolved instant or sorcery must be before it can be cast again.
     ReturnToHand,
+    /// CR 500.8 + CR 505.1a: a main phase an effect adds to a turn, which is a postcombat main
+    /// phase. Has no `ResourceVector` axis; injected directly into a node's produces/requires sets.
+    MainPhase,
 }
 
 /// HIGH-2 compile-time drift gate: an exhaustive **no-wildcard** projection of
@@ -166,9 +160,7 @@ impl From<&ResourceAxis> for AxisKey {
             ResourceAxis::EtbTriggers => AxisKey::Etb,
             ResourceAxis::LtbTriggers => AxisKey::Ltb,
             ResourceAxis::SacTriggers => AxisKey::Sac,
-            // CR 704.5c: the per-victim poison axis projects onto the same aggregate
-            // AxisKey the static ability-graph path uses (`add_counter` → Poison/Player),
-            // preserving poison's prior key identity for graph analysis.
+            // CR 704.5c: the per-victim poison axis has one aggregate key.
             ResourceAxis::Poison(_) => AxisKey::Counter(CounterClass::Poison, ObjectClass::Player),
         }
     }
@@ -187,9 +179,8 @@ impl From<&ResourceAxis> for AxisKey {
 enum AxisMagnitude {
     /// A statically-knowable fixed amount.
     Fixed(i32),
-    /// Unbounded-up: a dynamic `QuantityExpr` sitting in a production position.
-    /// Coverability treats this axis as coverable regardless of any fixed
-    /// counter-cost on the same axis (HIGH-1).
+    /// Unbounded-up: a dynamic `QuantityExpr` sitting in a production position. Its
+    /// node produces the axis whatever the node pays on it.
     Unbounded,
 }
 
@@ -368,9 +359,7 @@ fn default_object_class(class: CounterClass) -> ObjectClass {
 /// CR 101 (static sentinel convention, §3.6): map a player-referential
 /// [`TargetFilter`] to the analysis controller/opponent sentinel. `Controller`
 /// and `SelfRef` resolve to the loop's [`CONTROLLER`]; every other filter
-/// (`Any`, `Player`, a typed opponent, …) resolves to [`OPPONENT`], keeping the
-/// player-keyed life/library axes compatible with the controller-scoped
-/// coverability test.
+/// (`Any`, `Player`, a typed opponent, …) resolves to [`OPPONENT`].
 fn target_player(filter: &TargetFilter) -> PlayerId {
     match filter {
         TargetFilter::Controller | TargetFilter::SelfRef => CONTROLLER,
@@ -385,6 +374,61 @@ fn target_player_opt(filter: &Option<TargetFilter>) -> PlayerId {
         None => CONTROLLER,
         Some(f) => target_player(f),
     }
+}
+
+/// CR 102.2 + CR 102.3: the players a definition's player scope makes its effect act on, where
+/// the scope alone names them; `None` where a game state or another object decides who they are.
+fn scoped_players(scope: &PlayerFilter) -> Option<&'static [PlayerId]> {
+    match scope {
+        PlayerFilter::Controller => Some(&[CONTROLLER]),
+        PlayerFilter::Opponent => Some(&[OPPONENT]),
+        PlayerFilter::All => Some(&[CONTROLLER, OPPONENT]),
+        PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::AllExcept { .. }
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. }
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::AnyOf { .. }
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::TrackedSetPossessor { .. } => None,
+    }
+}
+
+/// CR 119.3 + CR 701.17a: [`effect_projection`] under the player scope of the definition `effect`
+/// heads. Each scoped player is the one the effect acts on, so what it moves on the controller's
+/// life or library moves on theirs.
+fn scoped_projection(effect: &Effect, scope: Option<&PlayerFilter>) -> Projection {
+    let mut projection = effect_projection(effect);
+    if let (Projection::Modeled { vector, .. }, Some(players)) =
+        (&mut projection, scope.and_then(scoped_players))
+    {
+        for axis in [&mut vector.life, &mut vector.library_delta] {
+            if let Some(amount) = axis.remove(&CONTROLLER) {
+                for player in players {
+                    *axis.entry(*player).or_insert(0) += amount;
+                }
+            }
+        }
+    }
+    projection
 }
 
 /// CR 700.4: a "dies" (Death-axis) event requires a *creature* moving to a
@@ -606,6 +650,31 @@ pub(crate) fn resolution_token_mint(effect: &Effect) -> Option<&QuantityExpr> {
     }
 }
 
+/// CR 111.10 + CR 111.3: the mana abilities (CR 605.1a) a token `effect` makes is created with,
+/// from its predefined definition and from the creating effect's grants.
+fn minted_mana_abilities(effect: &Effect) -> Vec<AbilityDefinition> {
+    let Effect::Token {
+        name,
+        types,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return Vec::new();
+    };
+    let mut abilities = materialize_token_ability_payload(name, types, None).abilities;
+    for modification in static_abilities
+        .iter()
+        .flat_map(|statik| &statik.modifications)
+    {
+        if let ContinuousModification::GrantAbility { definition } = modification {
+            abilities.push((**definition).clone());
+        }
+    }
+    abilities.retain(is_mana_ability);
+    abilities
+}
+
 /// The central deliverable: project a single [`Effect`] onto its static resource
 /// contribution. Exhaustive **no-wildcard** match over all 207 `Effect` variants
 /// — five priority families modeled (CR 106.1 / 122.1 / 120.1 / 701.26 / 601.2),
@@ -618,6 +687,23 @@ fn effect_projection(effect: &Effect) -> Projection {
         let (a, mag) = count_seed(count);
         b.add_tokens(a, mag);
         b.add_etb(a, mag);
+        for ability in minted_mana_abilities(effect) {
+            let mut resolved = Vec::new();
+            collect_effects(&ability, &mut resolved);
+            for (added, _) in resolved {
+                if let Effect::Mana { produced, .. } = added {
+                    let (seeds, each) = project_mana_production(produced);
+                    // A fixed number of tokens each adding a fixed amount is a fixed amount.
+                    let mag = match (mag, each) {
+                        (AxisMagnitude::Fixed(_), AxisMagnitude::Fixed(_)) => mag,
+                        _ => AxisMagnitude::Unbounded,
+                    };
+                    for (slot, amount) in seeds {
+                        b.add_mana(slot, a * amount, mag);
+                    }
+                }
+            }
+        }
         return b.finish();
     }
     match effect {
@@ -702,7 +788,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         }
         // ----- TAP/UNTAP family (CR 701.26a/b) -----
         Effect::SetTapState { state, .. } => match state {
-            // CR 701.26b: untapping produces untapped state (the loop pivot).
+            // CR 701.26b: untapping one permanent or a population produces untapped state.
             TapStateChange::Untap => {
                 b.produces.insert(AxisKey::Tap);
             }
@@ -840,14 +926,27 @@ fn effect_projection(effect: &Effect) -> Projection {
             let (a, mag) = count_seed(count);
             b.add_extra_turn(a, mag);
         }
-        // CR 500.8: only an additional *combat* phase pumps a modeled axis; any
-        // other extra phase carries no countable resource ⇒ Unmodeled (M2).
-        Effect::AdditionalPhase { segment, count, .. } => {
-            if *segment == TurnSegment::Phase(PhaseGroup::Combat) {
+        // CR 500.8: an added combat phase pumps the combat axis, and an added main phase begins a
+        // postcombat main phase (CR 505.1a); any other added segment carries no modeled axis.
+        Effect::AdditionalPhase {
+            segment,
+            followed_by,
+            count,
+            ..
+        } => {
+            let combat = *segment == TurnSegment::Phase(PhaseGroup::Combat);
+            let main = std::iter::once(segment)
+                .chain(followed_by)
+                .any(|added| added.first_step() == Phase::PostCombatMain);
+            if !combat && !main {
+                return Projection::Unmodeled;
+            }
+            if combat {
                 let (a, mag) = count_seed(count);
                 b.add_combat(a, mag);
-            } else {
-                return Projection::Unmodeled;
+            }
+            if main {
+                b.produces.insert(AxisKey::MainPhase);
             }
         }
         // Conjure creates real cards; only a battlefield entry is a modeled axis
@@ -902,6 +1001,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CombineHost { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
@@ -1015,6 +1115,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::PutAtLibraryPosition { .. }
@@ -1297,17 +1398,44 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
     }
 }
 
+/// The event axes a trigger's node requires: its mode's axis; for a damage-dealt trigger the axis
+/// of each kind of damage its definition watches; and for a beginning-of-step trigger a
+/// postcombat main phase begins for, the main phase an effect adds as well.
+fn trigger_requirements(trig: &TriggerDefinition) -> BTreeSet<AxisKey> {
+    let Some(axis) = trigger_axis(trig) else {
+        return BTreeSet::new();
+    };
+    // CR 505.1a: only a turn's first main phase is precombat, so an added main phase begins a
+    // postcombat main phase, which a trigger storing that step or no step is matched at.
+    if trig.mode == TriggerMode::Phase && matches!(trig.phase, None | Some(Phase::PostCombatMain)) {
+        return BTreeSet::from([axis, AxisKey::MainPhase]);
+    }
+    if axis != AxisKey::Damage {
+        return BTreeSet::from([axis]);
+    }
+    match trig.damage_kind {
+        // CR 120.2a + CR 506.1: combat damage is dealt in the combat damage step of a combat phase.
+        DamageKindFilter::CombatOnly => BTreeSet::from([AxisKey::Combat]),
+        // CR 120.2b: noncombat damage is dealt by the effect of a spell or ability.
+        DamageKindFilter::NoncombatOnly => BTreeSet::from([AxisKey::Damage]),
+        DamageKindFilter::Any => BTreeSet::from([AxisKey::Damage, AxisKey::Combat]),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // collect_effects — the recursive Effect-collecting walker
 // ---------------------------------------------------------------------------
+
+/// An effect and the player scope of the definition it heads; an effect heading none has none.
+pub(crate) type ScopedEffect<'a> = (&'a Effect, Option<&'a PlayerFilter>);
 
 /// Collect every [`Effect`] reachable from an [`AbilityDefinition`]: the head
 /// effect, the chained `sub_ability`/`else_ability`/`mode_abilities`, and — via
 /// [`collect_effects_in_effect`] — the nested-effect payloads that the display
 /// walkers (`build_ability_item`) do *not* descend. Borrows the faces, so the
 /// returned references live as long as the input.
-pub(crate) fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
-    collect_effects_in_effect(&def.effect, out);
+pub(crate) fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<ScopedEffect<'a>>) {
+    collect_effects_in_effect(&def.effect, def.player_scope.as_ref(), out);
     if let Some(sub) = &def.sub_ability {
         collect_effects(sub, out);
     }
@@ -1322,8 +1450,12 @@ pub(crate) fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a 
 /// Push `effect`, then descend the nested-`AbilityDefinition` payloads carried by
 /// the variants the display walkers skip (or this projection silently
 /// under-counts). Structural traversal — a wildcard covers the leaf variants.
-fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) {
-    out.push(effect);
+fn collect_effects_in_effect<'a>(
+    effect: &'a Effect,
+    scope: Option<&'a PlayerFilter>,
+    out: &mut Vec<ScopedEffect<'a>>,
+) {
+    out.push((effect, scope));
     match effect {
         Effect::Vote {
             per_choice_effect,
@@ -1343,6 +1475,7 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
                 collect_effects(outcome_template, out);
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => collect_effects(winner_effect, out),
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -1398,7 +1531,7 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
         // replacement install escapes every `collect_effects` consumer.
         Effect::CreateDrawReplacement { replacement_effect }
         | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
-            collect_effects_in_effect(replacement_effect, out);
+            collect_effects_in_effect(replacement_effect, None, out);
         }
         _ => {}
     }
@@ -1408,10 +1541,9 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
 // Node model
 // ---------------------------------------------------------------------------
 
-/// Whether every collected `Effect`/cost of a node (or every member node of a
-/// candidate) projected to a modeled `ResourceVector`, or at least one folded to
-/// [`Projection::Unmodeled`]. A typed candidate-confidence axis replacing a raw
-/// `bool` (CLAUDE.md "no raw bool" / R2) — self-documenting and extensible to
+/// Whether every collected `Effect`/cost of a node projected to a modeled
+/// `ResourceVector`, or at least one folded to [`Projection::Unmodeled`]. A typed
+/// flag — self-documenting and extensible to
 /// finer-grained confidence levels without touching call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelCompleteness {
@@ -1467,7 +1599,6 @@ pub struct NodeOrigin {
 /// The definitions Engine B reads from one card or object, borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct AbilitySource<'a> {
-    pub name: &'a str,
     pub mana_cost: &'a ManaCost,
     pub card_type: &'a CardType,
     pub abilities: &'a [AbilityDefinition],
@@ -1479,7 +1610,6 @@ pub struct AbilitySource<'a> {
 impl<'a> From<&'a CardFace> for AbilitySource<'a> {
     fn from(face: &'a CardFace) -> Self {
         Self {
-            name: &face.name,
             mana_cost: &face.mana_cost,
             card_type: &face.card_type,
             abilities: &face.abilities,
@@ -1493,12 +1623,8 @@ impl<'a> From<&'a CardFace> for AbilitySource<'a> {
 /// One graph node per *ability* across the input faces.
 #[derive(Debug, Clone)]
 pub struct AbilityNode {
-    /// Provenance: the card face this ability came from.
-    pub face_name: String,
     /// The source and definition this node was built from.
     pub origin: NodeOrigin,
-    /// Spell / Activated / … (informational provenance).
-    pub kind: AbilityKind,
     /// Folded signed `Projection`/cost vectors over `collect_effects` + the cost.
     pub net: ResourceVector,
     /// HIGH-1: axes this node produces with `AxisMagnitude::Unbounded`.
@@ -1507,10 +1633,7 @@ pub struct AbilityNode {
     pub produces: BTreeSet<AxisKey>,
     /// Axes this node costs/needs + the trigger-event axis that fires it.
     pub requires: BTreeSet<AxisKey>,
-    /// Axes some member of the node's cycle must produce, besides forming edges as `requires` do.
-    pub prerequisites: BTreeSet<AxisKey>,
-    /// Whether every collected effect/cost projected, or ≥1 was `Unmodeled`
-    /// (candidate-confidence flag).
+    /// Whether every collected effect/cost projected, or ≥1 was `Unmodeled`.
     pub completeness: ModelCompleteness,
 }
 
@@ -1667,9 +1790,6 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
         AbilityCost::OneOf { costs } => fold_one_of(acc, costs),
         // CR 119.4: paying life is subtracted from the controller's life total — a
         // unit, recall-safe under-approximation of a dynamic life cost (HIGH-1).
-        // The cost half of the R3-LIFE-SYMMETRY triple (with GainLife/LoseLife):
-        // keying it WITHOUT the GainLife effect side would veto a gain-and-pay loop
-        // as net-negative life, so the two must always land together.
         AbilityCost::PayLife { .. } => {
             *acc.net.life.entry(CONTROLLER).or_insert(0) -= 1;
         }
@@ -1953,29 +2073,27 @@ fn add_into(acc: &mut ResourceVector, v: &ResourceVector) {
 }
 
 /// Build one [`AbilityNode`] from a definition (the cost is the node's own
-/// `def.cost`; `trigger_req` is the trigger-event axis for trigger nodes).
+/// `def.cost`; `trigger_req` is the trigger-event axes for trigger nodes).
 fn build_node(
     origin: NodeOrigin,
-    face_name: &str,
     def: &AbilityDefinition,
-    trigger_req: Option<AxisKey>,
+    trigger_req: impl IntoIterator<Item = AxisKey>,
 ) -> AbilityNode {
-    build_node_paying(origin, face_name, def, trigger_req, None)
+    build_node_paying(origin, def, trigger_req, None)
 }
 
 /// [`build_node`], also paying `spell_cost`, the mana cost of the card a spell ability casts.
 fn build_node_paying(
     origin: NodeOrigin,
-    face_name: &str,
     def: &AbilityDefinition,
-    trigger_req: Option<AxisKey>,
+    trigger_req: impl IntoIterator<Item = AxisKey>,
     spell_cost: Option<&ManaCost>,
 ) -> AbilityNode {
     let mut acc = NodeAcc::default();
     let mut effects = Vec::new();
     collect_effects(def, &mut effects);
-    for e in effects {
-        fold_projection(&mut acc, effect_projection(e));
+    for (effect, scope) in effects {
+        fold_projection(&mut acc, scoped_projection(effect, scope));
     }
     if let Some(cost) = &def.cost {
         fold_cost(&mut acc, cost);
@@ -1997,19 +2115,14 @@ fn build_node_paying(
     // Unbounded-up production axes are produced even if a same-node cost masks
     // the net component (HIGH-1).
     produces.extend(acc.unbounded_production.iter().copied());
-    if let Some(req) = trigger_req {
-        requires.insert(req);
-    }
+    requires.extend(trigger_req);
 
     AbilityNode {
-        face_name: face_name.to_string(),
         origin,
-        kind: def.kind,
         net: acc.net,
         unbounded_production: acc.unbounded_production,
         produces,
         requires,
-        prerequisites: BTreeSet::new(),
         completeness: acc.completeness,
     }
 }
@@ -2021,8 +2134,8 @@ fn build_spell_node(
     source: &AbilitySource,
     def: &AbilityDefinition,
 ) -> AbilityNode {
-    let mut node = build_node_paying(origin, source.name, def, None, Some(source.mana_cost));
-    node.prerequisites.insert(AxisKey::ReturnToHand);
+    let mut node = build_node_paying(origin, def, None, Some(source.mana_cost));
+    node.requires.insert(AxisKey::ReturnToHand);
     node
 }
 
@@ -2047,27 +2160,21 @@ fn build_nodes(sources: &[AbilitySource]) -> Vec<AbilityNode> {
             nodes.push(if spell_card && def.kind == AbilityKind::Spell {
                 build_spell_node(origin, source, def)
             } else {
-                build_node(origin, source.name, def, None)
+                build_node(origin, def, None)
             });
         }
         for (i, trig) in source.triggers.iter().enumerate() {
             if let Some(def) = &trig.execute {
                 nodes.push(build_node(
                     at(AbilitySlot::Trigger(i)),
-                    source.name,
                     def,
-                    trigger_axis(trig),
+                    trigger_requirements(trig),
                 ));
             }
         }
         for (i, repl) in source.replacements.iter().enumerate() {
             if let Some(def) = &repl.execute {
-                nodes.push(build_node(
-                    at(AbilitySlot::Replacement(i)),
-                    source.name,
-                    def,
-                    None,
-                ));
+                nodes.push(build_node(at(AbilitySlot::Replacement(i)), def, None));
             }
         }
         for (statik, stat) in source.statics.iter().enumerate() {
@@ -2078,16 +2185,16 @@ fn build_nodes(sources: &[AbilitySource]) -> Vec<AbilityNode> {
                 });
                 match modi {
                     ContinuousModification::GrantAbility { definition } => {
-                        nodes.push(build_node(origin, source.name, definition, None));
+                        nodes.push(build_node(origin, definition, None));
                     }
                     ContinuousModification::GrantTrigger { trigger } => {
                         if let Some(def) = &trigger.execute {
-                            nodes.push(build_node(origin, source.name, def, trigger_axis(trigger)));
+                            nodes.push(build_node(origin, def, trigger_requirements(trigger)));
                         }
                     }
                     ContinuousModification::GrantReplacement { replacement } => {
                         if let Some(def) = &replacement.execute {
-                            nodes.push(build_node(origin, source.name, def, None));
+                            nodes.push(build_node(origin, def, None));
                         }
                     }
                     _ => {}
@@ -2128,7 +2235,7 @@ fn axis_matches(produced: &AxisKey, required: &AxisKey) -> bool {
 }
 
 /// Build the directed resource graph: edge A→B iff A.produces intersects
-/// B.requires or B.prerequisites under [`axis_matches`]. Self-edges are allowed (a node that
+/// B.requires under [`axis_matches`]. Self-edges are allowed (a node that
 /// both produces and requires the same axis).
 pub fn build_ability_graph(nodes: Vec<AbilityNode>) -> AbilityGraph {
     let mut graph = AbilityGraph::new();
@@ -2139,13 +2246,7 @@ pub fn build_ability_graph(nodes: Vec<AbilityNode>) -> AbilityGraph {
                 .produces
                 .iter()
                 .copied()
-                .filter(|p| {
-                    graph[b]
-                        .requires
-                        .iter()
-                        .chain(&graph[b].prerequisites)
-                        .any(|r| axis_matches(p, r))
-                })
+                .filter(|p| graph[b].requires.iter().any(|r| axis_matches(p, r)))
                 .collect();
             if !via.is_empty() {
                 graph.add_edge(a, b, ResourceEdge { via });
@@ -2156,73 +2257,28 @@ pub fn build_ability_graph(nodes: Vec<AbilityNode>) -> AbilityGraph {
 }
 
 // ---------------------------------------------------------------------------
-// Candidate output + SCC/coverability
+// Candidate output + SCC
 // ---------------------------------------------------------------------------
 
 /// A static, **unconfirmed** candidate cycle. Deliberately NOT a
 /// [`crate::analysis::LoopCertificate`] — it has no driven board-equality proof,
-/// so naming it a certificate would violate that type's soundness invariant. It
-/// reuses the certificate *vocabulary* (`ResourceAxis`, `WinKind`) so PR-5 can
-/// feed [`Self::expected_axes`] to `LoopCertificate::covers`.
+/// so naming it a certificate would violate that type's soundness invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateCycle {
-    /// Provenance: the card names whose abilities form the SCC.
-    pub faces: Vec<String>,
     /// The definitions whose nodes form the SCC.
     pub members: Vec<NodeOrigin>,
     /// Summed per-cycle resource vector.
     pub net: ResourceVector,
-    /// The named unbounded axes (reused vocabulary — feeds `detect_loop`'s `covers`).
+    /// The axes the summed vector drives up: an added turn (CR 500.7) or combat phase
+    /// (CR 500.8) among them is how far past its step the cycle reaches.
     pub unbounded: Vec<ResourceAxis>,
-    /// Tentative win classification.
-    pub win_kind: WinKind,
-    /// Whether ≥1 member node had unmodeled effects (lower confidence).
-    pub completeness: ModelCompleteness,
 }
 
-impl CandidateCycle {
-    /// The unbounded axes this candidate would pump, for PR-5's `covers()` call.
-    pub fn expected_axes(&self) -> &[ResourceAxis] {
-        &self.unbounded
-    }
-}
-
-/// PR-4a candidate coverability (§3.7 step 4). Reuses the shared controller-scoped
-/// axis helper [`ResourceVector::unbounded_axes_for`] for the net-progress axis
-/// set, and layers the HIGH-1 `unbounded_production` override over the
-/// consumed-axis sustainability veto (CR 732.2a): a net-negative consumed axis
-/// (mana pool, controller life) is tolerated iff that axis is unbounded-up. The
-/// override lives here, not in Engine A's `is_progress`, because it reads
-/// magnitude markers that exist only in Engine B.
-fn candidate_coverable(
-    net: &ResourceVector,
-    unbounded_production: &BTreeSet<AxisKey>,
-    controller: PlayerId,
-) -> bool {
-    // CR 107.4a + CR 107.4b: colored deficits are paid from the colorless slot's surplus, where
-    // every flexible production is seeded, and the generic remainder from the summed mana.
-    let colored_deficit: i64 = net.mana[..COLORLESS_INDEX]
-        .iter()
-        .map(|&n| (-n).max(0))
-        .sum();
-    let mana_short =
-        colored_deficit > net.mana[COLORLESS_INDEX].max(0) || net.mana.iter().sum::<i64>() < 0;
-    // CR 500.7 + CR 502.3: a cycle granting an extra turn untaps its mana sources each period.
-    if mana_short && !unbounded_production.contains(&AxisKey::Mana) && net.extra_turns <= 0 {
-        return false;
-    }
-    if net.life.get(&controller).copied().unwrap_or(0) < 0
-        && !unbounded_production.contains(&AxisKey::Life)
-    {
-        return false;
-    }
-    !net.unbounded_axes_for(controller).is_empty() || !unbounded_production.is_empty()
-}
-
-/// Map a coverable [`AxisKey`] back to a named [`ResourceAxis`] at the candidate's
+/// Map an [`AxisKey`] back to a named [`ResourceAxis`] at the candidate's
 /// sentinel players (§3.7 step 5). For mana, recover the seeded color from the
 /// first strictly-positive net slot (color survives the edge-key collapse), else
-/// the colorless family sentinel. `Tap`/`AnyCounter` have no `ResourceAxis`.
+/// the colorless family sentinel. `Tap`, `AnyCounter`, `ReturnToHand` and `MainPhase` have no
+/// `ResourceAxis`.
 fn axis_key_to_resource(key: &AxisKey, net: &ResourceVector) -> Option<ResourceAxis> {
     match key {
         AxisKey::Mana => {
@@ -2271,14 +2327,12 @@ fn axis_key_to_resource(key: &AxisKey, net: &ResourceVector) -> Option<ResourceA
         AxisKey::Ltb => Some(ResourceAxis::LtbTriggers),
         AxisKey::Death => Some(ResourceAxis::DeathTriggers),
         AxisKey::Sac => Some(ResourceAxis::SacTriggers),
-        AxisKey::Tap | AxisKey::AnyCounter | AxisKey::ReturnToHand => None,
+        AxisKey::Tap | AxisKey::AnyCounter | AxisKey::ReturnToHand | AxisKey::MainPhase => None,
     }
 }
 
 /// Engine B's entry point: build the ability graph for a card list, find SCCs
-/// (Tarjan), and emit the coverable candidate cycles. Each candidate names the
-/// unbounded `ResourceAxis` family it would pump so PR-5's confirmer can be fed a
-/// card list and a set of expected axes.
+/// (Tarjan), and emit each one that holds a cycle.
 pub fn candidate_cycles(faces: &[&CardFace]) -> Vec<CandidateCycle> {
     let sources: Vec<AbilitySource> = faces
         .iter()
@@ -2292,8 +2346,8 @@ pub fn candidate_cycles_from_sources(sources: &[AbilitySource]) -> Vec<Candidate
     candidate_cycles_from_nodes(build_nodes(sources))
 }
 
-/// The SCC + coverability core (steps 2–5), separated from node construction so
-/// synthetic-node fixtures can drive the full graph/SCC/coverability path.
+/// The graph and SCC core, separated from node construction so synthetic-node
+/// fixtures can drive it.
 pub(crate) fn candidate_cycles_from_nodes(nodes: Vec<AbilityNode>) -> Vec<CandidateCycle> {
     let graph = build_ability_graph(nodes);
     let mut out = Vec::new();
@@ -2304,35 +2358,14 @@ pub(crate) fn candidate_cycles_from_nodes(nodes: Vec<AbilityNode>) -> Vec<Candid
         if !is_cycle {
             continue;
         }
-        // CR 608.2n: a member that is cast again from a hand needs a member that returns it.
-        let prerequisite_met = scc.iter().all(|&i| {
-            graph[i]
-                .prerequisites
-                .iter()
-                .all(|need| scc.iter().any(|&j| graph[j].produces.contains(need)))
-        });
-        if !prerequisite_met {
-            continue;
-        }
-
         let mut net = ResourceVector::default();
         let mut unbounded_production = BTreeSet::new();
-        let mut completeness = ModelCompleteness::FullyModeled;
-        let mut faces_in: Vec<String> = Vec::new();
         let mut members: Vec<NodeOrigin> = Vec::new();
         for &idx in &scc {
             let node = &graph[idx];
             members.push(node.origin);
             add_into(&mut net, &node.net);
             unbounded_production.extend(node.unbounded_production.iter().copied());
-            completeness = completeness.merge(node.completeness);
-            if !faces_in.contains(&node.face_name) {
-                faces_in.push(node.face_name.clone());
-            }
-        }
-
-        if !candidate_coverable(&net, &unbounded_production, CONTROLLER) {
-            continue;
         }
 
         // §3.7 step 5: the controller-scoped strictly-up axes unioned with the
@@ -2348,12 +2381,9 @@ pub(crate) fn candidate_cycles_from_nodes(nodes: Vec<AbilityNode>) -> Vec<Candid
 
         members.sort_unstable();
         out.push(CandidateCycle {
-            faces: faces_in,
             members,
-            win_kind: classify_win_kind(CONTROLLER, &net, None),
             net,
             unbounded,
-            completeness,
         });
     }
     out
@@ -2422,16 +2452,13 @@ mod tests {
     fn activated(effect: Effect) -> AbilityDefinition {
         AbilityDefinition::new(AbilityKind::Activated, effect)
     }
-    fn raw_node(name: &str) -> AbilityNode {
+    fn raw_node() -> AbilityNode {
         AbilityNode {
-            face_name: name.into(),
             origin: ORIGIN,
-            kind: AbilityKind::Activated,
             net: ResourceVector::default(),
             unbounded_production: BTreeSet::new(),
             produces: BTreeSet::new(),
             requires: BTreeSet::new(),
-            prerequisites: BTreeSet::new(),
             completeness: ModelCompleteness::FullyModeled,
         }
     }
@@ -2552,18 +2579,18 @@ mod tests {
         assert!(matches!(effect_projection(&scry), Projection::Unmodeled));
     }
 
-    // === B. graph + SCC + coverability (the load-bearing path) ==============
+    // === B. graph + SCC (the load-bearing path) =============================
 
     #[test]
     fn two_node_mana_counter_cycle_is_candidate() {
         // A: costs {1} (mana -1), produces a +1/+1 counter. B: consumes the
         // counter (cost), produces {2} mana. Edges A→B (counter), B→A (mana).
-        let mut a = raw_node("A");
+        let mut a = raw_node();
         a.net.mana[COLORLESS_INDEX] = -1;
         a.net.counters.insert(P1P1, 1);
         a.produces.insert(AxisKey::Counter(P1P1.0, P1P1.1));
         a.requires.insert(AxisKey::Mana);
-        let mut b = raw_node("B");
+        let mut b = raw_node();
         b.net.mana[COLORLESS_INDEX] = 2;
         b.net.counters.insert(P1P1, -1);
         b.produces.insert(AxisKey::Mana);
@@ -2575,15 +2602,14 @@ mod tests {
             cands[0].unbounded,
             vec![ResourceAxis::Mana(ManaType::Colorless)]
         );
-        assert_eq!(cands[0].win_kind, WinKind::Advantage);
     }
 
     #[test]
     fn disjoint_producers_yield_no_candidate() {
-        let mut a = raw_node("A");
+        let mut a = raw_node();
         a.produces.insert(AxisKey::Mana);
         a.net.mana[COLORLESS_INDEX] = 1;
-        let mut b = raw_node("B");
+        let mut b = raw_node();
         b.produces.insert(AxisKey::Mana);
         b.net.mana[COLORLESS_INDEX] = 1;
         assert!(
@@ -2593,42 +2619,15 @@ mod tests {
     }
 
     #[test]
-    fn net_negative_cycle_is_not_candidate() {
-        // The SCC makes net progress on a GAINED axis (a token) but net-SPENDS a
-        // consumed axis (mana -2, fixed cost {3} vs {1} production) ⇒ unsustainable
-        // ⇒ rejected by the consumed-axis veto. The token isolates the veto: it
-        // passes the net-progress gate, so the ONLY rejecter is sustainability.
-        // REVERT PROBE: remove the mana<0 veto in `candidate_coverable` ⇒ the token
-        // makes it wrongly emit.
-        let mut a = raw_node("A");
-        a.net.mana[COLORLESS_INDEX] = -3;
-        a.net.tokens_created = 1; // a gained axis that survives the cycle
-        a.net.counters.insert(P1P1, 1);
-        a.produces.insert(AxisKey::Counter(P1P1.0, P1P1.1));
-        a.requires.insert(AxisKey::Mana);
-        let mut b = raw_node("B");
-        b.net.mana[COLORLESS_INDEX] = 1;
-        b.net.counters.insert(P1P1, -1);
-        b.produces.insert(AxisKey::Mana);
-        b.requires.insert(AxisKey::Counter(P1P1.0, P1P1.1));
-        assert!(
-            candidate_cycles_from_nodes(vec![a, b]).is_empty(),
-            "a net-negative mana cycle with no unbounded production is not coverable"
-        );
-    }
-
-    #[test]
-    fn unbounded_production_covers_fixed_cost() {
-        // HIGH-1, the Priest+Mantle shape: mana net -2 (fixed cost {3} vs
-        // unit-seeded production) BUT the production side is unbounded-up ⇒ the
-        // override forces the mana axis coverable. REVERT PROBE: drop the
-        // `unbounded_production` clause of `candidate_coverable` ⇒ 0 candidates.
-        let mut a = raw_node("A");
+    fn unbounded_production_is_a_reported_axis_whatever_the_summed_net() {
+        // The Priest of Titania + Umbral Mantle shape: the summed mana is -2, and the mana a
+        // member produces without bound is reported.
+        let mut a = raw_node();
         a.net.mana[COLORLESS_INDEX] = 1;
         a.unbounded_production.insert(AxisKey::Mana);
         a.produces.insert(AxisKey::Mana);
         a.requires.insert(AxisKey::Tap);
-        let mut b = raw_node("B");
+        let mut b = raw_node();
         b.net.mana[COLORLESS_INDEX] = -3;
         b.produces.insert(AxisKey::Tap);
         b.requires.insert(AxisKey::Mana);
@@ -2655,7 +2654,7 @@ mod tests {
                 AbilityCost::Untap,
             ],
         });
-        let node_b = build_node(ORIGIN, "Umbral", &def_b, None);
+        let node_b = build_node(ORIGIN, &def_b, None);
         assert!(
             node_b.produces.contains(&AxisKey::Tap),
             "{{Q}} untap cost produces Tap"
@@ -2667,13 +2666,13 @@ mod tests {
         // Paired sibling: a tap cost requires (not produces) Tap.
         let mut def_tap = activated(Effect::unimplemented("test", "tapper"));
         def_tap.cost = Some(AbilityCost::Tap);
-        assert!(build_node(ORIGIN, "Tapper", &def_tap, None)
+        assert!(build_node(ORIGIN, &def_tap, None)
             .requires
             .contains(&AxisKey::Tap));
 
         let mut def_a = activated(mana_effect(colorless(dynamic())));
         def_a.cost = Some(AbilityCost::Tap);
-        let node_a = build_node(ORIGIN, "Priest", &def_a, None);
+        let node_a = build_node(ORIGIN, &def_a, None);
         assert!(node_a.unbounded_production.contains(&AxisKey::Mana));
 
         let cands = candidate_cycles_from_nodes(vec![node_a, node_b]);
@@ -2697,7 +2696,7 @@ mod tests {
             color_options: vec![ManaColor::Green],
         }));
         def_a.cost = Some(AbilityCost::Tap);
-        let node_a = build_node(ORIGIN, "GreenSource", &def_a, None);
+        let node_a = build_node(ORIGIN, &def_a, None);
         assert_eq!(
             node_a.net.mana[4], 1,
             "green is seeded by the singleton color set"
@@ -2714,7 +2713,7 @@ mod tests {
                 AbilityCost::Untap,
             ],
         });
-        let node_b = build_node(ORIGIN, "GenericPump", &def_b, None);
+        let node_b = build_node(ORIGIN, &def_b, None);
         assert_eq!(
             node_b.net.mana[COLORLESS_INDEX], -3,
             "generic {{3}} sinks to colorless"
@@ -2739,11 +2738,11 @@ mod tests {
     fn any_counter_cost_matches_typed_counter_producer() {
         // R3-COUNTER-FUNGIBILITY: an AnyCounter requirement intersects any typed
         // counter producer; a typed-mismatched requirement does not.
-        let mut producer = raw_node("Producer");
+        let mut producer = raw_node();
         producer.produces.insert(AxisKey::Counter(P1P1.0, P1P1.1));
-        let mut any_consumer = raw_node("AnyConsumer");
+        let mut any_consumer = raw_node();
         any_consumer.requires.insert(AxisKey::AnyCounter);
-        let mut typed_consumer = raw_node("TypedConsumer");
+        let mut typed_consumer = raw_node();
         typed_consumer.requires.insert(AxisKey::Counter(
             CounterClass::Loyalty,
             ObjectClass::Planeswalker,
@@ -2766,7 +2765,7 @@ mod tests {
         // loyalty - is a requirer. REVERT PROBE (Loyalty→no-op) drops `np.produces`.
         let mut plus = activated(Effect::unimplemented("t", "loy+"));
         plus.cost = Some(AbilityCost::Loyalty { amount: 2 });
-        let np = build_node(ORIGIN, "Plus", &plus, None);
+        let np = build_node(ORIGIN, &plus, None);
         assert!(np.produces.contains(&AxisKey::Counter(
             CounterClass::Loyalty,
             ObjectClass::Planeswalker
@@ -2774,7 +2773,7 @@ mod tests {
 
         let mut minus = activated(Effect::unimplemented("t", "loy-"));
         minus.cost = Some(AbilityCost::Loyalty { amount: -7 });
-        let nm = build_node(ORIGIN, "Minus", &minus, None);
+        let nm = build_node(ORIGIN, &minus, None);
         assert!(nm.requires.contains(&AxisKey::Counter(
             CounterClass::Loyalty,
             ObjectClass::Planeswalker
@@ -2782,7 +2781,7 @@ mod tests {
 
         let mut blight = activated(Effect::unimplemented("t", "blight"));
         blight.cost = Some(AbilityCost::Blight { count: 1 });
-        let nb = build_node(ORIGIN, "Blight", &blight, None);
+        let nb = build_node(ORIGIN, &blight, None);
         assert!(nb.produces.contains(&AxisKey::Counter(
             CounterClass::Minus1Minus1,
             ObjectClass::Creature
@@ -2798,7 +2797,7 @@ mod tests {
             default_target_filter_any(),
             1,
         )));
-        let ns = build_node(ORIGIN, "Sac", &sac, None);
+        let ns = build_node(ORIGIN, &sac, None);
         assert!(ns.produces.contains(&AxisKey::Sac));
         assert!(ns.produces.contains(&AxisKey::Ltb));
         assert!(ns.produces.contains(&AxisKey::Death));
@@ -2809,22 +2808,19 @@ mod tests {
     }
 
     #[test]
-    fn opponent_damage_cycle_classifies_lethal() {
-        // A mana engine (A) feeds a pinger (B) that deals 1 to the opponent and
-        // untaps the engine (SetTapState{Untap}) each cycle ⇒ LethalDamage. The
-        // damage is routed through the real DealDamage→add_damage path (not
-        // hardcoded), so REVERT PROBE: key add_damage to CONTROLLER ⇒ win_kind
-        // flips to Advantage and the candidate names DamageDealt(CONTROLLER).
+    fn opponent_damage_cycle_reports_the_opponents_damage() {
+        // A mana engine (A) feeds a pinger (B) that deals 1 to the opponent and untaps the
+        // engine each cycle; the damage is projected through `DealDamage`.
         let mut def_a = activated(mana_effect(colorless(dynamic())));
         def_a.cost = Some(AbilityCost::Tap);
-        let node_a = build_node(ORIGIN, "Engine", &def_a, None);
+        let node_a = build_node(ORIGIN, &def_a, None);
 
         let mut def_b = activated(deal_damage(fixed(1)));
         def_b.sub_ability = Some(Box::new(activated(set_tap(TapStateChange::Untap))));
         def_b.cost = Some(AbilityCost::Mana {
             cost: ManaCost::generic(1),
         });
-        let node_b = build_node(ORIGIN, "Pinger", &def_b, None);
+        let node_b = build_node(ORIGIN, &def_b, None);
         assert!(
             node_b.produces.contains(&AxisKey::Tap),
             "the untap effect produces Tap"
@@ -2832,17 +2828,9 @@ mod tests {
 
         let cands = candidate_cycles_from_nodes(vec![node_a, node_b]);
         assert_eq!(cands.len(), 1);
-        assert_eq!(cands[0].win_kind, WinKind::LethalDamage);
         assert!(cands[0]
             .unbounded
             .contains(&ResourceAxis::DamageDealt(OPPONENT)));
-        // DISCRIMINATION: the same net, with the victim AS controller, is
-        // self-damage ⇒ Advantage (the controller-scoped classification).
-        assert_eq!(
-            classify_win_kind(OPPONENT, &cands[0].net, None),
-            WinKind::Advantage,
-            "the same damage, with the victim as controller, is self-damage (Advantage)"
-        );
     }
 
     // === C. walker completeness (revert = drop a recursion arm) =============
@@ -2863,13 +2851,15 @@ mod tests {
         let mut effects = Vec::new();
         collect_effects(&top, &mut effects);
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::Mana { .. })),
+            effects
+                .iter()
+                .any(|(e, _)| matches!(e, Effect::Mana { .. })),
             "the ChooseOneOf branch's Mana is collected"
         );
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::PutCounter { .. })),
+                .any(|(e, _)| matches!(e, Effect::PutCounter { .. })),
             "the sub_ability PutCounter is collected"
         );
     }
@@ -2924,8 +2914,8 @@ mod tests {
         let cands = candidate_cycles(&[priest, mantle]);
         assert!(
             cands.iter().any(|c| {
-                c.faces.iter().any(|f| f == "Priest of Titania")
-                    && c.faces.iter().any(|f| f == "Umbral Mantle")
+                c.members.iter().any(|member| member.source == 0)
+                    && c.members.iter().any(|member| member.source == 1)
                     && c.unbounded
                         .iter()
                         .any(|a| matches!(a, ResourceAxis::Mana(_)))
@@ -3014,10 +3004,10 @@ mod tests {
         t.destination = destination;
         t
     }
-    /// Build a trigger node the way `build_nodes` does — `trigger_axis` is the
-    /// real seam, so reverting a trigger arm flips this node's `requires`.
-    fn trig_node(name: &str, trig: &TriggerDefinition, execute: AbilityDefinition) -> AbilityNode {
-        build_node(ORIGIN, name, &execute, trigger_axis(trig))
+    /// Build a trigger node the way `build_nodes` does, through `trigger_requirements`, so
+    /// reverting a trigger arm flips this node's `requires`.
+    fn trig_node(trig: &TriggerDefinition, execute: AbilityDefinition) -> AbilityNode {
+        build_node(ORIGIN, &execute, trigger_requirements(trig))
     }
 
     // === A2. effect_projection per-family (revert = flip/delete the arm) =====
@@ -3080,7 +3070,7 @@ mod tests {
     fn token_projects_tokens_and_etb() {
         // CR 603.6a: a token entry IS an ETB — this is the producer half of the
         // aristocrats edge. REVERT PROBE: drop `b.add_etb` ⇒ no Etb ⇒ no A→B edge.
-        let np = build_node(ORIGIN, "Tokener", &activated(token(fixed(2))), None);
+        let np = build_node(ORIGIN, &activated(token(fixed(2))), None);
         assert_eq!(np.net.tokens_created, 2);
         assert_eq!(np.net.etb_triggers, 2);
         assert!(np.produces.contains(&AxisKey::Tokens));
@@ -3164,7 +3154,6 @@ mod tests {
         // A creature/undeterminable filter produces all three (CR 700.4 dies).
         let np = build_node(
             ORIGIN,
-            "Sac",
             &activated(sacrifice(default_target_filter_any())),
             None,
         );
@@ -3177,7 +3166,7 @@ mod tests {
         let noncreature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(
             TypeFilter::Creature,
         ))));
-        let nn = build_node(ORIGIN, "SacLand", &activated(sacrifice(noncreature)), None);
+        let nn = build_node(ORIGIN, &activated(sacrifice(noncreature)), None);
         assert!(nn.produces.contains(&AxisKey::Sac));
         assert!(nn.produces.contains(&AxisKey::Ltb));
         assert!(
@@ -3190,7 +3179,6 @@ mod tests {
     fn destroy_effect_produces_ltb_death_not_sac() {
         let np = build_node(
             ORIGIN,
-            "Destroyer",
             &activated(Effect::Destroy {
                 target: default_target_filter_any(),
                 cant_regenerate: false,
@@ -3210,7 +3198,6 @@ mod tests {
         // dest=Battlefield ⇒ ETB.
         let etb = build_node(
             ORIGIN,
-            "Reanimate",
             &activated(change_zone(Some(Zone::Graveyard), Zone::Battlefield)),
             None,
         );
@@ -3219,7 +3206,6 @@ mod tests {
         // bf→graveyard ⇒ LTB + Death (dies).
         let dies = build_node(
             ORIGIN,
-            "ToGrave",
             &activated(change_zone(Some(Zone::Battlefield), Zone::Graveyard)),
             None,
         );
@@ -3229,7 +3215,6 @@ mod tests {
         // bf→hand ⇒ LTB only (not a dies).
         let bounce = build_node(
             ORIGIN,
-            "ToHand",
             &activated(change_zone(Some(Zone::Battlefield), Zone::Hand)),
             None,
         );
@@ -3249,7 +3234,6 @@ mod tests {
         // And it propagates to the node's confidence flag.
         let node = build_node(
             ORIGIN,
-            "Recur",
             &activated(change_zone(Some(Zone::Graveyard), Zone::Library)),
             None,
         );
@@ -3265,7 +3249,6 @@ mod tests {
     fn extra_turn_and_combat_phase_project_their_axes() {
         let et = build_node(
             ORIGIN,
-            "TimeWalk",
             &activated(Effect::ExtraTurn {
                 target: TargetFilter::Controller,
                 count: fixed(1),
@@ -3277,7 +3260,6 @@ mod tests {
 
         let two = build_node(
             ORIGIN,
-            "TimeStretch",
             &activated(Effect::ExtraTurn {
                 target: TargetFilter::Controller,
                 count: fixed(2),
@@ -3301,7 +3283,6 @@ mod tests {
         // CR 500.8: an additional combat phase pumps the Combat axis.
         let combat = build_node(
             ORIGIN,
-            "Aggravated",
             &activated(Effect::AdditionalPhase {
                 recipient: crate::types::ability::ExtraPhaseRecipient::Controller,
                 segment: TurnSegment::Phase(PhaseGroup::Combat),
@@ -3315,7 +3296,7 @@ mod tests {
         assert_eq!(combat.net.combat_phases, 1);
         assert!(combat.produces.contains(&AxisKey::Combat));
 
-        // A non-combat extra phase carries no modeled axis ⇒ Unmodeled (M2).
+        // An added step that is neither a combat phase nor a main phase carries no modeled axis.
         assert!(matches!(
             effect_projection(&Effect::AdditionalPhase {
                 recipient: crate::types::ability::ExtraPhaseRecipient::Controller,
@@ -3423,7 +3404,7 @@ mod tests {
             Some(Zone::Battlefield),
             Some(Zone::Graveyard),
         );
-        let node_a = trig_node("Blood Artist", &trig_a, def_a);
+        let node_a = trig_node(&trig_a, def_a);
         assert!(node_a.requires.contains(&AxisKey::Death));
         assert!(node_a.produces.contains(&AxisKey::Etb));
 
@@ -3431,7 +3412,6 @@ mod tests {
         // ⇒ requires Etb; Sacrifice(creature) ⇒ produces Sac/Ltb/Death.
         let trig_b = zone_trigger(TriggerMode::ChangesZone, None, Some(Zone::Battlefield));
         let node_b = trig_node(
-            "Carrion Feeder",
             &trig_b,
             activated(sacrifice(TargetFilter::Typed(TypedFilter::creature()))),
         );
@@ -3444,13 +3424,7 @@ mod tests {
             1,
             "the dies↔ETB aristocrats SCC is one candidate"
         );
-        assert!(cands[0].faces.iter().any(|f| f == "Blood Artist"));
-        assert!(cands[0].faces.iter().any(|f| f == "Carrion Feeder"));
-        assert_eq!(
-            cands[0].win_kind,
-            WinKind::LethalDamage,
-            "the opponent loses 1 life each cycle"
-        );
+        assert_eq!(cands[0].members.len(), 2);
         assert!(cands[0].unbounded.contains(&ResourceAxis::Life(OPPONENT)));
     }
 
@@ -3459,7 +3433,6 @@ mod tests {
         // Node H (Heliod): "whenever you gain life, put a +1/+1 counter." lifegain
         // trigger ⇒ requires Life; PutCounter ⇒ produces Counter(P1P1, Creature).
         let node_h = trig_node(
-            "Heliod",
             &TriggerDefinition::new(TriggerMode::LifeGained),
             activated(put_counter(CounterType::Plus1Plus1, fixed(1))),
         );
@@ -3480,7 +3453,7 @@ mod tests {
                 },
             ],
         });
-        let node_f = build_node(ORIGIN, "Spike Feeder", &def_f, None);
+        let node_f = build_node(ORIGIN, &def_f, None);
         assert!(node_f.requires.contains(&AxisKey::Counter(P1P1.0, P1P1.1)));
         assert!(node_f.produces.contains(&AxisKey::Life));
 
@@ -3490,8 +3463,7 @@ mod tests {
             1,
             "the lifegain↔counter feedback SCC is one candidate"
         );
-        // Net life = +2 (gain) − 1 (pay) = +1 (controller-positive) ⇒ coverable.
-        assert_eq!(cands[0].win_kind, WinKind::Advantage);
+        // Net life = +2 (gain) − 1 (pay) = +1 on the controller.
         assert!(cands[0].unbounded.contains(&ResourceAxis::Life(CONTROLLER)));
     }
 
@@ -3546,6 +3518,269 @@ mod tests {
         ));
     }
 
+    fn face(name: &str) -> &'static CardFace {
+        crate::test_support::shared_card_db()
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the card fixture"))
+    }
+
+    /// The node built from `name`'s first printed trigger.
+    fn first_trigger_node(name: &str) -> AbilityNode {
+        build_nodes(&[AbilitySource::from(face(name))])
+            .into_iter()
+            .find(|node| node.origin.slot == AbilitySlot::Trigger(0))
+            .unwrap_or_else(|| panic!("{name}'s first trigger has a node"))
+    }
+
+    /// CR 120.2a + CR 120.2b: a damage-dealt trigger requires the combat axis, the damage axis, or
+    /// both, by the kind of damage it watches; a damage-received trigger requires neither.
+    #[test]
+    fn a_damage_trigger_requires_the_axes_of_the_damage_kinds_it_watches() {
+        let requires = |name: &str| trigger_requirements(&face(name).triggers[0]);
+        assert_eq!(requires("Old Gnawbone"), BTreeSet::from([AxisKey::Combat]));
+        assert_eq!(
+            requires("Virtue of Courage"),
+            BTreeSet::from([AxisKey::Damage])
+        );
+        assert_eq!(
+            requires("Malcolm, Keen-Eyed Navigator"),
+            BTreeSet::from([AxisKey::Damage, AxisKey::Combat])
+        );
+        assert_eq!(requires("Smaug the Impenetrable"), BTreeSet::new());
+        assert_eq!(
+            requires("Hellkite Charger"),
+            BTreeSet::from([AxisKey::Combat])
+        );
+    }
+
+    /// CR 120.2a + CR 500.8: an added combat phase feeds a trigger watching combat damage, and a
+    /// trigger watching only noncombat damage (CR 120.2b) is fed by an effect that deals damage.
+    #[test]
+    fn a_combat_damage_trigger_cycles_with_the_combat_that_feeds_it() {
+        for watcher in ["Old Gnawbone", "Malcolm, Keen-Eyed Navigator"] {
+            let names = ["Aggravated Assault", watcher];
+            assert!(
+                cycle_holds(&names, watcher, AbilitySlot::Trigger(0)),
+                "{watcher}"
+            );
+            assert!(
+                cycle_holds(&names, "Aggravated Assault", AbilitySlot::Ability(0)),
+                "{watcher}"
+            );
+        }
+        assert!(
+            cycle_holds(
+                &["Aggravated Assault", "The Reaver Cleaver"],
+                "Aggravated Assault",
+                AbilitySlot::Ability(0)
+            ),
+            "a combat-damage trigger an attachment grants"
+        );
+
+        let mut names = vec!["Aggravated Assault", "Molten Lavamancer", "Mana Echoes"];
+        assert!(!cycle_holds(
+            &names,
+            "Molten Lavamancer",
+            AbilitySlot::Trigger(0)
+        ));
+        names.push("Prodigal Pyromancer");
+        assert!(
+            cycle_holds(&names, "Molten Lavamancer", AbilitySlot::Trigger(0)),
+            "reach: a noncombat damage source closes the cycle the combat did not"
+        );
+    }
+
+    /// CR 505.1a + CR 500.8: a trigger a postcombat main phase begins for, whether it stores that
+    /// phase or stores none and fires in each main phase, requires the main phase an effect adds
+    /// as well as the turn that brings one; a trigger at the beginning of the precombat main
+    /// phase, of an upkeep or of combat does not.
+    #[test]
+    fn a_postcombat_main_trigger_requires_an_added_main_phase_as_well_as_a_turn() {
+        let requires = |name: &str| trigger_requirements(&face(name).triggers[0]);
+        for watcher in ["Neheb, the Eternal", "Frontier Siege", "Carpet of Flowers"] {
+            assert_eq!(
+                requires(watcher),
+                BTreeSet::from([AxisKey::ExtraTurn, AxisKey::MainPhase]),
+                "{watcher}"
+            );
+        }
+        for elsewhere in ["Glóin the Mighty", "Blinkmoth Urn", "Paradox Haze"] {
+            assert_eq!(
+                requires(elsewhere),
+                BTreeSet::from([AxisKey::ExtraTurn]),
+                "{elsewhere}"
+            );
+        }
+        assert_eq!(
+            requires("Sinister Monolith"),
+            BTreeSet::from([AxisKey::Combat])
+        );
+        assert_eq!(
+            requires("Lotus Cobra"),
+            BTreeSet::from([AxisKey::Etb]),
+            "a trigger that is not at the beginning of a step stores no step either"
+        );
+    }
+
+    /// CR 500.8: an effect that adds a main phase produces it, whether the main phase is the
+    /// segment it adds or follows the one it adds, and an effect adding a combat phase alone does
+    /// not; the added main phase is no resource axis.
+    #[test]
+    fn an_effect_adding_a_main_phase_produces_it() {
+        let adding = |segment: PhaseGroup, followed_by: Vec<PhaseGroup>| {
+            build_node(
+                ORIGIN,
+                &activated(Effect::AdditionalPhase {
+                    recipient: crate::types::ability::ExtraPhaseRecipient::Controller,
+                    segment: TurnSegment::Phase(segment),
+                    after: crate::types::ability::ExtraPhaseAnchor::this_main_phase(),
+                    followed_by: followed_by.into_iter().map(TurnSegment::Phase).collect(),
+                    count: fixed(1),
+                    attacker_restriction: None,
+                }),
+                None,
+            )
+        };
+        let both = adding(PhaseGroup::Combat, vec![PhaseGroup::PostcombatMain]);
+        assert_eq!(
+            both.produces,
+            BTreeSet::from([AxisKey::Combat, AxisKey::MainPhase])
+        );
+        assert_eq!(both.net.combat_phases, 1);
+        assert_eq!(
+            both.unbounded_production,
+            BTreeSet::new(),
+            "the added main phase names no resource"
+        );
+        assert_eq!(
+            axis_key_to_resource(&AxisKey::MainPhase, &ResourceVector::default()),
+            None
+        );
+
+        for main in [PhaseGroup::PostcombatMain, PhaseGroup::PrecombatMain] {
+            let alone = adding(main, Vec::new());
+            assert_eq!(alone.produces, BTreeSet::from([AxisKey::MainPhase]));
+            assert_eq!(alone.completeness, ModelCompleteness::FullyModeled);
+        }
+
+        let combat = adding(PhaseGroup::Combat, Vec::new());
+        assert_eq!(combat.produces, BTreeSet::from([AxisKey::Combat]));
+
+        assert!(node_of("Aggravated Assault", AbilitySlot::Ability(0))
+            .produces
+            .contains(&AxisKey::MainPhase));
+        let najeela = node_of("Najeela, the Blade-Blossom", AbilitySlot::Ability(0));
+        assert!(najeela.produces.contains(&AxisKey::Combat), "reach");
+        assert!(!najeela.produces.contains(&AxisKey::MainPhase));
+    }
+
+    /// CR 505.1a: the main phase Aggravated Assault adds feeds Neheb, the Eternal's trigger at the
+    /// beginning of the postcombat main phase and Frontier Siege's at the beginning of each main
+    /// phase, and not Glóin the Mighty's at the beginning of the first main phase; the combat
+    /// phase Najeela, the Blade-Blossom adds feeds none of them; and the turn Time Warp adds
+    /// feeds Neheb's and Glóin's alike.
+    #[test]
+    fn a_postcombat_main_trigger_cycles_with_the_main_phase_that_feeds_it() {
+        let fed = |adder: &str, slot: AbilitySlot, watcher: &str| {
+            cycle_holds(&[adder, watcher], watcher, AbilitySlot::Trigger(0))
+                && cycle_holds(&[adder, watcher], adder, slot)
+        };
+        let assault = ("Aggravated Assault", AbilitySlot::Ability(0));
+        let najeela = ("Najeela, the Blade-Blossom", AbilitySlot::Ability(0));
+        assert!(fed(assault.0, assault.1, "Neheb, the Eternal"));
+        assert!(fed(assault.0, assault.1, "Frontier Siege"));
+        assert!(!fed(assault.0, assault.1, "Glóin the Mighty"));
+        assert!(!fed(najeela.0, najeela.1, "Neheb, the Eternal"));
+        assert!(
+            first_trigger_node("Lotus Cobra")
+                .produces
+                .contains(&AxisKey::Mana),
+            "reach: Lotus Cobra's landfall trigger produces the mana Aggravated Assault spends"
+        );
+        assert!(!fed(assault.0, assault.1, "Lotus Cobra"));
+
+        for watcher in ["Neheb, the Eternal", "Glóin the Mighty"] {
+            assert!(
+                first_trigger_node(watcher)
+                    .produces
+                    .contains(&AxisKey::Mana),
+                "reach: {watcher} produces the mana both adders spend"
+            );
+            assert!(
+                cycle_holds(&["Time Warp", watcher], watcher, AbilitySlot::Trigger(0)),
+                "{watcher}"
+            );
+        }
+        assert!(
+            node_of(najeela.0, najeela.1)
+                .requires
+                .contains(&AxisKey::Mana),
+            "reach: Najeela's ability spends mana"
+        );
+    }
+
+    /// CR 111.10a + CR 111.3: a mint also produces the mana its tokens' own mana abilities add,
+    /// whether the ability comes from the token's definition (Treasure) or from the creating effect
+    /// ("They have "Sacrifice this token: Add {C}.""), in a fixed number or not.
+    #[test]
+    fn a_mint_produces_the_mana_its_tokens_add() {
+        let gnawbone = first_trigger_node("Old Gnawbone");
+        assert!(gnawbone.produces.contains(&AxisKey::Mana));
+        assert!(gnawbone.unbounded_production.contains(&AxisKey::Mana));
+
+        let hireling = first_trigger_node("Grim Hireling");
+        assert_eq!(hireling.net.mana.iter().sum::<i64>(), 2);
+        assert!(hireling.produces.contains(&AxisKey::Mana));
+        assert!(!hireling.unbounded_production.contains(&AxisKey::Mana));
+
+        assert!(cycle_holds(
+            &["Aggravated Assault", "Rapacious One"],
+            "Rapacious One",
+            AbilitySlot::Trigger(0)
+        ));
+    }
+
+    /// CR 701.26b: an untap of one permanent or of a population produces the tap axis, bounded,
+    /// and that edge closes the cycle with a tapped mana source.
+    #[test]
+    fn an_untap_of_one_permanent_or_a_population_produces_the_tap_axis() {
+        for scope in [EffectScope::Single, EffectScope::All] {
+            let mut acc = NodeAcc::default();
+            fold_projection(
+                &mut acc,
+                effect_projection(&Effect::SetTapState {
+                    target: default_target_filter_any(),
+                    scope,
+                    state: TapStateChange::Untap,
+                }),
+            );
+            assert!(acc.produces.contains(&AxisKey::Tap), "{scope:?}");
+            assert!(acc.unbounded_production.is_empty(), "{scope:?}");
+        }
+        for names in [
+            &["Aggravated Assault", "Bear Umbra", "Mountain"][..],
+            &["Aggravated Assault", "Birds of Paradise"][..],
+        ] {
+            assert!(
+                cycle_holds(names, "Aggravated Assault", AbilitySlot::Ability(0)),
+                "{names:?}"
+            );
+        }
+    }
+
+    /// CR 701.26a + CR 701.26b: Nature's Will ("tap all lands that player controls and untap all
+    /// lands you control") loops on the tap axis alone, so its cycle is a candidate that reports
+    /// no axis.
+    #[test]
+    fn a_cycle_on_the_tap_axis_alone_is_a_candidate_naming_no_axis() {
+        let will = first_trigger_node("Nature's Will");
+        assert!(will.requires.contains(&AxisKey::Tap) && will.produces.contains(&AxisKey::Tap));
+        assert!(will.unbounded_production.is_empty());
+        let candidates = candidate_cycles(&[face("Nature's Will")]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].unbounded, []);
+    }
+
     #[test]
     fn a_five_color_activation_cycles_on_flexible_and_single_color_producers() {
         let mut names = vec!["Najeela, the Blade-Blossom", "Urtet, Remnant of Memnarch"];
@@ -3563,25 +3798,95 @@ mod tests {
         ));
     }
 
+    /// CR 608.2n: a spell requires its return to a hand, an edge from a member that returns it
+    /// (Archaeomancer to Ghostly Flicker, which blinks it); Time Warp also cycles with the Island
+    /// its extra turn untaps (CR 500.7 + CR 502.3).
     #[test]
-    fn an_extra_turn_spell_cycles_only_with_a_member_returning_it_to_hand() {
-        let recursion = [
-            "Archaeomancer",
-            "Mnemonic Wall",
-            "Island",
-            "Time Warp",
-            "Ghostly Flicker",
-        ];
+    fn a_spell_requires_its_return_to_hand_and_cycles_through_any_edge_it_has() {
+        let warp = build_nodes(&[AbilitySource::from(face("Time Warp"))]);
+        assert!(warp[0].requires.contains(&AxisKey::ReturnToHand));
         assert!(cycle_holds(
-            &recursion,
-            "Time Warp",
+            &["Archaeomancer", "Ghostly Flicker"],
+            "Ghostly Flicker",
             AbilitySlot::Ability(0)
         ));
         assert!(!cycle_holds(
-            &["Time Warp", "Island"],
+            &["Mnemonic Wall", "Time Warp"],
             "Time Warp",
             AbilitySlot::Ability(0)
         ));
+        let names = ["Time Warp", "Island"];
+        assert!(cycle_holds(&names, "Time Warp", AbilitySlot::Ability(0)));
+        let faces = names.map(face);
+        assert!(candidate_cycles(&faces)
+            .iter()
+            .any(|cycle| cycle.unbounded.contains(&ResourceAxis::ExtraTurns)));
+    }
+
+    /// The node built from `name`'s activated ability or trigger in `slot`.
+    fn node_of(name: &str, slot: AbilitySlot) -> AbilityNode {
+        build_nodes(&[AbilitySource::from(face(name))])
+            .into_iter()
+            .find(|node| node.origin.slot == slot)
+            .unwrap_or_else(|| panic!("{name} has a node in {slot:?}"))
+    }
+
+    /// An axis a node produces without bound is produced whatever its own cost nets away:
+    /// Nykthos, Shrine to Nyx's "{2}, {T}: Choose a color. Add an amount of mana of that color
+    /// equal to your devotion to that color."
+    #[test]
+    fn an_unbounded_production_is_produced_whatever_the_nodes_cost_nets() {
+        let nykthos = node_of("Nykthos, Shrine to Nyx", AbilitySlot::Ability(1));
+        assert!(
+            nykthos.net.mana.iter().sum::<i64>() <= 0,
+            "reach: the cost nets the seeded mana away"
+        );
+        assert!(nykthos.produces.contains(&AxisKey::Mana));
+    }
+
+    /// CR 102.2 + CR 102.3 + CR 119.3 + CR 701.17a: an effect naming no target moves the life or
+    /// the library of the players its definition's scope names: each opponent, or each player.
+    #[test]
+    fn a_player_scope_names_whose_life_and_library_an_effect_moves() {
+        let trigger = AbilitySlot::Trigger(0);
+        // "each opponent loses 1 life and you gain 1 life"
+        let monolith = node_of("Sinister Monolith", trigger);
+        assert_eq!(
+            monolith.net.life,
+            BTreeMap::from([(CONTROLLER, 1), (OPPONENT, -1)])
+        );
+        assert!(monolith.produces.contains(&AxisKey::Life));
+        // "each opponent mills a card"
+        assert_eq!(
+            node_of("Altar of the Brood", trigger).net.library_delta,
+            BTreeMap::from([(OPPONENT, -1)])
+        );
+        // "each player loses 1 life"
+        assert_eq!(
+            node_of("Blood Tyrant", trigger).net.life,
+            BTreeMap::from([(CONTROLLER, -1), (OPPONENT, -1)])
+        );
+        // "{T}: Each player mills a card."
+        assert_eq!(
+            node_of("Ghoulcaller's Bell", AbilitySlot::Ability(0))
+                .net
+                .library_delta,
+            BTreeMap::from([(CONTROLLER, -1), (OPPONENT, -1)])
+        );
+        // "{T}: Add {R} or {G}. Each opponent gains 1 life.": the scope of the definition the
+        // effect heads, not of the ability it ends.
+        assert_eq!(
+            node_of("Grove of the Burnwillows", AbilitySlot::Ability(1))
+                .net
+                .life,
+            BTreeMap::from([(OPPONENT, 1)])
+        );
+        // "each opponent who doesn't control an Elf loses 1 life": who they are is the game's
+        // to say, so the loss stays where an unscoped effect puts it.
+        assert_eq!(
+            node_of("Thornbow Archer", trigger).net.life,
+            BTreeMap::from([(CONTROLLER, -1)])
+        );
     }
 
     // === E. PR-4a review resolution (PR #4493) ==============================
@@ -3595,21 +3900,18 @@ mod tests {
         // candidate MUST still be emitted (the proposer envelopes optimistically).
         //
         // DISCRIMINATION: revert `fold_one_of` to the AND-fold (`for c in costs {
-        // fold_cost(acc, c) }`) and B costs {101}; the cycle's fixed +1 mana then
-        // nets to -100 with no UNBOUNDED mana production, so `candidate_coverable`
-        // vetoes and this candidate DISAPPEARS (0 emitted). The envelope keeps
-        // mana at max(-1,-100) = -1, balanced to 0, so it survives.
+        // fold_cost(acc, c) }`) and B's node nets mana -101 where the envelope keeps
+        // max(-1,-100) = -1.
 
-        // Engine node A: tap for {1} (FIXED, so mana stays a veto axis) plus an
-        // UNBOUNDED +1/+1 counter — the payoff and the non-mana progress axis that
-        // makes the cycle coverable without making mana unbounded. Requires Tap.
+        // Engine node A: tap for {1} plus an UNBOUNDED +1/+1 counter, the axis the
+        // candidate reports. Requires Tap.
         let mut def_a = activated(mana_effect(colorless(fixed(1))));
         def_a.sub_ability = Some(Box::new(activated(put_counter(
             CounterType::Plus1Plus1,
             dynamic(),
         ))));
         def_a.cost = Some(AbilityCost::Tap);
-        let node_a = build_node(ORIGIN, "Engine", &def_a, None);
+        let node_a = build_node(ORIGIN, &def_a, None);
         assert_eq!(
             node_a.net.mana[COLORLESS_INDEX], 1,
             "fixed +1 mana producer"
@@ -3622,7 +3924,7 @@ mod tests {
         );
         assert!(
             !node_a.unbounded_production.contains(&AxisKey::Mana),
-            "mana production is FIXED, so mana stays a coverability veto axis"
+            "mana production is FIXED"
         );
 
         // Payoff node B: untaps the engine (produces Tap), cost = the disjunction.
@@ -3637,7 +3939,7 @@ mod tests {
                 },
             ],
         });
-        let node_b = build_node(ORIGIN, "Payoff", &def_b, None);
+        let node_b = build_node(ORIGIN, &def_b, None);
         assert_eq!(
             node_b.net.mana[COLORLESS_INDEX], -1,
             "envelope keeps the cheap branch's mana (max(-1,-100)), not the AND-fold's -101"
@@ -3682,7 +3984,7 @@ mod tests {
                 },
             ],
         });
-        let node = build_node(ORIGIN, "Disjoint", &def, None);
+        let node = build_node(ORIGIN, &def, None);
 
         // per-axis MAX net: the cheaper mana survives (-2, not the AND-fold's -7),
         // while the sac branch's event production is unioned in (absent in branch
@@ -3761,23 +4063,13 @@ mod tests {
     }
 
     #[test]
-    fn model_completeness_tracks_and_rolls_up_unmodeled() {
+    fn model_completeness_tracks_unmodeled() {
         // gemini R2 (PR #4493): the typed completeness flag replaces a raw bool.
         // A modeled effect ⇒ FullyModeled; an unmodeled one ⇒ ContainsUnmodeled.
-        let modeled = build_node(
-            ORIGIN,
-            "Modeled",
-            &activated(mana_effect(colorless(fixed(1)))),
-            None,
-        );
+        let modeled = build_node(ORIGIN, &activated(mana_effect(colorless(fixed(1)))), None);
         assert_eq!(modeled.completeness, ModelCompleteness::FullyModeled);
 
-        let unmodeled = build_node(
-            ORIGIN,
-            "Unmodeled",
-            &activated(Effect::unimplemented("x", "y")),
-            None,
-        );
+        let unmodeled = build_node(ORIGIN, &activated(Effect::unimplemented("x", "y")), None);
         assert_eq!(unmodeled.completeness, ModelCompleteness::ContainsUnmodeled);
         assert_ne!(unmodeled.completeness, ModelCompleteness::FullyModeled);
 
@@ -3793,36 +4085,6 @@ mod tests {
         assert_eq!(
             ModelCompleteness::ContainsUnmodeled.merge(ModelCompleteness::FullyModeled),
             ModelCompleteness::ContainsUnmodeled
-        );
-
-        // Candidate-level rollup over a 2-node mana/counter cycle: all-modeled
-        // members ⇒ FullyModeled; one unmodeled member ⇒ ContainsUnmodeled.
-        let mut a = raw_node("A");
-        a.net.mana[COLORLESS_INDEX] = -1;
-        a.net.counters.insert(P1P1, 1);
-        a.produces.insert(AxisKey::Counter(P1P1.0, P1P1.1));
-        a.requires.insert(AxisKey::Mana);
-        let mut b = raw_node("B");
-        b.net.mana[COLORLESS_INDEX] = 2;
-        b.net.counters.insert(P1P1, -1);
-        b.produces.insert(AxisKey::Mana);
-        b.requires.insert(AxisKey::Counter(P1P1.0, P1P1.1));
-
-        let modeled_cands = candidate_cycles_from_nodes(vec![a.clone(), b.clone()]);
-        assert_eq!(modeled_cands.len(), 1);
-        assert_eq!(
-            modeled_cands[0].completeness,
-            ModelCompleteness::FullyModeled,
-            "an all-modeled cycle must NOT report ContainsUnmodeled"
-        );
-
-        a.completeness = ModelCompleteness::ContainsUnmodeled;
-        let mixed_cands = candidate_cycles_from_nodes(vec![a, b]);
-        assert_eq!(mixed_cands.len(), 1);
-        assert_eq!(
-            mixed_cands[0].completeness,
-            ModelCompleteness::ContainsUnmodeled,
-            "one unmodeled member rolls the candidate up to ContainsUnmodeled"
         );
     }
 

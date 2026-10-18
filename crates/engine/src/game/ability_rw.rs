@@ -2125,6 +2125,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -3198,6 +3199,11 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::SetLifeTotal { target, amount } | Effect::DealDamage { amount, target, .. } => {
             legacy_quantity_expr(amount) || legacy_target_filter(target)
         }
+        // The second contestant is the only filter the contest reads.
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => legacy_target_filter(contestant),
         Effect::Endure {
             amount: count,
             subject: target,
@@ -3238,8 +3244,8 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::EmpowerJace { count } => legacy_quantity_expr(count),
         // Deferred continuous-modification carrier — no `count`; descend the mods
         // for a nested frozen tag (AddType/AddSubtype return `false`).
-        Effect::AddPendingEntersModifications { modifications } => {
-            modifications.iter().any(legacy_continuous_modification)
+        Effect::AddPendingEntersModifications { rider } => {
+            rider.modifications.iter().any(legacy_continuous_modification)
         }
         Effect::GainEnergy { amount } | Effect::Intensify { amount, .. } => {
             legacy_quantity_expr(amount)
@@ -3660,6 +3666,7 @@ fn legacy_effect(x: &Effect) -> bool {
             legacy_controller_ref(starting_with)
                 || per_choice_effect.iter().any(|d| legacy_definition(d))
         }
+        Effect::ExileTopCardContest { winner_effect } => legacy_definition(winner_effect),
         Effect::SeparateIntoPiles {
             object_filter,
             chosen_pile_effect,
@@ -4254,6 +4261,7 @@ fn walk_ability(
         target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
         target_pins: _,        // CR 400.7 selected-target pins, no read/write effect
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _, // CR 115.1 announced-target record, no read/write effect
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no read/write effect
@@ -4888,6 +4896,12 @@ fn rw_effect(
         Effect::Learn => (ext_write(StateKind::HandLibrary), None),
         Effect::DraftFromSpellbook { .. } => (ext_write(StateKind::HandLibrary), None),
         Effect::Clash => (ext_write(StateKind::HandLibrary), None),
+        // The contest itself writes no state; its result only gates the rider that
+        // follows. It reads the second contestant's filter.
+        Effect::PhysicalContest {
+            kind: _,
+            contestant,
+        } => (rw_target_filter(contestant), None),
         Effect::ChooseDrawnThisTurnPayOrTopdeck {
             count,
             life_payment,
@@ -5042,7 +5056,7 @@ fn rw_effect(
         // bearing ContinuousModification is ever admitted into this rider, the
         // parser extension MUST merge each mod's QuantityExpr here via
         // rw_quantity_expr.
-        Effect::AddPendingEntersModifications { modifications: _ } => {
+        Effect::AddPendingEntersModifications { rider: _ } => {
             (self_write(StateKind::SetMembership), Some(WriteScope::SelfSource))
         }
         Effect::Proliferate => {
@@ -6323,6 +6337,7 @@ fn rw_effect(
         | Effect::ChooseCard { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::EpicCopy { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::UnattachAll { .. }
@@ -7142,6 +7157,12 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             p.merge(frozen_source_read());
             p
         }
+        // CR 500.8 + CR 506.1: the phase-occurrence gate reads whether the
+        // turn's first combat phase is the one in progress — the same
+        // sequencing channel `Effect::AdditionalPhase` writes (an added combat
+        // phase changes the answer), so the profile records the `TurnStructure`
+        // kind rather than staying empty.
+        StaticCondition::FirstCombatPhaseOfTurn => reads_player_of(StateKind::TurnStructure),
         StaticCondition::SourceMatchesFilter { filter: _ } => {
             let mut p = reads_src_of(StateKind::ObjectPt);
             p.current_pt_reads.add(PtReadScope::Source);
@@ -9323,6 +9344,21 @@ mod tests {
         assert!(
             d.reads_player.turn_structure,
             "but does read the turn-history snapshot"
+        );
+    }
+
+    /// CR 500.8 + CR 506.1 (structural review): the first-combat-phase gate
+    /// reads the turn's phase history — the `TurnStructure` sequencing channel
+    /// `Effect::AdditionalPhase` writes (pinned as a write by the sibling test
+    /// above) — so an empty read profile would let the pair coexist without the
+    /// CR 603.3b ordering prompt the `feeds` matrix already proves for
+    /// TurnStructure × TurnStructure.
+    #[test]
+    fn first_combat_phase_gate_reads_turn_structure() {
+        let gate = rw_static_condition(&StaticCondition::FirstCombatPhaseOfTurn);
+        assert!(
+            gate.reads_player.turn_structure,
+            "the phase-occurrence gate must record the TurnStructure read, got {gate:?}"
         );
     }
 

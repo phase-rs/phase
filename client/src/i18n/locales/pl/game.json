@@ -808,7 +808,16 @@
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
   },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
+  },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stos",
     "collapsePanel": "Zwiń panel stosu",
     "expandPanel": "Rozwiń panel stosu",
@@ -2670,5 +2679,34 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Pojedynek na spojrzenia",
+      "breathHolding": "Zawody w wstrzymywaniu oddechu"
+    },
+    "versus": "{{first}} kontra {{second}}",
+    "instructions": "Klikaj, stukaj lub naciskaj spację tak długo, jak potrafisz. Pierwszy gracz, który przestanie na {{seconds}} s, przegrywa.",
+    "status": {
+      "pending": "Oczekiwanie na rozpoczęcie zawodów…",
+      "preparing": "Przygotuj się…",
+      "go": "START! Klikaj dalej!",
+      "paused": "Zawody wstrzymane, dopóki gracz się nie połączy ponownie…",
+      "spectating": "Oglądasz zawody…",
+      "resolving": "Ustalanie wyniku…"
+    },
+    "button": {
+      "wait": "Czekaj na START…",
+      "active": "Klikaj dalej!"
+    },
+    "you": "Ty",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "Wygrywasz zawody!",
+      "lost": "Przegrywasz zawody.",
+      "winner": "{{name}} wygrywa zawody.",
+      "tie": "Remis – nic się nie dzieje.",
+      "cancelled": "Zawody anulowano – nic się nie dzieje."
+    }
   }
 }

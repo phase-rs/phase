@@ -1,6 +1,7 @@
 pub mod ai_seats_wire_guard;
 pub mod client_hello_guard;
 pub mod client_message_wire_guard;
+pub mod contest;
 pub mod deck_resolve;
 pub mod draft_action_payload_guard;
 pub mod draft_session;

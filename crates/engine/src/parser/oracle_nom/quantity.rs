@@ -775,6 +775,32 @@ fn parse_number_of_cards_drawn_this_turn(input: &str) -> OracleResult<'_, Quanti
     Ok((rest, QuantityRef::CardsDrawnThisTurn { player }))
 }
 
+/// CR 121.1 + CR 102.2/102.3: the maximum number drawn this turn by one
+/// opponent or player, not the sum of that population's draw tallies.
+fn parse_extremum_cards_drawn_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = tag("the ").parse(input)?;
+    let (input, _) = parse_max_extremum_adjective(input)?;
+    let (input, _) = tag(" number of cards ").parse(input)?;
+    let (input, player) = alt((
+        value(
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+            tag("an opponent "),
+        ),
+        value(
+            PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Max,
+                exclude: None,
+            },
+            tag("a player "),
+        ),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((tag("has drawn this turn"), tag("drew this turn"))).parse(input)?;
+    Ok((rest, QuantityRef::CardsDrawnThisTurn { player }))
+}
+
 /// CR 701.9 + CR 603.4: "card(s) [you('ve)] discarded this turn". Reuses the
 /// runtime `CardsDiscardedThisTurn` quantity ref already wired for condition
 /// checks; this routes it into the dynamic "for each" count path (Misty Knight,
@@ -1155,7 +1181,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // scry-context "number of cards looked at …" reading wins over a
         // plain object-count reading.
         parse_scry_look_count_ref,
-        parse_controlled_object_count_extremum,
+        alt((
+            parse_controlled_object_count_extremum,
+            parse_extremum_cards_drawn_this_turn,
+        )),
         parse_the_number_of,
         // The cast journal is an occurrence population, not a live-object type
         // phrase, so it must win before the generic object aggregate arm.
@@ -1737,13 +1766,13 @@ fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
 /// interchangeable superlatives for the same `AggregateFunction::Max`
 /// ("greatest power", "highest mana value"); they are one axis, not one phrase
 /// each. Verdant Rejuvenation prints "highest".
-fn parse_max_extremum_adjective(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_max_extremum_adjective(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("greatest"), tag("highest"), tag("largest")))).parse(input)
 }
 
 /// CR 208.1 + CR 202.3: The aggregable object properties. Shared by every
 /// aggregate form so the property axis is declared once.
-fn parse_aggregate_property(input: &str) -> OracleResult<'_, ObjectProperty> {
+pub(crate) fn parse_aggregate_property(input: &str) -> OracleResult<'_, ObjectProperty> {
     alt((
         value(ObjectProperty::Power, tag("power")),
         value(ObjectProperty::Toughness, tag("toughness")),
@@ -8913,6 +8942,169 @@ mod tests {
                 }
                 other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
             }
+        }
+    }
+
+    /// CR 121.1 + CR 102.2/102.3: extrema select one player's draw tally,
+    /// while the existing opponents' sum and controller forms stay distinct.
+    #[test]
+    fn issue_9887_extremum_cards_drawn_axes_and_neighbors() {
+        for adjective in ["greatest", "highest", "largest"] {
+            for (subject, player) in [
+                (
+                    "an opponent",
+                    PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
+                    },
+                ),
+                (
+                    "a player",
+                    PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                ),
+            ] {
+                for verb in ["has drawn", "drew"] {
+                    let text =
+                        format!("the {adjective} number of cards {subject} {verb} this turn");
+                    assert_eq!(
+                        parse_quantity_ref(&text),
+                        Ok((
+                            "",
+                            QuantityRef::CardsDrawnThisTurn {
+                                player: player.clone(),
+                            },
+                        )),
+                        "{text}"
+                    );
+                }
+            }
+        }
+        for (text, player) in [
+            (
+                "the number of cards your opponents have drawn this turn",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            ),
+            (
+                "the number of cards you've drawn this turn",
+                PlayerScope::Controller,
+            ),
+        ] {
+            assert_eq!(
+                parse_quantity_ref(text),
+                Ok(("", QuantityRef::CardsDrawnThisTurn { player })),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_9887_extremum_cards_drawn_rejects_near_misses() {
+        for text in [
+            "the greatest number of cards an opponent has discarded this turn",
+            "the greatest number of cards an opponent has drawn last turn",
+            "the least number of cards an opponent has drawn this turn",
+            "the greatest number of cards an opponent has drawn this turn ever",
+            "the greatest number of cards an opponent has drawn this turn among your opponents",
+        ] {
+            let positive = "the greatest number of cards an opponent has drawn this turn";
+            let expected = QuantityRef::CardsDrawnThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            };
+            assert_eq!(parse_quantity_ref(positive), Ok(("", expected.clone())));
+            assert_eq!(
+                crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                    positive,
+                    &mut ParseContext::default(),
+                ),
+                Some(expected),
+                "positive bridge reach guard for {text}"
+            );
+            assert!(parse_quantity_ref_complete(text).is_err(), "{text}");
+            assert_eq!(
+                crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                    text,
+                    &mut ParseContext::default(),
+                ),
+                None,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_9887_extremum_cards_drawn_retains_dangling_tail() {
+        let positive = "the greatest number of cards an opponent has drawn this turn";
+        let expected = QuantityRef::CardsDrawnThisTurn {
+            player: PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+        };
+        assert_eq!(parse_quantity_ref(positive), Ok(("", expected.clone())));
+        assert_eq!(
+            crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                positive,
+                &mut ParseContext::default(),
+            ),
+            Some(expected.clone())
+        );
+        let dangling = format!("{positive} plus one");
+        assert_eq!(
+            parse_quantity_ref(&dangling),
+            Ok((" plus one", expected)),
+            "nom must preserve the unread suffix for its caller"
+        );
+        assert_eq!(
+            crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                &dangling,
+                &mut ParseContext::default(),
+            ),
+            None,
+            "the production bridge must not publish the supported prefix alone"
+        );
+        assert_eq!(
+            crate::parser::oracle_quantity::parse_cda_quantity(&dangling),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDrawnThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                }),
+                offset: 1,
+            }),
+            "the expression layer must compose the entire supported addition"
+        );
+    }
+
+    #[test]
+    fn issue_9887_extremum_cards_drawn_capitalized_replacement() {
+        let line = "This creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.";
+        for text in [line.to_string(), line.to_uppercase()] {
+            let definition =
+                crate::parser::oracle_replacement::parse_replacement_line(&text, "Thought Sponge")
+                    .expect("the replacement entry point normalizes capitalization");
+            let execute = definition.execute.expect("entry execute ability");
+            assert_eq!(
+                &*execute.effect,
+                &crate::types::ability::Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsDrawnThisTurn {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Max,
+                            },
+                        },
+                    },
+                }
+            );
         }
     }
 

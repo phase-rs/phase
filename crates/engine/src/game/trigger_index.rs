@@ -495,7 +495,10 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::ExtraTurnCreated { .. }
-        | GameEvent::ResolutionHalted { .. } => {}
+        | GameEvent::ResolutionHalted { .. }
+        // Contests are adapted physical minigames with no triggered-ability keys.
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -840,9 +843,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
+        | EffectKind::PhysicalContest
         | EffectKind::Behold
         | EffectKind::Vote
         | EffectKind::SeparateIntoPiles
+        | EffectKind::ExileTopCardContest
         | EffectKind::SwitchPT
         | EffectKind::CopySpell
         | EffectKind::EpicCopy

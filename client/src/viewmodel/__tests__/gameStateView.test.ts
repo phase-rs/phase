@@ -1152,6 +1152,7 @@ const PARTITION_FIXTURES: Record<
   ChooseAnnouncingOpponent: NO_TARGET_REF_LEGAL_SET,
   ChooseGiftRecipient: NO_TARGET_REF_LEGAL_SET,
   ClashCardPlacement: NO_TARGET_REF_LEGAL_SET,
+  PhysicalContest: NO_TARGET_REF_LEGAL_SET,
   VoteChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeon: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeonRoom: NO_TARGET_REF_LEGAL_SET,

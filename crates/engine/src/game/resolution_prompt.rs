@@ -359,6 +359,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -483,6 +484,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -605,6 +607,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         target_incarnations: _, // CR 400.7 referent pins, no choice
         target_pins: _, // CR 400.7 selected-target pins, no choice
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _,  // CR 115.1 announced-target record, no choice
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice

@@ -262,6 +262,7 @@ pub const ARTIFACT_SUBTYPES: &[&str] = &[
     "Food",
     "Fortification",
     "Gold",
+    "Heartwood",
     "Incubator",
     "Infinity",
     "Junk",
@@ -273,6 +274,7 @@ pub const ARTIFACT_SUBTYPES: &[&str] = &[
     "Stone",
     "Treasure",
     "Vehicle",
+    "Vibranium",
 ];
 
 pub const ENCHANTMENT_SUBTYPES: &[&str] = &[
@@ -415,6 +417,21 @@ pub fn noncreature_subtype_set(s: &str) -> Option<SubtypeSet> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 205.3g + CR 111.10w/x: both standard token types belong to artifacts.
+    #[test]
+    fn artifact_subtypes_heartwood_vibranium_own_artifact_set() {
+        for subtype in ["Heartwood", "Vibranium", "Equipment"] {
+            assert_eq!(noncreature_subtype_set(subtype), Some(SubtypeSet::Artifact));
+            assert_eq!(
+                fixed_noncreature_subtypes()
+                    .filter(|s| *s == subtype)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(noncreature_subtype_set("Bear"), None);
+    }
 
     /// CR 702.16a: `protection_quality_str` returns the lowercase singular
     /// protection noun for each card type the engine can offer as a chosen

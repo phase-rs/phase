@@ -31,6 +31,8 @@ const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<Wa
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",
   "GameOver",
+  // Eye to Eye / Mouth to Mouth render their own full-screen ContestOverlay.
+  "PhysicalContest",
 ]);
 
 // `WaitingFor` variants whose UI deliberately uses `pointer-events: none` so

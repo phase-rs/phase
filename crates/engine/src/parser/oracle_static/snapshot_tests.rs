@@ -1115,7 +1115,7 @@ fn three_way_oxford_disjunctive_doubler_source() {
 /// CR 613.1d + CR 613.4b + CR 613.1f (issue #2363): Grand Master of Flowers —
 /// "As long as ~ has seven or more loyalty counters on him, he's a 7/7 Dragon
 /// God creature with flying and indestructible."
-/// The parser must emit SetPower(7), SetToughness(7), AddType(Creature),
+/// The parser must emit SetPower(7), SetToughness(7), SetCardTypes([Creature]),
 /// AddSubtype(Dragon), AddSubtype(God), AddKeyword(Flying),
 /// AddKeyword(Indestructible), plus a non-null HasCounters condition.
 #[test]
@@ -1135,10 +1135,10 @@ fn grand_master_of_flowers_becomes_777_dragon_god_creature() {
         "expected SetToughness(7) in {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::AddType {
-            core_type: CoreType::Creature
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
         }),
-        "expected AddType(Creature) in {mods:?}"
+        "expected SetCardTypes([Creature]) in {mods:?}"
     );
     assert!(
         mods.contains(&ContinuousModification::AddSubtype {
@@ -1215,10 +1215,10 @@ fn gendered_pronoun_she_becomes_creature_static() {
         "expected SetToughness(3) in {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::AddType {
-            core_type: CoreType::Creature
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
         }),
-        "expected AddType(Creature) in {mods:?}"
+        "expected SetCardTypes([Creature]) in {mods:?}"
     );
     assert!(
         mods.contains(&ContinuousModification::AddSubtype {
@@ -1257,10 +1257,10 @@ fn neutral_plural_pronoun_they_becomes_creature_static() {
         "expected SetToughness(4) in {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::AddType {
-            core_type: CoreType::Creature
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
         }),
-        "expected AddType(Creature) in {mods:?}"
+        "expected SetCardTypes([Creature]) in {mods:?}"
     );
     assert!(
         mods.contains(&ContinuousModification::AddSubtype {

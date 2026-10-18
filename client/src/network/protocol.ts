@@ -106,11 +106,37 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  127 — game_setup and state_update carry GameState, whose activated grants
+ *  134 — game_setup and state_update carry GameState, whose activated grants
  *       carry an optional kind selector (Nicol Bolas, Dragon-God's loyalty
- *       subset). A v126 peer drops the defaulted field silently and
+ *       subset). A v133 peer drops the defaulted field silently and
  *       over-grants, so first contact rejects the skew. Bumped in
- *       lockstep with full-game protocol 145.
+ *       lockstep with full-game protocol 152.
+ *  133: Populated GameObject.bestow_form carries removed creature subtypes
+ *       as an object instead of the legacy boolean; full-game protocol 151.
+ *  132 — game_setup and state_update carry GameState whose casting permissions may
+ *       carry the reshaped cast-this-way gains rider (the permission's
+ *       enters_with_modifications object and Effect.AddPendingEntersModifications.rider).
+ *       A wire 131 peer cannot parse either shape. Bumped in lockstep with
+ *       full-game protocol 150.
+ *  131 — GameState.deferred_spell_delivery is removed and GameState.resolving_spell_final_part
+ *       ({ spell }) marks the CR 608.2n final part a paused instant or sorcery still owes,
+ *       in game_setup and state_update; a v130 peer drops the key and would move the spell
+ *       too early. Bumped with full-game protocol 149.
+ *  130 — game_setup and state_update carry GameState whose abilities may hold
+ *       Effect::ExileTopCardContest (Timesifter) and whose resolution frames may
+ *       park BatchCompletion::TopCardContestRoundComplete; a v129 peer cannot
+ *       parse either tag. Bumped in lockstep with full-game protocol 148.
+ *  129 — game_setup and state_update carry GameState whose waiting_for may be
+ *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
+ *       abilities may hold Effect::PhysicalContest; a v128 peer cannot parse
+ *       either tag. Bumped in lockstep with full-game protocol 147.
+ *  128 — game_setup and state_update carry GameState whose loop offers may carry
+ *       ConfirmedPeriod counted_by and performance (CR 732.2a). Bumped in
+ *       lockstep with full-game protocol 146.
+ *  127 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ *       on ResolvedAbility.parent_target_missing_reason in game_setup and
+ *       state_update; a wire 126 peer cannot parse the tag. Bumped in lockstep
+ *       with full-game protocol 145; lobby messages unchanged.
  *  126 — game_setup and state_update carry GameState, whose one-time boons
  *       (#7495) add Effect.CreateBoon / Effect.NoteNumber, the HasBoon
  *       conditions, and WaitingFor.ChooseTokenHost, and whose perpetual P/T
@@ -690,7 +716,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 127 as const;
+export const WIRE_PROTOCOL_VERSION = 134 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -711,6 +737,12 @@ export type P2PMessage = P2PAuthorityWire & (
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
+  /** One click in the running Eye to Eye / Mouth to Mouth contest. No `senderPlayerId`
+   *  and no timestamp: the host reads the seat from the authenticated connection and
+   *  stamps the instant on its own clock, so a guest can claim neither. `contest` is
+   *  the engine-authored identity of the contest the click was made in, so a frame
+   *  delayed from an earlier contest is never counted in a later one. */
+  | { type: "contest_click"; contest: number; seq: number }
   | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   /** Carries the request VERBATIM. No `senderPlayerId`: the host reads the
@@ -809,6 +841,7 @@ const VALID_TYPES = new Set([
   "guest_deck",
   "game_setup",
   "action",
+  "contest_click",
   "interaction",
   "preview_mana_payment",
   "preview_interaction",

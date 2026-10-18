@@ -61,6 +61,7 @@ function helloFrame(
     mode: "Full" | "LobbyOnly";
     lobby_protocol_version: number;
     wire_formats: string[];
+    command_correlation: unknown;
   }> = {},
 ): string {
   return JSON.stringify({
@@ -104,6 +105,20 @@ describe("openPhaseSocket", () => {
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ClientHello"'),
     );
+  });
+
+  it.each([
+    ["CommandIdV1", "CommandIdV1"],
+    ["Other", undefined],
+    [1, undefined],
+    [undefined, undefined],
+  ])("parses command_correlation %j as %j", async (advertised, expected) => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ command_correlation: advertised }));
+
+    const socket = await promise;
+    expect(socket.serverInfo.commandCorrelation).toBe(expected);
   });
 
   it("negotiates the gzip envelope and queues binary sends in order", async () => {
@@ -297,6 +312,17 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it("rejects Full v144 before it can read the SearchLibrary missing-referent tag", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 144 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
   it("rejects Full v143 before it can read one-time boon tags", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -308,10 +334,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v144 before it can silently drop an activated grant's kind selector", async () => {
+  it("rejects Full v145 before it can read a counted loop offer", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 144 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 145 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -319,13 +345,59 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v145 kind-selected activated-grant protocol", async () => {
+  it("rejects Full v146 before it can read a physical contest", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 145 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 146 }));
 
-    await expect(promise).resolves.toBeDefined();
-    expect(ws.close).not.toHaveBeenCalled();
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v147 before it can read a top-card exile contest", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 147 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v148 before it can read the carrier-owned final-part marker", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 148 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v149 before it can read the gains rider's reshaped payload", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 149 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v150 before it can read a populated Bestow payload", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 150 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
   });
 
   it("rejects Full v141 before it can read a linked-exile snapshot's incarnation", async () => {
@@ -338,7 +410,6 @@ describe("openPhaseSocket", () => {
     });
     expect(ws.close).toHaveBeenCalled();
   });
-
   it("rejects Full v140 before it can read a cast-cost exile link", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -348,6 +419,26 @@ describe("openPhaseSocket", () => {
       kind: "protocol_mismatch",
     });
     expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v151 before it can silently drop an activated grant's kind selector", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 151 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("accepts the literal Full v152 kind-selected activated-grant protocol", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 152 }));
+
+    await expect(promise).resolves.toBeDefined();
+    expect(ws.close).not.toHaveBeenCalled();
   });
 
   it("rejects Full v139 before it can read the attack event's attacked players", async () => {

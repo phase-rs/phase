@@ -718,7 +718,9 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
 
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes the per-period signature its bound was divided by");
     let life_loss_p1 = -per_cycle.delta.life.get(&P1).copied().unwrap_or(0);
     let library_drain_p0 = -per_cycle.delta.library_delta.get(&P0).copied().unwrap_or(0);
@@ -1100,7 +1102,9 @@ fn r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_ann
         // has nothing to do with the property under test.
         let per_cycle = certificate
             .per_cycle
-            .clone()
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .cloned()
             .expect("a bounded offer publishes its per-period signature");
         let schema = schema.clone();
 
@@ -3276,7 +3280,9 @@ fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
     let (proposer, certificate, schema) = offer_parts(&alpha);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
 
     // ── REACH-GUARD: the REACH term is what this row is about, so it must be non-zero, and
@@ -3531,7 +3537,9 @@ fn accept_a_fixed_grant(
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     assert!(
@@ -4319,7 +4327,9 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
     let (proposer, certificate, _schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let (charged_slot, magnitude) = per_cycle.victim_slot.first().cloned().expect(
         "REACH-GUARD: the fabricated pin must name a slot the certificate really charges, else \
@@ -4362,6 +4372,7 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
         staged_certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .is_some_and(|pc| pc.victim_slot.iter().any(|(s, _)| *s == charged_slot)),
         "REACH-GUARD: emptying the published set must leave the CHARGED set intact — that \
          divergence is the shape this row is about"
@@ -4607,7 +4618,9 @@ fn u2_the_published_victim_domain_gates_the_committed_drive() {
         let schema = schema.clone();
         let per_cycle = certificate
             .per_cycle
-            .clone()
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .cloned()
             .expect("a bounded offer publishes its per-period signature");
 
         assert!(
@@ -4644,11 +4657,12 @@ fn u2_the_published_victim_domain_gates_the_committed_drive() {
         if stage_to_proposer {
             match &mut state.waiting_for {
                 WaitingFor::LoopShortcut { certificate, .. } => {
-                    certificate
-                        .per_cycle
-                        .as_mut()
-                        .expect("the signature the reach-guards above just read")
-                        .declarable_victims = vec![proposer];
+                    let Some(engine::analysis::resource::PeriodSignature::EveryRepetition(pc)) =
+                        certificate.per_cycle.as_mut()
+                    else {
+                        panic!("the signature the reach-guards above just read");
+                    };
+                    pc.declarable_victims = vec![proposer];
                 }
                 other => panic!("expected the CR 732.2a bounded offer, got {other:?}"),
             }
@@ -4825,7 +4839,9 @@ fn t1_a_victim_changing_declaration_commits_its_whole_count_on_the_seats_it_decl
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     // The count the offer's own published declaration drives. This row's claim is that an accepted
@@ -4970,7 +4986,9 @@ fn t2_reach_guard_a_same_seat_schedule_shape_already_commits_its_whole_count() {
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     // The count the offer's own published declaration drives. This row's claim is that an accepted
@@ -5063,7 +5081,9 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
 
     // ── The announced slot and its candidate seats, read off the SCHEMA — the same "first
@@ -5303,7 +5323,9 @@ fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
 
@@ -5462,7 +5484,9 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
     let unbounded = certificate.unbounded.clone();
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     // The count the offer's own published declaration drives. This row's claim is that an accepted
@@ -5651,7 +5675,9 @@ fn f4_allocation_offer(state: &mut GameState) -> F4Allocation {
     let (proposer, certificate, schema) = offer_parts(state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
 
@@ -7886,7 +7912,9 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
             schema.deliverable_capacity,
             certificate
                 .per_cycle
-                .clone()
+                .as_ref()
+                .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+                .cloned()
                 .expect("a bounded offer publishes its per-period signature"),
         )
     };
@@ -8336,7 +8364,9 @@ fn one_count_three_allocations_and_only_the_overrunning_ones_are_refused() {
     let (_proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     let capacity = schema.deliverable_capacity;
@@ -8436,7 +8466,9 @@ fn a_later_segment_aiming_the_preannounced_victim_within_its_headroom_is_admitte
     let (_proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     let capacity = schema.deliverable_capacity;
@@ -8505,7 +8537,9 @@ fn the_reported_departure_counts_the_repetitions_aimed_elsewhere_first() {
     let (_proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     let other = f4_other_victim(&offer);
@@ -8534,7 +8568,7 @@ fn the_reported_departure_counts_the_repetitions_aimed_elsewhere_first() {
         count,
         AimContext {
             proposer: offer.proposer,
-            per_cycle: Some(&per_cycle),
+            per_cycle: certificate.per_cycle.as_ref(),
             published: published.as_ref(),
         },
         &state,
@@ -8609,6 +8643,7 @@ fn f4_re_aiming_segments(state: &GameState, offer: &F4Allocation) -> [(PlayerId,
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-period signature");
     let others = f4_other_victims(offer);
     [
@@ -8754,6 +8789,7 @@ fn a_re_offer_holding_no_charged_announcement_delivers_the_re_aiming_count_whole
         let charged = &certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature")
             .victim_slot;
         let points = bounded_cycle_pin_slots(board, proposer);
@@ -8837,6 +8873,7 @@ fn an_accept_at_the_capacity_delivers_an_opponent_crossing_and_empties_the_propo
         certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature"),
         victim,
     );
@@ -8939,7 +8976,9 @@ fn a_departure_coinciding_with_the_announced_seats_ceiling_crossing_commits_the_
     let capacity = schema.deliverable_capacity;
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let points = schema.points.clone();
     let charged: Vec<_> = per_cycle
@@ -9142,7 +9181,9 @@ fn the_drive_template_and_the_published_declaration_are_carried_apart() {
     let (_proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let points = schema.points.clone();
     let charged: Vec<_> = per_cycle
@@ -9435,7 +9476,9 @@ pub(crate) fn f4_cascade_spanning_window() -> (GameState, u32, u32) {
     let (_proposer, certificate, _schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let crossing = offer.drivable_count;
     let other = f4_other_victim(&offer);
