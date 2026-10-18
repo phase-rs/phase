@@ -436,7 +436,11 @@ fn refused_search_pair_preserves_a_represented_neighbor() {
                             count: Box::new(QuantityExpr::Ref {
                                 qty: QuantityRef::ObjectCount {
                                     filter: TargetFilter::Typed(
-                                        TypedFilter::land().controller(ControllerRef::You),
+                                        TypedFilter::land()
+                                            .controller(ControllerRef::You)
+                                            .properties(vec![FilterProp::InZone {
+                                                zone: Zone::Battlefield,
+                                            }]),
                                     ),
                                 },
                             }),
