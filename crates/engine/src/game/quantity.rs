@@ -22871,9 +22871,12 @@ mod tests {
         )
     }
 
+    /// Builds a `QuantityRef` that reads through the given `ObjectScope`.
+    type ObjectScopeRefCtor = fn(ObjectScope) -> QuantityRef;
+
     /// Constructors for every `QuantityRef` that reads information from an
     /// object through an `ObjectScope`.
-    fn object_information_refs() -> [(&'static str, fn(ObjectScope) -> QuantityRef); 10] {
+    fn object_information_refs() -> [(&'static str, ObjectScopeRefCtor); 10] {
         [
             ("Power", |scope| QuantityRef::Power { scope }),
             ("BasePower", |scope| QuantityRef::BasePower { scope }),
