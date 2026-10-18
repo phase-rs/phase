@@ -107,8 +107,9 @@ fn aberrant_return_moves_up_to_three_targets_each_with_a_counter() {
 }
 
 /// C1 sibling. The minimum is one target: a single announced target is legal,
-/// and the one creature moved still gets its counter. Optional slots two and
-/// three are answered with no target (CR 115.6 / CR 601.2c).
+/// and the one creature moved still gets its counter. The caster announces a
+/// target count of one (CR 601.2c: a variable number of targets is announced
+/// before the targets).
 ///
 /// Reach guard for the "other candidates stay put" assertion: the declared
 /// creature DID move, so the undeclared one staying in the graveyard is not an
