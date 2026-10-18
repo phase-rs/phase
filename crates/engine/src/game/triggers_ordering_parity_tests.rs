@@ -38,7 +38,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor, ZoneChangeRecord};
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::phase::Phase;
+use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -2705,6 +2705,39 @@ fn reservoir_kraken_order_changes_ready_attacker() {
         assert!(!runner.state().objects[&c].tapped);
         assert_eq!(runner.state().battlefield.len(), 3);
 
+        // Preserve the real declaration prompt even when no attacker is legal.
+        assert_eq!(runner.state().active_player, P0);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ));
+        let before_preference = serde_json::to_value((
+            runner.state().phase,
+            &runner.state().waiting_for,
+            &runner.state().stack,
+            &runner.state().objects,
+        ))
+        .expect("snapshot preference-independent game state");
+        let stop = PhaseStop {
+            phase: Phase::DeclareAttackers,
+            scope: PhaseStopScope::OwnTurn,
+        };
+        runner
+            .act(GameAction::SetPhaseStops { stops: vec![stop] })
+            .expect("install P0's own-turn declaration stop");
+        assert_eq!(runner.state().phase_stops.get(&P0), Some(&vec![stop]));
+        assert_eq!(runner.state().active_player, P0);
+        assert_eq!(
+            serde_json::to_value((
+                runner.state().phase,
+                &runner.state().waiting_for,
+                &runner.state().stack,
+                &runner.state().objects,
+            ))
+            .expect("read state after preference action"),
+            before_preference
+        );
+
         // Advance only once: revisiting this helper at BeginCombat refires it.
         runner.advance_to_phase(Phase::BeginCombat);
         let WaitingFor::OrderTriggers { player, triggers } = runner.state().waiting_for.clone()
@@ -2819,11 +2852,84 @@ fn reservoir_kraken_order_changes_ready_attacker() {
             .filter(|id| crate::game::combat::validate_attackers(state, &[**id]).is_ok())
             .count();
         attacker_counts.push(ready);
-        runner.advance_to_combat();
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::DeclareAttackers { .. }
-        ));
+        let fish_id = *fish[0];
+        // CR 117.3b + CR 117.4: after resolution, ordinary consecutive
+        // priority passes end this empty-stack step without entering it again.
+        for _ in 0..8 {
+            if runner.state().phase != Phase::BeginCombat {
+                break;
+            }
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                    && runner.state().stack.is_empty(),
+                "unexpected combat transition: phase={:?}, waiting={:?}, stack={:?}",
+                runner.state().phase,
+                runner.state().waiting_for,
+                runner.state().stack
+            );
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass settled beginning-of-combat priority");
+        }
+        let state = runner.state();
+        assert_eq!(
+            state.phase,
+            Phase::DeclareAttackers,
+            "bounded combat transition ended at phase={:?}, waiting={:?}",
+            state.phase,
+            state.waiting_for
+        );
+        let WaitingFor::DeclareAttackers {
+            player,
+            valid_attacker_ids,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected real declaration prompt: phase={:?}, waiting={:?}",
+                state.phase, state.waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(state.active_player, P0);
+        // CR 302.6 + CR 508.1a: the fixed ready A survives only B-first.
+        assert_eq!(valid_attacker_ids, &if a_first { vec![] } else { vec![a] });
+        assert!(state.phase_stop_hit(P0));
+        assert!(state.stack.is_empty());
+        assert!(state.pending_trigger_order.is_none());
+        assert!(state.objects[&c].tapped);
+        assert_eq!(state.objects[&a].tapped, a_first);
+        assert_eq!(state.objects[&b].tapped, !a_first);
+        for (id, history) in [a, b].iter().zip(&histories) {
+            let object = &state.objects[id];
+            assert_eq!(
+                (
+                    object.owner,
+                    object.controller,
+                    object.entered_battlefield_turn,
+                    object.summoning_sick
+                ),
+                *history
+            );
+            assert_eq!(object.zone, Zone::Battlefield);
+        }
+        let final_fish: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token && state.objects[id].name == "Fish")
+            .copied()
+            .collect();
+        assert_eq!(final_fish, vec![fish_id]);
+        assert_eq!(state.objects[&fish_id].controller, P0);
+        assert!(crate::game::combat::validate_attackers(state, &[fish_id]).is_err());
+        assert!(crate::game::combat::validate_attackers(state, &[b]).is_err());
+        assert_eq!(
+            [a, b]
+                .iter()
+                .filter(|id| crate::game::combat::validate_attackers(state, &[**id]).is_ok())
+                .count(),
+            ready
+        );
     }
     // B-first's ready A is the positive reach guard for A-first's zero attackers.
     assert_eq!(attacker_counts, vec![0, 1]);

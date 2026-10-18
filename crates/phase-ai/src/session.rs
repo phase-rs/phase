@@ -74,6 +74,8 @@ pub struct AiSession {
     pub(crate) pact_proposals: Arc<RwLock<PactPlanProposals>>,
     #[cfg(test)]
     pub(crate) policy_registry_override: Option<Arc<PolicyRegistry>>,
+    #[cfg(test)]
+    pub(crate) projection_deadline_observer: Option<Arc<RwLock<Vec<Deadline>>>>,
 }
 
 impl std::fmt::Debug for AiSession {
@@ -150,6 +152,8 @@ impl AiSession {
             pact_proposals: Arc::default(),
             #[cfg(test)]
             policy_registry_override: None,
+            #[cfg(test)]
+            projection_deadline_observer: None,
         }
     }
 
@@ -247,6 +251,12 @@ impl AiSession {
         horizon: ProjectionHorizon,
         deadline: Deadline,
     ) -> Result<Arc<Projection>, BailReason> {
+        #[cfg(test)]
+        if let Some(observer) = &self.projection_deadline_observer {
+            let mut received = observer.write().expect("projection deadline observer lock");
+            received.push(deadline);
+        }
+
         let key = ProjectionKey {
             state_hash: quick_state_hash(base),
             turn_number: base.turn_number,
@@ -411,7 +421,7 @@ mod tests {
     use crate::projection::BailReason;
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use crate::projection::ProjectionHorizon;
 
@@ -641,7 +651,10 @@ mod tests {
 
         // Arm 1 — a non-expiring deadline forwards through the wrapper, the
         // projection completes, and the result is cached.
-        let session = AiSession::empty();
+        let observed = Arc::new(RwLock::new(Vec::new()));
+        let mut session = AiSession::empty();
+        session.projection_deadline_observer = Some(Arc::clone(&observed));
+        assert!(observed.read().unwrap().is_empty());
         let ok = session.get_or_project(
             &state,
             PlayerId(0),
@@ -659,10 +672,20 @@ mod tests {
             1,
             "arm 1: a successful projection must be cached"
         );
+        let received = {
+            let deadlines = observed.read().unwrap();
+            assert_eq!(deadlines.len(), 1);
+            deadlines[0]
+        };
+        assert_eq!(received.remaining(), None);
+        assert!(!received.expired());
 
         // Arm 2 — a fresh session with a pre-expired deadline: the wrapper must
         // forward it (so the bail is the wall-clock one) and must not cache it.
-        let bailing = AiSession::empty();
+        let observed_bail = Arc::new(RwLock::new(Vec::new()));
+        let mut bailing = AiSession::empty();
+        bailing.projection_deadline_observer = Some(Arc::clone(&observed_bail));
+        assert!(observed_bail.read().unwrap().is_empty());
         let err = bailing.get_or_project(
             &state,
             PlayerId(0),
@@ -680,6 +703,15 @@ mod tests {
             0,
             "arm 2: a bail must not be cached"
         );
+        let received_bail = {
+            let deadlines = observed_bail.read().unwrap();
+            assert_eq!(deadlines.len(), 1);
+            deadlines[0]
+        };
+        assert!(received_bail.remaining().is_some());
+        assert!(received_bail.expired());
+        assert_eq!(observed.read().unwrap().len(), 1);
+        assert!(!observed.read().unwrap()[0].expired());
     }
 
     /// T4 — multi-authority hostile fixture: the cache and the deadline both
