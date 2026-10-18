@@ -951,7 +951,8 @@ fn parse_activate_once_each_turn_rider(input: &str) -> OracleResult<'_, Activati
 /// rider (a trailing sentence that yields no standalone static) into the `cap` of
 /// the most recently emitted `GrantAllActivatedAbilitiesOf` modification, returning
 /// `true` when the fold lands. Returns `false` when `segment` is not the rider, or
-/// when there is no still-uncapped ability grant preceding it to attach to.
+/// when there is no still-uncapped ability grant preceding it to attach to, or
+/// the nearest grant has an unsupported kind-selected rider.
 ///
 /// This is the SHARED grant-rider primitive: it composes the once-per-turn cap with
 /// the STANDARD grant parse (sentence 1 → `GrantAllActivatedAbilitiesOf` via the
@@ -969,17 +970,17 @@ pub(super) fn fold_grant_cap_rider(segment: &str, defs: &mut [StaticDefinition])
     else {
         return false;
     };
-    // Attach to the most recent grant modification that is still uncapped.
-    // CR 602.5b + CR 606.3: loyalty grants are never fold targets — loyalty
-    // frequency is governed by the per-permanent gate, which replaces CR
-    // 602.5b rider caps, so a rider after a loyalty grant falls through to
-    // the loud whole-line path instead of inventing capped-loyalty semantics.
+    // Kind-selected grant riders are unsupported here. Stop at that grant so
+    // the caller declines the whole line instead of capping an older sibling.
     for def in defs.iter_mut().rev() {
         for modification in def.modifications.iter_mut().rev() {
             if let ContinuousModification::GrantAllActivatedAbilitiesOf { cap, kind, .. } =
                 modification
             {
-                if cap.is_none() && kind.is_none() {
+                if kind.is_some() {
+                    return false;
+                }
+                if cap.is_none() {
                     *cap = Some(restriction);
                     return true;
                 }
@@ -1368,10 +1369,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         }
         // CR 606.1 + CR 606.2: a loyalty grant donates the loyalty abilities
         // (activated abilities with a loyalty symbol in the cost) of the source
-        // set, via the kind selector on the activated authority. No cap channel
-        // pairing — loyalty frequency is governed by the CR 606.3 per-permanent
-        // gate, which replaces CR 602.5b rider caps, so loyalty grants are
-        // never fold targets in `fold_grant_cap_rider`.
+        // set, via the kind selector on the activated authority. Kind-selected
+        // grant riders remain unsupported by `fold_grant_cap_rider`, which
+        // declines the whole line when one follows this grant.
         if matches!(kinds, GrantedAbilityKinds::Loyalty) {
             mods.push(ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: source.clone(),

@@ -10542,15 +10542,9 @@ fn grant_cap_rider_folds_over_any_grant_source() {
     );
 }
 
-/// CR 602.5b + CR 606.3: the once-per-turn rider NEVER folds onto a loyalty
-/// grant. After the sibling-to-parameter merge a Bolas-style grant IS a
-/// `GrantAllActivatedAbilitiesOf`, so without the `kind.is_none()` guard in
-/// `fold_grant_cap_rider` the fold would attach CR 602.5b rider caps to loyalty
-/// grants — inventing semantics for a combination the CR 606.3 per-permanent
-/// gate already governs and no card prints. Synthetic text (no card prints a
-/// loyalty grant with a rider): the rider must fall through to the loud path,
-/// leaving no capped loyalty mod behind. Reverting the guard folds the cap
-/// onto the loyalty mod (RED).
+/// CR 602.5b + CR 602.5c: kind-selected grant riders remain unsupported by
+/// the static parser. Synthetic text checks that this combination declines
+/// instead of silently dropping an explicit restriction on the acquired ability.
 #[test]
 fn grant_cap_rider_never_folds_onto_loyalty_grant() {
     // Hostile leg: loyalty grant + rider. No returned modification may be a
@@ -10591,6 +10585,73 @@ fn grant_cap_rider_never_folds_onto_loyalty_grant() {
             kind: None,
         }],
         "the same rider must still fold onto an activated grant; got {activated:?}",
+    );
+}
+
+/// A refused kind-selected rider must decline the whole sibling-static line,
+/// rather than attaching to an older all-activated grant. This synthetic
+/// composition tests parser coverage honesty, not a printed card's behavior.
+#[test]
+fn grant_cap_rider_after_loyalty_grant_does_not_cap_older_sibling() {
+    let grants = "Grant Recipient has all activated abilities of all lands on the battlefield. Grant Recipient has all loyalty abilities of all other planeswalkers on the battlefield.";
+    let uncapped = parse_card(grants, "Grant Recipient", &[], &["Artifact"], &[]);
+    assert!(uncapped.abilities.is_empty(), "{:?}", uncapped.abilities);
+    assert_eq!(uncapped.statics.len(), 2, "{:?}", uncapped.statics);
+    assert_eq!(
+        uncapped.statics[0].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }])),
+            cap: None,
+            kind: None,
+        }],
+    );
+    assert_eq!(
+        uncapped.statics[1].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: all_other_planeswalkers_source(),
+            cap: None,
+            kind: Some(ActivatedAbilityKind::Loyalty),
+        }],
+    );
+
+    let refused = parse_card(
+        &format!("{grants} You may activate each of those abilities only once each turn."),
+        "Grant Recipient",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert!(refused.statics.is_empty(), "{:?}", refused.statics);
+    assert_eq!(refused.abilities.len(), 1, "{:?}", refused.abilities);
+    assert!(
+        matches!(&*refused.abilities[0].effect, Effect::Unimplemented { name, .. } if name == "static_structure"),
+        "{:?}",
+        refused.abilities,
+    );
+
+    // The same sibling structure still caps the latest all-activated grant.
+    let activated = parse_card(
+        "Grant Recipient has all activated abilities of all lands on the battlefield. Grant Recipient has all activated abilities of all other planeswalkers on the battlefield. You may activate each of those abilities only once each turn.",
+        "Grant Recipient",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert!(activated.abilities.is_empty(), "{:?}", activated.abilities);
+    assert_eq!(activated.statics.len(), 2, "{:?}", activated.statics);
+    assert_eq!(
+        activated.statics[0].modifications,
+        uncapped.statics[0].modifications,
+    );
+    assert_eq!(
+        activated.statics[1].modifications,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: all_other_planeswalkers_source(),
+            cap: Some(ActivationRestriction::OnlyOnceEachTurn),
+            kind: None,
+        }],
     );
 }
 
