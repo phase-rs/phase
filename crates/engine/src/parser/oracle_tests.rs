@@ -1,4 +1,112 @@
 use super::*;
+
+#[test]
+fn ordinary_reveal_public_document_and_preserve_gap() {
+    let scalar = "Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.";
+    let parsed = parse_oracle_text(scalar, "Synthetic aggregate", &[], &["Instant".into()], &[]);
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert_eq!(parsed.abilities.len(), 1);
+    let head = &parsed.abilities[0];
+    assert_eq!(head.player_scope, Some(PlayerFilter::All));
+    assert!(matches!(*head.effect, Effect::RevealTop { count: 1, .. }));
+    let tail = head.sub_ability.as_deref().unwrap();
+    assert_eq!(tail.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(tail.player_scope, None);
+    assert!(matches!(
+        *tail.effect,
+        Effect::GainLife {
+            player: TargetFilter::Controller,
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            }
+        }
+    ));
+    assert!(tail.sub_ability.is_none());
+
+    let payment = parse_oracle_text("Each player reveals the top card of their library unless they pay 1 life. You gain 3 life.", "Synthetic payment", &[], &["Instant".into()], &[]);
+    assert!(payment.parse_warnings.is_empty(), "{payment:#?}");
+    let head = &payment.abilities[0];
+    assert_eq!(head.player_scope, Some(PlayerFilter::All));
+    assert!(matches!(*head.effect, Effect::RevealTop { .. }));
+    assert_eq!(
+        head.unless_pay,
+        Some(UnlessPayModifier {
+            payer: TargetFilter::ScopedPlayer,
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
+        })
+    );
+    assert!(matches!(
+        *head.sub_ability.as_deref().unwrap().effect,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+
+    let full = "At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    let mut ir = parse_oracle_ir(full, "Game Preserve", &[], &["Enchantment".into()], &[]);
+    assert_eq!(ir.source_text, full);
+    let parsed = lower_oracle_ir(&mut ir);
+    assert_eq!(parsed.triggers.len(), 1);
+    let head = parsed.triggers[0].execute.as_deref().unwrap();
+    assert!(matches!(*head.effect, Effect::RevealTop { .. }));
+    let gap = head.sub_ability.as_deref().unwrap();
+    assert!(
+        matches!(&*gap.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case("If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control"))
+    );
+}
+
+#[test]
+fn ordinary_reveal_scalar_public_chain() {
+    for (head, scope, count) in [
+        (
+            "Each player reveals the top card of their library",
+            Some(PlayerFilter::All),
+            1,
+        ),
+        (
+            "Each player reveals the top two cards of their library",
+            Some(PlayerFilter::All),
+            2,
+        ),
+        (
+            "Each opponent reveals the top card of their library",
+            Some(PlayerFilter::Opponent),
+            1,
+        ),
+        ("Reveal the top card of your library", None, 1),
+    ] {
+        let text = format!("{head}. You gain life equal to the number of cards revealed this way.");
+        let mut ir = parse_oracle_ir(&text, "Synthetic aggregate", &[], &["Instant".into()], &[]);
+        assert_eq!(ir.source_text, text);
+        let parsed = lower_oracle_ir(&mut ir);
+        assert_eq!(parsed.abilities.len(), 1);
+        let root = &parsed.abilities[0];
+        assert_eq!(root.player_scope, scope);
+        assert!(matches!(*root.effect, Effect::RevealTop { count: n, .. } if n == count));
+        let scalar = root.sub_ability.as_deref().unwrap();
+        assert!(matches!(
+            *scalar.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                }
+            }
+        ));
+        assert_eq!(scalar.player_scope, None);
+        assert_eq!(scalar.sub_link, SubAbilityLink::SequentialSibling);
+        for node in [root, scalar] {
+            assert!(node.declares_return_result.is_none());
+            assert!(node.reads_return_result.is_none());
+            assert!(node.multi_target.is_none());
+        }
+        assert!(parsed.statics.is_empty());
+        assert!(parsed.parse_warnings.is_empty());
+    }
+}
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::parser::oracle_ir::doc::{
     OracleDocBuilder, OracleNodeIr, OracleSourceSpan, RelationSynthesisIr,
@@ -9,7 +117,7 @@ use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment,
     DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
-    TargetReadOrigin,
+    TargetReadOrigin, UnlessPayModifier,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};

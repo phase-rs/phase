@@ -7140,6 +7140,38 @@ fn standalone_view(node: &ResolvedAbility) -> ResolvedAbility {
     alone
 }
 
+/// A bare own-library reveal may finish the complete scoped instruction before
+/// its independent tail. Riders and local referents keep ordinary seat resolution.
+fn supports_scoped_reveal_collection(
+    state: &GameState,
+    outer: &ResolvedAbility,
+    scoped_template: &ResolvedAbility,
+    matching_players: &[PlayerId],
+) -> bool {
+    if scoped_template.sub_ability.is_some() || scoped_template.player_scope.is_some() {
+        return false;
+    }
+    let Effect::RevealTop {
+        player: player_filter @ (TargetFilter::Controller | TargetFilter::ScopedPlayer),
+        ..
+    } = &scoped_template.effect
+    else {
+        return false;
+    };
+    if scoped_template.repeat_until != outer.repeat_until {
+        return false;
+    }
+    let mut view = standalone_view(scoped_template);
+    // CR 608.2c: the already-entered outer process driver owns this repeat.
+    // Normalize only the guard view; never erase a real rider or local child.
+    view.repeat_until = None;
+    scoped_library_search::has_no_resolution_riders(&view)
+        && matching_players.iter().all(|&seat| {
+            let bound = bind_scoped_seat(scoped_template, outer.controller, seat);
+            resolve_player_for_context_ref(state, &bound, player_filter) == Some(seat)
+        })
+}
+
 /// CR 400.1 as modified by a shared-library format + CR 701.24a + CR 608.2c: the
 /// parsed per-player wheel ("each player moves their <zones> into their library,
 /// then draws N") is one all-players move phase, one shuffle of the single pile,
@@ -16055,6 +16087,27 @@ fn resolve_chain_body(
         let scoped_search_delivery_is_safe =
             scoped_library_search::has_only_detachable_shuffle_tail(ability);
         let (scoped_template, after_scope) = split_player_scope_chain(ability, scope);
+        if supports_scoped_reveal_collection(state, ability, &scoped_template, &matching_players) {
+            // CR 608.2c + CR 608.2e: publish one completed instruction, then
+            // resolve the independent tail once under the original controller.
+            reveal_top::resolve_for_players(state, &scoped_template, &matching_players, events)?;
+            record_player_actions_performed(state, &events[scoped_events_before..]);
+            // No following child in this bookkeeping view: the reveal publisher
+            // already owns membership, including a fresh empty result.
+            publish_player_scope_clause_results(
+                state,
+                &standalone_view(ability),
+                &scoped_template,
+                &matching_players,
+                false,
+                &events[scoped_events_before..],
+            );
+            state.clause_minimum_snapshot = None;
+            if let Some(after_scope) = after_scope {
+                resolve_ability_chain(state, &after_scope, events, depth + 1)?;
+            }
+            return Ok(());
+        }
         let after_scope_needs_linked_exile = after_scope.as_ref().is_some_and(|tail| {
             crate::game::exile_links::ability_contains_linked_exile_consumer(tail)
         });
@@ -23180,6 +23233,108 @@ mod tests {
         );
     }
     use crate::game::ability_utils::build_resolved_from_def;
+    #[test]
+    fn ordinary_scoped_reveal_collection_eligibility() {
+        let state = GameState::new_two_player(42);
+        let seats = [PlayerId(0), PlayerId(1)];
+        let parse = |text| {
+            let def = crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
+            build_resolved_from_def(&def, ObjectId(100), PlayerId(0))
+        };
+        let plain = parse("Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.");
+        let (template, tail) = split_player_scope_chain(&plain, &PlayerFilter::All);
+        assert!(tail.is_some());
+        assert!(template.sub_ability.is_none());
+        assert!(supports_scoped_reveal_collection(
+            &state, &plain, &template, &seats
+        ));
+        for text in [
+            "Each player reveals the top card of their library unless they pay 1 life. You gain 3 life.",
+            "Each player may reveal the top card of their library.",
+            "Each player reveals the top card of their library, loses life equal to that card's mana value, then puts it into their hand.",
+        ] {
+            let outer = parse(text);
+            let (scoped, _) = split_player_scope_chain(&outer, &PlayerFilter::All);
+            assert!(matches!(scoped.effect, Effect::RevealTop { .. }), "real reveal reaches rider classification");
+            if text == "Each player reveals the top card of their library unless they pay 1 life. You gain 3 life." {
+                assert!(scoped.unless_pay.is_some(), "real payment rider");
+            }
+            assert!(!supports_scoped_reveal_collection(&state, &outer, &scoped, &seats), "{text}");
+            assert!(!supports_scoped_reveal_collection(&state, &outer, &scoped, &[]), "empty population cannot bypass riders");
+        }
+        let mut conditional = template.clone();
+        conditional.condition = Some(AbilityCondition::WhenYouDo);
+        assert!(!supports_scoped_reveal_collection(
+            &state,
+            &plain,
+            &conditional,
+            &seats
+        ));
+        let mut incoming = template.clone();
+        incoming.sub_link = SubAbilityLink::SequentialSibling;
+        assert!(supports_scoped_reveal_collection(
+            &state, &plain, &incoming, &seats
+        ));
+        assert_eq!(incoming.sub_link, SubAbilityLink::SequentialSibling);
+        let mut outer = plain.clone();
+        outer.repeat_until = Some(
+            crate::types::ability::RepeatContinuation::UntilStopConditions {
+                stop_on_put_to_hand: true,
+                stop_on_duplicate_exiled_names: false,
+            },
+        );
+        incoming.repeat_until = outer.repeat_until.clone();
+        assert!(supports_scoped_reveal_collection(
+            &state, &outer, &incoming, &seats
+        ));
+        assert_eq!(
+            incoming.repeat_until, outer.repeat_until,
+            "only the guard view normalizes"
+        );
+        assert!(!supports_scoped_reveal_collection(
+            &state, &plain, &incoming, &seats
+        ));
+        let mut counted = template.clone();
+        counted.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        assert!(!supports_scoped_reveal_collection(
+            &state, &plain, &counted, &seats
+        ));
+        counted.repeat_for = None; // drive_repeat_for_outermost clears this before body dispatch.
+        assert!(supports_scoped_reveal_collection(
+            &state, &plain, &counted, &seats
+        ));
+        for player in [
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            TargetFilter::OriginalController,
+        ] {
+            let mut independent = template.clone();
+            independent.effect = Effect::RevealTop { count: 1, player };
+            assert!(!supports_scoped_reveal_collection(
+                &state,
+                &plain,
+                &independent,
+                &seats
+            ));
+        }
+        for player in [TargetFilter::Controller, TargetFilter::ScopedPlayer] {
+            let mut own = template.clone();
+            own.effect = Effect::RevealTop {
+                count: 1,
+                player: player.clone(),
+            };
+            own.set_unpinned_targets(vec![TargetRef::Player(PlayerId(1))]);
+            assert!(supports_scoped_reveal_collection(
+                &state, &plain, &own, &seats
+            ));
+            for seat in seats {
+                let bound = bind_scoped_seat(&own, PlayerId(0), seat);
+                assert_eq!(
+                    resolve_player_for_context_ref(&state, &bound, &player),
+                    Some(seat)
+                );
+            }
+        }
+    }
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,

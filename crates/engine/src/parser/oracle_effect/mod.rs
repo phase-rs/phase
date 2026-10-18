@@ -8744,7 +8744,31 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
     imperative::is_for_each_opponent_choose_controlled(lower)
 }
 
+/// Recognize the unfinished universal head without consuming or blessing its body.
+fn is_all_revealed_result_consumer(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            peek((
+                opt(tag("then ")),
+                tag("if "),
+                tag("all cards "),
+                tag("revealed "),
+                opt(tag("in ")),
+                tag("this way are "),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 608.2c: retain the complete following instruction until its consumer exists.
+    if is_all_revealed_result_consumer(text) {
+        return parsed_clause(Effect::unimplemented("all_revealed_result_consumer", text));
+    }
     // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
     // own duration, so it must run before the clause shell peels a trailing one.
     {
@@ -41258,6 +41282,15 @@ fn parse_effect_chain_ir_body(
             .map(|_| (builder.clauses().len(), chunk.text.clone()));
         builder.set_pending_leading_duration(chunk.leading_duration.clone());
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
+        if is_all_revealed_result_consumer(chunk.text.trim()) {
+            unimplemented_clause(
+                &mut builder,
+                "all_revealed_result_consumer",
+                chunk.text.trim(),
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // The lookahead's bound pair is consumed once, only by its next chunk.
         if let Some((expected_chunk, owner, power, toughness)) = pending_token_definition.take() {
             if expected_chunk == chunk_idx {

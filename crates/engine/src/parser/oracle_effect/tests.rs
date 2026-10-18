@@ -4,6 +4,153 @@ use super::lower::{
 };
 use super::sequence::split_clause_sequence;
 use super::*;
+
+// SHAPE: public runtime discriminators live in integration::jev_reveal_aggregate.
+#[test]
+fn ordinary_reveal_scalar_chain_preserves_scope_and_source() {
+    for (head, count, scope) in [
+        (
+            "Each player reveals the top card of their library",
+            1,
+            Some(PlayerFilter::All),
+        ),
+        (
+            "Each player reveals the top two cards of their library",
+            2,
+            Some(PlayerFilter::All),
+        ),
+        ("Reveal the top card of your library", 1, None),
+    ] {
+        let text = format!("{head}. You gain life equal to the number of cards revealed this way.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert_eq!(ir.clauses[0].source.fragment(), Some(head));
+        assert!(ir.clauses[0].boundary.is_some());
+        assert!(ir
+            .clauses
+            .iter()
+            .all(|clause| clause.reads_return_result.is_none()));
+        let chain = parse_effect_chain(&text, AbilityKind::Spell);
+        assert_eq!(chain.player_scope, scope);
+        assert!(matches!(*chain.effect, Effect::RevealTop { count: n, .. } if n == count));
+        let scalar = chain
+            .sub_ability
+            .as_deref()
+            .expect("independent count consumer");
+        assert_eq!(scalar.player_scope, None);
+        assert_eq!(scalar.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(
+            &*scalar.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                }
+            }
+        ));
+        assert!(scalar.sub_ability.is_none());
+        for node in [&chain, scalar] {
+            assert!(node.declares_return_result.is_none());
+            assert!(node.reads_return_result.is_none());
+        }
+    }
+}
+
+#[test]
+fn ordinary_reveal_local_and_document_boundaries() {
+    let local = parse_effect_chain("Each player reveals the top card of their library, loses life equal to that card's mana value, then puts it into their hand.", AbilityKind::Spell);
+    assert_eq!(local.player_scope, Some(PlayerFilter::All));
+    let loss = local.sub_ability.as_deref().unwrap();
+    assert_eq!(loss.sub_link, SubAbilityLink::ContinuationStep);
+    assert!(matches!(*loss.effect, Effect::LoseLife { .. }));
+    assert!(matches!(
+        *loss.sub_ability.as_deref().unwrap().effect,
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            ..
+        }
+    ));
+    for text in [
+        "Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.\n\nYou gain 3 life.",
+        "Choose one —\n• Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.\n• You gain 3 life.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic boundaries", &[], &["Instant".into()], &[]);
+        assert!(!parsed.abilities.is_empty());
+        assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+        fn check(def: &AbilityDefinition) {
+            assert!(!matches!(*def.effect, Effect::Unimplemented { .. }));
+            assert!(def.declares_return_result.is_none());
+            assert!(def.reads_return_result.is_none());
+            if matches!(*def.effect, Effect::RevealTop { .. }) {
+                let scalar = def.sub_ability.as_deref().unwrap();
+                assert!(matches!(*scalar.effect, Effect::GainLife { amount: QuantityExpr::Ref { qty: QuantityRef::TrackedSetSize }, .. }));
+                assert_eq!(scalar.sub_link, SubAbilityLink::SequentialSibling);
+                assert_eq!(scalar.player_scope, None);
+            }
+            if let Some(sub) = &def.sub_ability { check(sub); }
+            for mode in &def.mode_abilities { check(mode); }
+        }
+        for ability in &parsed.abilities { check(ability); }
+    }
+}
+
+#[test]
+fn ordinary_scoped_reveal_carries_unless_payment() {
+    let chain = parse_effect_chain("Each player reveals the top card of their library unless they pay 1 life. You gain 3 life.", AbilityKind::Spell);
+    assert_eq!(chain.player_scope, Some(PlayerFilter::All));
+    assert!(matches!(*chain.effect, Effect::RevealTop { count: 1, .. }));
+    assert_eq!(
+        chain.unless_pay,
+        Some(UnlessPayModifier {
+            payer: TargetFilter::ScopedPlayer,
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
+        })
+    );
+    assert!(!chain.optional);
+    assert!(chain.condition.is_none());
+    let tail = chain.sub_ability.as_deref().unwrap();
+    assert_eq!(tail.player_scope, None);
+    assert!(matches!(
+        *tail.effect,
+        Effect::GainLife {
+            player: TargetFilter::Controller,
+            amount: QuantityExpr::Fixed { value: 3 }
+        }
+    ));
+}
+
+#[test]
+fn all_revealed_consumer_preserves_complete_gap_at_both_entries() {
+    for fragment in [
+        "If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control",
+        "If all cards revealed in this way are artifact cards, draw a card",
+        "Then if all cards revealed this way are unsupported predicates, do something unsupported",
+    ] {
+        let leaf = parse_effect_clause(fragment, &mut ParseContext::default());
+        assert!(matches!(&leaf.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source == fragment));
+        let text = format!("Each player reveals the top card of their library. {fragment}.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert!(matches!(ir.clauses[0].parsed.effect, Effect::Dig { .. } | Effect::RevealTop { .. }));
+        assert!(matches!(&ir.clauses[1].parsed.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case(fragment)));
+    }
+    // Adjacent non-universal conditions retain their own admission route.
+    for text in [
+        "If you control a creature, draw a card",
+        "If that card is a creature card, draw a card",
+    ] {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(
+            matches!(clause.effect, Effect::Draw { .. }),
+            "adjacent conditional reaches its supported body: {clause:#?}"
+        );
+        assert!(
+            !matches!(&clause.effect, Effect::Unimplemented { name, .. } if name == "all_revealed_result_consumer")
+        );
+    }
+}
 use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
 use crate::parser::oracle_ir::ast::EntersUnderSpec;

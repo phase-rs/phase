@@ -18,6 +18,105 @@ use crate::types::ability::{
 use crate::types::game_state::DistributionUnit;
 use crate::types::mana::{ManaCost, ManaCostShard};
 
+#[test]
+fn ordinary_reveal_scalar_two_layers() {
+    for (head, count, scope) in [
+        (
+            "Each player reveals the top card of their library",
+            1,
+            Some(crate::types::ability::PlayerFilter::All),
+        ),
+        (
+            "Each player reveals the top two cards of their library",
+            2,
+            Some(crate::types::ability::PlayerFilter::All),
+        ),
+        ("Reveal the top card of your library", 1, None),
+    ] {
+        let text = format!("{head}. You gain life equal to the number of cards revealed this way.");
+        let mut ir = parse_oracle_ir(&text, "Synthetic aggregate", &[], &["Instant".into()], &[]);
+        assert_eq!(ir.source_text, text);
+        let OracleNodeIr::Spell(spell) = &ir.items[0].node else {
+            panic!("{ir:#?}")
+        };
+        assert_eq!(spell.body.clauses.len(), 2);
+        let reveal = &spell.body.clauses[0];
+        assert_eq!(reveal.source.fragment(), Some(head));
+        assert_eq!(reveal.player_scope, scope);
+        match &reveal.parsed.effect {
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value },
+                reveal,
+                keep_count,
+                ..
+            } => {
+                assert_eq!(*value, count as i32);
+                assert!(*reveal);
+                assert_eq!(*keep_count, None, "no selection continuation");
+            }
+            Effect::RevealTop { count: actual, .. } => assert_eq!(*actual, count),
+            other => panic!("not a bare reveal: {other:?}"),
+        }
+        assert!(matches!(
+            spell.body.clauses[1].parsed.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                },
+                ..
+            }
+        ));
+        let lowered = lower_oracle_ir(&mut ir);
+        assert!(lowered.parse_warnings.is_empty(), "{lowered:#?}");
+        let head = &lowered.abilities[0];
+        assert!(matches!(*head.effect, Effect::RevealTop { count: n, .. } if n == count));
+        assert_eq!(head.player_scope, scope);
+        let tail = head.sub_ability.as_deref().unwrap();
+        assert_eq!(tail.player_scope, None);
+        assert!(matches!(
+            *tail.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                }
+            }
+        ));
+        if count == 1 && scope.is_some() {
+            insta::assert_yaml_snapshot!("jev_ordinary_reveal_scalar_ir", ir);
+            insta::assert_yaml_snapshot!("jev_ordinary_reveal_scalar_lowered", lowered);
+        }
+    }
+    let full = "At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    let mut ir = parse_oracle_ir(full, "Game Preserve", &[], &["Enchantment".into()], &[]);
+    assert_eq!(ir.source_text, full);
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!("{ir:#?}")
+    };
+    let Some(crate::parser::oracle_ir::trigger::TriggerBody::EffectChain(chain)) = &trigger.body
+    else {
+        panic!("{trigger:#?}")
+    };
+    assert_eq!(chain.clauses.len(), 2);
+    assert_eq!(
+        chain.clauses[0].player_scope,
+        Some(crate::types::ability::PlayerFilter::All)
+    );
+    assert!(matches!(
+        chain.clauses[0].parsed.effect,
+        Effect::Dig { reveal: true, .. } | Effect::RevealTop { .. }
+    ));
+    assert!(
+        matches!(&chain.clauses[1].parsed.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case("If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control"))
+    );
+    let lowered = lower_oracle_ir(&mut ir);
+    let reveal = lowered.triggers[0].execute.as_deref().unwrap();
+    assert!(matches!(*reveal.effect, Effect::RevealTop { .. }));
+    assert!(
+        matches!(&*reveal.sub_ability.as_deref().unwrap().effect, Effect::Unimplemented { description: Some(source), .. } if source.eq_ignore_ascii_case("If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control"))
+    );
+}
+
 const OUTER_ORDINARY_SPIRIT: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.";
 const OUTER_WHITE_SUN: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This token can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)";
 const OUTER_WHITE_SEMANTIC: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures.";
