@@ -5253,8 +5253,8 @@ mod tests {
         }
     }
 
-    /// CR 107.1: the arithmetic forms compose over the whole-phrase reading
-    /// instead of being shadowed by a bare substring count.
+    /// The arithmetic forms compose over the whole-phrase reading instead of
+    /// being shadowed by a bare substring count.
     #[test]
     fn parse_cda_quantity_opponents_graveyards_composes_in_arithmetic() {
         assert_eq!(
