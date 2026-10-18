@@ -51,6 +51,7 @@ pub fn resolve(
 }
 
 pub(crate) fn complete_creation(
+    state: &mut GameState,
     player: crate::types::player::PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
@@ -58,8 +59,13 @@ pub(crate) fn complete_creation(
     // "the number of opponents who investigated this way" references resolve.
     // During an `Effect`-level `player_scope: Opponent` fan-out the driver
     // rebinds `ability.controller` to the scoped opponent (effects/mod.rs:2891),
-    // so each opponent's investigate records THAT opponent. The generic scan in
-    // effects/mod.rs inserts `(player_id, action)` into `player_actions_this_way`.
+    // so each opponent's investigate records THAT opponent. Publish both ledgers
+    // at completion, before the creation-owned tail can read them. A resumed
+    // creation need not have an enclosing generic event scan.
+    state
+        .player_actions_this_way
+        .insert((player, PlayerActionKind::Investigate));
+    super::record_player_action_this_turn(state, player, PlayerActionKind::Investigate);
     events.push(GameEvent::PlayerPerformedAction {
         player_id: player,
         action: PlayerActionKind::Investigate,
@@ -73,12 +79,30 @@ pub(crate) fn complete_creation(
 mod tests {
     use super::*;
 
+    fn assert_completed_action_ledgers(state: &GameState) {
+        let action = (
+            crate::types::player::PlayerId(0),
+            PlayerActionKind::Investigate,
+        );
+        assert!(state.player_actions_this_way.contains(&action));
+        assert_eq!(
+            state
+                .player_actions_this_turn
+                .iter()
+                .filter(|entry| **entry == action)
+                .count(),
+            1,
+            "completion publishes the turn action once, including after resume"
+        );
+    }
+
     #[test]
     fn investigate_completion_synchronous() {
-        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
             crate::types::ability::Effect::Investigate,
             super::super::token_copy::tests::CreationPauseCase::Synchronous,
         );
+        assert_completed_action_ledgers(&state);
         assert_eq!(
             events
                 .iter()
@@ -115,10 +139,11 @@ mod tests {
     }
     #[test]
     fn investigate_completion_queued_child() {
-        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
             crate::types::ability::Effect::Investigate,
             super::super::token_copy::tests::CreationPauseCase::Queued,
         );
+        assert_completed_action_ledgers(&state);
         assert_eq!(
             events
                 .iter()
@@ -155,10 +180,11 @@ mod tests {
     }
     #[test]
     fn investigate_completion_counter_pause() {
-        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
             crate::types::ability::Effect::Investigate,
             super::super::token_copy::tests::CreationPauseCase::Counter,
         );
+        assert_completed_action_ledgers(&state);
         assert_eq!(
             events
                 .iter()
@@ -195,10 +221,11 @@ mod tests {
     }
     #[test]
     fn investigate_completion_queued_child_current_reload() {
-        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
             crate::types::ability::Effect::Investigate,
             super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
         );
+        assert_completed_action_ledgers(&state);
         assert_eq!(
             events
                 .iter()
@@ -235,10 +262,11 @@ mod tests {
     }
     #[test]
     fn investigate_completion_counter_current_reload() {
-        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
             crate::types::ability::Effect::Investigate,
             super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
         );
+        assert_completed_action_ledgers(&state);
         assert_eq!(
             events
                 .iter()

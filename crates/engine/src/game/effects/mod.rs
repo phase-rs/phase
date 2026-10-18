@@ -6461,6 +6461,32 @@ fn condition_contains_designation(condition: &AbilityCondition) -> bool {
     }
 }
 
+/// Prepare the next instruction after its parent has actually completed. Both
+/// ordinary descent and a creation-owned saved tail use this boundary.
+pub(crate) fn prepare_chain_child(
+    state: &mut GameState,
+    child: Option<&ResolvedAbility>,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 608.2c + CR 613.1: the next instruction reads the parent's completed
+    // changes through the layer system, before condition and quantity reads.
+    if child.is_some() {
+        crate::game::layers::flush_layers(state);
+    }
+
+    // CR 702.131b + CR 702.131d: a newly created tenth permanent grants the
+    // city's blessing before the next instruction checks its condition. Keep
+    // the existing sibling designation preparation at this same boundary.
+    if child.is_some_and(|sub| {
+        sub.condition
+            .as_ref()
+            .is_some_and(condition_contains_designation)
+    }) {
+        crate::game::sba::apply_city_blessing_if_triggered(state, events);
+        crate::game::sba::apply_enduring_story_if_triggered(state, events);
+    }
+}
+
 /// CR 608.2c: Whether a parent effect computes its own "if you do" outcome
 /// signal (`optional_effect_performed`) rather than that signal meaning "the
 /// mandatory action occurred."
@@ -18017,37 +18043,7 @@ fn resolve_chain_body(
         ability
     };
 
-    // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
-    // same resolution (instructions are followed "in the order written"), so it
-    // resolves AFTER the parent's effect and must read the object's CURRENT
-    // characteristics, which the layer system (CR 613) determines. When the
-    // parent effect mutated layer-affecting state (a +1/+1 counter via
-    // `PutCounter`, a P/T-setting continuous effect, …) it only marked
-    // `layers_dirty`; the derived `power`/`toughness` fields are not recomputed
-    // until the next flush. Flush here, before the sub resolves its condition and
-    // effect-quantity reads, so a sub like "add {R} equal to this creature's
-    // power" (Molten-Core Maestro, issue #2384) sees the post-counter power
-    // rather than the stale pre-counter snapshot. `flush_layers` is the single
-    // authority and a no-op when nothing is dirty, so leaf chains and non-P/T
-    // parents pay nothing.
-    if ability.sub_ability.is_some() {
-        crate::game::layers::flush_layers(state);
-    }
-
-    // CR 702.131b + CR 702.131d: If the sub-ability's condition is gated on
-    // the city's blessing, re-evaluate the blessing now — before checking the
-    // condition — so a permanent created by the parent effect (e.g. Ocelot
-    // Pride's Cat token becoming the 10th permanent) is reflected in
-    // `state.city_blessing`. This mirrors the SBA loop's "any time" semantics
-    // without waiting for the next priority pass.
-    if ability.sub_ability.as_ref().is_some_and(|sub| {
-        sub.condition
-            .as_ref()
-            .is_some_and(condition_contains_designation)
-    }) {
-        crate::game::sba::apply_city_blessing_if_triggered(state, events);
-        crate::game::sba::apply_enduring_story_if_triggered(state, events);
-    }
+    prepare_chain_child(state, ability.sub_ability.as_deref(), events);
 
     if ability.sub_ability.is_none()
         && waits_for_resolution_choice(&state.waiting_for)
@@ -19545,11 +19541,14 @@ fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEven
         } = event
         {
             state.player_actions_this_way.insert((*player_id, *action));
-            // Draw completions record their turn-ledger entry at the single event
-            // emission site in `draw.rs`; overlapping nested chain windows may
+            // Draw and Investigate completions record their turn-ledger entry
+            // at their single event emission sites; overlapping chain windows may
             // still see that event for the resolution-local set, but must not
             // append it to the Vec more than once.
-            if *action != PlayerActionKind::Draw {
+            if !matches!(
+                action,
+                PlayerActionKind::Draw | PlayerActionKind::Investigate
+            ) {
                 record_player_action_this_turn(state, *player_id, *action);
             }
         }

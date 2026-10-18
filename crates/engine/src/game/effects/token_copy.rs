@@ -918,7 +918,7 @@ fn complete_creation_segment(
             None
         }
         TokenCreationCallerState::Investigate { player } => {
-            super::investigate::complete_creation(player, events);
+            super::investigate::complete_creation(state, player, events);
             None
         }
         TokenCreationCallerState::Amass {
@@ -1054,6 +1054,7 @@ fn finish_creation(
     if let Some(mut continuation) = pending.continuation {
         continuation.chain.context.token_creation_parent = None;
         continuation.chain.context.forwarded_result_context = Some(Box::new(result.clone()));
+        super::prepare_chain_child(state, Some(&continuation.chain), events);
         state.park_ability_continuation(*continuation);
         super::drain_pending_continuation(state, events);
     }
@@ -6061,6 +6062,21 @@ pub(crate) mod tests {
                 "outer tail cannot run before the child answers"
             );
             assert!(!state.resolution_stack.is_empty());
+            if matches!(ability.effect, Effect::Investigate) {
+                let action = (
+                    PlayerId(0),
+                    crate::types::events::PlayerActionKind::Investigate,
+                );
+                assert!(!state.player_actions_this_way.contains(&action));
+                assert!(!state.player_actions_this_turn.contains(&action));
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::Investigate,
+                        ..
+                    }
+                )));
+            }
             if matches!(
                 pause,
                 CreationPauseCase::ReloadQueued | CreationPauseCase::ReloadCounter

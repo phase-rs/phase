@@ -2632,6 +2632,387 @@ fn full_thraben_inspector_manufactor_investigates_once_for_three_complete_entrie
         1
     );
     assert!(outcome.state().resolution_stack.is_empty());
+    let action = (P0, engine::types::events::PlayerActionKind::Investigate);
+    assert!(outcome.state().player_actions_this_way.contains(&action));
+    assert_eq!(
+        outcome
+            .state()
+            .player_actions_this_turn
+            .iter()
+            .filter(|entry| **entry == action)
+            .count(),
+        1,
+        "the enclosing ETB/cast event windows must not record the action twice"
+    );
+}
+
+const WERNOG: &str = "When Wernog, Rider's Chaplain enters or leaves the battlefield, each opponent may investigate. Each opponent who doesn't loses 1 life. You investigate X times, where X is one plus the number of opponents who investigated this way.\nPartner—Friends forever (You can have two commanders if both have this ability.)";
+const OCELOT: &str = "First strike, lifelink\nAscend (If you control ten or more permanents, you get the city's blessing for the rest of the game.)\nAt the beginning of your end step, if you gained life this turn, create a 1/1 white Cat creature token. Then if you have the city's blessing, for each token you control that entered this turn, create a token that's a copy of it.";
+
+fn wernog_completion_case(accepts: [bool; 2], queued_reload: bool) {
+    use engine::types::events::PlayerActionKind;
+    use engine::types::game_state::ReplacementChoiceKind;
+    use engine::types::player::PlayerId;
+    use engine::types::proposed_event::ProposedEvent;
+
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 928);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, p2] {
+        scenario.with_library_top(player, &["Plains", "Plains", "Plains"]);
+    }
+    let manufactor = queued_reload.then(|| {
+        scenario.add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 3, JINNIE);
+        scenario
+            .add_creature_from_oracle(
+                P1,
+                "Academy Manufactor",
+                1,
+                3,
+                "If you would create a Clue, Food, or Treasure token, instead create one of each.",
+            )
+            .id()
+    });
+    let wernog = scenario
+        .add_creature_to_hand(P0, "Wernog, Rider's Chaplain", 1, 2)
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Investigate", "Partner"], WERNOG)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![
+                engine::types::mana::ManaCostShard::White,
+                engine::types::mana::ManaCostShard::Black,
+            ],
+        })
+        .id();
+    let mut runner = scenario.build();
+    fund_creation_response(&mut runner, P0);
+    // Commit the real cast, then answer the ETB's decisions through public
+    // actions so the runner does not auto-decline the opponents' choices.
+    drop(runner.cast(wernog).commit());
+    let mut events = Vec::new();
+    let mut optional_players = Vec::new();
+    let mut reloaded_child = false;
+    for _ in 0..100 {
+        if !events.is_empty()
+            && runner.state().stack.is_empty()
+            && runner.state().resolution_stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().objects[&wernog].zone == Zone::Battlefield
+            && optional_players.len() == 2
+        {
+            break;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                optional_players.push(player);
+                assert!(player == P1 || player == p2);
+                if player == p2 && accepts[0] {
+                    assert!(runner
+                        .state()
+                        .player_actions_this_way
+                        .contains(&(P1, PlayerActionKind::Investigate)));
+                }
+                GameAction::DecideOptionalEffect {
+                    accept: accepts[player.0 as usize - 1],
+                }
+            }
+            WaitingFor::ReplacementChoice {
+                player,
+                kind,
+                candidates,
+                ..
+            } => {
+                assert!(queued_reload);
+                assert_eq!(player, P1);
+                let proposed = &runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .proposed;
+                if !reloaded_child
+                    && matches!(proposed, ProposedEvent::CreateToken { spec, creation_frame: Some(_), .. }
+                        if spec.name == "Food" || spec.name == "Treasure")
+                {
+                    // This is an actually queued Manufactor child, with the
+                    // primary still outstanding, rather than an optional effect
+                    // that has not begun its creation instruction.
+                    let ProposedEvent::CreateToken {
+                        creation_frame: Some(id),
+                        ..
+                    } = proposed
+                    else {
+                        unreachable!()
+                    };
+                    assert!(runner.state().resolution_stack.iter().any(|frame| {
+                        matches!(frame, engine::types::resolution::ResolutionFrame::CopyToken(pending)
+                            if pending.creation_id == Some(*id) && !pending.work.is_empty())
+                    }));
+                    let action = (P1, PlayerActionKind::Investigate);
+                    assert!(!runner.state().player_actions_this_way.contains(&action));
+                    assert!(!runner.state().player_actions_this_turn.contains(&action));
+                    assert!(!events.iter().any(|event| matches!(event,
+                        GameEvent::PlayerPerformedAction { player_id, action: PlayerActionKind::Investigate, .. }
+                            if *player_id == P1)));
+                    let before = proposed.clone();
+                    runner = GameRunner::from_state(
+                        serde_json::from_value::<engine::types::resolution::ResolutionStateWire>(
+                            serde_json::to_value(
+                                engine::types::resolution::ResolutionStateWire::from_game_state(
+                                    runner.state().clone(),
+                                ),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state(),
+                    );
+                    assert_eq!(
+                        runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .unwrap()
+                            .proposed,
+                        before
+                    );
+                    reloaded_child = true;
+                }
+                GameAction::ChooseReplacement {
+                    index: if kind == ReplacementChoiceKind::OptionalBranch {
+                        1 // Decline Jinnie, retaining the actual predefined bodies.
+                    } else {
+                        candidates
+                            .iter()
+                            .position(|candidate| Some(candidate.source_id) == manufactor)
+                            .expect("apply Manufactor before the optional substitution")
+                    },
+                }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected Wernog completion prompt: {other:?}"),
+        };
+        events.extend(runner.act(action).unwrap().events);
+    }
+    assert_eq!(optional_players, vec![P1, p2]);
+    assert_eq!(reloaded_child, queued_reload);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert_eq!(runner.state().objects[&wernog].zone, Zone::Battlefield);
+    let x = 1 + accepts.iter().filter(|accept| **accept).count();
+    for (player, count) in [
+        (P0, x),
+        (P1, usize::from(accepts[0])),
+        (p2, usize::from(accepts[1])),
+    ] {
+        let action = (player, PlayerActionKind::Investigate);
+        assert_eq!(
+            runner.state().player_actions_this_way.contains(&action),
+            count > 0
+        );
+        assert_eq!(
+            runner
+                .state()
+                .player_actions_this_turn
+                .iter()
+                .filter(|entry| **entry == action)
+                .count(),
+            count
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event,
+            GameEvent::PlayerPerformedAction { player_id, action: PlayerActionKind::Investigate, .. }
+                if *player_id == player)).count(), count);
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token
+                    && object.zone == Zone::Battlefield
+                    && object.controller == player
+                    && object.name == "Clue")
+                .count(),
+            count,
+            "Wernog's actual creation quantity must consume the completed opponent actions"
+        );
+    }
+    if queued_reload {
+        for name in ["Food", "Treasure"] {
+            assert_eq!(
+                runner
+                    .state()
+                    .objects
+                    .values()
+                    .filter(|object| object.is_token
+                        && object.zone == Zone::Battlefield
+                        && object.controller == P1
+                        && object.name == name)
+                    .count(),
+                1
+            );
+        }
+    }
+    assert_eq!(runner.state().players[0].life, 20);
+    for (index, accepted) in accepts.into_iter().enumerate() {
+        assert_eq!(
+            runner.state().players[index + 1].life,
+            if accepted { 20 } else { 19 }
+        );
+    }
+}
+
+#[test]
+fn full_wernog_completed_actions_feed_quantity_and_both_ledgers_once() {
+    wernog_completion_case([true, true], false);
+    wernog_completion_case([false, true], false);
+    wernog_completion_case([false, false], false);
+}
+
+#[test]
+fn full_wernog_queued_creation_child_reload_publishes_before_quantity() {
+    wernog_completion_case([true, true], true);
+}
+
+#[test]
+fn full_ocelot_tenth_permanent_grants_blessing_before_copying_new_cat() {
+    for (permanents, already_blessed, expected_cats, reload) in [
+        (9, false, 2, false),
+        (9, false, 2, true),
+        (8, false, 1, false),
+        (8, true, 2, false),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1] {
+            scenario.with_library_top(player, &["Plains", "Plains", "Plains"]);
+        }
+        let ocelot = scenario
+            .add_creature(P0, "Ocelot Pride", 1, 1)
+            .from_oracle_text_with_keywords(&["First strike", "Lifelink", "Ascend"], OCELOT)
+            .id();
+        if reload {
+            scenario.add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 3, JINNIE);
+        }
+        for _ in (if reload { 2 } else { 1 })..permanents {
+            scenario.add_artifact_from_oracle(P0, "Threshold permanent", "");
+        }
+        let gain = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic life gain", false, "You gain 1 life.")
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let mut runner = scenario.build();
+        if already_blessed {
+            // An established rest-of-game designation is the sister control.
+            runner.state_mut().city_blessing.insert(P0);
+        }
+        assert!(runner.state().objects[&ocelot]
+            .keywords
+            .contains(&engine::types::keywords::Keyword::Ascend));
+        assert_eq!(runner.state().battlefield.len(), permanents);
+        fund_creation_response(&mut runner, P0);
+        let gain_outcome = runner.cast(gain).resolve();
+        assert_eq!(gain_outcome.state().players[0].life, 21);
+        assert_eq!(gain_outcome.state().players[0].life_gained_this_turn, 1);
+        assert_eq!(runner.state().city_blessing.contains(&P0), already_blessed);
+        let mut events = Vec::new();
+        let mut saved = false;
+        for _ in 0..100 {
+            if runner.state().phase == Phase::End
+                && runner.state().stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+                && events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::TokenCreated { .. }))
+            {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => {
+                    assert!(reload);
+                    if !saved {
+                        assert!(!runner.state().city_blessing.contains(&P0));
+                        assert_eq!(runner.state().battlefield.len(), 9);
+                        assert!(!events
+                            .iter()
+                            .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+                        assert!(runner.state().resolution_stack.iter().any(|frame| {
+                            matches!(frame, engine::types::resolution::ResolutionFrame::CopyToken(pending)
+                                if pending.continuation.is_some() && pending.creation_id.is_some())
+                        }));
+                        runner = GameRunner::from_state(
+                            serde_json::from_value::<engine::types::resolution::ResolutionStateWire>(
+                                serde_json::to_value(
+                                    engine::types::resolution::ResolutionStateWire::from_game_state(
+                                        runner.state().clone(),
+                                    ),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state(),
+                        );
+                        saved = true;
+                    }
+                    GameAction::ChooseReplacement { index: 1 }
+                }
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                ref other => panic!("unexpected Ocelot completion prompt: {other:?}"),
+            };
+            events.extend(runner.act(action).unwrap().events);
+        }
+        assert_eq!(saved, reload);
+        assert_eq!(runner.state().phase, Phase::End);
+        let births: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                if let GameEvent::TokenCreated { object_id, .. } = event {
+                    Some((index, *object_id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            births.len(),
+            expected_cats,
+            "the first Cat must enable the following copy condition at ten permanents"
+        );
+        for (_, id) in &births {
+            let cat = &runner.state().objects[id];
+            assert!(cat.is_token);
+            assert_eq!(cat.zone, Zone::Battlefield);
+            assert_eq!(cat.controller, P0);
+            assert_eq!(cat.name, "Cat");
+            assert_eq!(cat.color, vec![ManaColor::White]);
+            assert_eq!((cat.base_power, cat.base_toughness), (Some(1), Some(1)));
+            assert!(events.iter().any(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, from: None, to: Zone::Battlefield, .. } if object_id == id)));
+        }
+        assert_eq!(
+            runner.state().city_blessing.contains(&P0),
+            already_blessed || permanents == 9
+        );
+        let blessings: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(event, GameEvent::CityBlessingGained { player_id } if *player_id == P0)
+                    .then_some(index)
+            })
+            .collect();
+        if permanents == 9 {
+            assert_eq!(blessings.len(), 1);
+            assert!(
+                births[0].0 < blessings[0] && blessings[0] < births[1].0,
+                "grant the designation after actual entry and before the saved copy instruction"
+            );
+        } else {
+            assert!(blessings.is_empty());
+        }
+        assert!(runner.state().resolution_stack.is_empty());
+    }
 }
 
 #[test]
