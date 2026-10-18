@@ -631,7 +631,7 @@ const NESTED_SUB_COST: &[Row] = &[
     ("m/Wizards' School (2)", "Wizards' School", "{2}, {T}: Add {W} or {B}.", &[("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Wooded Bastion", "Wooded Bastion", "{G/W}, {T}: Add {G}{G}, {G}{W}, or {W}{W}.", &[("Forest", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Yurlok of Scorch Thrash", "Yurlok of Scorch Thrash", "{1}, {T}: Each player adds {B}{R}{G}.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
-    ("m/Codie, Vociferous Codex (2)", "Codie, Vociferous Codex", "{4}, {T}: Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value. Until end of turn, you may cast that card without paying its mana cost. Put each other card exiled this way on the bottom of your library in a random order.", &[("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Opt", true, "tt/GY"),
+    ("m/Codie, Vociferous Codex (2)", "Codie, Vociferous Codex", "{4}, {T}: Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value. Until end of turn, you may cast that card without paying its mana cost. Put each other card exiled this way on the bottom of your library in a random order.", &[("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Opt", true, "tt/stk"),
     ("m/Azorius Signet (2)", "Azorius Signet", "{1}, {T}: Add {W}{U}.", &[("Wastes", B, 'p')], &[], "Fugitive Wizard", true, "tt/BF"),
 ];
 

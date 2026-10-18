@@ -84,6 +84,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v147 adds the Eye to Eye / Mouth to Mouth physical contest.
 // v148 adds Timesifter's top-card exile contest (`Effect::ExileTopCardContest`,
 // `BatchCompletion::TopCardContestRoundComplete`).
+// v149 moves the CR 608.2n owed final part of a paused spell onto the resolution
+// carrier (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -174,7 +176,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +75: v146 adds `ConfirmedPeriod.counted_by` and `.performance` to loop offers in GameState.
 // +77: v148 adds Timesifter's `Effect::ExileTopCardContest` and its parked
 //      `BatchCompletion::TopCardContestRoundComplete`.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 77;
+// +78: v149 moves the owed final part of a paused spell onto the resolution carrier
+//      (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 78;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -275,7 +279,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +75: wire 129 moves with full-game v147 for the physical contest and its `contest_click` frame.
 // +74: wire 128 moves with full-game v146 for `ConfirmedPeriod.counted_by` and `.performance`.
 // +76: wire 130 moves with full-game v148 for Timesifter's top-card exile contest.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 76;
+// +77: wire 131 moves with full-game v149 for the carrier-owned final-part marker.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 77;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

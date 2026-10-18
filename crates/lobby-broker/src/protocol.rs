@@ -60,6 +60,22 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 149 — The CR 608.2n final part of a spell's resolution is owed on the
+///      resolution carrier. `GameState::deferred_spell_delivery` (v110: the
+///      destination recorded while a spell paused on its own free-cast window)
+///      is removed, and `GameState` gains `resolving_spell_final_part`
+///      (`{ spell }`, omitted when none): an instant or
+///      sorcery whose instructions paused for a choice (Faithless Looting's
+///      discard, Doomsday's search, a free-cast window) stays on the stack, and
+///      the marker says it still owes its on-resolution hooks, destination and
+///      move. A v148 peer drops the key and would move the spell before its
+///      paused instructions finish, or leave it on the stack in no zone after a
+///      free-cast window, so full-game and P2P refuse the mismatch (wire 131).
+///      A pre-v149 snapshot that carries `deferred_spell_delivery` is refused at
+///      restore: it cannot say which hooks (rebound, paradigm, epic) already
+///      ran, and replaying them would install a second delayed trigger. Lobby
+///      messages are unchanged.
+///
 /// 148 — Timesifter's top-card exile contest. `Effect::ExileTopCardContest`
 ///      (with its nested winner `AbilityDefinition`) serializes in ability
 ///      definitions inside `GameState`, and a paused contest round parks
@@ -1115,7 +1131,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 148;
+pub const PROTOCOL_VERSION: u32 = 149;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2372,12 +2388,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 148);
+        assert_eq!(PROTOCOL_VERSION, 149);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 147);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 148);
     }
 
     #[test]

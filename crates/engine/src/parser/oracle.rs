@@ -9656,19 +9656,29 @@ fn parse_oracle_pipeline(
     ParsedAbilities,
     Option<(OracleDocIr, ParsedAbilities, String)>,
 ) {
+    let _card_span =
+        tracing::debug_span!(target: "engine::parser::binding", "card", card_name).entered();
     let (normalized, refusals) = normalize_card_name_refs_reporting(oracle_text, card_name);
-    let mut ir = parse_normalized_oracle_ir(
-        oracle_text,
-        &normalized,
-        card_name,
-        mtgjson_keyword_names,
-        types,
-        subtypes,
-        observer,
-    );
+    let mut ir = {
+        let _stage = tracing::debug_span!(target: "engine::parser::binding", "stage", stage = "ir_production").entered();
+        parse_normalized_oracle_ir(
+            oracle_text,
+            &normalized,
+            card_name,
+            mtgjson_keyword_names,
+            types,
+            subtypes,
+            observer,
+        )
+    };
     ir.granter_name_refusals = refusals;
     let document_ir = capture_stages.then(|| ir.clone());
-    let mut parsed = lower_oracle_ir(&mut ir);
+    let mut parsed = {
+        let _stage =
+            tracing::debug_span!(target: "engine::parser::binding", "stage", stage = "ir_lowering")
+                .entered();
+        lower_oracle_ir(&mut ir)
+    };
     let mut raw_lowered = capture_stages.then(|| parsed.clone());
     render_granting_self_descriptions(&mut parsed, card_name);
     demote_unbound_delayed_sweeps(&mut parsed);
