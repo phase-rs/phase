@@ -313,6 +313,12 @@ fn characteristic_view_for_object(
     object_id: ObjectId,
 ) -> Option<CharacteristicView<'_>> {
     match state.objects.get(&object_id) {
+        // CR 608.2h: a current battlefield noncreature has live colors even
+        // though it has no power/toughness. Earlier incarnations' LKI is not
+        // the characteristic authority for this permanent.
+        Some(object) if object.zone == Zone::Battlefield => {
+            Some(CharacteristicView::Object(object))
+        }
         Some(object) if object.power.is_none() && object.toughness.is_none() => state
             .lki_cache
             .get(&object_id)
@@ -25016,5 +25022,127 @@ mod token_target_occurrence_tests {
         ability.context.target_damage_source = Some(TargetDamageSourceBinding::Illegal);
         assert_eq!(selected_target_pt_object_occurrence(&ability), None);
         assert_eq!(power(&ability), 0);
+    }
+}
+
+#[cfg(test)]
+mod jev_color_population_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::game_state::SpellCastRecord;
+    use crate::types::identifiers::CardId;
+
+    fn colors(source: CardTypeSetSource) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { source },
+        }
+    }
+
+    #[test]
+    fn jev_color_population_reading_axes() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Current noncreature".into(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types = vec![CoreType::Enchantment];
+            object.color = vec![ManaColor::White];
+        }
+        let mut old = state.objects[&id].snapshot_public_characteristics();
+        old.colors = vec![ManaColor::Blue];
+        old.power = Some(7);
+        old.toughness = Some(9);
+        state.lki_cache.insert(id, old.clone());
+        // CR 608.2h: absent P/T does not make a battlefield object's colors historical.
+        let current = colors(CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+            ),
+        });
+        assert_eq!(resolve_quantity(&state, &current, PlayerId(0), id), 1);
+        assert_eq!(
+            characteristic_view_for_object(&state, id).unwrap().colors(),
+            &[ManaColor::White]
+        );
+        assert_eq!(state.lki_cache[&id].colors, vec![ManaColor::Blue]);
+
+        // Off-battlefield and absent-object compatibility keeps the existing LKI route.
+        let off = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Departed creature".into(),
+            Zone::Graveyard,
+        );
+        state.lki_cache.insert(off, old.clone());
+        assert_eq!(
+            characteristic_view_for_object(&state, off)
+                .unwrap()
+                .property_value(ObjectProperty::Power),
+            Some(7)
+        );
+        assert_eq!(
+            characteristic_view_for_object(&state, off)
+                .unwrap()
+                .colors(),
+            &[ManaColor::Blue]
+        );
+        state.objects.remove(&off);
+        assert_eq!(
+            characteristic_view_for_object(&state, off)
+                .unwrap()
+                .property_value(ObjectProperty::Toughness),
+            Some(9)
+        );
+
+        // Historical event/cast channels must disagree with the live object.
+        let mut attack = state.objects[&id].snapshot_for_attack_declaration(id);
+        attack.lki.colors = vec![ManaColor::Red, ManaColor::Green];
+        state.current_trigger_events = vec![GameEvent::AttackersDeclared {
+            attacker_ids: vec![id],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![attack],
+        }];
+        let attacks = colors(CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+        });
+        assert_eq!(resolve_quantity(&state, &attacks, PlayerId(0), id), 2);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![SpellCastRecord {
+                colors: vec![ManaColor::White, ManaColor::Green],
+                core_types: vec![CoreType::Instant],
+                ..Default::default()
+            }]),
+        );
+        let casts = CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter: None,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &colors(casts.clone()), PlayerId(0), id),
+            2
+        );
+        let union = colors(
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+                    ),
+                },
+                casts,
+            ])
+            .unwrap(),
+        );
+        // CR 105.1: First Family's union counts white once across both populations.
+        assert_eq!(resolve_quantity(&state, &union, PlayerId(0), id), 2);
     }
 }

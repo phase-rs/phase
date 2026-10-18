@@ -227,10 +227,106 @@ fn jev_outer_scope_circadian() {
                 _ => None,
             })
             .collect();
-    assert!(gaps.iter().any(|f| f.contains(OUTER_CIRCADIAN_SEEK)));
+    assert!(matches!(
+        lowered.abilities[0].effect.as_ref(),
+        Effect::Seek {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::DistinctColorsAmong { .. }
+            },
+            ..
+        }
+    ));
+    assert!(!gaps.iter().any(|f| f.contains(OUTER_CIRCADIAN_SEEK)));
     assert!(gaps.iter().any(|f| f.contains(OUTER_CIRCADIAN_GRANT)));
     insta::assert_json_snapshot!("jev_outer_scope_circadian_ir", &ir);
     insta::assert_json_snapshot!("jev_outer_scope_circadian_lowered", &lowered);
+}
+
+#[test]
+fn jev_seek_public_ir_binding_and_coverage() {
+    // SHAPE: the stored clause expression is the only input to ordinary lowering;
+    // integration::jev_seek_perpetual exercises its public runtime consumer.
+    let text = format!("Vivid — {OUTER_CIRCADIAN_BODY}");
+    let mut ir = parse_oracle_ir(&text, "Circadian Struggle", &[], &["Instant".into()], &[]);
+    assert_collected_source_contract(&ir, &text, &text, OUTER_CIRCADIAN_BODY);
+    let OracleNodeIr::Spell(body) = &ir.items[0].node else {
+        panic!("{ir:#?}")
+    };
+    let seek = &body.body.clauses[0];
+    let seek_id = crate::parser::oracle_ir::effect_chain::ClauseId(0);
+    assert_eq!(seek.id, seek_id);
+    assert_eq!(
+        seek.source.fragment().unwrap().trim_end_matches('.'),
+        OUTER_CIRCADIAN_SEEK
+    );
+    assert_eq!(
+        seek.where_x_expression.as_deref(),
+        Some("the number of colors among permanents you control")
+    );
+    assert!(
+        matches!(seek.parsed.effect, Effect::Seek { count: QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } }, .. } if name == "X")
+    );
+    assert!(body
+        .body
+        .clauses
+        .iter()
+        .skip(1)
+        .all(|clause| clause.id != seek_id));
+    let lowered = lower_oracle_ir(&mut ir);
+    let Effect::Seek {
+        filter: TargetFilter::Typed(typed),
+        count,
+        ..
+    } = lowered.abilities[0].effect.as_ref()
+    else {
+        panic!("{lowered:#?}")
+    };
+    let QuantityExpr::Ref {
+        qty:
+            QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::Objects { filter: population },
+            },
+    } = count
+    else {
+        panic!("{count:#?}")
+    };
+    assert!(typed.properties.iter().any(|prop| matches!(prop, FilterProp::SharesQuality { reference: Some(reference), .. } if reference.as_ref() == population)));
+    let gaps: Vec<_> = std::iter::successors(Some(&lowered.abilities[0]), |node| {
+        node.sub_ability.as_deref()
+    })
+    .filter_map(|node| node.effect.unimplemented_description())
+    .collect();
+    assert_eq!(gaps, vec![OUTER_CIRCADIAN_GRANT]);
+
+    // Change only the binding on the named clause. Raw/prepared/source text still
+    // says colors, so a text rescan instead of ClauseIr consumption fails this.
+    let OracleNodeIr::Spell(body) = &mut ir.items[0].node else {
+        unreachable!()
+    };
+    let seek = body
+        .body
+        .clauses
+        .iter_mut()
+        .find(|clause| clause.id == seek_id)
+        .unwrap();
+    assert_eq!(
+        seek.where_x_expression.as_deref(),
+        Some("the number of colors among permanents you control")
+    );
+    seek.where_x_expression = Some("three".into());
+    let rebound = lower_oracle_ir(&mut ir);
+    assert!(matches!(
+        rebound.abilities[0].effect.as_ref(),
+        Effect::Seek {
+            count: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+    assert_eq!(
+        rebound.abilities[0].description.as_deref(),
+        Some(text.as_str())
+    );
+    assert!(ability_has_unimplemented(&rebound.abilities[0]));
 }
 
 #[test]
@@ -347,6 +443,15 @@ fn ability_word_boundary_preserves_complete_circadian_source_and_audit() {
     );
     assert_eq!(lowered.abilities[1].description.as_deref(), Some(circadian));
     assert!(ability_has_unimplemented(&lowered.abilities[1]));
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::Seek {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::DistinctColorsAmong { .. }
+            },
+            ..
+        }
+    ));
     let item = &ir.items[1];
     assert_eq!(item.source.fragment(), Some(circadian));
     assert_eq!(

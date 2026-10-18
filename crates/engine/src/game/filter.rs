@@ -23392,3 +23392,121 @@ mod casting_name_context_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod jev_shared_color_filter_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    #[test]
+    fn jev_color_overlap_is_nonempty_any_overlap_with_controlled_battlefield_population() {
+        let mut scenario = GameScenario::new();
+        let reference = scenario
+            .add_enchantment_from_oracle(P0, "White reference", "")
+            .with_color(vec![ManaColor::White])
+            .id();
+        scenario
+            .add_enchantment_from_oracle(P1, "Opponent blue", "")
+            .with_color(vec![ManaColor::Blue]);
+        let eligible = scenario
+            .add_spell_to_library_top(P0, "White red", true)
+            .with_color(vec![ManaColor::White, ManaColor::Red])
+            .id();
+        let blue = scenario
+            .add_spell_to_library_top(P0, "Blue", true)
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let colorless = scenario
+            .add_spell_to_library_top(P0, "Colorless", true)
+            .id();
+        scenario
+            .add_spell_to_hand(P0, "Blue hand", true)
+            .with_color(vec![ManaColor::Blue]);
+        scenario
+            .add_spell_to_graveyard(P0, "Blue graveyard", true)
+            .with_color(vec![ManaColor::Blue]);
+        let mut runner = scenario.build();
+        let ctx = FilterContext::from_source_with_controller(reference, P0);
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::Color,
+                    reference: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+                    ))),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+        assert!(matches_target_filter(
+            runner.state(),
+            eligible,
+            &filter,
+            &ctx
+        ));
+        assert!(!matches_target_filter(runner.state(), blue, &filter, &ctx));
+        assert!(!matches_target_filter(
+            runner.state(),
+            colorless,
+            &filter,
+            &ctx
+        ));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .color
+            .clear();
+        assert!(
+            !matches_target_filter(runner.state(), colorless, &filter, &ctx),
+            "empty colors do not overlap"
+        );
+    }
+
+    #[test]
+    fn jev_descendants_reference_cannot_be_satisfied_by_the_library_card_itself() {
+        let mut scenario = GameScenario::new();
+        let candidate = scenario
+            .add_spell_to_library_top(P0, "Elf card", false)
+            .as_creature()
+            .with_subtypes(vec!["Elf"])
+            .id();
+        let reference = scenario
+            .add_creature(P0, "Battlefield Elf", 2, 2)
+            .with_subtypes(vec!["Elf"])
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().all_creature_types = vec!["Elf".into(), "Human".into()];
+        let ctx = FilterContext::from_source_with_controller(reference, P0);
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+        // CR 109.2: "a creature you control" means battlefield creatures.
+        assert!(matches_target_filter(
+            runner.state(),
+            candidate,
+            &filter,
+            &ctx
+        ));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .card_types
+            .subtypes = vec!["Human".into()];
+        assert!(!matches_target_filter(
+            runner.state(),
+            candidate,
+            &filter,
+            &ctx
+        ));
+    }
+}

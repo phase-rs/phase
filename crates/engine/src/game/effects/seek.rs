@@ -545,3 +545,75 @@ mod tests {
         assert!(obj.tapped);
     }
 }
+
+#[cfg(test)]
+mod jev_dynamic_seek_seam_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{
+        CardTypeSetSource, ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::mana::ManaColor;
+    use crate::types::zones::{EtbTapState, Zone};
+
+    #[test]
+    fn jev_dynamic_seek_count_is_frozen_and_top_window_is_preserved() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_enchantment_from_oracle(P0, "White", "")
+            .with_color(vec![ManaColor::White])
+            .id();
+        let outside = scenario
+            .add_spell_to_library_top(P0, "Outside window", false)
+            .as_enchantment()
+            .with_color(vec![ManaColor::White, ManaColor::Green])
+            .id();
+        let inside = scenario
+            .add_spell_to_library_top(P0, "Inside window", false)
+            .as_enchantment()
+            .with_color(vec![ManaColor::White, ManaColor::Blue])
+            .id();
+        let mut runner = scenario.build();
+        let ability = ResolvedAbility::new(
+            Effect::Seek {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctColorsAmong {
+                        source: CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Permanent)
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                },
+                from_top: Some(1),
+                destination: Zone::Battlefield,
+                enter_tapped: EtbTapState::Tapped,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        let mut events = Vec::new();
+        resolve(runner.state_mut(), &ability, &mut events).unwrap();
+        assert_eq!(runner.state().objects[&inside].zone, Zone::Battlefield);
+        assert!(runner.state().objects[&inside].tapped);
+        assert_eq!(runner.state().objects[&outside].zone, Zone::Library);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        from: Some(Zone::Library),
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+}

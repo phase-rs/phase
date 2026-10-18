@@ -14889,3 +14889,32 @@ mod casting_name_population_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod jev_distinct_color_grammar_tests {
+    use super::*;
+
+    #[test]
+    fn jev_color_quantity_complete_population_and_union() {
+        // SHAPE: the same quantity authority serves where-X and for-each.
+        let (_, colors) =
+            parse_quantity_ref_complete("the number of colors among permanents you control")
+                .unwrap();
+        assert!(
+            matches!(&colors, QuantityRef::DistinctColorsAmong { source: CardTypeSetSource::Objects { filter: TargetFilter::Typed(typed) } } if typed.controller == Some(ControllerRef::You) && typed.type_filters.contains(&TypeFilter::Permanent))
+        );
+        assert_eq!(
+            parse_for_each_clause_ref_complete("color among permanents you control")
+                .unwrap()
+                .1,
+            colors
+        );
+        assert!(matches!(parse_quantity_ref_complete("the number of colors among permanents you control and spells you've cast this turn").unwrap().1, QuantityRef::DistinctColorsAmong { source: CardTypeSetSource::AnyOf { .. } }));
+        for text in [
+            "the number of colors among permanents you control unfinished",
+            "the number of colors among mysteries you control",
+        ] {
+            assert!(parse_quantity_ref_complete(text).is_err(), "{text}");
+        }
+    }
+}

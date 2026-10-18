@@ -9602,3 +9602,28 @@ mod tests {
         assert!(parse_for_each_target_controlled_type("creature you control").is_none());
     }
 }
+
+#[cfg(test)]
+mod jev_color_quantity_delegate_tests {
+    use super::*;
+
+    #[test]
+    fn jev_color_quantity_delegates_without_parallel_grammar() {
+        let text = "the number of colors among permanents you control";
+        let expected = crate::parser::oracle_nom::quantity::parse_quantity_ref_complete(text)
+            .unwrap()
+            .1;
+        assert_eq!(parse_quantity_ref(text), Some(expected.clone()));
+        assert_eq!(
+            parse_cda_quantity(text),
+            Some(QuantityExpr::Ref {
+                qty: expected.clone()
+            })
+        );
+        assert_eq!(
+            parse_for_each_clause("color among permanents you control"),
+            Some(expected)
+        );
+        assert!(parse_quantity_ref("the number of colors among mysteries you control").is_none());
+    }
+}

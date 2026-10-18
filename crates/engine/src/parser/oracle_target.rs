@@ -8583,6 +8583,7 @@ fn parse_shared_quality_reference<'a>(
         }
     }
 
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("one or more ")).parse(input)?;
     let (filter, rest) = parse_target_disjunction(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -8816,6 +8817,7 @@ pub(crate) fn parse_shared_quality_clause<'a>(
 ) -> nom::IResult<&'a str, FilterProp, OracleError<'a>> {
     type Vbe<'a> = OracleError<'a>;
     let (rest, _) = tag::<_, _, Vbe>("that ").parse(input)?;
+    let (rest, _) = opt(tag::<_, _, Vbe>("each ")).parse(rest)?;
     let (rest, relation) = alt((
         value(
             SharedQualityRelation::DoesNotShare,
@@ -8840,9 +8842,10 @@ pub(crate) fn parse_shared_quality_clause<'a>(
     .parse(rest)?;
     let (rest, _) = opt(alt((tag::<_, _, Vbe>("a "), tag("at least one ")))).parse(rest)?;
     let (rest, quality) = parse_shared_quality(rest)?;
-    let (rest, reference) = opt(nom::sequence::preceded(tag::<_, _, Vbe>(" with "), |i| {
-        parse_shared_quality_reference(i, ctx)
-    }))
+    let (rest, reference) = opt(nom::sequence::preceded(
+        tag::<_, _, Vbe>(" with "),
+        nom::combinator::cut(|i| parse_shared_quality_reference(i, ctx)),
+    ))
     .parse(rest)?;
 
     Ok((
@@ -21069,6 +21072,62 @@ mod tests {
             tf.properties
         );
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn jev_shared_quality_each_and_quantified_reference_are_independent_axes() {
+        let ctx = ParseContext::default();
+        for subject in ["that share ", "that shares ", "that each share "] {
+            for reference in [
+                "permanents you control",
+                "one or more permanents you control",
+            ] {
+                let input = format!("{subject}a color with {reference}, next");
+                let (rest, prop) = parse_shared_quality_clause(&input, &ctx).unwrap();
+                assert_eq!(rest, ", next");
+                let FilterProp::SharesQuality {
+                    quality,
+                    reference: Some(reference),
+                    relation,
+                } = prop
+                else {
+                    panic!("{prop:?}")
+                };
+                assert_eq!(quality, SharedQuality::Color);
+                assert_eq!(relation, SharedQualityRelation::Shares);
+                let TargetFilter::Typed(typed) = *reference else {
+                    panic!("{reference:?}")
+                };
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+            }
+        }
+        let (_, negative) = parse_shared_quality_clause(
+            "that each don't share a creature type with one or more creatures you control",
+            &ctx,
+        )
+        .unwrap();
+        assert!(matches!(
+            negative,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(_),
+                relation: SharedQualityRelation::DoesNotShare
+            }
+        ));
+        assert!(parse_shared_quality_clause("that share a color", &ctx).is_ok());
+        for input in [
+            "that share a color with ",
+            "that each share a color with one or more nonsense",
+        ] {
+            assert!(
+                matches!(
+                    parse_shared_quality_clause(input, &ctx),
+                    Err(nom::Err::Failure(_))
+                ),
+                "explicit reference cannot become a group constraint: {input}"
+            );
+        }
     }
 
     /// CR 707.2 + CR 115.10a: Duplication Device — "target creature becomes a

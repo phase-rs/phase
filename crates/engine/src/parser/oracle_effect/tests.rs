@@ -32786,7 +32786,8 @@ fn search_filter_permanent_card_of_chosen_kind() {
 
 #[test]
 fn seek_an_elf_card() {
-    let details = parse_seek_details("seek an elf card", &mut ParseContext::default());
+    let details = parse_seek_details("seek an elf card", &mut ParseContext::default())
+        .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.destination, Zone::Hand);
     assert!(!details.enter_tapped);
@@ -32801,7 +32802,8 @@ fn seek_an_elf_card() {
 
 #[test]
 fn seek_two_nonland_cards() {
-    let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default());
+    let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default())
+        .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
     assert_eq!(details.from_top, None);
     assert_eq!(details.destination, Zone::Hand);
@@ -32820,7 +32822,8 @@ fn seek_for_each_card_exiled_from_your_hand_uses_dynamic_count() {
     let details = parse_seek_details(
         "seek an instant or sorcery card for each card exiled from your hand this way",
         &mut ctx,
-    );
+    )
+    .expect("supported seek details");
     assert!(matches!(
         details.count,
         QuantityExpr::Ref {
@@ -32840,7 +32843,8 @@ fn seek_land_and_nonland_cards_splits_filters() {
     let details = parse_seek_details(
         "seek a land card and a nonland card",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.extra_filters.len(), 1);
     let TargetFilter::Typed(primary) = &details.filter else {
@@ -32983,7 +32987,8 @@ fn seek_from_among_top_cards_carries_library_limit() {
     let details = parse_seek_details(
         "seek an artifact card from among the top ten cards of your library, then shuffle",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.from_top, Some(10));
     let TargetFilter::Typed(tf) = &details.filter else {
@@ -33025,7 +33030,8 @@ fn seek_cards_of_chosen_kind() {
     let details = parse_seek_details(
         "seek two cards of the chosen kind",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
     let TargetFilter::Typed(tf) = &details.filter else {
         panic!("Expected Typed filter, got {:?}", details.filter);
@@ -33077,7 +33083,8 @@ fn seek_land_onto_battlefield_tapped() {
     let details = parse_seek_details(
         "seek a land card and put it onto the battlefield tapped",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.destination, Zone::Battlefield);
     assert!(details.enter_tapped);
@@ -85769,4 +85776,40 @@ fn token_definition_rejects_multiple_creators_and_document_boundary_leaks() {
             ..
         }
     )));
+}
+
+#[test]
+fn jev_seek_chain_uses_one_where_x_binding_and_keeps_independent_tail() {
+    // SHAPE: a synthetic grammar fixture exercises both X sites and chaining.
+    let def = parse_effect_chain("Seek X cards with mana value X or less, where X is the number of colors among permanents you control. You gain 3 life.", AbilityKind::Spell);
+    let Effect::Seek {
+        filter: TargetFilter::Typed(typed),
+        count,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("{def:#?}")
+    };
+    assert!(matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { .. }
+        }
+    ));
+    assert!(typed.properties.contains(&FilterProp::Cmc {
+        comparator: Comparator::LE,
+        value: count.clone()
+    }));
+    assert!(matches!(
+        def.sub_ability.as_deref().unwrap().effect.as_ref(),
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+    let bad = parse_effect_chain(
+        "Seek X cards, where X is the number of mysteries you control.",
+        AbilityKind::Spell,
+    );
+    assert!(std::iter::successors(Some(&bad), |d| d.sub_ability.as_deref()).any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { name, description: Some(fragment) } if name == "where_x_binding" && fragment == "where X is the number of mysteries you control")));
 }

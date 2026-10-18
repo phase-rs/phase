@@ -16972,3 +16972,47 @@ mod dq_d_player_set_lift_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod jev_seek_binder_tests {
+    use super::*;
+    use crate::types::zones::EtbTapState;
+
+    #[test]
+    fn jev_existing_where_x_binder_rewrites_seek_filter_and_count() {
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        };
+        let mut effect = Effect::Seek {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: x.clone(),
+            }])),
+            count: x,
+            from_top: Some(10),
+            destination: Zone::Battlefield,
+            enter_tapped: EtbTapState::Tapped,
+        };
+        let expression = "the number of colors among permanents you control";
+        apply_where_x_effect_expression(&mut effect, Some(expression));
+        let expected = parse_where_x_quantity_expression(expression).unwrap();
+        let Effect::Seek {
+            filter: TargetFilter::Typed(typed),
+            count,
+            from_top,
+            destination,
+            enter_tapped,
+        } = effect
+        else {
+            panic!("Seek preserved")
+        };
+        assert_eq!(count, expected);
+        assert!(typed.properties.contains(&FilterProp::Cmc {
+            comparator: Comparator::LE,
+            value: expected
+        }));
+        assert_eq!(from_top, Some(10));
+        assert_eq!(destination, Zone::Battlefield);
+        assert_eq!(enter_tapped, EtbTapState::Tapped);
+    }
+}

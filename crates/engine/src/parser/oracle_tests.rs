@@ -198,10 +198,93 @@ fn outer_spell_instruction_owns_nested_static_text() {
                 .iter()
                 .any(|node| matches!(node.effect.as_ref(), Effect::CreateDelayedTrigger { .. })));
         } else {
-            assert!(gaps.iter().any(|f| f.contains(CIRCADIAN_SEEK)));
+            assert!(scope_chain(&parsed.abilities[0]).iter().any(|d| matches!(
+                d.effect.as_ref(),
+                Effect::Seek {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::DistinctColorsAmong { .. }
+                    },
+                    ..
+                }
+            )));
+            assert!(!gaps.iter().any(|f| f.contains(CIRCADIAN_SEEK)));
             assert!(gaps.iter().any(|f| f.contains(CIRCADIAN_GRANT)));
         }
     }
+}
+
+#[test]
+fn jev_seek_excerpt_is_fully_bound_and_malformed_references_stay_honest() {
+    // SHAPE: this is explicitly only Circadian's first instruction.
+    let excerpt = format!("{CIRCADIAN_SEEK}.");
+    let parsed = scope_spell(&excerpt);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert!(!has_unimplemented(&parsed.abilities[0]));
+    let Effect::Seek { filter, count, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("{parsed:#?}");
+    };
+    assert!(matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { .. }
+        }
+    ));
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("{filter:?}")
+    };
+    assert!(typed.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::SharesQuality {
+            reference: Some(_),
+            ..
+        }
+    )));
+    for text in [
+        "Seek two cards that each share a color with.",
+        "Seek two cards that each share a color with one or more mysteries you control.",
+        "Seek two cards that each share a texture with permanents you control.",
+        "Seek two cards that each share a color with permanents you control except on Tuesdays.",
+    ] {
+        let bad = scope_spell(text);
+        assert!(
+            bad.abilities.iter().any(has_unimplemented),
+            "must retain complete unsupported semantics: {text}: {bad:#?}"
+        );
+        assert!(
+            bad.abilities
+                .iter()
+                .flat_map(scope_chain)
+                .any(|node| matches!(
+                    node.effect.as_ref(),
+                    Effect::Unimplemented { description: Some(fragment), .. }
+                        if fragment.trim_end_matches('.') == text.trim_end_matches('.')
+                )),
+            "complete rejected instruction, not just its suffix: {text}: {bad:#?}"
+        );
+        assert!(
+            bad.abilities
+                .iter()
+                .flat_map(scope_chain)
+                .all(|node| !matches!(node.effect.as_ref(), Effect::Seek { .. })),
+            "a rejected restriction cannot leave a broad Seek: {bad:#?}"
+        );
+    }
+    let unsupported = "Seek X cards, where X is the number of mysteries you control.";
+    let bad = scope_spell(unsupported);
+    assert_eq!(bad.abilities[0].description.as_deref(), Some(unsupported));
+    assert!(
+        bad.abilities
+            .iter()
+            .flat_map(scope_chain)
+            .any(|node| matches!(
+                node.effect.as_ref(),
+                Effect::Unimplemented { name, description: Some(fragment) }
+                    if name == "where_x_binding"
+                        && fragment == "where X is the number of mysteries you control"
+            )),
+        "complete unrepresentable where-X operand: {bad:#?}"
+    );
 }
 
 #[test]

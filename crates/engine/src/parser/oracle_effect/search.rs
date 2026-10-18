@@ -677,7 +677,7 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
 
 /// Parse "seek [count] [filter] card(s) [and put onto battlefield [tapped]]".
 /// Seek grammar is simpler than search: no "your library", no "for", no shuffle.
-pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDetails {
+pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> Option<SeekDetails> {
     let after_seek = tag::<_, _, OracleError<'_>>("seek ")
         .parse(lower)
         .map(|(rest, _)| rest)
@@ -685,14 +685,18 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
 
     // Extract destination clause before filter parsing, so it doesn't pollute the filter.
     let (filter_text, destination, enter_tapped) = {
-        let put_idx = after_seek
-            .find(" and put")
-            .or_else(|| after_seek.find(", put"));
-        if let Some(idx) = put_idx {
-            let dest_clause = &after_seek[idx..];
+        let boundary = [" and put ", ", put "]
+            .into_iter()
+            .filter_map(|delimiter| {
+                take_until::<_, _, OracleError<'_>>(delimiter)
+                    .parse(after_seek)
+                    .ok()
+            })
+            .min_by_key(|(_, before)| before.len());
+        if let Some((dest_clause, before)) = boundary {
             let dest = parse_search_destination(dest_clause);
             let tapped = scan_contains_phrase(dest_clause, "battlefield tapped");
-            (&after_seek[..idx], dest, tapped)
+            (before, dest, tapped)
         } else {
             (after_seek, Zone::Hand, false)
         }
@@ -705,7 +709,7 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         });
 
     // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
-    // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
+    // CR 107.3c: text-defined X is bound by the existing where-X lowerer.
     let (count, remaining) = if let Some(expr) = dynamic_count {
         (expr, filter_text)
     } else if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
@@ -720,16 +724,36 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         .map(|(rest, _)| rest)
         .unwrap_or(remaining);
 
-    let (filter, extra_filters) = parse_search_filter_with_extras(remaining, ctx);
+    // A speculative filter must not commit pronoun/choice state on failure.
+    // Isolate new diagnostics so an identical pre-existing warning cannot hide
+    // an unresolved restriction through diagnostic deduplication.
+    let mut tentative = ctx.clone();
+    let prior_diagnostics = std::mem::take(&mut tentative.diagnostics);
+    let (filter, extra_filters) = parse_search_filter_with_extras(remaining, &mut tentative);
+    let unresolved = tentative
+        .diagnostics
+        .iter()
+        .any(|diagnostic| matches!(diagnostic, OracleDiagnostic::TargetFallback { .. }));
+    let diagnostics = std::mem::replace(&mut tentative.diagnostics, prior_diagnostics);
+    if unresolved {
+        for diagnostic in diagnostics {
+            ctx.push_diagnostic(diagnostic);
+        }
+        return None;
+    }
+    for diagnostic in diagnostics {
+        tentative.push_diagnostic(diagnostic);
+    }
+    *ctx = tentative;
 
-    SeekDetails {
+    Some(SeekDetails {
         filter,
         count,
         from_top,
         destination,
         enter_tapped,
         extra_filters,
-    }
+    })
 }
 
 fn split_seek_for_each_count_suffix(filter_text: &str) -> Option<(&str, QuantityExpr)> {
@@ -2487,7 +2511,7 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, prop)) = parse_shared_quality_clause(remaining, &ParseContext::default()) {
+        if let Ok((rest, prop)) = parse_shared_quality_clause(remaining, ctx) {
             last_shared_quality_reference = match &prop {
                 FilterProp::SharesQuality {
                     reference: Some(reference),
@@ -2787,6 +2811,95 @@ mod tests {
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
+
+    #[test]
+    fn jev_seek_admission_is_transactional_and_preserves_all_axes() {
+        let mut ctx = ParseContext::default();
+        let prior = OracleDiagnostic::TargetFallback {
+            context: "caller".into(),
+            text: "prior".into(),
+            line_index: 7,
+        };
+        ctx.push_diagnostic(prior.clone());
+        let details = parse_seek_details(
+            "seek two cards that each share a color with one or more permanents you control",
+            &mut ctx,
+        )
+        .expect("explicit shared reference");
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+        let TargetFilter::Typed(typed) = details.filter else {
+            panic!("typed cards")
+        };
+        assert!(typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(_),
+                ..
+            }
+        )));
+        assert_eq!(ctx.diagnostics, vec![prior]);
+        for (text, residual) in [
+            ("seek two cards that each share a color with ", "that each share a color with"),
+            ("seek two cards that each share a color with one or more mysteries you control", "that each share a color with one or more mysteries you control"),
+            ("seek two cards that each share a texture with permanents you control", "that each share a texture with permanents you control"),
+            ("seek two cards that each share a color with permanents you control except on Tuesdays", "except on Tuesdays"),
+        ] {
+            let before = ctx.clone();
+            assert!(parse_seek_details(text, &mut ctx).is_none(), "{text}");
+            let mut semantic = ctx.clone();
+            semantic.diagnostics = before.diagnostics.clone();
+            assert_eq!(
+                semantic, before,
+                "failed parse cannot commit semantic context"
+            );
+            assert!(ctx.diagnostics.iter().any(|diagnostic| matches!(diagnostic,
+                OracleDiagnostic::TargetFallback { context, text, line_index: 0 }
+                    if context == "search-filter-suffix unmatched" && text == residual // allow-noncombinator: test assertion compares the diagnostic context and complete residual, not parsing dispatch.
+            )), "complete diagnostic residual must be replayed: {text}: {:?}", ctx.diagnostics);
+            // A repeated failure must still reject after its diagnostic is present.
+            assert!(parse_seek_details(text, &mut ctx).is_none());
+        }
+        let mut contextual = ParseContext {
+            current_ability_exile_cost_zone: Some(Zone::Hand),
+            object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+            ..Default::default()
+        };
+        for (reference, expected) in [
+            ("the exiled card", TargetFilter::CostPaidObject),
+            ("it", TargetFilter::TriggeringSource),
+        ] {
+            let text = format!("seek a card that shares a color with {reference}");
+            let details = parse_seek_details(&text, &mut contextual).unwrap();
+            let TargetFilter::Typed(typed) = details.filter else {
+                panic!("typed cards")
+            };
+            assert!(
+                typed.properties.iter().any(|prop| matches!(prop,
+                    FilterProp::SharesQuality { reference: Some(reference), .. }
+                        if reference.as_ref() == &expected
+                )),
+                "caller cost/pronoun authority must survive: {typed:?}"
+            );
+        }
+        assert!(contextual.diagnostics.is_empty());
+        let details = parse_seek_details("seek a land card and a nonland card from among the top ten cards of your library and put them onto the battlefield tapped", &mut ctx).unwrap();
+        assert_eq!(details.from_top, Some(10));
+        assert_eq!(details.destination, Zone::Battlefield);
+        assert!(details.enter_tapped);
+        assert_eq!(details.extra_filters.len(), 1);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        let details = parse_seek_details(
+            "seek a card, put it into your graveyard and put it into your hand",
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            details.destination,
+            Zone::Hand,
+            "destination semantics still belong to parse_search_destination"
+        );
+    }
 
     fn assert_exact_named_union(filter: &TargetFilter, expected: &[&str]) {
         let TargetFilter::Or { filters } = filter else {
@@ -5019,7 +5132,8 @@ mod tests {
         let details = parse_seek_details(
             "seek a creature card of the most prevalent creature type in your library",
             &mut ctx,
-        );
+        )
+        .expect("supported seek details");
         let TargetFilter::Typed(filter) = details.filter else {
             panic!("expected typed filter, got {:?}", details.filter);
         };
@@ -5051,7 +5165,8 @@ mod tests {
         let details = parse_seek_details(
             "seek a creature card of the most prevalent creature type in an opponent's library",
             &mut ctx,
-        );
+        )
+        .expect("supported seek details");
         let TargetFilter::Typed(filter) = details.filter else {
             panic!("expected typed filter, got {:?}", details.filter);
         };
@@ -5069,7 +5184,7 @@ mod tests {
         let details = parse_seek_details(
             "seek a card with the highest mana value among cards in your library with mana value less than or equal to the amount of life you gained this turn",
             &mut ctx,
-        );
+        ).expect("supported seek details");
         let TargetFilter::Typed(filter) = details.filter else {
             panic!("expected typed filter, got {:?}", details.filter);
         };
@@ -5105,7 +5220,7 @@ mod tests {
         let details = parse_seek_details(
             "seek a card with the highest mana value among cards in your library with mana value x or less, where x is the number of charge counters on ~",
             &mut ctx,
-        );
+        ).expect("supported seek details");
         let TargetFilter::Typed(filter) = details.filter else {
             panic!("expected typed filter, got {:?}", details.filter);
         };

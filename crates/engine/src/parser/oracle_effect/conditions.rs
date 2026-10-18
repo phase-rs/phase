@@ -1778,17 +1778,16 @@ fn parse_revealed_card_gate_suffix<'a>(
     // load-bearing invariant: the `is revealed this way` caller's post-`card`
     // slice trims to "is revealed this way", which fails `tag("that ")`).
     //
-    // The `reference: Some(_)` guard is REQUIRED, not cosmetic: the clause parses
-    // its reference with `opt(...)` and returns `Ok` with `reference: None` when
-    // the `" with <ref>"` phrase is absent OR present-but-unparseable. Runtime
-    // `evaluate_shares_quality` treats a `None` reference as UNCONDITIONALLY TRUE
-    // (`is_none_or`), so accepting a `None`-reference clause here would (a) re-emit
-    // the always-satisfied gate this fix exists to remove, and (b) in the
-    // `is revealed this way` caller, consume `that shares <quality>`, leave the
-    // mandatory anchor unmatchable, and drop that card's ENTIRE condition. Guarding
-    // on `Some(_)` makes the arm consume nothing in both degenerate cases, keeping
-    // the invariant intact for all callers; a genuinely unparseable reference then
-    // stays an honest unsupported gap rather than a false gate.
+    // The `reference: Some(_)` guard is REQUIRED: the shared-quality grammar
+    // permits a group constraint without a printed reference. An explicitly
+    // printed `with <ref>` instead commits to parsing that reference and fails
+    // if it is unparseable. Runtime `evaluate_shares_quality` treats a missing
+    // reference as unconditionally true, so this card gate must require a real
+    // reference population. Otherwise the `is revealed this way` caller could
+    // consume `that shares <quality>`, leave its mandatory anchor unmatchable,
+    // and drop the card's condition. The guard leaves an absent reference
+    // unconsumed; a malformed explicit reference fails the shared parser. Both
+    // cases remain an honest unsupported gap rather than an always-true gate.
     if let Ok((
         rest,
         prop @ FilterProp::SharesQuality {

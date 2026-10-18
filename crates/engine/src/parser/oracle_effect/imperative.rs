@@ -3296,7 +3296,7 @@ pub(super) fn parse_search_and_creation_ast(
         return Some(ast);
     }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("seek ")).parse(input)) {
-        let details = super::parse_seek_details(lower, ctx);
+        let details = super::parse_seek_details(lower, ctx)?;
         return Some(SearchCreationImperativeAst::Seek {
             filter: details.filter,
             count: details.count,
@@ -28857,5 +28857,22 @@ mod exile_graveyard_producer_shape {
             })
             .is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod jev_seek_imperative_tests {
+    use super::*;
+
+    #[test]
+    fn jev_seek_family_propagates_rejected_filter_details() {
+        let good = "seek two cards that each share a color with one or more permanents you control";
+        let mut ctx = ParseContext::default();
+        assert!(matches!(
+            parse_search_and_creation_ast(good, good, &mut ctx),
+            Some(SearchCreationImperativeAst::Seek { .. })
+        ));
+        let bad = "seek two cards that each share a color with one or more mysteries you control";
+        assert!(parse_search_and_creation_ast(bad, bad, &mut ctx).is_none());
     }
 }
