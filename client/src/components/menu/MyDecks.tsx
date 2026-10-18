@@ -48,6 +48,7 @@ import {
   savedDeckCatalogId,
   type DeckCatalogCandidate,
 } from "../../services/deckCatalog";
+import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import {
   pickRandomDeckCandidate,
   randomDeckPriority,
@@ -58,9 +59,10 @@ import {
   isPoolSelectionEmpty,
   summarizePoolSelection,
   withCatalogSavedNames,
+  type PoolCandidate,
 } from "../../services/randomPoolSelection";
 import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
-import { resolveBracketDrawBase, resolveRandomDrawPool } from "../../services/aiRandomPool";
+import { resolveBracketDrawBase, resolveRandomDrawPool, type BracketTaggedCandidate } from "../../services/aiRandomPool";
 import { RandomPoolTree } from "./RandomPoolTree";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
@@ -646,13 +648,15 @@ interface MyDecksProps {
    */
   onActiveDeckCompatChange?: (compat: DeckCompatibilityResult | null) => void;
   /**
-   * Resolved bracket tiers by catalog id, hoisted from the setup page's
-   * shared AI catalog analysis. Present only in single-player setup once the
-   * analysis lands; the human random pool matches the AI bracket restriction
-   * against it. Absent everywhere else (multiplayer select has no AI context,
-   * so the pool selection applies alone there).
+   * Completed legal catalog hoisted from the setup page's shared AI catalog
+   * analysis. Present only in single-player setup once the analysis lands;
+   * the deferred human pool (tree, bracket base, counts, fallback) derives
+   * from this full universe — never the search-narrowed display — so the
+   * preview matches what game start can draw. Absent everywhere else
+   * (multiplayer select has no AI context, so the pool selection applies
+   * alone there).
    */
-  aiBrackets?: ReadonlyMap<string, CommanderBracket | null>;
+  aiLegalCatalog?: readonly AiDeckCandidate[];
 }
 
 type MyDecksTab = "decks" | "subscriptions";
@@ -671,7 +675,7 @@ export function MyDecks({
   randomSelectionMode = "resolveImmediately",
   bare = false,
   onActiveDeckCompatChange,
-  aiBrackets,
+  aiLegalCatalog,
 }: MyDecksProps) {
   const { t } = useTranslation("menu");
   const effectiveOffline = useEffectiveOffline();
@@ -771,10 +775,16 @@ export function MyDecks({
   // this index so a deck moved between folders (here or in another tab)
   // recomputes instead of serving stale membership.
   const poolFolderIndex = usePoolFolderIndex();
-  // The human Random draw matches the AI bracket restriction only in
-  // single-player setup (defer mode, bracket map present). Multiplayer
-  // select has no AI context, so the pool selection applies alone there.
-  const useBracketBase = randomSelectionMode === "defer" && aiBrackets !== undefined;
+  // The deferred human preview (tree, bracket base, counts, fallback)
+  // derives from the full hoisted legal catalog — never the search-narrowed
+  // display — so it matches what game start can draw. Present only in
+  // single-player setup once the analysis lands; multiplayer select has no
+  // AI context, so the pool selection applies alone there.
+  const useLegalPreview = randomSelectionMode === "defer" && aiLegalCatalog !== undefined;
+  const legalBrackets = useMemo(
+    () => new Map((aiLegalCatalog ?? []).map((candidate) => [candidate.id, candidate.bracket] as const)),
+    [aiLegalCatalog],
+  );
 
   const handleToggleStar = useCallback((name: string) => toggleStar(name), [toggleStar]);
   const handleAssignFolder = useCallback(
@@ -1201,11 +1211,11 @@ export function MyDecks({
         source: candidate?.source ?? { type: "saved" },
         knownFormat: candidate?.knownFormat,
         compatibility: compatibilities[deckName] ?? null,
-        bracket: aiBrackets?.get(id) ?? null,
+        bracket: legalBrackets.get(id) ?? null,
       };
     });
   }, [
-    aiBrackets,
+    legalBrackets,
     compatibilities,
     deckCandidatesByName,
     legalPreconByName,
@@ -1218,7 +1228,7 @@ export function MyDecks({
   // the shared bracket-then-curation layering applies so your deck lands in
   // the same bracket(s) as the AI seats.
   const randomSelectableCandidates = useMemo(() => {
-    if (!useBracketBase) {
+    if (!useLegalPreview) {
       if (isPoolSelectionEmpty(humanPoolSelection)) return randomBaseCandidates;
       const keep = new Set(
         applyPoolSelection(
@@ -1248,23 +1258,17 @@ export function MyDecks({
     randomBaseCandidates,
     selectedFormatForCompatibility,
     tableCedh,
-    useBracketBase,
+    useLegalPreview,
   ]);
   // Deferred preview legality: game start draws the human Random deck from
-  // the hoisted legal catalog, while the display deliberately retains
-  // unscanned decks — so the deferred tree/counts/fallback intersect the
-  // display with legal-catalog membership (the bracket map's keys; its
-  // presence also signals the analysis finished). Tiles, search, and
-  // immediate mode keep the display universe.
-  const legalCatalogIds = useMemo(
-    () => (useBracketBase && aiBrackets ? new Set(aiBrackets.keys()) : undefined),
-    [useBracketBase, aiBrackets],
-  );
-  const poolTreeItems = useMemo(() => {
-    const items = withCatalogSavedNames(randomBaseCandidates);
-    if (!legalCatalogIds) return items;
-    return items.filter((item) => legalCatalogIds.has(item.id));
-  }, [randomBaseCandidates, legalCatalogIds]);
+  // the full completed legal catalog, so the deferred tree/base/counts use
+  // that same universe directly — intersecting the search-narrowed display
+  // with legal membership cannot restore legal decks search already removed.
+  // Tiles, search, and immediate mode keep the display universe.
+  const poolTreeItems = useMemo<(PoolCandidate & BracketTaggedCandidate)[]>(() => {
+    if (useLegalPreview && aiLegalCatalog) return withCatalogSavedNames(aiLegalCatalog);
+    return withCatalogSavedNames(randomBaseCandidates);
+  }, [useLegalPreview, aiLegalCatalog, randomBaseCandidates]);
   // Complete toggleable universe for folder toggles: the display base above
   // is narrowed by search/source/set filters, but a toggle clears overrides
   // for every true group member. Saved-duplicate precons stay deduped (the
@@ -1290,14 +1294,14 @@ export function MyDecks({
           source: candidate.source,
           knownFormat: candidate.knownFormat,
           compatibility: compatibilities[deckName] ?? null,
-          bracket: aiBrackets?.get(candidate.id) ?? null,
+          bracket: legalBrackets.get(candidate.id) ?? null,
         }];
       }),
     );
-  }, [aiBrackets, catalogCandidates, compatibilities, deckNames, mode]);
+  }, [legalBrackets, catalogCandidates, compatibilities, deckNames, mode]);
   const poolBaseIds = useMemo(
     () =>
-      useBracketBase
+      useLegalPreview
         ? new Set(
             resolveBracketDrawBase(poolTreeItems, {
               bracketFilter: aiBracketFilter,
@@ -1311,14 +1315,14 @@ export function MyDecks({
       poolTreeItems,
       selectedFormatForCompatibility,
       tableCedh,
-      useBracketBase,
+      useLegalPreview,
     ],
   );
   const humanPoolConflict = useMemo(() => {
-    if (!useBracketBase || !poolBaseIds) return null;
+    if (!useLegalPreview || !poolBaseIds) return null;
     const summary = summarizePoolSelection(poolTreeItems, humanPoolSelection, poolBaseIds, poolFolderIndex);
     return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
-  }, [useBracketBase, poolTreeItems, humanPoolSelection, poolBaseIds, poolFolderIndex]);
+  }, [useLegalPreview, poolTreeItems, humanPoolSelection, poolBaseIds, poolFolderIndex]);
   const userDeckScanTotal = requiresCompatibilityFilter ? unknownFormatDeckNames.length : 0;
   const userDeckScanCompleted = Math.min(deckScanIndex, userDeckScanTotal);
   const isScanningUserDecks = userDeckScanCompleted < userDeckScanTotal;
@@ -2057,10 +2061,13 @@ export function MyDecks({
               <RandomPoolTree
                 pool="human"
                 items={poolTreeItems}
-                allItems={poolCompleteItems}
+                // Deferred items already are the complete legal universe (as
+                // on the AI side); display items need the search-independent
+                // universe for total folder toggles.
+                allItems={useLegalPreview ? undefined : poolCompleteItems}
                 baseIds={poolBaseIds}
                 showBracketFilter={
-                  useBracketBase && isCommanderFamilyFormat(selectedFormatForCompatibility ?? undefined)
+                  useLegalPreview && isCommanderFamilyFormat(selectedFormatForCompatibility ?? undefined)
                 }
               />
             )}

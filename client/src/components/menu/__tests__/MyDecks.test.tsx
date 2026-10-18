@@ -22,6 +22,7 @@ import {
   STORAGE_KEY_PREFIX,
 } from "../../../constants/storage";
 import type { ParsedDeck } from "../../../services/deckParser";
+import type { AiDeckCandidate } from "../../../services/aiDeckCatalog";
 import type { CommanderBracket } from "../../../types/bracket";
 import {
   awaitSavedDeckLibraryIdle,
@@ -109,6 +110,18 @@ function compatibleBatch(decks: Array<{ name: string }>) {
     color_identity: ["U"],
     color_distribution: [],
   }]));
+}
+
+function legalCandidate(name: string, bracket: CommanderBracket | null): AiDeckCandidate {
+  return {
+    id: savedDeckCatalogId(name),
+    name,
+    source: { type: "saved" },
+    deck: { main: [], sideboard: [] } as ParsedDeck,
+    coveragePct: null,
+    archetype: null,
+    bracket,
+  };
 }
 
 describe("MyDecks", () => {
@@ -1376,7 +1389,7 @@ describe("MyDecks", () => {
     );
   });
 
-  it("restricts the human pool preview by cedhMode even when every seat is Medium", async () => {
+  it("restricts the human pool preview by cedhMode even when every seat is Medium, ignoring search", async () => {
     saveDeck("Bracket Two", { main: [{ name: "Island", count: 99 }], sideboard: [], format: "Commander" } as ParsedDeck);
     saveDeck("Bracket Five", { main: [{ name: "Swamp", count: 99 }], sideboard: [], format: "Commander" } as ParsedDeck);
     vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
@@ -1413,7 +1426,7 @@ describe("MyDecks", () => {
           activeDeckName={null}
           onSelectDeck={vi.fn()}
           randomSelectionMode="defer"
-          aiBrackets={new Map([[twoId, 2], [fiveId, 5]])}
+          aiLegalCatalog={[legalCandidate("Bracket Two", 2), legalCandidate("Bracket Five", 5)]}
         />,
       );
 
@@ -1424,6 +1437,22 @@ describe("MyDecks", () => {
       // bracket-2 pick cannot survive the cEDH bracket-5 draw base.
       expect(screen.getAllByText(/None of the 1 selected/)).toHaveLength(2);
       expect(within(screen.getByRole("status")).getByText(/your random deck/)).toBeInTheDocument();
+
+      // Both legal decks are in the pool universe before the search …
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      await userEvent.click(screen.getByRole("button", { name: /Unfiled 1 of 2/ }));
+      expect(screen.getByRole("checkbox", { name: "Bracket Two" })).toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Bracket Five" })).toBeInTheDocument();
+
+      // … and searching narrows only the tiles: the deferred pool still
+      // resolves from the full legal catalog, so the warning to the real
+      // bracket-5 base is retained instead of collapsing onto the subset.
+      await userEvent.type(screen.getByPlaceholderText(/Search decks/), "Bracket Two");
+      expect(screen.getByRole("button", { name: "Bracket Two 99 cards" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Bracket Five 99 cards" })).not.toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Bracket Five" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Your random pool 1 of 2.*0 playable/ })).toBeInTheDocument();
+      expect(screen.getAllByText(/None of the 1 selected/)).toHaveLength(2);
     } finally {
       act(() => {
         usePreferencesStore.setState(restore);
@@ -1461,7 +1490,7 @@ describe("MyDecks", () => {
           activeDeckName={null}
           onSelectDeck={vi.fn()}
           randomSelectionMode="defer"
-          aiBrackets={new Map<string, CommanderBracket | null>([[standardId, null]])}
+          aiLegalCatalog={[legalCandidate("Standard Deck", null)]}
         />,
       );
 

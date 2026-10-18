@@ -117,10 +117,6 @@ export function GameSetupPage() {
     selectedFormat: formatConfig?.format,
     selectedMatchType: effectiveMatchType,
   });
-  const aiBrackets = useMemo(
-    () => new Map(aiCatalog.candidates.map((candidate) => [candidate.id, candidate.bracket] as const)),
-    [aiCatalog.candidates],
-  );
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(selectedFormat);
@@ -374,7 +370,7 @@ export function GameSetupPage() {
             randomSelectionMode="defer"
             bare
             onActiveDeckCompatChange={setSelectedCompat}
-            aiBrackets={aiCatalog.loading ? undefined : aiBrackets}
+            aiLegalCatalog={aiCatalog.loading ? undefined : aiCatalog.candidates}
           />
 
           {/* Sidebar */}
