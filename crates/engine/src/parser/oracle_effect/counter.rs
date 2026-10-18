@@ -7,9 +7,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
-    DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, FilterProp, MultiTargetSpec,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+    ChosenCounterCountCondition, Comparator, CounterAdjustment, CounterMoveSelection,
+    CounterTransferMode, DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount,
+    FilterProp, MultiTargetSpec, ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -29,6 +29,100 @@ use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
 use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
 use crate::parser::oracle_ir::ast::replace_fixed_quantity;
+
+/// CR 122.1 + CR 608.2c: one counter instruction with two alternative
+/// operations. Both legs share the ordinary count, kind and recipient atoms.
+/// A recognized disjunction that cannot be consumed stays a complete strict gap.
+pub(super) fn try_parse_specified_counter_adjustment(
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<
+    Result<
+        (
+            crate::types::counter::CounterMatch,
+            QuantityExpr,
+            TargetFilter,
+        ),
+        (),
+    >,
+> {
+    fn operation(i: &str) -> OracleResult<'_, CounterAdjustment> {
+        alt((
+            value(CounterAdjustment::Add, tag("put ")),
+            value(CounterAdjustment::Remove, tag("remove ")),
+        ))
+        .parse(i)
+    }
+    fn leg(
+        i: &str,
+        ctx: &mut ParseContext,
+        inherited: Option<&CounterType>,
+    ) -> Option<(CounterAdjustment, CounterType, QuantityExpr, TargetFilter)> {
+        let (rest, add) = operation(i).ok()?;
+        let (count, rest) = parse_count_expr(rest)?;
+        if count.is_up_to() {
+            return None;
+        }
+        let explicit = nom_primitives::parse_counter_type_typed(rest)
+            .ok()
+            .and_then(|(tail, kind)| {
+                alt((tag::<_, _, OracleError<'_>>(" counters"), tag(" counter")))
+                    .parse(tail)
+                    .ok()
+                    .map(|(tail, _)| (tail, kind))
+            });
+        let (rest, kind) = match explicit {
+            Some(parsed) => parsed,
+            None => (rest, inherited?.clone()),
+        };
+        let (recipient, _) =
+            tag::<_, _, OracleError<'_>>(if matches!(add, CounterAdjustment::Add) {
+                "on "
+            } else {
+                "from "
+            })
+            .parse(rest.trim_start())
+            .ok()?;
+        let (target, remainder, multi) =
+            resolve_counter_placement_target(recipient, recipient, recipient, ctx);
+        if multi.is_some()
+            || !super::imperative::terminal_punctuation_only(remainder)
+            || matches!(target, TargetFilter::Any | TargetFilter::None)
+        {
+            return None;
+        }
+        Some((add, kind, count, target))
+    }
+    operation(lower).ok()?;
+    let (second, first) = terminated(take_until::<_, _, OracleError<'_>>(" or "), tag(" or "))
+        .parse(lower)
+        .ok()?;
+    // Only operation disjunctions belong here; target phrases can contain "or".
+    operation(second).ok()?;
+    let mut local = ctx.clone();
+    let Some((add, kind, count, target)) = leg(first, &mut local, None) else {
+        return Some(Err(()));
+    };
+    let referent = if target.is_context_ref() {
+        target.clone()
+    } else {
+        TargetFilter::ParentTarget
+    };
+    local.object_pronoun_ref = Some(referent.clone());
+    let Some((other_add, other_kind, other_count, other_target)) =
+        leg(second, &mut local, Some(&kind))
+    else {
+        return Some(Err(()));
+    };
+    if add == other_add || kind != other_kind || count != other_count || other_target != referent {
+        return Some(Err(()));
+    }
+    Some(Ok((
+        crate::types::counter::CounterMatch::OfType(kind),
+        count,
+        target,
+    )))
+}
 
 /// Check if text starts with a self-reference: "this ", "~"
 fn is_self_ref(text: &str) -> bool {
@@ -4506,5 +4600,70 @@ mod tests {
         assert_eq!(ctx.diagnostics, expected);
         resolve_remove_counter_from_target("among all permanents", &mut ctx);
         assert_eq!(ctx.diagnostics, expected, "push_diagnostic deduplicates");
+    }
+}
+
+#[cfg(test)]
+mod mandatory_adjustment_shape_tests {
+    use super::*;
+    #[test]
+    fn specified_two_leg_grammar_consumes_both_orders_and_refuses_mismatches() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        for kind in ["charge", "oil", "+1/+1"] {
+            for text in [
+                format!("put a {kind} counter on it or remove one from it."),
+                format!("remove a {kind} counter from it or put one on it."),
+            ] {
+                let (matcher, count, target) = try_parse_specified_counter_adjustment(&text, &ctx)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    matcher,
+                    crate::types::counter::CounterMatch::OfType(parse_counter_type(kind))
+                );
+                assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(target, TargetFilter::SelfRef);
+            }
+        }
+        let good = "put x charge counters on target creature or remove x charge counters from it";
+        let (_, count, target) = try_parse_specified_counter_adjustment(good, &ctx)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { .. }
+            }
+        ));
+        assert!(!target.is_context_ref());
+        for bad in [
+            "put a charge counter on it or remove two from it",
+            "put a charge counter on it or remove an oil counter from it",
+            "put a charge counter on target creature or remove one from ~",
+            "put a charge counter on it or remove one from it and draw a card",
+        ] {
+            assert!(
+                try_parse_specified_counter_adjustment(bad, &ctx)
+                    .unwrap()
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            ctx.object_pronoun_ref.is_none(),
+            "failed alternatives never write shared context"
+        );
+        assert!(
+            try_parse_specified_counter_adjustment("put a charge counter on it", &ctx).is_none()
+        );
+        assert!(try_parse_put_counter(
+            "put a charge counter on it",
+            "put a charge counter on it",
+            &mut ctx.clone()
+        )
+        .is_some());
     }
 }

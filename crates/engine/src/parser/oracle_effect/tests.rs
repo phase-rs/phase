@@ -66711,6 +66711,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
 /// its invariant is over the lowered tree, not over this list.
 fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
     match effect {
+        Effect::ChooseCounterAdjustment { target, .. } => filter_has_chosen_color(target),
         Effect::BounceAll { target, .. }
         | Effect::DestroyAll { target, .. }
         | Effect::DamageAll { target, .. } => filter_has_chosen_color(target),
@@ -66795,7 +66796,6 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::PutChosenCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
-        | Effect::ChooseCounterAdjustment { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }

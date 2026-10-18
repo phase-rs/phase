@@ -2354,6 +2354,25 @@ pub(super) fn counter_removal_targets(
 }
 
 /// Resolve targeting to object IDs using the typed TargetFilter.
+/// CR 400.7: ordinary chosen-counter recipients honor both positional pins
+/// and the delayed keyed pins. Raw-target fallback predicates remain upstream.
+fn current_chosen_counter_objects(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter_map(|(index, target)| {
+            let TargetRef::Object(id) = target else {
+                return None;
+            };
+            (ability.target_occurrence_is_current(index, state)
+                && ability.target_pin_is_current(*id, state)
+                && state.objects.contains_key(id))
+            .then_some(*id)
+        })
+        .collect()
+}
+
 pub(super) fn resolve_defined_or_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -2508,14 +2527,7 @@ pub(super) fn resolve_defined_or_targets(
     // player. The object guard deliberately excludes the chooser-only target
     // bookkeeping used by `ChooseOneOf` branches above.
     if matches!(target_spec, Some(TargetFilter::ParentTarget)) && has_object_target {
-        return ability
-            .live_object_targets(state)
-            .into_iter()
-            .filter_map(|target| match target {
-                TargetRef::Object(id) => Some(id),
-                TargetRef::Player(_) => None,
-            })
-            .collect();
+        return current_chosen_counter_objects(state, ability);
     }
 
     if let Some(filter) = target_spec {
@@ -2561,17 +2573,7 @@ pub(super) fn resolve_defined_or_targets(
     // here with the returned card in `targets`. She is correct only because the
     // pin is never STAMPED for her (her condition names the referent's own
     // entry) — not because this read is exempted.
-    ability
-        .live_object_targets(state)
-        .into_iter()
-        .filter_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(id)
-            } else {
-                None
-            }
-        })
-        .collect()
+    current_chosen_counter_objects(state, ability)
 }
 
 /// CR 122.5 / CR 122.8: Read counters from source and transfer them to target.
@@ -9268,5 +9270,62 @@ mod tests {
             "CR 608.2k: an undeparted cost-paid referent is still the counter \
              subject, and the inherited parent target does not displace it"
         );
+    }
+
+    #[test]
+    fn ordinary_chosen_counter_reader_checks_positional_and_delayed_pins_before_fallback() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Recipient".into(),
+            Zone::Battlefield,
+        );
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::SpecificObject { id: target },
+        ] {
+            let mut ability = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Time,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: filter,
+                },
+                vec![TargetRef::Object(target)],
+                source,
+                PlayerId(0),
+            );
+            assert_eq!(
+                resolve_defined_or_targets(&state, &ability),
+                vec![target],
+                "legacy unpinned live target"
+            );
+            let pin = ObjectIncarnationRef::from_object(&state.objects[&target]);
+            ability.replace_target_occurrences(vec![(TargetRef::Object(target), Some(pin))]);
+            assert_eq!(resolve_defined_or_targets(&state, &ability), vec![target]);
+            state.objects.get_mut(&target).unwrap().incarnation += 1;
+            assert!(
+                resolve_defined_or_targets(&state, &ability).is_empty(),
+                "stale chosen authority cannot become a source fallback"
+            );
+            ability.replace_target_occurrences(vec![(TargetRef::Object(target), None)]);
+            assert_eq!(resolve_defined_or_targets(&state, &ability), vec![target]);
+            ability.target_incarnations = vec![pin];
+            assert!(
+                resolve_defined_or_targets(&state, &ability).is_empty(),
+                "delayed keyed pin remains independently authoritative"
+            );
+            ability.target_incarnations =
+                vec![ObjectIncarnationRef::from_object(&state.objects[&target])];
+            assert_eq!(resolve_defined_or_targets(&state, &ability), vec![target]);
+        }
     }
 }

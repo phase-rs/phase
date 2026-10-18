@@ -1074,7 +1074,8 @@ pub struct TournamentRequestId(pub u64);
 /// Old typed peers cannot decode this tag inside GameState/card definitions.
 /// 145: current token-creation frames and private resolved copy-source tails require resolution wire 6.
 /// 146: typed revealed results and exact queued original origins require resolution wire 7.
-pub const PROTOCOL_VERSION: u32 = 146;
+/// 147: specified-kind and exact-recipient mandatory counter-adjustment capability.
+pub const PROTOCOL_VERSION: u32 = 147;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2331,7 +2332,7 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 146);
+        assert_eq!(PROTOCOL_VERSION, 147);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact

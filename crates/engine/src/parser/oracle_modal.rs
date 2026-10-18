@@ -1207,6 +1207,27 @@ fn modal_relative_player_scope_for_trigger(trigger: &TriggerIr) -> Option<Contro
     }
 }
 
+/// An unmodeled action-specific reflexive cannot become a plain modal when
+/// replacing its parent body. CR 603.12 + CR 608.2c require both instructions.
+fn terminal_action_reflexive(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let mut sentence = lower.as_str();
+    while let Ok((remaining, _)) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". ")).parse(sentence)
+    {
+        sentence = remaining;
+    }
+    let parsed: OracleResult<'_, _> = (
+        tag("when "),
+        take_until(" this way"),
+        tag(" this way"),
+        opt(tag(",")),
+        nom::combinator::eof,
+    )
+        .parse(sentence.trim());
+    parsed.is_ok()
+}
+
 pub(crate) fn lower_oracle_block_ir(
     block: OracleBlockAst,
     card_name: &str,
@@ -1252,7 +1273,33 @@ pub(crate) fn lower_oracle_block_ir(
                 &mut trigger_ctx,
             );
             ctx.diagnostics.extend(trigger_ctx.diagnostics);
+            let unsupported_reflexive =
+                reflexive_parent.is_none() && terminal_action_reflexive(&trigger_line);
+            let full_fragment = format!(
+                "{trigger_line}, {}\n{}",
+                header.raw,
+                modes
+                    .iter()
+                    .map(|mode| mode.source_text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
             for trigger in &mut triggers {
+                if unsupported_reflexive {
+                    trigger.body = Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                        &full_fragment,
+                        AbilityKind::Spell,
+                        parsed_clause(Effect::unimplemented(
+                            "counter_action_reflexive",
+                            &full_fragment,
+                        )),
+                        None,
+                        None,
+                        true,
+                    )));
+                    continue;
+                }
+
                 // CR 603.4: a trailing "if <guard>" left on the trigger line that
                 // did not hoist would be silently dropped when the modal payload
                 // replaces the body; fail the trigger closed instead.
@@ -5972,5 +6019,35 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    #[test]
+    fn unsupported_action_reflexive_guard_preserves_recognized_modal_routes() {
+        assert!(terminal_action_reflexive("Whenever this creature enters, put a charge counter on it or remove one from it. When you remove a counter this way"));
+        assert!(!terminal_action_reflexive("Whenever this creature attacks"));
+        assert!(!terminal_action_reflexive(
+            "When this creature enters, exile another card from a graveyard. When you do"
+        ));
+        for (index,text) in [
+            "Whenever this creature attacks, choose one —\n• Draw a card.\n• You gain 1 life.",
+            "When this creature enters, exile another card from a graveyard. When you do, choose one —\n• Draw a card.\n• You gain 2 life.",
+            "Whenever this creature attacks, you may sacrifice another creature. When you do, choose one —\n• Draw a card.\n• You gain 2 life.",
+        ].into_iter().enumerate() {
+            let parsed=parse_oracle_text(text,"Synthetic modal control",&[],&["Creature".into()],&[]);
+            let execute=parsed.triggers.first().and_then(|t|t.execute.as_deref()).expect("recognized trigger");
+            assert!(!matches!(execute.effect.as_ref(),Effect::Unimplemented { .. }),"{execute:?}");
+            match index {
+                0 => {assert!(matches!(execute.effect.as_ref(),Effect::GenericEffect { .. }));assert_eq!(execute.mode_abilities.len(),2);},
+                1 | 2 => {
+                    if index==1 {assert!(matches!(execute.effect.as_ref(),Effect::ChangeZone { .. }));assert!(!execute.optional);}
+                    else {assert!(matches!(execute.effect.as_ref(),Effect::Sacrifice { .. }));assert!(execute.optional);}
+                    let modal=execute.sub_ability.as_deref().expect("reflexive modal owner");
+                    assert_eq!(modal.condition,Some(AbilityCondition::WhenYouDo));assert_eq!(modal.mode_abilities.len(),2);
+                },
+                _ => unreachable!(),
+            }
+            // allow-noncombinator: test assertion over serialized output, not parser dispatch.
+            assert!(!serde_json::to_string(execute).unwrap().contains("counter_action_reflexive"));
+        }
     }
 }

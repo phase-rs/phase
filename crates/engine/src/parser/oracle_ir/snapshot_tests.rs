@@ -4164,3 +4164,47 @@ fn craterous_prior_controller_source_and_lowered() {
     insta::assert_json_snapshot!("craterous_prior_controller_ir", &ir);
     insta::assert_json_snapshot!("craterous_prior_controller_lowered", &lowered);
 }
+
+#[test]
+fn jev_mandatory_counter_adjustment_two_layers() {
+    // SHAPE. Snapshot materialization is reserved for the combined candidate.
+    let parent="Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it.";
+    let full="Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
+    let (parent_ir, parent_lowered) =
+        parse_two_layer(parent, "Immard, the Stormcleaver", &["Creature"], &[]);
+    assert_eq!(parent_ir.source_text, parent);
+    assert!(!parent_lowered.triggers.is_empty());
+    assert!(parent_lowered.triggers.iter().all(|t| matches!(
+        t.execute.as_ref().unwrap().effect.as_ref(),
+        Effect::ChooseCounterAdjustment { .. }
+    )));
+    let (full_ir, full_lowered) =
+        parse_two_layer(full, "Immard, the Stormcleaver", &["Creature"], &[]);
+    assert_eq!(full_ir.source_text, full);
+    assert!(
+        !full_lowered.triggers.is_empty(),
+        "modal block must reach trigger route"
+    );
+    for trigger in &full_lowered.triggers {
+        let effect = trigger.execute.as_ref().unwrap().effect.as_ref();
+        let Effect::Unimplemented { description, .. } = effect else {
+            panic!("unfinished actual-removal reflexive must remain strict: {effect:?}")
+        };
+        for fragment in [
+            "put a charge counter",
+            "When you remove a counter this way",
+            "Immard deals 4 damage",
+            "Immard gains lifelink",
+        ] {
+            assert!(description.contains(fragment), "{description}");
+        }
+    }
+    insta::assert_json_snapshot!(
+        "jev_mandatory_counter_adjustment_ir",
+        (&parent_ir, &full_ir)
+    );
+    insta::assert_json_snapshot!(
+        "jev_mandatory_counter_adjustment_lowered",
+        (&parent_lowered, &full_lowered)
+    );
+}

@@ -18433,34 +18433,24 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 122.1 + CR 608.2d (Clockspinning): The controller chooses one kind of
-    /// counter currently on the single target permanent or suspended card, then
-    /// — per `adjustment` — adds and/or removes `count` of that chosen kind. The
-    /// counter kind is chosen at resolution from the kinds actually present on
-    /// the target (CR 122.1 + CR 702.62b: a counter is a marker that can sit on
-    /// a card outside the battlefield, so a suspended card's time counters are
-    /// eligible).
-    ///
-    /// This effect has NO cast-time target slot of its own: the single target is
-    /// supplied by the parent `TargetOnly` clause through the propagated
-    /// `ability.targets` chain, exactly like `Effect::ChooseOneOf`. It is
-    /// therefore registered in the slot-less (`None`) groups of `target_filter`,
-    /// `count_expr`, and `count_expr_mut` alongside `ChooseOneOf`, and carries no
-    /// `target` field.
-    ///
-    /// CR 608.2d: a player can't choose an impossible option, so if the target
-    /// bears no counters there is no kind to choose and the effect does nothing
-    /// (Clockspinning Gatherer ruling: "if the chosen permanent or card has no
-    /// counters, nothing happens"). Resolution builds a flat `Effect::ChooseOneOf`
-    /// of concrete `PutCounter`/`RemoveCounter` branches (one per present kind ×
-    /// allowed operation), so the counter change dispatches onto the existing
-    /// counter resolvers and reuses the whole `ChooseOneOfBranch` interactive
-    /// surface. This is the choose-ONE-kind sibling of the
-    /// `repeat_for: DistinctCounterKindsAmong` for-EACH-kind loop.
+    /// CR 122.1 + CR 608.2d: choose a mandatory counter operation on one recipient.
+    /// `Any` first chooses one kind currently present; `OfType` specifies the
+    /// kind even when absent. Context recipients create no announced target slot.
+    /// Resolution binds the count and delegates ordinary counter branches.
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
+        #[serde(
+            default = "default_counter_match_any",
+            skip_serializing_if = "is_counter_match_any"
+        )]
+        counters: CounterMatch,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(
+            default = "default_target_filter_parent",
+            skip_serializing_if = "is_counter_adjustment_parent"
+        )]
+        target: TargetFilter,
     },
     /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
     /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
@@ -21263,6 +21253,17 @@ fn default_target_filter_exiled_by_source() -> TargetFilter {
     TargetFilter::ExiledBySource
 }
 
+// Legacy adjustment payloads choose one present kind (CR 122.1).
+fn default_counter_match_any() -> CounterMatch {
+    CounterMatch::Any
+}
+fn is_counter_match_any(value: &CounterMatch) -> bool {
+    matches!(value, CounterMatch::Any)
+}
+fn is_counter_adjustment_parent(value: &TargetFilter) -> bool {
+    matches!(value, TargetFilter::ParentTarget)
+}
+
 /// CR 608.2c: default for continuation effects whose target is inherited from
 /// the parent ability (e.g. `Effect::HideawayConceal`).
 fn default_target_filter_parent() -> TargetFilter {
@@ -23067,6 +23068,7 @@ impl Effect {
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
             | Effect::RemoveCounter { target, .. }
+            | Effect::ChooseCounterAdjustment { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -23571,11 +23573,6 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            // CR 122.1 + CR 608.2d: ChooseCounterAdjustment is slot-less like
-            // ChooseOneOf — its single target arrives via the propagated
-            // `ability.targets` chain, not a cast-time slot, so it must NOT be
-            // surfaced by `collect_target_slots`.
-            | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
@@ -23694,6 +23691,7 @@ impl Effect {
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
             | Effect::RemoveCounter { target, .. }
+            | Effect::ChooseCounterAdjustment { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -24018,7 +24016,6 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
@@ -44881,5 +44878,53 @@ mod sought_result_serde_tests {
             .remove("declares_return_result");
         let legacy: AbilityDefinition = serde_json::from_value(historical).unwrap();
         assert!(legacy.reads_return_result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod mandatory_counter_adjustment_serde_tests {
+    use super::*;
+    #[test]
+    fn current_and_legacy_adjustment_defaults_accessors_and_count_ownership() {
+        let mut legacy: Effect = serde_json::from_value(
+            serde_json::json!({"type":"ChooseCounterAdjustment","adjustment":"AddOrRemove"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            &legacy,
+            Effect::ChooseCounterAdjustment {
+                counters: CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+        let omitted = serde_json::to_value(&legacy).unwrap();
+        assert!(omitted.get("counters").is_none());
+        assert!(omitted.get("target").is_none());
+        *legacy.target_filter_mut().unwrap() = TargetFilter::SelfRef;
+        assert_eq!(legacy.target_filter(), Some(&TargetFilter::SelfRef));
+        assert!(legacy.count_expr().is_none());
+        assert!(legacy.count_expr_mut().is_none());
+        let current = Effect::ChooseCounterAdjustment {
+            adjustment: CounterAdjustment::AddOrRemove,
+            counters: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                "charge".into(),
+            )),
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::SelfRef,
+        };
+        assert_eq!(
+            serde_json::from_str::<Effect>(&serde_json::to_string(&current).unwrap()).unwrap(),
+            current
+        );
+        for invalid in [
+            serde_json::json!({"type":"Unknown"}),
+            serde_json::json!({"type":"OfType","data":42}),
+        ] {
+            let mut raw = serde_json::to_value(&current).unwrap();
+            raw["counters"] = invalid;
+            assert!(serde_json::from_value::<Effect>(raw).is_err());
+        }
     }
 }

@@ -3150,6 +3150,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             d.push(("token".into(), desc));
         }
+        Effect::ChooseCounterAdjustment { adjustment, counters, count, target } => {
+            d.push(("adjustment".into(), format!("{adjustment:?}")));
+            d.push(("counters".into(), format!("{counters:?}")));
+            d.push(("count".into(), fmt_quantity(count)));
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::PutCounter {
             counter_type,
             count,
@@ -4413,7 +4419,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::EachPlayerCopyChosen { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::ChooseCounterAdjustment { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize => {}
     }
@@ -22601,5 +22606,22 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             items.is_empty(),
             "modeled tree must emit no unsupported item"
         );
+    }
+
+    #[test]
+    fn mandatory_adjustment_details_report_all_parameter_axes() {
+        let effect = Effect::ChooseCounterAdjustment {
+            adjustment: crate::types::ability::CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("charge".into()),
+            ),
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::SelfRef,
+        };
+        let details = effect_details(&effect);
+        for key in ["adjustment", "counters", "count", "target"] {
+            assert!(details.iter().any(|(k, _)| k == key));
+        }
+        assert!(details.iter().any(|(_, value)| value.contains("charge")));
     }
 }

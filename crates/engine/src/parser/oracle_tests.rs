@@ -35202,3 +35202,39 @@ fn prior_controller_malformed_quote_public_document_remains_unsupported() {
         );
     }
 }
+
+#[test]
+fn mandatory_counter_adjustment_parent_and_legacy_axes_shape() {
+    use crate::types::ability::{CounterAdjustment, QuantityExpr, TargetFilter};
+    use crate::types::counter::CounterMatch;
+    let text="Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it.";
+    let parsed = parse_oracle_text(
+        text,
+        "Immard, the Stormcleaver",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 2);
+    for trigger in &parsed.triggers {
+        let def = trigger.execute.as_deref().expect("mandatory parent");
+        assert!(
+            matches!(def.effect.as_ref(),Effect::ChooseCounterAdjustment { adjustment:CounterAdjustment::AddOrRemove,counters:CounterMatch::OfType(crate::types::counter::CounterType::Generic(kind)),count:QuantityExpr::Fixed { value:1 },target:TargetFilter::SelfRef } if kind=="charge")
+        );
+        assert!(def.sub_ability.is_none());
+    }
+    for text in [
+        "Put another of those counters on it.",
+        "Remove that counter from it.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic legacy", &[], &["Instant".into()], &[]);
+        assert!(matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::ChooseCounterAdjustment {
+                counters: CounterMatch::Any,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+    }
+}

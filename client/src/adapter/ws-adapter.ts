@@ -877,7 +877,8 @@ export class NativeEngineVersionMismatchError extends Error {
 // 144: TargetFilter.CastingSpell is serialized inside full GameState.
 // 145: current token-creation frames and private copy-source tails use resolution wire 6.
 // 146: typed revealed results and exact queued original origins use resolution wire 7.
-export const PROTOCOL_VERSION = 146;
+// 147: mandatory specified-kind/exact-recipient counter adjustment.
+export const PROTOCOL_VERSION = 147;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

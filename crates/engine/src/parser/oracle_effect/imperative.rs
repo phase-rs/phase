@@ -16194,6 +16194,29 @@ pub(super) fn parse_zone_counter_ast<'a>(
     if let Some(ast) = parse_counter_ast(text, lower) {
         return Some(Ok(ast));
     }
+    if let Some(parsed) = super::counter::try_parse_specified_counter_adjustment(lower, ctx) {
+        return Some(
+            parsed
+                .map(|(counters, count, target)| {
+                    ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                        adjustment: CounterAdjustment::AddOrRemove,
+                        counters,
+                        count,
+                        target,
+                    }
+                })
+                .map_err(|()| text),
+        );
+    }
+    // Legacy anaphoric add-only and remove forms precede generic counter parsing.
+    if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
+        return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+            adjustment,
+            counters: crate::types::counter::CounterMatch::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        }));
+    }
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
@@ -16340,18 +16363,6 @@ pub(super) fn parse_zone_counter_ast<'a>(
     // would drop them to `Unimplemented`. `parse_counter_anaphor` (the shared
     // anaphor authority in counter.rs) recognizes that surface against the
     // post-"remove " remainder so it reaches `try_parse_remove_counter`.
-    // CR 122.1 + CR 608.2d (Clockspinning sentence 2): "remove that counter ...
-    // or put another of those counters on it" — the controller chooses, at
-    // resolution, a kind of counter present on the established target and adds OR
-    // removes one of it. Must run BEFORE the generic `tag("remove ")` gate below
-    // so this anaphoric add-or-remove clause is captured here rather than failing
-    // through `try_parse_remove_counter`. The combinator returns `None` for every
-    // other "remove …" clause, leaving the existing remove path unchanged.
-    if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
-        return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
-            adjustment,
-        }));
-    }
     if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
         let is_counter_remove = nom_primitives::scan_contains(lower, "counter")
             || nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some();
@@ -16566,15 +16577,17 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         },
-        // CR 122.1 + CR 608.2d: the kind/op choice happens at resolution; the
-        // target arrives via the parent `TargetOnly` chain, so this effect carries
-        // no target slot. `count` is one per the printed "another"/"that counter".
-        ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment } => {
-            Effect::ChooseCounterAdjustment {
-                adjustment,
-                count: QuantityExpr::Fixed { value: 1 },
-            }
-        }
+        ZoneCounterImperativeAst::ChooseCounterAdjustment {
+            adjustment,
+            counters,
+            count,
+            target,
+        } => Effect::ChooseCounterAdjustment {
+            adjustment,
+            counters,
+            count,
+            target,
+        },
         ZoneCounterImperativeAst::MoveCounters {
             source,
             counter_type,
@@ -28874,5 +28887,44 @@ mod jev_seek_imperative_tests {
         ));
         let bad = "seek two cards that each share a color with one or more mysteries you control";
         assert!(parse_search_and_creation_ast(bad, bad, &mut ctx).is_none());
+    }
+
+    #[test]
+    fn mandatory_counter_family_lowers_every_axis_and_keeps_single_operations() {
+        use crate::types::counter::CounterMatch;
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        let text = "put a charge counter on it or remove one from it";
+        let ast = parse_zone_counter_ast(text, text, &mut ctx)
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(lower_zone_counter_ast(ast),Effect::ChooseCounterAdjustment { counters:CounterMatch::OfType(CounterType::Generic(kind)),target:TargetFilter::SelfRef,count:QuantityExpr::Fixed { value:1 },adjustment:CounterAdjustment::AddOrRemove } if kind=="charge")
+        );
+        for text in [
+            "put a charge counter on it",
+            "remove a charge counter from it",
+        ] {
+            let ast = parse_zone_counter_ast(text, text, &mut ctx)
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                lower_zone_counter_ast(ast),
+                Effect::PutCounter { .. } | Effect::RemoveCounter { .. }
+            ));
+        }
+        for bad in [
+            "put a charge counter on it or remove two from it",
+            "put a charge counter on it or remove an oil counter from it",
+        ] {
+            assert_eq!(
+                parse_zone_counter_ast(bad, bad, &mut ctx)
+                    .unwrap()
+                    .unwrap_err(),
+                bad
+            );
+        }
     }
 }

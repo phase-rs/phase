@@ -3289,7 +3289,8 @@ fn legacy_effect(x: &Effect) -> bool {
                     .is_some_and(|condition| legacy_quantity_expr(&condition.rhs))
                 || legacy_target_filter(target)
         }
-        Effect::ChooseCounterAdjustment { count, .. } => legacy_quantity_expr(count),
+        Effect::ChooseCounterAdjustment { adjustment: _, counters: _, count, target } =>
+            legacy_quantity_expr(count) || legacy_target_filter(target),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             legacy_effect(replacement_effect)
         }
@@ -4776,12 +4777,11 @@ fn rw_effect(
             }
             (p, sc)
         }
-        // CR 122.1 + CR 608.2d: slot-less counter adjustment reads/writes the
-        // propagated parent target at resolution, then delegates through a
-        // runtime-built ChooseOneOf. Until this profiler can recover that parent
-        // target scope, model it conservatively.
-        Effect::ChooseCounterAdjustment { count, .. } => {
+        // CR 122.1 + CR 608.2d: runtime-built branches remain conservative;
+        // the authored recipient and quantity still contribute their reads.
+        Effect::ChooseCounterAdjustment { adjustment: _, counters: _, count, target } => {
             let mut p = RwProfile::conservative();
+            p.merge(rw_target_filter(target));
             p.merge(rw_quantity_expr(count));
             (p, None)
         }
@@ -9892,5 +9892,34 @@ mod sought_reader_rw_tests {
             crate::types::player::PlayerId(0),
         );
         assert!(!ability_rw_profile(&unbound).reads_member_bound());
+    }
+
+    #[test]
+    fn mandatory_adjustment_recipient_legacy_and_rw_axes_are_consumed() {
+        let effect = |target| Effect::ChooseCounterAdjustment {
+            adjustment: crate::types::ability::CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("charge".into()),
+            ),
+            count: QuantityExpr::Fixed { value: 1 },
+            target,
+        };
+        assert!(!legacy_effect(&effect(TargetFilter::SelfRef)));
+        assert!(legacy_effect(&effect(TargetFilter::CostPaidObject)));
+        let (p, _) = rw_effect(&effect(TargetFilter::SelfRef), None, PlayerSpan::None, None);
+        assert!(p.reads_member_bound());
+        assert!(p.reads_board.any());
+        assert!(p.writes_external.any());
+        let (dynamic, _) = rw_effect(
+            &effect(TargetFilter::EventTarget),
+            None,
+            PlayerSpan::None,
+            None,
+        );
+        assert!(dynamic.reads_member_bound());
+        assert!(dynamic.reads_event_live);
+        // The runtime-built branch remains conservatively external, not a proven
+        // event-object write; this axis cannot authorize batch precision.
+        assert!(!dynamic.writes_event_object.any());
     }
 }

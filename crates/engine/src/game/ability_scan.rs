@@ -2216,8 +2216,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::DraftFromSpellbook { .. } => Axes::NONE,
         Effect::ChooseCounterAdjustment {
             adjustment: _,
+            counters: _,
             count,
-        } => scan_quantity_expr(count, mode),
+            target,
+        } => scan_quantity_expr(count, mode).or(scan_target_filter(target, target_ctx, mode)),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             scan_effect(replacement_effect, mode)
         }
@@ -11389,5 +11391,61 @@ mod sought_reader_scan_tests {
             crate::types::player::PlayerId(0),
         );
         assert!(!ability_uses_event_context(&plain));
+    }
+
+    #[test]
+    fn mandatory_adjustment_scans_its_dynamic_recipient_and_count_diagonally() {
+        let effect = |target, count| Effect::ChooseCounterAdjustment {
+            adjustment: crate::types::ability::CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("charge".into()),
+            ),
+            count,
+            target,
+        };
+        for target in [TargetFilter::SelfRef, TargetFilter::ParentTarget] {
+            let e = effect(target, QuantityExpr::Fixed { value: 1 });
+            assert_eq!(
+                effect_target_ctx(&e, ScanMode::LoopFirewall),
+                FilterReadContext::SnapshotOrEvent
+            );
+            let def = AbilityDefinition::new(crate::types::ability::AbilityKind::Spell, e);
+            let resolved = crate::game::ability_utils::build_resolved_from_def(
+                &def,
+                crate::types::identifiers::ObjectId(1),
+                crate::types::player::PlayerId(0),
+            );
+            assert!(crate::game::resolution_prompt::chain_offers_choice(
+                &resolved
+            ));
+        }
+        let plain = scan_effect(
+            &effect(TargetFilter::SelfRef, QuantityExpr::Fixed { value: 1 }),
+            ScanMode::Conservative,
+        );
+        let dynamic = scan_effect(
+            &effect(
+                TargetFilter::CostPaidObject,
+                QuantityExpr::Fixed { value: 1 },
+            ),
+            ScanMode::Conservative,
+        );
+        assert!(!plain.event);
+        assert!(
+            dynamic.event,
+            "recipient payload cannot disappear behind leaf classification"
+        );
+        let quantity = scan_effect(
+            &effect(
+                TargetFilter::SelfRef,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            ),
+            ScanMode::Conservative,
+        );
+        assert!(quantity.event);
     }
 }
