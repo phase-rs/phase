@@ -23981,6 +23981,23 @@ fn battlefield_mover_entry_counters(
     }
 }
 
+/// A declined entry-counter rider stays represented in the chain: as an explicit
+/// `Unimplemented` gap that names the rider, or as a gated entry counter on a
+/// battlefield `ChangeZone` (`conditional_enter_with_counters`). An empty
+/// `enter_with_counters` alone cannot tell a declined rider from a dropped one.
+fn entry_rider_remains_represented(defs: &[&AbilityDefinition]) -> bool {
+    defs.iter().any(|def| match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            conditional_enter_with_counters,
+            ..
+        } => !conditional_enter_with_counters.is_empty(),
+        effect => effect
+            .unimplemented_description()
+            .is_some_and(|text| text.to_lowercase().contains("enters with")),
+    })
+}
+
 /// Like `chain_definitions`, but also descends into a delayed trigger's effect
 /// (Semester's End returns its creatures from a delayed trigger).
 fn chain_definitions_through_delayed(abilities: &[AbilityDefinition]) -> Vec<&AbilityDefinition> {
@@ -24126,6 +24143,10 @@ fn entry_rider_hostile_shapes_do_not_patch_the_mover() {
         assert!(
             movers.iter().all(|counters| counters.is_empty()),
             "{label}: a declined rider must not patch the mover, got {abilities:?}"
+        );
+        assert!(
+            entry_rider_remains_represented(&defs),
+            "{label}: a declined rider stays represented as a gap or a gated entry counter, got {abilities:?}"
         );
     }
 
