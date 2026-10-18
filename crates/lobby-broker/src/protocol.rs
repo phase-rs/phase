@@ -61,8 +61,8 @@ pub struct TournamentRequestId(pub u64);
 /// can be refused. See 24.
 ///
 /// 153 — `WardCost::Discard` replaces `DiscardCard` with count, filter and
-///       selection fields. Older full-game/P2P peers cannot decode the tag.
-///       P2P wire 135 moves with this change; lobby-only traffic is unchanged.
+///      selection fields. Older full-game/P2P peers cannot decode the tag.
+///      P2P wire 135 moves with this change; lobby-only traffic is unchanged.
 /// 152 — `ShortcutDecisionSchema` gains `suggested_declaration` (the offer's
 ///      eliminating suggestion) and `leading_aims` (published slots a trigger on
 ///      the stack already targets), and `ShortcutProposal` gains `leading_aims`.

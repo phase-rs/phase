@@ -216,7 +216,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
  * 153 — WardCost.Discard replaces DiscardCard with count, filter and selection.
- *       Older peers cannot decode or render the cost; P2P wire 135 moves with it.
+ *      Older peers cannot decode or render the cost; P2P wire 135 moves with it.
  * 152 — ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
  *      ShortcutProposal gains leading_aims; a v151 peer drops them. Wire 134 moves
  *      with it.
