@@ -697,7 +697,7 @@ fn effect_type_name(effect: &Effect) -> String {
     // (Tap/Untap/TapAll/UntapAll) so per-effect coverage reporting reads the
     // same set as before the collapse. `effect_variant_name` reconstructs them
     // from `(scope, state)`.
-    // K-5: `Effect::FlipCoins` likewise serializes under one tag; the three run labels
+    // `Effect::FlipCoins` likewise serializes under one tag; the three run labels
     // (FlipCoin / FlipCoins / FlipCoinUntilLose) are reconstructed from `flips`.
     if matches!(
         effect,
@@ -3758,7 +3758,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("modifier".into(), label.into()));
             }
         }
-        // K-5: descriptors stay per run mode (R2). `UntilLoss` reports its mode only, as
+        // Descriptors stay per run mode. `UntilLoss` reports its mode only, as
         // the retired `FlipCoinUntilLose` did; `Exactly` reports the count unless it is the
         // single flip, as the retired `FlipCoin` / `FlipCoins` pair did.
         Effect::FlipCoins {
@@ -15663,7 +15663,7 @@ mod tests {
         );
     }
 
-    /// K-5 / V19: `Effect::FlipCoins` serializes under one tag, but the diagnostic labels and
+    /// `Effect::FlipCoins` serializes under one tag, but the diagnostic labels and
     /// detail rows keep the three pre-merge run names and descriptors, reconstructed from
     /// `flips`: no `count` row for the single flip, a `count` row for N flips, and
     /// `mode: until lose` only for the until-loss run.

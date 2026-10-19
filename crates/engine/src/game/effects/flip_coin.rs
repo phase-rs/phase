@@ -227,7 +227,7 @@ enum FlipRunOutcome {
     Suspended,
 }
 
-/// CR 705.1 + CR 705.2: the single cap and run-end authority. Decides whether another flip
+/// CR 705.1 + CR 705.2: the run-end authority, plus the engine's `MAX_FLIPS` safety cap. Decides whether another flip
 /// is owed from `kind`, the position after the last settled flip.
 fn next_step(kind: PendingCoinFlipKind) -> FlipRunStep {
     match kind {
@@ -2021,7 +2021,7 @@ mod tests {
         assert!(reached, "some seed in 0..64 must win at least two flips");
     }
 
-    /// Engine contract (K-9; no printed card has this shape): an `UntilLoss` run's
+    /// Engine contract (no printed card has this shape): an `UntilLoss` run's
     /// `lose_effect` runs as the losing flip settles (CR 705.2), before the owed
     /// `win_effect` rewards are paid (CR 608.2c: the reward instruction follows the
     /// flipping instruction). Win GainLife 1, lose GainLife 7.

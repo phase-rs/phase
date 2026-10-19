@@ -264,7 +264,7 @@ fn payload_mint(payload: &AbilityDefinition) -> Option<PayloadMint> {
             Effect::ExileFromTopUntil { .. } | Effect::ExileTop { .. } => {
                 Some(PayloadMint::SelectedFromZone)
             }
-            // CR 705.1: only the single flip mints a random outcome payload; multi-flip
+            // Only the single flip mints a random outcome payload; multi-flip
             // and until-loss runs keep their pre-merge `None`.
             Effect::FlipCoins { flips, .. } if flips.is_single_flip() => {
                 Some(PayloadMint::RandomOutcome)
@@ -28979,8 +28979,8 @@ fn seat_order_is_unobservable(body: &AbilityDefinition) -> bool {
             | Effect::Token { .. }
             | Effect::Mill { .. }
             | Effect::RevealTop { .. } => true,
-            // CR 705.1: a single coin flip asks no choice. A multi-flip or until-loss
-            // run keeps its pre-merge fail-closed `false`.
+            // A single coin flip keeps its pre-merge membership (no modelled choice); a
+            // multi-flip or until-loss run keeps its pre-merge fail-closed `false`.
             Effect::FlipCoins { flips, .. } => flips.is_single_flip(),
             // CR 701.9b: a random discard asks no choice.
             Effect::Discard { selection, .. } => selection.is_random(),
@@ -38555,7 +38555,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         Effect::RevealFromHand {
             on_decline: None, ..
         } => {}
-        // R1: branch recursion is mode-agnostic (single, N and until-loss runs).
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
         Effect::FlipCoins {
             win_effect,
             lose_effect,

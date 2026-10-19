@@ -1167,7 +1167,7 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
         Effect::AddTargetReplacement { .. } | Effect::CreateDamageReplacement { .. } => {
             return true
         }
-        // R1: branch recursion is mode-agnostic (single, N and until-loss runs).
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
         Effect::FlipCoins {
             win_effect,
             lose_effect,

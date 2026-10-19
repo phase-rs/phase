@@ -13910,6 +13910,8 @@ fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
 ///   for the controller, which is the `flipper` default).
 ///
 /// Idempotent: a current `FlipCoins` always carries `flips`.
+///
+/// A legacy `FlipCoins` whose count is `Fixed 1` (no writer produced one) becomes the single flip.
 fn migrate_legacy_coin_flip_effects(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Array(values) => {
@@ -35684,7 +35686,7 @@ mod tests {
         assert_eq!(persisted, migrated, "the migration is idempotent");
     }
 
-    /// V15: the committed Dina/Conqueror capture holds legacy single `FlipCoin` triggers
+    /// The committed Dina/Conqueror capture holds legacy single `FlipCoin` triggers
     /// (Krark-style objects 191 and 383); restoring it must reach the migration.
     #[test]
     fn committed_dump_coin_flips_restore_as_single_runs() {

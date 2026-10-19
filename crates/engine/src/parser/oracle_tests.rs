@@ -29992,7 +29992,7 @@ fn unbound_delayed_graveyard_sweep_stays_honestly_unimplemented() {
 /// that fixture for this pass.
 ///
 /// It plants one refused rider in sixteen carriers — the ability-node chain
-/// links, the two `FlipCoin` payloads, `ChooseOneOf`, a trigger, a granted
+/// links, the two `FlipCoins` payloads, `ChooseOneOf`, a trigger, a granted
 /// ability, a replacement payload, the four cost slots (CR 602.1a activation
 /// cost, CR 118.12 `unless_pay` on both an ability and a trigger, and
 /// `ReplacementMode::MayCost`) and the two decline branches — and asserts every

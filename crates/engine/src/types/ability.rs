@@ -27410,7 +27410,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::LoseTheGame { .. } => "LoseTheGame",
         Effect::WinTheGame { .. } => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
-        // K-5: the card-data label keeps the three pre-merge run names (SetTapState
+        // The card-data label keeps the three pre-merge run names (SetTapState
         // precedent), reconstructed from `flips`.
         Effect::FlipCoins { flips, .. } => match flips {
             CoinFlipRun::UntilLoss => "FlipCoinUntilLose",

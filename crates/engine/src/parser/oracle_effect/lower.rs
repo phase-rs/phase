@@ -4885,7 +4885,7 @@ fn definition_contains_chosen_damage_source_binding(def: &AbilityDefinition) -> 
                 damage_source_filter,
                 Some(TargetFilter::ChosenDamageSource { .. })
             ),
-            // R1: branch recursion is mode-agnostic (single, N and until-loss runs).
+            // Branch recursion is mode-agnostic (single, N and until-loss runs).
             Effect::FlipCoins {
                 win_effect,
                 lose_effect,
@@ -4928,7 +4928,7 @@ fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
         {
             *source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
-        // R1: branch recursion is mode-agnostic (single, N and until-loss runs).
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
         Effect::FlipCoins {
             win_effect,
             lose_effect,

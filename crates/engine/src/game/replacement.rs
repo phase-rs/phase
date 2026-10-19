@@ -4152,9 +4152,9 @@ fn coin_flip_applier(
 
     let new_count = match execute {
         Some(ability) if ability.sub_ability.is_none() => match &*ability.effect {
-            // R2: only a counted multi-flip execute rescales the event; a single flip or an
-            // `UntilLoss` run is not a "flip N coins instead" count (#105's until-loss cap
-            // must not read as one), so both fall to the unchanged `_ => count`.
+            // Only a counted multi-flip execute rescales the event; a single flip or an
+            // `UntilLoss` run is not a "flip N coins instead" count, so both fall to the
+            // unchanged `_ => count`.
             Effect::FlipCoins {
                 flips: flips @ CoinFlipRun::Exactly { count: qty },
                 ..
