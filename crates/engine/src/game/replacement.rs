@@ -7128,8 +7128,9 @@ fn evaluate_replacement_condition(
 /// (`valid_card`, `destination_zone`, `condition`) for a replacement against an
 /// event. Factored from the per-object scan (which runs the same three gates
 /// inline) so the global state-level store can run identical logic for
-/// non-damage events. `source` is the replacement's source object (the sentinel
-/// `ObjectId(0)` for a global install); `source_controller` anchors
+/// non-damage events. `source` is the replacement's host: the anchored installing
+/// source (`ReplacementDefinition::source_object`) for an anchored global install,
+/// else the sentinel `ObjectId(0)`; `source_controller` anchors
 /// controller-relative filters/conditions. Returns `true` when all gates pass.
 fn apply_state_level_gates(
     repl_def: &ReplacementDefinition,
