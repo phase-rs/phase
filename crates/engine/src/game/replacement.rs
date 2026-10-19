@@ -12188,14 +12188,23 @@ pub(crate) fn damage_source_context_coherent(
                     ..
                 }
             ) && ability.source_id == *source_id
-        })
-        .and_then(|ability| ability.trigger_source.as_ref());
+        });
     match context {
         Some(context) => {
             context.identity.reference.object_id == *source_id
-                && owner.is_none_or(|owner| owner.identity == context.identity)
+                && owner
+                    .and_then(|ability| ability.trigger_source.as_ref())
+                    .is_none_or(|owner| owner.identity == context.identity)
         }
-        None => owner.is_none(),
+        // A resolving chain can park a later, differently sourced damage leg.
+        // Its root cannot prove that an absent event carrier was required.
+        // This is the same direct-owner boundary as legacy migration; current
+        // tail-free bound damage still cannot omit its source authority.
+        None => owner.is_none_or(|ability| {
+            ability.trigger_source.is_none()
+                || ability.sub_ability.is_some()
+                || ability.else_ability.is_some()
+        }),
     }
 }
 

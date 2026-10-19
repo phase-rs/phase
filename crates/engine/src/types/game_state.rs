@@ -12697,11 +12697,19 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                 return Err("pending counter removal disagrees with its bound producer".into());
             }
         }
-        if matches!(&pending.proposed, ProposedEvent::RemoveCounter { result_binding: None, .. })
-            && state.resolution_stack.iter().any(|frame|
-                matches!(frame, ResolutionFrame::CounterRemovals(queue) if queue.result_binding.is_some()))
-        {
-            return Err("current bound counter proposal is missing its result ticket".into());
+        if let ProposedEvent::RemoveCounter { result_binding, .. } = &pending.proposed {
+            if result_binding.is_none()
+                && state.resolution_stack.iter().any(|frame| {
+                    matches!(frame, ResolutionFrame::CounterRemovals(queue) if queue.result_binding.is_some())
+                })
+            {
+                return Err("current bound counter proposal is missing its result ticket".into());
+            }
+            if let Some(queue) = state.active_counter_removals() {
+                if queue.in_flight.is_some() && &queue.result_binding != result_binding {
+                    return Err("counter proposal disagrees with its owning queue ticket".into());
+                }
+            }
         }
     }
     if let WaitingFor::ChooseOneOfBranch {
@@ -12737,6 +12745,10 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             ResolutionFrame::CounterRemovals(queue) => {
                 if let Some(binding) = &queue.result_binding {
                     validate_binding(binding)?;
+                } else if counter_reader_waits_for(queue.source_ability_id) {
+                    // The owned reader requires its producer's authority even
+                    // when both optional transport copies were omitted.
+                    return Err("counter-removal queue is missing producer authority".into());
                 }
             }
             ResolutionFrame::ChooseOneOf(pending) => {

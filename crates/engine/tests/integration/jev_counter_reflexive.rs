@@ -771,6 +771,210 @@ fn u13_public_relevant_removal_replacement_pause_reload_and_prevention() {
 }
 
 #[test]
+fn u13_current_removal_pause_requires_both_tickets_from_its_owned_reader() {
+    use engine::types::ability::AbilityCondition;
+    use engine::types::game_state::{
+        InstructionResult, PersistedGameState, TrustedGameStateEnvelope,
+    };
+    use engine::types::resolution::ResolutionFrame;
+
+    for persistence in 0..5 {
+        for mode in [0, 1] {
+            let mut selected = ObjectId(0);
+            let mut f = u13_fixture(IMMARD, 2, |s, source, _| {
+                for (name, modification) in [
+                    (
+                        "Synthetic ticket Double",
+                        QuantityModification::Times { factor: 2 },
+                    ),
+                    (
+                        "Synthetic ticket Minus",
+                        QuantityModification::Minus { value: 1 },
+                    ),
+                ] {
+                    let id = s
+                        .add_creature(P0, name, 2, 2)
+                        .with_replacement_definition(
+                            ReplacementDefinition::new(ReplacementEvent::RemoveCounter)
+                                .valid_card(TargetFilter::SpecificObject { id: source })
+                                .quantity_modification(modification),
+                        )
+                        .id();
+                    if name == "Synthetic ticket Double" {
+                        selected = id;
+                    }
+                }
+            });
+            f.runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+            assert!(matches!(
+                f.runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let queue = f.runner.state().active_counter_removals().unwrap();
+            assert!(queue.in_flight.is_some());
+            let binding = queue.result_binding.as_ref().unwrap();
+            let engine::types::proposed_event::ProposedEvent::RemoveCounter {
+                result_binding: Some(proposed_binding),
+                ..
+            } = &f
+                .runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .proposed
+            else {
+                panic!("genuine bound removal proposal")
+            };
+            assert_eq!(proposed_binding, binding);
+            let InstructionResult::CounterRemovals(result) =
+                &f.runner.state().return_result_frames[&binding.occurrence][&binding.result]
+            else {
+                panic!("present typed counter result")
+            };
+            assert!(result.counter_removals.is_empty());
+            assert_eq!(result.source, binding.source);
+            assert!(f.runner.state().resolution_stack.iter().any(|frame| {
+                let ResolutionFrame::AbilityContinuation(frame) = frame else {
+                    return false;
+                };
+                let reader = &frame.pending;
+                let is_owned = |condition: &AbilityCondition| {
+                    matches!(condition,
+                    AbilityCondition::CounterRemovedThisWay { result, counters }
+                        if *result == binding.result && *counters == binding.counters)
+                };
+                reader.return_result_occurrence == Some(binding.occurrence)
+                    && reader.chain.source_id == binding.source.reference.object_id
+                    && reader
+                        .chain
+                        .condition
+                        .as_ref()
+                        .is_some_and(|condition| match condition {
+                            AbilityCondition::And { conditions } => conditions.iter().any(is_owned),
+                            condition => is_owned(condition),
+                        })
+            }));
+            let good = match persistence {
+                0 => serde_json::to_value(f.runner.state()).unwrap(),
+                1 => serde_json::to_value(ResolutionStateWire::from_game_state(
+                    f.runner.state().clone(),
+                ))
+                .unwrap(),
+                2 => serde_json::to_value(PersistedGameState::Raw(Box::new(
+                    f.runner.state().clone(),
+                )))
+                .unwrap(),
+                3 => serde_json::to_value(PersistedGameState::capture(f.runner.state().clone()))
+                    .unwrap(),
+                4 => serde_json::to_value(TrustedGameStateEnvelope::capture(
+                    f.runner.state().clone(),
+                ))
+                .unwrap(),
+                _ => unreachable!(),
+            };
+            for omitted in 0..3 {
+                let mut bad = good.clone();
+                let state = if persistence >= 3 {
+                    &mut bad["state"]
+                } else {
+                    &mut bad
+                };
+                // Keep the exact reader/result untouched; omit both carriers,
+                // then each single carrier as coherence controls.
+                if omitted != 2 {
+                    assert!(state["pending_replacement"]["proposed"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("result_binding")
+                        .is_some());
+                }
+                if omitted != 1 {
+                    let carrier = if persistence == 0 {
+                        "resolution_stack"
+                    } else {
+                        "resolution_frames"
+                    };
+                    let queue = state[carrier]["frames"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|frame| frame["type"] == "CounterRemovals")
+                        .unwrap();
+                    assert!(queue["data"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("result_binding")
+                        .is_some());
+                }
+                let rejected = match persistence {
+                    0 => serde_json::from_value::<GameState>(bad).is_err(),
+                    1 => serde_json::from_value::<ResolutionStateWire>(bad).is_err(),
+                    2 | 3 => serde_json::from_value::<PersistedGameState>(bad).is_err(),
+                    4 => serde_json::from_value::<TrustedGameStateEnvelope>(bad).is_err(),
+                    _ => unreachable!(),
+                };
+                assert!(rejected, "current ingress {persistence}, omitted {omitted}");
+            }
+            let state = match persistence {
+                0 => serde_json::from_value::<GameState>(good).unwrap(),
+                1 => serde_json::from_value::<ResolutionStateWire>(good)
+                    .unwrap()
+                    .into_game_state(),
+                2 | 3 => serde_json::from_value::<PersistedGameState>(good)
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap(),
+                4 => serde_json::from_value::<TrustedGameStateEnvelope>(good)
+                    .unwrap()
+                    .into_game_state(),
+                _ => unreachable!(),
+            };
+            f.runner = GameRunner::from_state(state);
+            let index = f
+                .runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .candidates
+                .iter()
+                .position(|id| id.source == selected)
+                .unwrap();
+            f.runner
+                .act(GameAction::ChooseReplacement { index })
+                .unwrap();
+            u13_until(&mut f.runner, |state| {
+                matches!(state.waiting_for, WaitingFor::AbilityModeChoice { .. })
+            });
+            assert_eq!(n(&f.runner, f.source, &charge()), 1);
+            // CR 603.12: accepted actual removal earns the independent child.
+            f.runner
+                .act(GameAction::SelectModes {
+                    indices: vec![mode],
+                })
+                .unwrap();
+            if mode == 0 {
+                let action = engine::ai_support::legal_actions(f.runner.state()).into_iter().find(|action|
+                    matches!(action, GameAction::ChooseTarget { target: Some(engine::types::ability::TargetRef::Player(player)) } if *player == P2)).unwrap();
+                f.runner.act(action).unwrap();
+            }
+            finish(&mut f.runner, &mut Vec::new());
+            assert_eq!(f.runner.life(P2), if mode == 0 { 16 } else { 20 });
+            if mode == 1 {
+                assert!(f.runner.state().objects[&f.source]
+                    .keywords
+                    .contains(&engine::types::keywords::Keyword::Lifelink));
+                assert!(f.runner.state().objects[&f.source]
+                    .keywords
+                    .contains(&engine::types::keywords::Keyword::Indestructible));
+            }
+            assert!(f.runner.state().return_result_frames.is_empty());
+        }
+    }
+}
+
+#[test]
 fn u13_paused_exact_recipient_and_current_missing_wrong_ticket_refusal() {
     for wire in [false, true] {
         let f = u13_fixture(IMMARD, 1, |_, _, _| {});
@@ -3303,6 +3507,195 @@ fn u13_explicit_v7_ordinary_adjustment_and_damage_do_not_acquire_new_authority()
     finish(&mut r, &mut Vec::new());
     assert_eq!(r.life(P2), 14);
     assert_eq!(r.state().damage_dealt_this_turn.last().unwrap().amount, 6);
+}
+
+#[test]
+fn u13_explicit_v7_captured_damage_with_tail_and_later_target_leg_resume() {
+    use engine::types::ability::{DamageModification, DamageSource, TargetRef};
+    use engine::types::proposed_event::ProposedEvent;
+
+    for mixed in [false, true] {
+        // Synthetic source-damage-plus-tail class; the mixed sibling's second
+        // instruction deliberately has a different source-selection mechanism.
+        let text = if mixed {
+            "When this creature enters, it deals 1 damage to you. Target creature you control deals 2 damage to you. You gain 3 life."
+        } else {
+            "When this creature enters, it deals 1 damage to you. You gain 3 life."
+        };
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let source = s
+            .add_creature_to_hand_from_oracle(P0, "Synthetic legacy damage tail", 2, 4, text)
+            .id();
+        let mut pending = vec![];
+        let mut selected = vec![];
+        for (name, modification) in [
+            (
+                "Synthetic tail Plus",
+                DamageModification::Plus {
+                    value: QuantityExpr::Fixed { value: 1 },
+                },
+            ),
+            ("Synthetic tail Double", DamageModification::Double),
+            (
+                "Synthetic tail last",
+                DamageModification::Plus {
+                    value: QuantityExpr::Fixed { value: 2 },
+                },
+            ),
+        ] {
+            selected.push(u13_install_damage_modifier(
+                &mut s,
+                &mut pending,
+                false,
+                P0,
+                name,
+                modification,
+                None,
+            ));
+        }
+        let mut r = s.build();
+        r.cast(source).commit();
+        for _ in 0..50 {
+            match &r.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => break,
+                WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                    assert!(mixed);
+                    let action = engine::ai_support::legal_actions(r.state()).into_iter().find(|action|
+                        matches!(action, GameAction::ChooseTarget { target: Some(TargetRef::Object(id)) } if *id == source)).unwrap();
+                    r.act(action).unwrap();
+                }
+                WaitingFor::Priority { .. } => {
+                    r.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("public source trigger route: {other:?}"),
+            }
+        }
+        let mut events = vec![];
+        for leg in 0..if mixed { 2 } else { 1 } {
+            let owner = r
+                .state()
+                .resolving_stack_entry
+                .as_ref()
+                .unwrap()
+                .ability()
+                .unwrap();
+            assert!(matches!(
+                owner.effect,
+                Effect::DealDamage {
+                    damage_source: None,
+                    ..
+                }
+            ));
+            assert!(owner.trigger_source.is_some());
+            assert!(owner.sub_ability.is_some());
+            if leg == 0 {
+                assert!(r
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .damage_source_context
+                    .is_some());
+            } else {
+                // Same storage id as the captured root, but this event was
+                // produced by Target, not by that root's own-source route.
+                assert!(
+                    std::iter::successors(owner.sub_ability.as_deref(), |node| node
+                        .sub_ability
+                        .as_deref())
+                    .any(|node| matches!(
+                        node.effect,
+                        Effect::DealDamage {
+                            damage_source: Some(DamageSource::Target),
+                            ..
+                        }
+                    ))
+                );
+                assert!(r
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .damage_source_context
+                    .is_none());
+            }
+            for (step, chosen) in [selected[0], selected[1]].into_iter().enumerate() {
+                let pause = r.state().pending_replacement.as_ref().unwrap();
+                assert!(matches!(
+                    r.state().waiting_for,
+                    WaitingFor::ReplacementChoice { player: P0, .. }
+                ));
+                assert!(
+                    matches!(pause.proposed, ProposedEvent::Damage { source_id, amount, .. }
+                    if source_id == source && amount == if step == 0 { leg + 1 } else { leg + 2 })
+                );
+                assert_eq!(pause.candidates.len(), 3 - step);
+                let mut old =
+                    serde_json::to_value(ResolutionStateWire::from_game_state(r.state().clone()))
+                        .unwrap();
+                old["resolution_state_version"] = serde_json::json!(7);
+                old["pending_replacement"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("damage_source_context");
+                let restored: ResolutionStateWire = serde_json::from_value(old).unwrap();
+                r = GameRunner::from_state(restored.into_game_state());
+                let owner = r
+                    .state()
+                    .resolving_stack_entry
+                    .as_ref()
+                    .unwrap()
+                    .ability()
+                    .unwrap();
+                assert!(owner.trigger_source.is_some());
+                assert!(owner.sub_ability.is_some());
+                let pause = r.state().pending_replacement.as_ref().unwrap();
+                assert!(
+                    pause.damage_source_context.is_none(),
+                    "mixed legacy work stays ordinary"
+                );
+                let index = pause
+                    .candidates
+                    .iter()
+                    .position(|id| *id == chosen)
+                    .unwrap();
+                assert!(engine::ai_support::legal_actions(r.state())
+                    .contains(&GameAction::ChooseReplacement { index }));
+                events.extend(
+                    r.act(GameAction::ChooseReplacement { index })
+                        .unwrap()
+                        .events,
+                );
+            }
+            if mixed && leg == 0 {
+                u13_until(&mut r, |state| {
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
+                });
+            }
+        }
+        finish(&mut r, &mut events);
+        // CR 608.2c + CR 616.1f: each event applies +1, double, +2 once;
+        // then the independent three-life instruction executes exactly once.
+        let records: Vec<_> = r
+            .state()
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|record| record.source_id == source)
+            .collect();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.amount)
+                .collect::<Vec<_>>(),
+            if mixed { vec![6, 8] } else { vec![6] }
+        );
+        assert_eq!(r.life(P0), if mixed { 9 } else { 17 });
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == source)).count(), 1);
+        assert!(r.state().pending_replacement.is_none());
+        assert!(r.state().resolving_stack_entry.is_none());
+        assert!(r.state().resolution_stack.is_empty());
+    }
 }
 
 #[test]
