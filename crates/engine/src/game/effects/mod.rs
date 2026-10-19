@@ -4131,14 +4131,17 @@ pub(crate) fn install_floating_damage_replacement(
     }
     // CR 113.7a: anchor the host ONLY for a source that was actually
     // hosting the shield before this authority existed -- i.e. an object in THIS
-    // CALLER'S `anchor_zones`. The two callers do not agree on that set (see the
+    // CALLER'S `anchor_zones`. The callers do not agree on that set (see the
     // doc comment), so it must not be hardcoded here. A shield created by a
     // resolving instant/sorcery never had a host, and neither did any shield this
     // caller was ALREADY routing to the registry -- for `prevent_damage::resolve`'s
     // untargeted branch that includes a Command-zone (emblem) source, which its
     // `Battlefield`-only fork already sent here. Leaving all of those `None`
     // reproduces today's sentinel semantics byte-for-byte for the entire
-    // pre-existing registry population.
+    // pre-existing registry population. Exception: `add_target_replacement::resolve`'s
+    // `TargetFilter::None` arm was always registry-hosted; it anchors a battlefield
+    // source deliberately (see the doc comment above), so its population is not
+    // byte-for-byte preserved.
     if shield.source_object.is_none()
         && state
             .objects

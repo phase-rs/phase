@@ -2099,9 +2099,10 @@ mod tests {
     }
 
     /// CR 109.5 hostile sub-case (a), the controller-threading discriminator: "you"
-    /// is the controller of the ability when it was put on the stack, so a later
-    /// control change of the SOURCE does not move it. The source passes to P0 after
-    /// install; the rider still counts P1's board (3), not P0's (1).
+    /// is the controller of the source when the ability triggered (CR 109.5),
+    /// latched at install as `source_controller`, so a later control change of the
+    /// SOURCE does not move it. The source passes to P0 after install; the rider
+    /// still counts P1's board (3), not P0's (1).
     #[test]
     fn floating_entry_counter_rider_you_is_latched_when_source_changes_control() {
         use crate::types::counter::CounterType;
