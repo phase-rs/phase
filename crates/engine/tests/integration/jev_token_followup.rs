@@ -395,7 +395,7 @@ fn duration_construction_no_regeneration_rider_reaches_destroy() {
         ));
         assert!(b.runner.state().objects[&b.b]
             .replacement_definitions
-            .iter()
+            .iter_unchecked()
             .any(|r| r.shield_kind == ShieldKind::Regeneration));
         let outcome = b.runner.cast(b.spell).target_objects(&[b.b, b.c]).resolve();
         outcome.assert_zone(&[b.b], expected_zone);
@@ -764,7 +764,7 @@ fn assert_committed_pins(state: &GameState, spell: ObjectId, announced: &[Object
                 );
             }
         }
-        if matches!(*node.effect, engine::types::ability::Effect::Token { .. }) {
+        if matches!(node.effect, engine::types::ability::Effect::Token { .. }) {
             assert_eq!(
                 node.target_reads,
                 engine::types::ability::TargetReadOrigin::ParentAnnouncement
@@ -1088,7 +1088,7 @@ fn ordinary_target_qualifiers_are_checked_before_initial_resolution() {
             return_priority_to_caster(&mut b.runner);
             assert!(b.runner.state().objects[&b.b]
                 .replacement_definitions
-                .iter()
+                .iter_unchecked()
                 .any(|r| r.shield_kind == ShieldKind::Regeneration));
         }
         let mut committed = b.runner.cast(b.spell).target_object(b.b).commit();
@@ -2733,7 +2733,7 @@ fn wernog_completion_case(accepts: [bool; 2], queued_reload: bool) {
                     .proposed;
                 if !reloaded_child
                     && matches!(proposed, ProposedEvent::CreateToken { spec, creation_frame: Some(_), .. }
-                        if spec.name == "Food" || spec.name == "Treasure")
+                        if spec.characteristics.display_name == "Food" || spec.characteristics.display_name == "Treasure")
                 {
                     // This is an actually queued Manufactor child, with the
                     // primary still outstanding, rather than an optional effect

@@ -2904,9 +2904,9 @@ fn u14_continuous_grammar_reference_preservation_protection_riders() {
         assert!(matches!(
             r.state().waiting_for,
             WaitingFor::NamedChoice {
-                choice_type: ChoiceType::Color,
+                choice_type: ChoiceType::Color { ref excluded },
                 ..
-            }
+            } if excluded.is_empty()
         ));
         r.act(GameAction::ChooseOption {
             choice: "White".into(),

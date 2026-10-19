@@ -41,7 +41,7 @@ fn construction_no_regeneration_rider_reaches_destroy() {
         ));
         assert!(b.runner.state().objects[&b.b]
             .replacement_definitions
-            .iter()
+            .iter_unchecked()
             .any(|r| r.shield_kind == ShieldKind::Regeneration));
         assert!(b
             .runner

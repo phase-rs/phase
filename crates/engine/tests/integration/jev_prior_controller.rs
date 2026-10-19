@@ -716,7 +716,7 @@ fn continuous_grant_duration_and_static_siblings() {
         &Keyword::Haste
     ));
     assert!(runner.state().objects[&recipient]
-        .colors
+        .color
         .contains(&ManaColor::Red));
     next_main(&mut runner, P0);
     assert!(!engine::game::keywords::has_keyword(
@@ -728,7 +728,7 @@ fn continuous_grant_duration_and_static_siblings() {
         &Keyword::Haste
     ));
     assert!(!runner.state().objects[&recipient]
-        .colors
+        .color
         .contains(&ManaColor::Red));
 }
 

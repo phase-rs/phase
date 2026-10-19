@@ -575,7 +575,9 @@ fn revealed_exact_producers_and_latched_queue_ignore_later_mirrors() {
         };
         let source = spell(&mut s, P0, &format!("Reveal the top card of your library. You mill a card. {ALL_CREATURES} You gain 7 life."));
         let mut r = s.build();
-        seat_creature_tops(&mut r, if mixed { &[zero] } else { &[zero, one] });
+        let single = [zero];
+        let both = [zero, one];
+        seat_creature_tops(&mut r, if mixed { &single[..] } else { &both[..] });
         let library = r.state_mut().library_of_mut(P0);
         library.retain(|id| *id != decoy);
         library.push_front(decoy);
@@ -901,7 +903,7 @@ fn ordinary_reveal_scalar_cast_counts_complete_instruction() {
         r.state_mut().waiting_for = WaitingFor::Priority { player: caster };
         let libraries: Vec<_> = [P0, P1]
             .iter()
-            .map(|&p| r.state().library_of(p).to_vec())
+            .map(|&p| r.state().library_of(p).iter().copied().collect::<Vec<_>>())
             .collect();
         let out = r.cast(id).resolve();
         out.assert_life_delta(caster, 2);
@@ -910,7 +912,14 @@ fn ordinary_reveal_scalar_cast_counts_complete_instruction() {
         assert_eq!(actual.len(), 2);
         for (p, library) in [P0, P1].into_iter().zip(&libraries) {
             assert!(actual.contains(&(p, vec![library[0]])));
-            assert_eq!(out.state().library_of(p), library.as_slice());
+            assert_eq!(
+                out.state()
+                    .library_of(p)
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                *library
+            );
             out.assert_zone(library, Zone::Library);
         }
         assert_eq!(gains(out.events()), vec![(caster, 2)]);
@@ -966,7 +975,11 @@ fn ordinary_reveal_empty_seats_publish_fresh_empty() {
             .map(|seat| {
                 (
                     PlayerId(seat),
-                    r.state().library_of(PlayerId(seat)).to_vec(),
+                    r.state()
+                        .library_of(PlayerId(seat))
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect();
@@ -1018,8 +1031,8 @@ fn ordinary_reveal_replaces_previous_immediate_result() {
         &format!("Reveal the top card of your library. You mill a card. {SCALAR}"),
     );
     let mut r = s.build();
-    let a = r.state().library_of(P0).to_vec();
-    let b = r.state().library_of(P1).to_vec();
+    let a = r.state().library_of(P0).iter().copied().collect::<Vec<_>>();
+    let b = r.state().library_of(P1).iter().copied().collect::<Vec<_>>();
     let out = r.cast(id).resolve();
     assert_eq!(
         reveals(out.events()),
@@ -1049,16 +1062,30 @@ fn ordinary_reveal_count_is_cards_not_seats() {
         s.with_library_top(P1, &names[..second_count]);
         let id = spell(&mut s, P0, TOP_TWO);
         let mut r = s.build();
-        let a = r.state().library_of(P0).to_vec();
-        let b = r.state().library_of(P1).to_vec();
+        let a = r.state().library_of(P0).iter().copied().collect::<Vec<_>>();
+        let b = r.state().library_of(P1).iter().copied().collect::<Vec<_>>();
         let out = r.cast(id).resolve();
         out.assert_life_delta(P0, 2 + second_count as i32);
         assert!(reveals(out.events()).contains(&(P0, a[..2].to_vec())));
         if !b.is_empty() {
             assert!(reveals(out.events()).contains(&(P1, b.clone())));
         }
-        assert_eq!(out.state().library_of(P0), a);
-        assert_eq!(out.state().library_of(P1), b);
+        assert_eq!(
+            out.state()
+                .library_of(P0)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            a
+        );
+        assert_eq!(
+            out.state()
+                .library_of(P1)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            b
+        );
         assert!(!reveals(out.events())
             .iter()
             .any(|(_, cards)| cards.contains(&a[2])));
@@ -1069,8 +1096,11 @@ fn ordinary_reveal_count_is_cards_not_seats() {
     s.with_library_top(P0, &["Shared first", "Shared second", "Shared secret"]);
     let id = spell(&mut s, P0, TOP_TWO);
     let mut r = s.build();
-    let top = r.state().library_of(P0)[..2].to_vec();
-    assert_eq!(r.state().library_of(P1)[..2], top);
+    let top = r.state().library_of(P0).iter().copied().collect::<Vec<_>>()[..2].to_vec();
+    assert_eq!(
+        r.state().library_of(P1).iter().copied().collect::<Vec<_>>()[..2],
+        top
+    );
     let out = r.cast(id).resolve();
     assert_eq!(
         reveals(out.events()),
@@ -1091,7 +1121,7 @@ fn ordinary_scoped_reveal_unless_payment_uses_normal_choices() {
         let mut r = s.build();
         let libraries: Vec<_> = [P0, P1]
             .iter()
-            .map(|&p| r.state().library_of(p).to_vec())
+            .map(|&p| r.state().library_of(p).iter().copied().collect::<Vec<_>>())
             .collect();
         let mut cast = r.cast(id).commit();
         assert!(!cast.state().stack.is_empty(), "committed public spell");
@@ -1147,7 +1177,14 @@ fn ordinary_scoped_reveal_unless_payment_uses_normal_choices() {
             1
         );
         for p in [P0, P1] {
-            assert_eq!(out.state().library_of(p), libraries[p.0 as usize]);
+            assert_eq!(
+                out.state()
+                    .library_of(p)
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                libraries[p.0 as usize]
+            );
         }
         assert_no_library_moves(&events, &libraries.concat());
         assert!(events.iter().any(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -1, .. } if *player_id == if p0_pays { P0 } else { P1 })));
@@ -1172,13 +1209,20 @@ fn ordinary_reveal_context_authority_ignores_inherited_player_target() {
     s.with_library_top(P1, &["Target top", "Target secret"]);
     let id = spell(&mut s, P0, text);
     let mut r = s.build();
-    let a = r.state().library_of(P0).to_vec();
-    let b = r.state().library_of(P1).to_vec();
+    let a = r.state().library_of(P0).iter().copied().collect::<Vec<_>>();
+    let b = r.state().library_of(P1).iter().copied().collect::<Vec<_>>();
     let out = r.cast(id).target_player(P1).resolve();
     out.assert_life_delta(P1, 1);
     out.assert_life_delta(P0, 1);
     assert_eq!(reveals(out.events()), vec![(P0, vec![a[0]])]);
-    assert_eq!(out.state().library_of(P1), b);
+    assert_eq!(
+        out.state()
+            .library_of(P1)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        b
+    );
 }
 
 #[test]
@@ -1260,7 +1304,7 @@ fn ordinary_reveal_public_events_and_private_views() {
     let mut r = s.build();
     let libraries: Vec<_> = [P0, P1]
         .iter()
-        .map(|&p| r.state().library_of(p).to_vec())
+        .map(|&p| r.state().library_of(p).iter().copied().collect::<Vec<_>>())
         .collect();
     let out = r.cast(id).resolve();
     out.assert_life_delta(P0, 2);

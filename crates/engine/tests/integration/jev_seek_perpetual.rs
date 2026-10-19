@@ -2,7 +2,7 @@
 
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
-use engine::parser::parse_oracle_text;
+use engine::parser::{oracle_nom::primitives::parse_mana_cost, parse_oracle_text};
 use engine::types::ability::{
     CardTypeSetSource, Effect, EffectKind, FilterProp, QuantityExpr, QuantityRef, SharedQuality,
     TargetFilter,
@@ -15,6 +15,7 @@ use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+use nom::{combinator::all_consuming, Parser};
 
 const SEEK_EXCERPT: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control.";
 const FULL_CIRCADIAN: &str = "Vivid — Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
@@ -320,15 +321,15 @@ fn jev_seek_uses_resolution_board_and_live_reentered_noncreature() {
     let anthem = scenario
         .add_spell_to_hand_from_oracle(P0, "Glorious Anthem", false, ANTHEM)
         .as_enchantment()
-        .with_mana_cost("{1}{W}{W}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{W}{W}").unwrap().1)
         .id();
     let thoughtlace = scenario
         .add_spell_to_hand_from_oracle(P0, "Thoughtlace", true, THOUGHTLACE)
-        .with_mana_cost("{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{U}").unwrap().1)
         .id();
     let disperse = scenario
         .add_spell_to_hand_from_oracle(P0, "Disperse", true, DISPERSE)
-        .with_mana_cost("{1}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{U}").unwrap().1)
         .id();
     let candidates = [
         library_card(&mut scenario, P0, "White card", &[ManaColor::White]),
@@ -388,7 +389,7 @@ fn jev_seek_reads_board_after_public_response_without_announced_x() {
     let spell = seek_spell(&mut scenario, P0, SEEK_EXCERPT);
     let response = scenario
         .add_spell_to_hand_from_oracle(P0, "Disperse", true, DISPERSE)
-        .with_mana_cost("{1}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{U}").unwrap().1)
         .id();
     let mut runner = scenario.build();
     let mut committed = runner.cast(spell).commit();
@@ -492,12 +493,12 @@ fn replacement_run(two: bool, reload: bool) -> (Vec<ObjectId>, Vec<GameEvent>) {
     let mut scenario = scenario();
     let rip = scenario
         .add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE)
-        .with_mana_cost("{1}{W}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{W}").unwrap().1)
         .id();
     let leyline = two.then(|| {
         scenario
             .add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE)
-            .with_mana_cost("{2}{B}{B}".parse().unwrap())
+            .with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{B}{B}").unwrap().1)
             .id()
     });
     let cards = [
@@ -691,33 +692,38 @@ fn circadian_runner() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId, Ob
     }
     let divination = scenario
         .add_spell_to_library_top(P0, "Divination", false)
-        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{U}").unwrap().1)
         .with_color(vec![ManaColor::Blue])
         .from_oracle_text(DIVINATION)
         .id();
     let disperse = scenario
         .add_spell_to_library_top(P0, "Disperse", true)
-        .with_mana_cost("{1}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{U}").unwrap().1)
         .with_color(vec![ManaColor::Blue])
         .from_oracle_text(DISPERSE)
         .id();
     let untouched = scenario
         .add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
-        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{U}").unwrap().1)
         .with_color(vec![ManaColor::Blue])
         .id();
     let opponent = scenario
         .add_spell_to_hand_from_oracle(P1, "Divination", false, DIVINATION)
-        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{U}").unwrap().1)
         .with_color(vec![ManaColor::Blue])
         .id();
     let call = scenario
         .add_spell_to_hand_from_oracle(P0, "Call to Mind", false, CALL_TO_MIND)
-        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{U}").unwrap().1)
         .id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Circadian Struggle", true, FULL_CIRCADIAN)
-        .with_mana_cost("{4}{G/U}{G/U}".parse().unwrap())
+        .with_mana_cost(
+            all_consuming(parse_mana_cost)
+                .parse("{4}{G/U}{G/U}")
+                .unwrap()
+                .1,
+        )
         .id();
     let off_color = library_card(
         &mut scenario,
@@ -875,11 +881,11 @@ fn sought_replacement_run(two: bool, reload_at: Option<usize>) -> (Vec<ObjectId>
     let mut scenario = scenario();
     scenario
         .add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE)
-        .with_mana_cost("{1}{W}".parse().unwrap());
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{W}").unwrap().1);
     if two {
         scenario
             .add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE)
-            .with_mana_cost("{2}{B}{B}".parse().unwrap());
+            .with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{B}{B}").unwrap().1);
     }
     let cards = [
         library_card(&mut scenario, P0, "First chosen", &[ManaColor::Blue]),
@@ -1112,7 +1118,7 @@ fn jev_perpetual_recipient_authorities_remain_distinct() {
         .collect();
     let source = scenario
         .add_spell_to_hand_from_oracle(P0, "Discover the Formula", true, text)
-        .with_mana_cost("{4}{U}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{4}{U}{U}").unwrap().1)
         .id();
     let mut runner = scenario.build();
     let outcome = runner.cast(source).resolve();
@@ -1258,7 +1264,7 @@ fn jev_perpetual_event_recipient_remains_distinct() {
     let mut scenario = scenario();
     let whelp = scenario.add_creature_from_oracle(P0, "Darigaaz's Whelp", 2, 2,
         "Kicker {1}{R}\nFlying\nWhenever you draw a Dragon card, it perpetually gets +1/+1.\nWhen Darigaaz's Whelp enters, if it was kicked, seek a Dragon card. Darigaaz's Whelp and that Dragon card each perpetually get +1/+1.")
-        .with_mana_cost("{1}{B}".parse().unwrap()).id();
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{B}").unwrap().1).id();
     let dragon = scenario
         .add_spell_to_library_top(P0, "Drawn Dragon", false)
         .as_creature()
@@ -1267,7 +1273,7 @@ fn jev_perpetual_event_recipient_remains_distinct() {
     let other = library_card(&mut scenario, P0, "Unrelated draw", &[]);
     let draw = scenario
         .add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
-        .with_mana_cost("{2}{U}".parse().unwrap())
+        .with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{U}").unwrap().1)
         .id();
     let mut runner = scenario.build();
     let outcome = runner.cast(draw).resolve();

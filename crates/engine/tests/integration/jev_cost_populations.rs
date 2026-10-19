@@ -487,9 +487,13 @@ fn jev_all_nine_complete_current_export_string_loader() {
         let reflexive = parent.sub_ability.as_deref().unwrap();
         let condition = reflexive.condition.as_ref().unwrap();
         assert!(condition.has_when_you_do_marker());
-        let (result, counters) = condition.counter_removal_event().unwrap();
+        let mut guard = Some(condition.clone());
+        assert!(AbilityCondition::take_when_you_do_marker(&mut guard));
+        let Some(AbilityCondition::CounterRemovedThisWay { result, counters }) = guard else {
+            panic!("complete actual-removal guard")
+        };
         assert_eq!(parent.declares_return_result, Some(result));
-        assert_eq!(*counters, CounterMatch::Any);
+        assert_eq!(counters, CounterMatch::Any);
         assert_eq!(reflexive.mode_abilities.len(), 2);
         assert!(matches!(
             reflexive.mode_abilities[0].effect.as_ref(),
@@ -858,7 +862,7 @@ fn locket_unnamed_and_actual_face_down_nonmatch() {
         assert_eq!(
             committed.state().players[0].mana_pool.total(),
             0,
-            "named {4}-1 and unnamed face-down {3} are separate payable branches"
+            "named {{4}}-1 and unnamed face-down {{3}} are separate payable branches"
         );
         let outcome = committed.resolve();
         outcome.assert_zone(&[spell], Zone::Battlefield);
@@ -3841,7 +3845,7 @@ fn alternative_permission(
         source_id: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: Some(CastCostModifier::reduce(ManaCost::generic(rider))),
     }
