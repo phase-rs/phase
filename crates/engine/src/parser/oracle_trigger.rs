@@ -4906,6 +4906,7 @@ fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> b
         AbilityCost::Mana { .. }
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(_)

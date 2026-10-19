@@ -1160,7 +1160,41 @@ export type CastPaymentMode =
   | { type: "AutoExceptSacrificialMana" }
   | { type: "Manual" };
 
+// Un-card actions (silver-border sets; no CR entry). Mirrors
+// `crates/engine/src/types/un_actions.rs`.
+export type PhysicalTell = "TouchFace" | "TouchTable" | "Laugh" | "FlickCards";
+
+export type UnTell =
+  | { type: "Physical"; data: PhysicalTell }
+  | { type: "Said"; data: { text: string } };
+
+/** One entry of the Un-actions menu, derived by the engine from the Gotcha
+ *  abilities in play (`UnActionState.menu`). */
+export type UnTellKind =
+  | { type: "Physical"; data: PhysicalTell }
+  | { type: "SaysWord" }
+  | { type: "SaysNumber" };
+
+export type UnAction =
+  | { type: "SetEnabled"; data: { enabled: boolean } }
+  | { type: "PerformTell"; data: { tell: UnTell } }
+  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } };
+
+export interface GotchaOffer {
+  id: number;
+  player: PlayerId;
+  source_id: ObjectId;
+  returns: ObjectId;
+}
+
+export interface UnActionState {
+  enabled_players?: PlayerId[];
+  gotcha_offers?: GotchaOffer[];
+  menu?: UnTellKind[];
+}
+
 export type UnlessCost =
+  | { type: "SayPhrase"; phrase: string }
   | { type: "Fixed"; cost: ManaCost }
   | { type: "DynamicGeneric"; quantity: unknown }
   | { type: "PayLife"; amount: number }
@@ -3391,6 +3425,8 @@ export type GameAction =
   | { type: "SetPriorityPassingMode"; data: { mode: PriorityPassingMode } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "SetMayTriggerAutoChoice"; data: { op: MayTriggerAutoChoiceOp } }
+  // Un-card actions (no CR entry): opt-in toggle, menu gestures, and "Gotcha!".
+  | { type: "UnAction"; data: { action: UnAction } }
   // CR 603.3b: mirror engine GameAction::SetTriggerOrderTemplate (PR-7 phase-2 boundary sync).
   | { type: "SetTriggerOrderTemplate"; data: { op: TriggerOrderTemplateOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
@@ -3638,6 +3674,10 @@ export type GameEvent =
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.
   | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } }
+  // Un-card gestures / speech (no CR entry); mirror engine GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid}.
+  | { type: "UnTellPerformed"; data: { player: PlayerId; tell: UnTell } }
+  | { type: "PhraseSaid"; data: { player: PlayerId; phrase: string } }
+  | { type: "GotchaSaid"; data: { player: PlayerId; source_id: ObjectId; returns: ObjectId } }
   // CR 116.2c: a player took the special action of paying a continuous effect's
   // printed termination cost. `group` is the engine-minted group key;
   // `source_id` is the permanent whose resolution installed the effect.
@@ -4530,6 +4570,7 @@ export interface GameState {
   priority_yields?: PriorityYield[];
   /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
   may_trigger_auto_choices?: MayTriggerAutoChoiceRecord[];
+  un_actions?: UnActionState;
   replacement_auto_choices?: ReplacementAutoChoiceRecord[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{

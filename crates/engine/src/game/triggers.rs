@@ -419,24 +419,38 @@ pub type DeferredTrigger = PendingTriggerContext;
 impl PendingTriggerContext {
     pub fn single(pending: PendingTrigger) -> Self {
         let trigger_events = pending.trigger_event.iter().cloned().collect();
+        // CR 603.2d: reflexive/delayed triggers (including GotchaSaid) are not
+        // triggered abilities the object has; trigger doublers do not apply.
+        let firing = if matches!(pending.trigger_event, Some(GameEvent::GotchaSaid { .. })) {
+            TriggerFiring::LegacyDelayed
+        } else {
+            TriggerFiring::Ordinary
+        };
         Self {
             pending,
             trigger_events,
             duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             batch_origin: DeferredTriggerBatchOrigin::Ordinary,
-            firing: TriggerFiring::Ordinary,
+            firing,
         }
     }
 
     fn batched(pending: PendingTrigger, trigger_events: Vec<GameEvent>) -> Self {
+        // CR 603.2d: reflexive/delayed triggers (including GotchaSaid) are not
+        // triggered abilities the object has; trigger doublers do not apply.
+        let firing = if matches!(pending.trigger_event, Some(GameEvent::GotchaSaid { .. })) {
+            TriggerFiring::LegacyDelayed
+        } else {
+            TriggerFiring::Ordinary
+        };
         Self {
             pending,
             trigger_events,
             duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             batch_origin: DeferredTriggerBatchOrigin::Ordinary,
-            firing: TriggerFiring::Ordinary,
+            firing,
         }
     }
 

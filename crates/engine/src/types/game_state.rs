@@ -23321,6 +23321,10 @@ declare_game_state! {
     pub pending_die_roll_instruction: Option<Box<PendingDieRollInstruction>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
+    /// Opt-in Un-card actions (Gotcha windows, say-it prompts). See
+    /// [`crate::types::un_actions`].
+    #[serde(default, skip_serializing_if = "super::un_actions::UnActionState::is_default")]
+    pub un_actions: super::un_actions::UnActionState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replacement_auto_choices: Vec<ReplacementAutoChoiceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29906,6 +29910,7 @@ impl GameState {
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
+            un_actions: Default::default(),
             replacement_auto_choices: Vec::new(),
             replacement_auto_choice_tail: None,
             decision_templates: Vec::new(),
@@ -31541,6 +31546,9 @@ impl GameState {
                 | GameEvent::SagaChapterAbilityResolved { .. }
                 | GameEvent::ObjectIntensified { .. }
                 | GameEvent::Evolved { .. }
+                | GameEvent::UnTellPerformed { .. }
+                | GameEvent::PhraseSaid { .. }
+                | GameEvent::GotchaSaid { .. }
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
@@ -32929,6 +32937,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,
+        un_actions: _,
         replacement_auto_choices: _,
         replacement_auto_choice_tail: _,
         decision_templates: _,
@@ -33312,6 +33321,7 @@ impl PartialEq for GameState {
             && self.replacement_auto_choices == other.replacement_auto_choices
             && self.replacement_auto_choice_tail == other.replacement_auto_choice_tail
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
+            && self.un_actions == other.un_actions
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities

@@ -59,6 +59,11 @@ pub struct TournamentRequestId(pub u64);
 /// the new field, an old server that omits it produces a silent feature loss
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
+/// 155 — `GameAction::UnAction` wire action, Un-card actions state field
+///      `GameState.un_actions`, and new Un-action event tags (`UnTellPerformed`,
+///      `PhraseSaid`, `GotchaSaid`). A v154 peer cannot parse `UnAction` or
+///      state containing `un_actions`. Full-game peers and P2P move in lockstep
+///      (wire 137).
 ///
 /// 154 — `PendingCostMoveResume` gains `CounterCostRemovalPayment`, a
 ///      counter-removal cost paused while a replacement choice settles its
@@ -1176,7 +1181,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 154;
+pub const PROTOCOL_VERSION: u32 = 155;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2433,12 +2438,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 154);
+        assert_eq!(PROTOCOL_VERSION, 155);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 153);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 154);
     }
 
     #[test]

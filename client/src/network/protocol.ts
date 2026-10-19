@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  137 — game_setup and state_update carry GameState with un_actions state
+ *       and legalActions may carry GameAction::UnAction wire action.
+ *       Bumped in lockstep with full-game protocol 155.
  *  136 — game_setup and state_update carry GameState whose
  *       pending_cost_move_resume may hold PendingCostMoveResume
  *       CounterCostRemovalPayment (a counter-removal cost paused on a CR 616.1
@@ -727,7 +730,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 136 as const;
+export const WIRE_PROTOCOL_VERSION = 137 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

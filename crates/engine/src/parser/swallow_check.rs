@@ -932,6 +932,8 @@ fn def_tree_has_optional(def: &AbilityDefinition) -> bool {
 fn trigger_tree_has_optional(trigger: &TriggerDefinition) -> bool {
     trigger.optional
         || matches!(trigger.mode, TriggerMode::Exerted)
+        // Un-card Gotcha: saying "Gotcha!" is the "you may" gate.
+        || matches!(trigger.mode, TriggerMode::GotchaSaid)
         || trigger
             .execute
             .as_deref()
@@ -4657,6 +4659,11 @@ fn detect_condition_if(
     // your graveyard") implicit in the sub_ability's relationship to the
     // parent effect.
     if any_ability_has_exile_parent_rider(parsed) {
+        return;
+    }
+    // Un-card Gotcha: "If an opponent <behavior>" is the typed `gotcha_condition`
+    // the trigger watches for, not a swallowed game-state condition.
+    if parsed.triggers.iter().any(|t| t.gotcha_condition.is_some()) {
         return;
     }
     // CR 119.7 + CR 608.2c: Screaming Nemesis's "If a player is dealt damage

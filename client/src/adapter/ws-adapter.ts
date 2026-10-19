@@ -214,7 +214,11 @@ export class NativeEngineVersionMismatchError extends Error {
  * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
- *
+ * 155 — GameAction::UnAction wire action, Un-card actions state field
+ *       GameState.un_actions, and new Un-action event tags (UnTellPerformed,
+ *       PhraseSaid, GotchaSaid). A v154 peer cannot parse UnAction or
+ *       state containing un_actions. Full-game peers and P2P move in lockstep
+ *       (wire 137).
  * 154 — PendingCostMoveResume gains CounterCostRemovalPayment (a counter-removal
  *       cost paused on a CR 616.1 replacement choice; the activation reads the
  *       settled count, CR 118.11) and ManaAbilityCostCursor gains
@@ -938,7 +942,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 154;
+export const PROTOCOL_VERSION = 155;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

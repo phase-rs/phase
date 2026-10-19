@@ -5890,6 +5890,21 @@ fn parse_normalized_oracle_ir(
 
         let lower = line.to_lowercase();
 
+        // Un-card Gotcha (no CR entry): `Gotcha — If an opponent <behavior>, you may
+        // say "Gotcha!" When you do, <effect>.` is one printed trigger — recognized
+        // before the generic classifiers so the quoted "Gotcha!" is never read as
+        // a clause of its own.
+        if let Some((condition, effect_text)) = super::oracle_un::split_gotcha_line(&line, &lower) {
+            ctx.subject = None;
+            ctx.actor = None;
+            let effect_def =
+                parse_effect_chain_with_context(effect_text.trim(), AbilityKind::Spell, &mut ctx);
+            let trigger = super::oracle_un::gotcha_trigger(condition, effect_def, &line);
+            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+            i += 1;
+            continue;
+        }
+
         // Priority 8b (early): "As an additional cost to cast this spell" — must
         // precede static-pattern classifiers (Priority 7) that match embedded
         // "This spell costs {N} less..." tails on combined lines (Rottenmouth
@@ -10192,6 +10207,7 @@ fn demote_lifetimes_in_cost(cost: &mut AbilityCost) {
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(..)
         | AbilityCost::PayLife { .. }

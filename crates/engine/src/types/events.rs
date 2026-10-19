@@ -1373,6 +1373,26 @@ pub enum GameEvent {
     Evolved {
         object_id: ObjectId,
     },
+    /// Un-card gesture (no CR entry): `player` performed `tell` from the
+    /// Un-actions menu. Drives client animations and opens Gotcha windows.
+    UnTellPerformed {
+        player: PlayerId,
+        tell: super::un_actions::UnTell,
+    },
+    /// Un-card speech (no CR entry): `player` said `phrase` aloud to pay an
+    /// `AbilityCost::SayPhrase`. Drives client animations.
+    PhraseSaid {
+        player: PlayerId,
+        phrase: String,
+    },
+    /// Un-card Gotcha (no CR entry): `player` called "Gotcha!" for the Gotcha
+    /// ability on `source_id`, naming `returns` as the card to return. Consumed
+    /// by `TriggerMode::GotchaSaid` — the "When you do" reflexive trigger.
+    GotchaSaid {
+        player: PlayerId,
+        source_id: ObjectId,
+        returns: ObjectId,
+    },
     CounterRemoved {
         object_id: ObjectId,
         counter_type: CounterType,

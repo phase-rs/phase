@@ -73,6 +73,7 @@ const TRIGGER_KEYS: &[&str] = &[
     "unless_pay",
     "batched",
     "die_sides",
+    "gotcha_condition",
     "expend_threshold",
     "attack_target_filter",
     "player_actions",

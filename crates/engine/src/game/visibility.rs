@@ -1544,6 +1544,23 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.pending_begin_game_abilities.clear();
     filtered.resolving_begin_game_abilities = false;
 
+    // Un-card actions: enabled status and Gotcha offers are private to the entitled player.
+    // The gesture menu is derived from all active abilities in the game and is shared.
+    if let Some(viewer_id) = viewer {
+        filtered
+            .un_actions
+            .enabled_players
+            .retain(|p| *p == viewer_id);
+        filtered
+            .un_actions
+            .gotcha_offers
+            .retain(|o| o.player == viewer_id);
+    } else {
+        filtered.un_actions.enabled_players.clear();
+        filtered.un_actions.gotcha_offers.clear();
+    }
+    filtered.un_actions.pending_tells.clear();
+
     // Hidden-information + fairness integrity: the game's RNG is a deterministic
     // ChaCha20 stream seeded from `rng_seed`, and that seed is a serialized field
     // of `GameState`. Broadcasting it to clients (every `StateUpdate` /

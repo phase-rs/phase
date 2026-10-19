@@ -1013,6 +1013,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::UnAction { action: a0 } => {
+            let GameAction::UnAction { action: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::SetTriggerOrderTemplate { op: a0 } => {
             let GameAction::SetTriggerOrderTemplate { op: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");

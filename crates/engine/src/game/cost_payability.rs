@@ -601,6 +601,7 @@ fn object_cost_node(cost: &AbilityCost) -> ObjectCostNode<'_> {
         }
         AbilityCost::Mana { .. }
         | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
@@ -1297,6 +1298,8 @@ impl AbilityCost {
             // CR 601.2g: Mana affordability is checked by the mana payment step,
             // not the 601.2b choice-of-object gate.
             AbilityCost::Mana { .. } => true,
+            // Un-card: saying a phrase requires that the player has opted in.
+            AbilityCost::SayPhrase { .. } => state.un_actions.is_enabled(player),
             // CR 118.3: Tap/Untap availability is enforced at payment time
             // (the object must be in the correct state). This gate only concerns
             // choice-of-object eligibility.
