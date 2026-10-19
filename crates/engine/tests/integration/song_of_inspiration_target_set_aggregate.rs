@@ -18,7 +18,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -1543,12 +1543,110 @@ fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
     );
 }
 
-/// MED1-T0 — PAUSE (false-red guard). The parked declared-player twin honors
-/// the CR 608.2b illegal stamp: with P1 declared but slot 0 stamped illegal,
-/// the resumed TargetOpponent axis matches NOTHING (1 + 0 = 1) — never the
-/// event player, never the stamped player. Ignoring the stamp would emit 6.
+/// B1a — PAUSE (local-first priority). The live authority reads the node's
+/// own player target before the root fallback; the parked twin must match:
+/// with P1 local and P0 on the root (and the recorded mode-base list showing
+/// P0), the resumed TargetOpponent axis resolves P1 (1 + 5 = 6). Preferring
+/// the recorded base list would emit 10 (P0's 9).
 #[test]
-fn parked_target_opponent_axis_ignores_illegal_declared_player() {
+fn parked_declared_player_prefers_local_over_root() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own Brute", 9, 9);
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    // NOTE: the Roller below is P0's 1-power creature, so a root/base-P0
+    // misread sums 9 + 1 and emits 11, not 10.
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Player(P1)],
+        sides: 20,
+        results: vec![1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(opponent_power_sum_modifier()),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![TargetRef::Player(P0)],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![None],
+        declared_targets: vec![TargetRef::Player(P0)],
+        declared_target_pins: vec![None],
+        declared_ahead: 0,
+        declared_targets_recorded: true,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    };
+    assert_eq!(
+        resumed_die_totals(&mut state, pending),
+        vec![6],
+        "the resumed read follows the local P1 (1 + 5), not root/base P0 (11)"
+    );
+}
+
+/// B1a — PAUSE (chain stamp). With no local player, the twin falls back to
+/// the captured declared chain and honors the CR 608.2b stamp: declared P1
+/// at stamped slot 0 names nobody (1 + 0 = 1) even though the legacy root
+/// list shows unstamped P0 at its slot 1. Reading the legacy list would
+/// emit 11.
+#[test]
+fn parked_declared_player_honors_chain_illegal_stamp() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own Brute", 9, 9);
+    let foe = scenario.add_creature(P1, "Foe Brute", 5, 5).id();
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![],
+        sides: 20,
+        results: vec![1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(opponent_power_sum_modifier()),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![TargetRef::Object(foe), TargetRef::Player(P0)],
+        illegal_target_slots: vec![0],
+        chain_root_target_pins: vec![None, None],
+        declared_targets: vec![TargetRef::Player(P1)],
+        declared_target_pins: vec![None],
+        declared_ahead: 0,
+        declared_targets_recorded: true,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    };
+    assert_eq!(
+        resumed_die_totals(&mut state, pending),
+        vec![1],
+        "the stamped chain player names nobody (1 + 0); the legacy list is not consulted"
+    );
+}
+
+/// B1a — PAUSE (base offset). The stamp is root-numbered while the captured
+/// chain counts from the slot base: with ahead 1, declared slot 0 is root
+/// slot 1, so a stamp at 1 marks declared P1 illegal (1 + 0 = 1). Ignoring
+/// the offset would emit 6.
+#[test]
+fn parked_declared_player_applies_base_offset_to_stamp() {
     use engine::game::scenario::P1;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1557,7 +1655,319 @@ fn parked_target_opponent_axis_ignores_illegal_declared_player() {
     let runner = scenario.build();
     let mut state = runner.state().clone();
 
-    let modifier = DieRollModifier::Add {
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![],
+        sides: 20,
+        results: vec![1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(opponent_power_sum_modifier()),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![1],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![TargetRef::Player(P1)],
+        declared_target_pins: vec![None],
+        declared_ahead: 1,
+        declared_targets_recorded: true,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    };
+    assert_eq!(
+        resumed_die_totals(&mut state, pending),
+        vec![1],
+        "ahead 1 puts declared slot 0 at stamped root slot 1 (1 + 0)"
+    );
+}
+
+/// B1a — PAUSE (compaction parity). The live fast path reads the node's own
+/// player without consulting the root-numbered stamp (validation compacts
+/// the node before the park); the twin matches: local P1 with a stamp at
+/// root slot 0 still resolves P1 (1 + 5 = 6).
+#[test]
+fn parked_declared_player_ignores_root_numbered_stamp_on_local() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![TargetRef::Player(P1)],
+        sides: 20,
+        results: vec![1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(opponent_power_sum_modifier()),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![0],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
+        declared_targets_recorded: true,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    };
+    assert_eq!(
+        resumed_die_totals(&mut state, pending),
+        vec![6],
+        "the local P1 survives the root-numbered stamp (1 + 5), exactly like live"
+    );
+}
+
+/// B1a — PAUSE (absent control). With no player on any parked list, the twin
+/// answers Undeclared and the axis matches nothing (1 + 0 = 1) — never a
+/// neighboring list's non-player entry, never the event player.
+#[test]
+fn parked_declared_player_absent_matches_nothing() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    let pending = PendingDieRoll {
+        source_id: roller,
+        controller: P0,
+        roller: P0,
+        targets: vec![],
+        sides: 20,
+        results: vec![1],
+        ignore_rules: vec![],
+        results_table: vec![],
+        modifier: Some(opponent_power_sum_modifier()),
+        die_result: None,
+        next_index: 0,
+        running_total: 0,
+        rolled_any: false,
+        forced_ignored: vec![],
+        chain_root_targets: vec![],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
+        declared_targets_recorded: true,
+        local_target_pins: vec![],
+        keyed_target_incarnations: vec![],
+    };
+    assert_eq!(
+        resumed_die_totals(&mut state, pending),
+        vec![1],
+        "no parked player means no match (1 + 0)"
+    );
+}
+
+/// B1-production — the real capture/keep-pause/`SelectDieRolls` boundary
+/// for the supported direct axis. A synthetic player-targeting die spell is
+/// CAST with Barbarian Class raising the roll; the keep prompt is answered
+/// through `GameAction`, and the resumed modifier must resolve the declared
+/// player target (P1's 5, not P0's 9). Capture, pause, and resume are all
+/// production; only the aggregate's controller is rebound (the parser binds
+/// the population to the caster in this position, so the test installs the
+/// target-derived axis the boundary must carry — which the constructor
+/// accepts, proving the shape admits).
+#[test]
+fn production_pause_resolves_declared_player_axis() {
+    const CENSUS_ROLL: &str =
+        "Choose target player. Roll a d20 and add the total power of creatures they control.";
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new_n_player(2, 49);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own Brute", 9, 9);
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    scenario.add_enchantment_from_oracle(P0, "Barbarian Class", BARBARIAN_CLASS_L1);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Census Roll", true, CENSUS_ROLL)
+        .id();
+    let mut runner = scenario.build();
+    rebind_census_roll_to_target_axis(runner.state_mut(), spell);
+
+    runner.cast(spell).target_player(P1).commit();
+    let top_targets = runner
+        .state()
+        .stack
+        .back()
+        .and_then(|entry| entry.ability())
+        .map(|ability| ability.targets.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        top_targets,
+        vec![TargetRef::Player(P1)],
+        "reach-guard: P1 must be declared on the resolving spell"
+    );
+    runner.resolve_top();
+
+    let WaitingFor::DieKeepChoice {
+        player,
+        results,
+        ignorable_indices,
+        ignore_count,
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "reach-guard: the raised d20s must open a real CR 706.6 ignore choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "the roller answers the keep choice");
+    assert_eq!(*ignore_count, 1, "Barbarian ignores one lowest roll");
+    assert_eq!(
+        ignorable_indices.len(),
+        2,
+        "both raised dice are offered, got {results:?}"
+    );
+
+    let survivor = *results.iter().max().expect("two raised dice");
+    let ignore = if results[0] <= results[1] { 0 } else { 1 };
+    let result = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![ignore],
+        })
+        .expect("submit the keep choice");
+    let rolls: Vec<u8> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                sides: 20,
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![survivor + 5],
+        "the survivor adds the declared player's power (P1's 5); a dropped binding emits the bare survivor, a P0 misread adds 9"
+    );
+}
+
+/// B1-production — INLINE control for the paused test above: the same
+/// rebound spell cast WITHOUT Barbarian resolves its modifier live (no
+/// suspension), so the total must carry the same declared-player addend.
+/// The pinned total is seed-49's natural plus P1's 5 (M6 pins dice the same
+/// way); a dropped binding emits the bare natural, a P0 misread adds 9.
+#[test]
+fn inline_census_roll_resolves_declared_player_axis() {
+    const CENSUS_ROLL: &str =
+        "Choose target player. Roll a d20 and add the total power of creatures they control.";
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new_n_player(2, 49);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own Brute", 9, 9);
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Census Roll", true, CENSUS_ROLL)
+        .id();
+    let mut runner = scenario.build();
+    rebind_census_roll_to_target_axis(runner.state_mut(), spell);
+
+    runner.cast(spell).target_player(P1).commit();
+    // `resolve_top` drops its events; drive priority through `act` like it
+    // does so the inline total stays observable.
+    let initial_stack_len = runner.state().stack.len();
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.len() < initial_stack_len {
+            break;
+        }
+        match runner.act(GameAction::PassPriority) {
+            Ok(result) => events.extend(result.events),
+            Err(_) => break,
+        }
+    }
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                sides: 20,
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![10],
+        "seed 49 rolls a natural 5 and adds the declared player's 5; a dropped binding emits 5, a P0 misread 14"
+    );
+}
+
+/// Rebind Census Roll's parsed aggregate population from the parser's caster
+/// default to the declared-player axis the suspension boundary must carry.
+/// The wholesale rebuild through the public constructor doubles as an
+/// admission proof: a refused shape would panic here, not at the boundary.
+fn rebind_census_roll_to_target_axis(state: &mut GameState, spell: ObjectId) {
+    use std::sync::Arc;
+    let spell_obj = state.objects.get_mut(&spell).expect("spell in hand");
+    let defs = Arc::get_mut(&mut spell_obj.abilities).expect("uniquely owned defs");
+    let sub = defs
+        .iter_mut()
+        .find_map(|def| def.sub_ability.as_mut())
+        .expect("Census Roll parses a roll sub-ability");
+    let Effect::RollDie {
+        modifier: Some(DieRollModifier::Add { value }),
+        ..
+    } = sub.effect.as_mut()
+    else {
+        panic!("Census Roll parses an added roll modifier");
+    };
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(existing),
+    } = value
+    else {
+        panic!("Census Roll parses an aggregate modifier");
+    };
+    assert_eq!(
+        existing.function(),
+        AggregateFunction::Sum,
+        "parse-stability guard: still a power sum"
+    );
+    *value = QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(
+            engine::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Power,
+                CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::TargetPlayer),
+                        properties: vec![],
+                    }),
+                },
+            )
+            .expect("the direct target-player axis admits"),
+        ),
+    };
+}
+
+/// Sum of power over creatures the target opponent controls — the shared
+/// direct-axis modifier for the B1a parked-player probes.
+fn opponent_power_sum_modifier() -> DieRollModifier {
+    DieRollModifier::Add {
         value: QuantityExpr::Ref {
             qty: QuantityRef::PropertyAggregate(
                 engine::types::ability::PropertyAggregate::new(
@@ -1574,36 +1984,15 @@ fn parked_target_opponent_axis_ignores_illegal_declared_player() {
                 .expect("statically valid property aggregate"),
             ),
         },
-    };
-    let pending = PendingDieRoll {
-        source_id: roller,
-        controller: P0,
-        roller: P0,
-        targets: vec![TargetRef::Player(P1)],
-        sides: 20,
-        results: vec![1],
-        ignore_rules: vec![],
-        results_table: vec![],
-        modifier: Some(modifier),
-        die_result: None,
-        next_index: 0,
-        running_total: 0,
-        rolled_any: false,
-        forced_ignored: vec![],
-        chain_root_targets: vec![],
-        illegal_target_slots: vec![0],
-        chain_root_target_pins: vec![],
-        declared_targets: vec![TargetRef::Player(P1)],
-        declared_target_pins: vec![None],
-        declared_ahead: 0,
-        declared_targets_recorded: true,
-        local_target_pins: vec![],
-        keyed_target_incarnations: vec![],
-    };
+    }
+}
+
+/// Drive `pending` through the real resume entry and collect emitted totals.
+fn resumed_die_totals(state: &mut GameState, pending: PendingDieRoll) -> Vec<u8> {
     let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
+    resume_after_ignore(state, pending, Vec::new(), &mut events, None)
         .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
+    events
         .iter()
         .filter_map(|event| match event {
             GameEvent::DieRolled {
@@ -1612,12 +2001,7 @@ fn parked_target_opponent_axis_ignores_illegal_declared_player() {
             } => Some(*total),
             _ => None,
         })
-        .collect();
-    assert_eq!(
-        rolls,
-        vec![1],
-        "the stamped-illegal declared player contributes nothing (1 + 0); reading it would emit 6"
-    );
+        .collect()
 }
 
 /// M6: production-created Song pause. Parsed Song is CAST with Barbarian

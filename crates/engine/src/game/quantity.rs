@@ -391,7 +391,7 @@ enum TrackedMemberRead<'s> {
 /// True when departures from `zone` record LKI under their pre-move
 /// incarnation. Mirrors the zones.rs recording gate exactly; a new
 /// recording zone must extend both.
-fn zone_departure_records_lki(zone: Zone) -> bool {
+pub(crate) fn zone_departure_records_lki(zone: Zone) -> bool {
     matches!(zone, Zone::Battlefield | Zone::Exile | Zone::Stack)
 }
 
@@ -21982,6 +21982,220 @@ mod tests {
             resolve_quantity(&state, &aggregate, PlayerId(0), source),
             0,
             "live power 2 fails the power-3 floor; the stale pumped 5 must not admit the member"
+        );
+    }
+
+    /// B2 — STATE EQUIVALENCE (origins). Two states identical except one
+    /// member's departure origin read different powers (5 vs 2) through the
+    /// same ChainSet aggregate, so they must compare UNEQUAL — origin-blind
+    /// equality would certify loop-equivalent states that aggregate
+    /// differently. Fails while `tracked_set_member_origins` is absent from
+    /// the equality chain.
+    #[test]
+    fn loop_equality_distinguishes_tracked_member_departure_origins() {
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+
+        let mut a = GameState::new_two_player(42);
+        let (source_a, _) = stage_pumped_bounced_discarded_member(&mut a);
+        let mut b = GameState::new_two_player(42);
+        let (source_b, _) = stage_pumped_bounced_discarded_member(&mut b);
+        // A re-pins Oak's origin to the pumped battlefield departure
+        // (snapshot power 5); B keeps the staged hand exit (live power 2).
+        // The origins map is the ONLY field that differs.
+        let set = TrackedSetId(a.next_tracked_set_id - 1);
+        let oak = a.tracked_object_sets.get(&set).expect("staged set")[0];
+        a.tracked_set_member_origins.entry(set).or_default().insert(
+            oak,
+            TrackedMemberOrigin {
+                departed_from: Zone::Battlefield,
+                departure_incarnation: 1,
+            },
+        );
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity(&a, &power_sum(), PlayerId(0), source_a),
+            5,
+            "the battlefield origin must read the pumped snapshot 5"
+        );
+        assert_eq!(
+            resolve_quantity(&b, &power_sum(), PlayerId(0), source_b),
+            2,
+            "the hand-exit origin must read live power 2"
+        );
+        assert_ne!(a, b, "raw equality must distinguish the origins");
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "loop equality must distinguish the origins"
+        );
+    }
+
+    /// B2 — control: identical states with identical origins stay equal
+    /// through normalization. Guards the equality conjunct against
+    /// over-distinguishing.
+    #[test]
+    fn loop_equality_keeps_identical_origins_equal() {
+        use crate::types::game_state::loop_states_equal;
+
+        let mut a = GameState::new_two_player(42);
+        stage_pumped_bounced_discarded_member(&mut a);
+        let b = a.clone();
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "identical states must stay loop-equal"
+        );
+    }
+
+    /// B2 — RENUMBERED origins: two positions minted at different times with
+    /// the same structure (a pumped battlefield departure under incarnation 7
+    /// vs 9) normalize to EQUAL states that read the same aggregate. The
+    /// resolved set's origin-named snapshots must survive retention and both
+    /// the snapshots and the origins must canonicalize to one rank. Fails
+    /// after the equality conjunct until retention plus canonicalization
+    /// extend to origins.
+    #[test]
+    fn loop_equality_canonicalizes_renumbered_departure_origins() {
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+
+        fn staged_at(incarnation: u64) -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+            let set = TrackedSetId(state.next_tracked_set_id - 1);
+            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+            // Replace the staged history with a single pumped departure under
+            // the requested incarnation, and pin the origin to it.
+            state.lki_by_incarnation.clear();
+            let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
+            assert_eq!(pumped.power, Some(5), "staged pump shape");
+            state
+                .lki_by_incarnation
+                .entry(oak)
+                .or_default()
+                .insert(incarnation, pumped);
+            state
+                .tracked_set_member_origins
+                .entry(set)
+                .or_default()
+                .insert(
+                    oak,
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: incarnation,
+                    },
+                );
+            (state, source)
+        }
+
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        let (a, source_a) = staged_at(7);
+        let (b, source_b) = staged_at(9);
+        let na = a.normalize_for_loop();
+        let nb = b.normalize_for_loop();
+        assert!(
+            loop_states_equal(&na, &nb),
+            "renumbered origins must canonicalize to equal states"
+        );
+        assert_eq!(
+            resolve_quantity(&na, &power_sum(), PlayerId(0), source_a),
+            5,
+            "the retained, remapped snapshot must still read 5 on A"
+        );
+        assert_eq!(
+            resolve_quantity(&nb, &power_sum(), PlayerId(0), source_b),
+            5,
+            "the retained, remapped snapshot must still read 5 on B"
+        );
+    }
+
+    /// B2 — STALE-ORIGIN totality: an origin naming an incarnation with no
+    /// snapshot anywhere (legacy save, pruned history) must not panic
+    /// canonicalization — the union-rank remap assigns the rank the stamp
+    /// would have were it pooled — and reads fall back to legacy behavior
+    /// (live 2 here), since no snapshot sits at that rank.
+    #[test]
+    fn loop_normalization_tolerates_stale_departure_origins() {
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+
+        fn staged_stale() -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+            let set = TrackedSetId(state.next_tracked_set_id - 1);
+            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+            // A decoy snapshot under incarnation 7 plus an origin naming the
+            // record-less incarnation 99: without the union-rank remap, the
+            // rank lookup panics on the unpooled 99.
+            state.lki_by_incarnation.clear();
+            let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
+            state
+                .lki_by_incarnation
+                .entry(oak)
+                .or_default()
+                .insert(7, pumped);
+            state
+                .tracked_set_member_origins
+                .entry(set)
+                .or_default()
+                .insert(
+                    oak,
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: 99,
+                    },
+                );
+            (state, source)
+        }
+
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        let (a, source_a) = staged_stale();
+        let (b, _) = staged_stale();
+        let na = a.normalize_for_loop();
+        let nb = b.normalize_for_loop();
+        assert!(
+            loop_states_equal(&na, &nb),
+            "identical stale states must stay loop-equal"
+        );
+        assert_eq!(
+            resolve_quantity(&na, &power_sum(), PlayerId(0), source_a),
+            2,
+            "the record-less origin must fall back to legacy live power 2"
         );
     }
 

@@ -9485,11 +9485,12 @@ impl CardTypeSetSource {
 /// the resolving ability in scope, resumed with only the parked slot
 /// channel. Shapes with a parked backstop stay admitted — direct
 /// `ParentTarget` / `ParentTargetSlot` nodes (R1), a direct
-/// `SharesQuality` reference to `ParentTarget` (R2), and the
-/// target-derived controller axis (`TargetPlayer` / `TargetOpponent`,
-/// which reads the parked declared-player twin) — while shapes that
-/// read `ability.targets` (or other ability-carried records: chosen
-/// players, declared views, cost stamps) with no parked equivalent refuse.
+/// `SharesQuality` reference to `ParentTarget` (R2), and the DIRECT
+/// `Typed.controller` target-derived axis (`TargetPlayer` /
+/// `TargetOpponent`, which reads the parked declared-player twin) — while
+/// shapes that read `ability.targets` (or other ability-carried records:
+/// chosen players, declared views, cost stamps) with no parked equivalent
+/// refuse, including the same axis nested in a property or nested scan.
 /// Every match below is exhaustive over its syntax enum (no wildcard) so
 /// a future variant fails compilation here instead of silently admitting.
 pub(crate) fn member_filter_has_unsupported_selected_ref(filter: &TargetFilter) -> bool {
@@ -9519,7 +9520,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
             typed
                 .controller
                 .as_ref()
-                .is_some_and(controller_ref_is_selected_dependent)
+                .is_some_and(|controller| controller_ref_is_selected_dependent(controller, !nested))
                 || typed
                     .properties
                     .iter()
@@ -9631,14 +9632,16 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         FilterProp::CombatRelation { .. } => true,
         FilterProp::AttachedTo { to } => match to {
             AttachmentReferent::DeclaredTarget { .. } => true,
-            AttachmentReferent::Player { player } => controller_ref_is_selected_dependent(player),
+            AttachmentReferent::Player { player } => {
+                controller_ref_is_selected_dependent(player, false)
+            }
             AttachmentReferent::Source | AttachmentReferent::Recipient => false,
         },
         FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
-        } => controller_ref_is_selected_dependent(controller),
+        } => controller_ref_is_selected_dependent(controller, false),
         FilterProp::Attacking { defender, .. }
         | FilterProp::AttackedThisTurn { defender, .. }
         | FilterProp::HasAttachment {
@@ -9654,7 +9657,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
             ..
         } => defender
             .as_ref()
-            .is_some_and(controller_ref_is_selected_dependent),
+            .is_some_and(|axis| controller_ref_is_selected_dependent(axis, false)),
         FilterProp::Counters { count, .. } => quantity_expr_has_unsupported_selected_ref(count),
         FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
             quantity_expr_has_unsupported_selected_ref(value)
@@ -9794,13 +9797,21 @@ fn player_filter_has_unsupported_selected_ref(player: &PlayerFilter) -> bool {
 /// Target-, choice-, and view-derived controller axes read the resolving
 /// ability with no parked equivalent; source, event, combat, and
 /// turn-state axes evaluate identically either way.
-fn controller_ref_is_selected_dependent(reference: &ControllerRef) -> bool {
+///
+/// `direct_member` is true only for a direct `Typed.controller` in the
+/// member-evaluation context: the single position the parked
+/// declared-player twin serves. Every property, quantity, and nested-scan
+/// position passes false, so a target-derived axis there refuses.
+fn controller_ref_is_selected_dependent(reference: &ControllerRef, direct_member: bool) -> bool {
     match reference {
-        // MED1 carve-out: the target-derived controller axis reads the
-        // declared player target, which the parked quantity path carries
-        // through the declared-player twin of `declared_target_player`
-        // (stamp-honoring, event-blind) — so it is suspension-safe.
-        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => false,
+        // MED1 carve-out (direct member-controller position only): the
+        // target-derived axis reads the declared player target, which the
+        // parked quantity path carries through the declared-player twin of
+        // `declared_target_player` — so it is suspension-safe exactly there.
+        // Property contexts (`Owned`, `ProtectorMatches`, defenders) and
+        // nested scans resolve through the live ability only, with no parked
+        // equivalent, and refuse.
+        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => !direct_member,
         ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
@@ -9979,11 +9990,11 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         QuantityRef::TargetZoneCardCount { scope, .. }
         | QuantityRef::BasicLandTypeCount { controller: scope }
         | QuantityRef::CommanderManaValue { owner: scope } => {
-            controller_ref_is_selected_dependent(scope)
+            controller_ref_is_selected_dependent(scope, false)
         }
         QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
             .as_ref()
-            .is_some_and(controller_ref_is_selected_dependent),
+            .is_some_and(|axis| controller_ref_is_selected_dependent(axis, false)),
         QuantityRef::CountersOn { scope, .. }
         | QuantityRef::Power { scope }
         | QuantityRef::BasePower { scope }
@@ -42692,6 +42703,30 @@ mod tests {
                     },
                 }]),
             ),
+            (
+                "Owned property over the target player (no parked property authority)",
+                typed(vec![FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                }]),
+            ),
+            (
+                "ProtectorMatches over the target opponent (no parked property authority)",
+                typed(vec![FilterProp::ProtectorMatches {
+                    controller: ControllerRef::TargetOpponent,
+                }]),
+            ),
+            (
+                "target-player controller nested in a SharesQuality reference scan",
+                typed(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: Some(ControllerRef::TargetPlayer),
+                        properties: vec![],
+                    }))),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            ),
         ] {
             assert_eq!(
                 chain_set_with(filter).validate_admission(),
@@ -42731,7 +42766,7 @@ mod tests {
                 TargetFilter::ParentTargetSlot { index: 0 },
             ),
             (
-                "target-player controller axis (parked-supported)",
+                "direct target-player controller axis (parked-supported)",
                 TargetFilter::Typed(TypedFilter {
                     type_filters: vec![],
                     controller: Some(ControllerRef::TargetPlayer),
@@ -42739,7 +42774,7 @@ mod tests {
                 }),
             ),
             (
-                "target-opponent controller axis (parked-supported)",
+                "direct target-opponent controller axis (parked-supported)",
                 TargetFilter::Typed(TypedFilter {
                     type_filters: vec![],
                     controller: Some(ControllerRef::TargetOpponent),
@@ -42810,6 +42845,46 @@ mod tests {
         assert!(
             serde_json::from_str::<QuantityExpr>(&admitted).is_ok(),
             "the R2-supported shape still decodes"
+        );
+    }
+
+    /// B1b — VERDICT (the target-player carve-out is direct-controller-only).
+    /// Matt's witness: a power sum over `TrackedSet{ChainSet, filter:
+    /// Typed{properties:[Owned{TargetPlayer}]}}` reads 5 live but 0 resumed,
+    /// because the `Owned` property evaluator resolves only through the live
+    /// ability with no parked equivalent. The shape must refuse both at the
+    /// aggregate constructor and at the custom decoder — while the DIRECT
+    /// `Typed.controller` axis keeps admitting (see the scoped test below).
+    #[test]
+    fn med1_owned_target_player_property_refuses_at_construction_and_decode() {
+        let witness = || {
+            chain_set_with(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                }],
+            }))
+        };
+        assert_eq!(
+            PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, witness()),
+            Err(PropertyAggregateError::UnsupportedDependentMemberFilter),
+            "B1b witness: Owned{{TargetPlayer}} must refuse at construction"
+        );
+        let aggregate = PropertyAggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::Power,
+            source: witness(),
+        };
+        let json = serde_json::to_string(&QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        })
+        .expect("test value serializes");
+        let err = serde_json::from_str::<QuantityExpr>(&json)
+            .expect_err("decoding the Owned{{TargetPlayer}} witness must fail");
+        assert!(
+            err.to_string().contains("suspension-resume path"),
+            "decoding must fail on the shared admission rejection, not a shape error: {err}"
         );
     }
 

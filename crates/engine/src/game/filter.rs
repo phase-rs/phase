@@ -2517,21 +2517,27 @@ pub(crate) fn target_player_from_ability_or_root(
 }
 
 /// CR 608.2c + CR 608.2b: the parked twin of [`declared_target_player`] —
-/// the first declared player target on the parked frame, judged by the
-/// carried illegal stamp. List priority mirrors
-/// [`referenced_parked_targets_for_filter`]: the recorded declared list
-/// when present (authoritative even when empty), else the legacy root
-/// list, else the local list. The stamp is root-numbered, so the base
-/// offset applies — exactly like the live path. Players carry no
-/// incarnation, so there is no pin check (the live path passes player
-/// slots through unchanged).
+/// the first declared player target on the parked frame. Priority mirrors
+/// the live authority EXACTLY: the node's own targets first with no stamp
+/// check (validation compacts the node before the park, exactly like the
+/// live fast path), then the captured declared chain — the parked form of
+/// the live root-chain fallback — with the resolution stamp in root
+/// numbering (so the base offset applies), else the legacy chain-root list
+/// when no capture was recorded. A roll node usually carries no targets of
+/// its own, so production frames resolve through the captured chain. Players
+/// carry no incarnation, so there is no pin check (the live path passes
+/// player slots through unchanged).
 pub(crate) fn parked_declared_player_target(parked: ParkedTargets<'_>) -> DeclaredPlayerTarget {
+    if let Some(player) = parked.local.iter().find_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(_) => None,
+    }) {
+        return DeclaredPlayerTarget::Legal(player);
+    }
     let (list, ahead) = if parked.declared_recorded {
         (parked.declared, parked.ahead)
-    } else if !parked.root.is_empty() {
-        (parked.root, 0)
     } else {
-        (parked.local, 0)
+        (parked.root, 0)
     };
     list.iter()
         .enumerate()

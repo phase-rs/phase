@@ -33716,6 +33716,36 @@ impl GameState {
         // CR 104.4b: the same traversal identity canonicalization uses.
         self.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
 
+        // CR 608.2c: the departure snapshots the frame's live tracked-set
+        // anaphor reads — the resolved set's origins (`chain_tracked_set_id`,
+        // else the latest non-empty set, mirroring
+        // `targeting::resolve_tracked_set_id`; inlined because types cannot
+        // depend on game) — are retained alongside carrier references, or
+        // normalization would degrade origin reads the unnormalized states
+        // agree on. Every other set is an append-only record whose superseded
+        // stamps are history, not position: each blink cycle appends a fresh
+        // set re-stamping the same member, so retaining every stamp would
+        // accumulate incarnations across periods and refuse artefactually.
+        // (Fresh sets' origins stay compared through the origins field,
+        // converged below the window by the cover arms.)
+        let resolved_set = self.chain_tracked_set_id.or_else(|| {
+            self.tracked_object_sets
+                .iter()
+                .filter(|(_, members)| !members.is_empty())
+                .max_by_key(|(id, _)| id.0)
+                .map(|(id, _)| *id)
+        });
+        if let Some(set) = resolved_set {
+            if let Some(members) = self.tracked_set_member_origins.get(&set) {
+                for (member, origin) in members.iter() {
+                    referenced_lki.insert(ObjectIncarnationRef::of(
+                        *member,
+                        origin.departure_incarnation,
+                    ));
+                }
+            }
+        }
+
         self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
             .into_iter()
             .filter_map(|(object_id, mut history)| {
@@ -34030,6 +34060,40 @@ impl GameState {
                 *incarnation = canonical(object_id, *incarnation);
             }
         });
+        // CR 608.2c: remap origin-named incarnations with the same ranks,
+        // so two positions minted at different times keep reading the same
+        // snapshots through structurally identical origins. The rank counts
+        // the pool below the incarnation whether or not the pool holds it —
+        // the rank it WOULD have — so a superseded older-set stamp remaps
+        // exactly like the live stamp naming the same departure on the other
+        // side (the origins field then converges below the window, while the
+        // retained snapshots' content still judges material change), and a
+        // stale record-less stamp still remaps totally instead of panicking.
+        // (`canonical` above keeps panicking for history keys and carriers,
+        // which are pooled by construction; only origins take the union-rank
+        // path. Reads through normalized older-set stamps may alias a
+        // retained rank; only resolved-set reads are exact, which is all the
+        // loop comparison consumes.)
+        let remap_origin = |member: ObjectId, incarnation: u64| {
+            present
+                .get(&member)
+                .map(|incarnations| incarnations.partition_point(|&x| x < incarnation) as u64 + 1)
+                .unwrap_or(1)
+        };
+        self.tracked_set_member_origins = std::mem::take(&mut self.tracked_set_member_origins)
+            .into_iter()
+            .map(|(set_id, members)| {
+                let members = members
+                    .into_iter()
+                    .map(|(member, mut origin)| {
+                        origin.departure_incarnation =
+                            remap_origin(member, origin.departure_incarnation);
+                        (member, origin)
+                    })
+                    .collect();
+                (set_id, members)
+            })
+            .collect();
     }
 
     /// The spell announcements named by `BecomesTarget` targeters on every
@@ -35536,6 +35600,7 @@ impl PartialEq for GameState {
             && self.next_return_result_occurrence_id == other.next_return_result_occurrence_id
             && self.resolving_modal_instruction == other.resolving_modal_instruction
             && self.tracked_set_member_causes == other.tracked_set_member_causes
+            && self.tracked_set_member_origins == other.tracked_set_member_origins
             && self.tracked_set_participants == other.tracked_set_participants
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
