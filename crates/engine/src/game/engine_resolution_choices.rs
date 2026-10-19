@@ -6733,32 +6733,48 @@ pub(super) fn handle_resolution_choice(
                             marker.group = Some(logical_zone_change_group.logical_group_id);
                         }
                     }
+                    // CR 603.6a + CR 614.12: one event — every member's gates
+                    // read the board before any member moves. The resolving
+                    // stack ability may be a root whose effect is not this move
+                    // (the move can be any sub-ability), so it binds only the
+                    // gate filters and counter quantities; the move's own
+                    // descriptor is the entry context.
+                    let binding =
+                        effects::change_zone::resolving_stack_ability_for_source(state, source_id);
+                    let entry_spec = effects::change_zone::ChangeZoneEntrySpec {
+                        entry: effects::change_zone::EntryGateContext {
+                            destination: dest_zone,
+                            controller_override: enters_under_player,
+                            enter_transformed,
+                        },
+                        source_id,
+                        enter_with_counters: &enter_with_counters,
+                        conditional_enter_with_counters: &conditional_enter_with_counters,
+                        enter_tapped,
+                        enters_attacking,
+                        enters_modified_if: enters_modified_if.as_ref(),
+                    };
+                    let members = effects::change_zone::resolve_change_zone_member_entries(
+                        state,
+                        binding.as_ref(),
+                        &entry_spec,
+                        &chosen_ids,
+                    );
                     let logical_group_event_start = events.len();
-                    for (i, card_id) in chosen_ids.iter().enumerate() {
+                    for (i, member) in members.iter().enumerate() {
+                        let card_id = &member.object_id;
                         let origin = state
                             .objects
                             .get(card_id)
                             .map(|object| object.zone)
                             .unwrap_or(zone);
-                        let per_obj_enter_counters =
-                            effects::change_zone::enter_with_counters_for_pending_object(
-                                state,
-                                source_id,
-                                *card_id,
-                                &enter_with_counters,
-                                &conditional_enter_with_counters,
-                            );
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
                             source_id,
                             controller: player,
                             origin: Some(origin),
                             destination: dest_zone,
                             enter_transformed,
-                            enter_tapped,
                             enters_under_player,
-                            enters_attacking,
-                            enter_with_counters: per_obj_enter_counters,
-                            conditional_enter_with_counters: vec![],
                             // CR 611.2a + CR 610.3: the duration carried across
                             // the `EffectZoneChoice` round-trip — an
                             // "exile ... until ~ leaves the battlefield" move
@@ -6776,10 +6792,6 @@ pub(super) fn handle_resolution_choice(
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
                             library_placement: None,
-                            // CR 614.12: evaluate the moved-object type gate carried
-                            // across the `EffectZoneChoice` round-trip against each
-                            // chosen object (Summoner's Grimoire).
-                            enters_modified_if: enters_modified_if.clone(),
                             enter_attached_to: None,
                         };
                         let anticipated_pause =
@@ -6792,7 +6804,7 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, *card_id, events,
+                            state, &ctx, member, events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -6836,7 +6848,7 @@ pub(super) fn handle_resolution_choice(
                                             boundary.mark_counted();
                                             boundary
                                         }),
-                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
                                         // EffectZoneChoice can select across multiple
@@ -6846,12 +6858,7 @@ pub(super) fn handle_resolution_choice(
                                         origin: None,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
-                                        enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
-                                        enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: enter_with_counters.clone(),
-                                        conditional_enter_with_counters:
-                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         face_down_in_exile: ctx.face_down_in_exile,
@@ -6869,9 +6876,6 @@ pub(super) fn handle_resolution_choice(
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
-                                        // CR 614.12: preserve the moved-object type
-                                        // gate across a further as-enters pause.
-                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -6921,7 +6925,7 @@ pub(super) fn handle_resolution_choice(
                                                 })
                                                 .expect("zone-change pause must retain its exact boundary"),
                                         ),
-                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
                                         // EffectZoneChoice can select across multiple
@@ -6931,12 +6935,7 @@ pub(super) fn handle_resolution_choice(
                                         origin: None,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
-                                        enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
-                                        enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: enter_with_counters.clone(),
-                                        conditional_enter_with_counters:
-                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         face_down_in_exile: ctx.face_down_in_exile,
@@ -6954,9 +6953,6 @@ pub(super) fn handle_resolution_choice(
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
-                                        // CR 614.12: preserve the moved-object type
-                                        // gate across a further as-enters pause.
-                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -7270,11 +7266,7 @@ pub(super) fn handle_resolution_choice(
                         origin: Some(zone),
                         destination: dest_zone,
                         enter_transformed,
-                        enter_tapped,
                         enters_under_player,
-                        enters_attacking,
-                        enter_with_counters: vec![],
-                        conditional_enter_with_counters: vec![],
                         // CR 118.3: cost-payment exile is unbounded — no
                         // "until ..." duration idiom pays a cost, so the
                         // round-trip `duration` (always `None` for `PayCost`
@@ -7284,20 +7276,41 @@ pub(super) fn handle_resolution_choice(
                         face_down_in_exile,
                         face_down_profile: face_down_profile.clone(),
                         library_placement: None,
-                        // CR 614.12: cost-payment exile carries no enter-modifier
-                        // gate; thread the (None) round-trip value for consistency.
-                        enters_modified_if: enters_modified_if.clone(),
                         enter_attached_to: None,
                     };
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
+                    // CR 118.3 + CR 614.12: cost-payment exile carries no entry
+                    // counters; thread the round-trip rider values (always
+                    // unconditional for `PayCost` producers) through the same
+                    // pre-event member resolution as every other ChangeZone loop.
+                    let entry_spec = effects::change_zone::ChangeZoneEntrySpec {
+                        entry: effects::change_zone::EntryGateContext {
+                            destination: dest_zone,
+                            controller_override: enters_under_player,
+                            enter_transformed,
+                        },
+                        source_id,
+                        enter_with_counters: &[],
+                        conditional_enter_with_counters: &[],
+                        enter_tapped,
+                        enters_attacking,
+                        enters_modified_if: enters_modified_if.as_ref(),
+                    };
+                    let members = effects::change_zone::resolve_change_zone_member_entries(
+                        state,
+                        None,
+                        &entry_spec,
+                        &chosen_ids,
+                    );
                     let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
                             &chosen_ids,
                         );
                     let logical_group_event_start = events.len();
-                    for (i, card_id) in chosen_ids.iter().enumerate() {
+                    for (i, member) in members.iter().enumerate() {
+                        let card_id = &member.object_id;
                         let anticipated_pause =
                             effects::change_zone::anticipated_zone_change_delivery(
                                 state,
@@ -7308,7 +7321,7 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, *card_id, events,
+                            state, &ctx, member, events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -7338,27 +7351,19 @@ pub(super) fn handle_resolution_choice(
                                             boundary.mark_counted();
                                             boundary
                                         }),
-                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
-                                        enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
-                                        enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: enter_with_counters.clone(),
-                                        conditional_enter_with_counters:
-                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
-                                        // CR 614.12: preserve the moved-object type
-                                        // gate across a further as-enters pause.
-                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -7396,27 +7401,19 @@ pub(super) fn handle_resolution_choice(
                                                 })
                                                 .expect("zone-change pause must retain its exact boundary"),
                                         ),
-                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
-                                        enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
-                                        enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: enter_with_counters.clone(),
-                                        conditional_enter_with_counters:
-                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
-                                        // CR 614.12: preserve the moved-object type
-                                        // gate across a further as-enters pause.
-                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
                                     },

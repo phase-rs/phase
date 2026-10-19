@@ -95,6 +95,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // carrier (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
 // v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`, and
 // `ShortcutProposal.leading_aims`.
+// v155 carries each parked ChangeZone member's pre-event entry modifications
+// (`ChangeZoneMemberEntry`, CR 603.6a + CR 614.12) in GameState.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -197,7 +199,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // and removes the loyalty-grant sibling variant.
 // +83: v154 adds `PendingCostMoveResume::CounterCostRemovalPayment` and
 //      `ManaAbilityCostCursor.counter_removal` to GameState.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 83;
+// +84: v155 retypes `PendingChangeZoneIteration.remaining` to `ChangeZoneMemberEntry`
+//      (pre-event entry modifications) and drops the raw gate fields.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 84;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -306,7 +310,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +80: wire 134 moves with full-game v152 for the shortcut suggestion fields.
 // +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
 // +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 82;
+// +83: wire 137 moves with full-game v155 for the pre-event ChangeZone member entries.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 83;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

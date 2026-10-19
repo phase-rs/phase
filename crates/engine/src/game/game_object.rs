@@ -3270,6 +3270,84 @@ impl GameObject {
         }
     }
 
+    /// CR 603.10 + CR 400.7: write an observed projection's characteristics and battlefield
+    /// status onto this object — the field-for-field inverse of the `TriggerSourceContext`
+    /// `snapshot_for_zone_change` builds. Builds a read-only view for filter evaluation; never
+    /// applied to an object in `GameState`.
+    ///
+    /// Abilities (`trigger_entries`) are not projected; the base object supplies them. The
+    /// projection's state-level relationships with no `GameObject` counterpart
+    /// (`linked_exile_snapshot`, `cards_exiled_this_turn`, `combat_status`, `granting_object`)
+    /// are left to their state-level authorities.
+    pub(crate) fn overlay_source_projection(&mut self, context: &TriggerSourceContext) {
+        let lki = &context.lki;
+        // Identity.
+        self.incarnation = context.identity.reference.incarnation;
+        // allow-raw-zone: writes a detached read-only view for filter evaluation, never an object in `GameState`; no zone change occurs (CR 603.10).
+        self.zone = context.identity.expected_zone;
+        self.card_id = context.card_id;
+        self.printed_ref = context.printed_ref.clone();
+        self.token_image_ref = lki.token_image_ref.clone();
+        // Public characteristics (layer-applied at observation time).
+        self.name = lki.name.clone();
+        self.power = lki.power;
+        self.toughness = lki.toughness;
+        self.layer_base_power = lki.base_power;
+        self.layer_base_toughness = lki.base_toughness;
+        self.controller = lki.controller;
+        self.owner = lki.owner;
+        self.card_types.core_types = lki.card_types.clone();
+        self.card_types.subtypes = lki.subtypes.clone();
+        self.card_types.supertypes = lki.supertypes.clone();
+        self.keywords = lki.keywords.clone();
+        self.color = lki.colors.clone();
+        self.chosen_attributes = lki.chosen_attributes.clone();
+        self.counters = lki.counters.clone();
+        self.tapped = lki.tapped;
+        self.is_suspected = lki.is_suspected;
+        // Relationships.
+        self.attachments = context
+            .attachments
+            .iter()
+            .map(|attachment| attachment.object_id)
+            .collect();
+        self.attached_to = context.attached_to;
+        self.paired_with = context.paired_with;
+        self.pair_controller = context.pair_controller;
+        // Object status and as-cast / as-entered facts.
+        self.is_token = context.is_token;
+        self.face_down = context.face_down;
+        self.mana_cost = context.mana_cost.clone();
+        self.transformed = context.transformed;
+        self.is_renowned = context.is_renowned;
+        self.is_saddled = context.is_saddled;
+        self.echo_due = context.echo_due;
+        self.harnessed = context.harnessed;
+        self.saddled_by = context.saddled_by.clone();
+        self.convoked_creatures = context.convoked_creatures.clone();
+        self.case_state = context.case_state.clone();
+        self.class_level = context.class_level;
+        self.timestamp = context.timestamp;
+        self.entered_battlefield_turn = context.entered_battlefield_turn;
+        self.cast_from_zone = context.cast_from_zone;
+        self.played_from_zone = context.played_from_zone;
+        self.entered_via_ability_source = context.entered_via_ability_source;
+        self.cast_controller = context.cast_controller;
+        self.phase_status = context.phase_status;
+        self.cast_variant_paid = context.cast_variant_paid;
+        self.cast_timing_permission = context.cast_timing_permission;
+        self.cost_x_paid = context.cost_x_paid;
+        self.cast_spell_keywords = context.cast_spell_keywords.clone();
+        self.mana_spent_to_cast = context.mana_spent_to_cast;
+        self.colors_spent_to_cast = context.colors_spent_to_cast.clone();
+        self.mana_spent_to_cast_amount = context.mana_spent_to_cast_amount;
+        self.mana_spent_source_snapshots = context.mana_spent_source_snapshots.clone();
+        self.kickers_paid = context.kickers_paid.clone();
+        self.additional_cost_payment_count = context.additional_cost_payment_count;
+        self.additional_cost_payments = context.additional_cost_payments.clone();
+        self.cast_cost_paid_object = context.cast_cost_paid_object.clone();
+    }
+
     /// CR 106.3 + CR 601.2h: Capture the public source characteristics needed
     /// by source-qualified "mana spent to cast" effects.
     pub fn snapshot_for_mana_spent(&self) -> LKISnapshot {
@@ -5791,5 +5869,85 @@ mod tests {
         entering.prepared_copy_source = Some(ObjectId(77));
         entering.reset_for_battlefield_exit();
         assert_eq!(entering.prepared_copy_source, None);
+    }
+
+    /// U1 — CR 603.10 + CR 400.7: `overlay_source_projection` is the inverse of the
+    /// latch projection for every field an enter observer's filter can read, on both a
+    /// live-entrant base and a `GameObject::new` skeleton.
+    #[test]
+    fn overlay_source_projection_inverts_snapshot() {
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::GameState;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(7);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Observed Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).expect("created");
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec!["Bear".to_string()];
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.layer_base_power = Some(2);
+            obj.layer_base_toughness = Some(2);
+            obj.keywords = vec![Keyword::Flying];
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+            obj.tapped = true;
+            obj.controller = PlayerId(0);
+            obj.incarnation = 3;
+        }
+        let original = state.objects[&id].clone();
+        let ctx = crate::game::triggers::trigger_source_context_for_latch(&state, &original);
+
+        let assert_inverse = |view: &GameObject| {
+            assert_eq!(view.incarnation, original.incarnation);
+            assert_eq!(view.zone, original.zone);
+            assert_eq!(view.card_id, original.card_id);
+            assert_eq!(view.name, original.name);
+            assert_eq!(view.power, original.power);
+            assert_eq!(view.toughness, original.toughness);
+            assert_eq!(view.layer_base_power, original.layer_base_power);
+            assert_eq!(view.layer_base_toughness, original.layer_base_toughness);
+            assert_eq!(view.controller, original.controller);
+            assert_eq!(view.owner, original.owner);
+            assert_eq!(view.card_types.core_types, original.card_types.core_types);
+            assert_eq!(view.card_types.subtypes, original.card_types.subtypes);
+            assert_eq!(view.card_types.supertypes, original.card_types.supertypes);
+            assert_eq!(view.keywords, original.keywords);
+            assert_eq!(view.color, original.effective_colors());
+            assert_eq!(view.counters, original.counters);
+            assert_eq!(view.tapped, original.tapped);
+            assert_eq!(view.is_token, original.is_token);
+            assert_eq!(view.attachments, original.attachments);
+            assert_eq!(view.phase_status, original.phase_status);
+            assert_eq!(view.timestamp, original.timestamp);
+        };
+
+        // Live base: later changes on the object are overwritten by the projection.
+        let mut live = original.clone();
+        live.counters.insert(CounterType::Plus1Plus1, 3);
+        live.power = Some(4);
+        live.keywords.push(Keyword::Haste);
+        live.controller = PlayerId(1);
+        live.tapped = false;
+        live.incarnation = 4;
+        assert_ne!(
+            live.counters, original.counters,
+            "precondition: the live base differs"
+        );
+        live.overlay_source_projection(&ctx);
+        assert_inverse(&live);
+
+        // Skeleton base.
+        let mut skeleton =
+            GameObject::new(id, CardId(0), PlayerId(1), String::new(), Zone::Graveyard);
+        skeleton.overlay_source_projection(&ctx);
+        assert_inverse(&skeleton);
     }
 }

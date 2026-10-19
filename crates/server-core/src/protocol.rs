@@ -3473,6 +3473,12 @@ mod tests {
         }
     }
 
+    /// v155: `PendingChangeZoneIteration.remaining` carries each member's
+    /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
+    /// CR 614.12) and drops the raw gate fields, and the persisted resolution
+    /// state moves from version 6 to 7; a v154 peer cannot parse a parked
+    /// ChangeZone frame, so it must be refused before it receives v155 state.
+    ///
     /// v154: `PendingCostMoveResume` gains `CounterCostRemovalPayment` (a
     /// counter-removal cost paused on a CR 616.1 replacement choice, whose
     /// settled count the activation reads, CR 118.11) and
@@ -3730,8 +3736,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_154_for_counter_cost_removal_payment() {
-        assert_eq!(PROTOCOL_VERSION, 154);
+    fn protocol_version_is_155_for_pre_event_change_zone_entries() {
+        assert_eq!(PROTOCOL_VERSION, 155);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3742,7 +3748,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_154_for_counter_cost_removal_payment` stays
+    /// `protocol_version_is_155_for_pre_event_change_zone_entries` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
