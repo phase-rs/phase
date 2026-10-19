@@ -100,12 +100,22 @@ mod qualified_adjective_tests {
                 );
             }
         }
-        for phrase in ["modified attacking", "nonartifact attacking mysteryword"] {
-            let (_, rest) = parse_type_phrase_folding(phrase);
+        for phrase in [
+            "modified attacking",
+            "nonartifact attacking mysteryword",
+            "green or white",
+            "green or white mysteryword",
+            "white, blue, or black",
+            "white, blue, or black mysteryword",
+            "black or mysteryword",
+            "green or legendary attacking",
+        ] {
+            let (filter, rest) = parse_type_phrase_folding(phrase);
             assert_eq!(
                 rest, phrase,
                 "an incomplete noun cannot publish its adjectives"
             );
+            assert_eq!(filter, TargetFilter::Typed(TypedFilter::default()));
         }
         let (TargetFilter::Or { filters }, rest) =
             parse_type_phrase_folding("nontoken attacking or blocking blue creature you control")
@@ -3072,15 +3082,15 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         subtype
     };
 
-    if card_type.is_none()
-        && subtype.is_none()
-        && !properties
+    // A color-only leg can acquire its noun from a later disjunct. Keep
+    // local completeness until the existing separator/backfill owner below
+    // has had the opportunity to assemble that complete noun phrase.
+    let has_local_noun = card_type.is_some()
+        || subtype.is_some()
+        || properties
             .iter()
             .any(|prop| matches!(prop, FilterProp::IsCommander))
-        && parse_token_suffix(&lower[pos..]).is_none()
-    {
-        return (TargetFilter::Typed(TypedFilter::default()), text);
-    }
+        || parse_token_suffix(&lower[pos..]).is_some();
 
     // CR 205.3a: "[Subtype] [CoreType]" patterns like "Wizard creatures",
     // "Goblin creatures", "Elf Warriors" — when parse_core_type (via parse_type_filter_word)
@@ -3407,6 +3417,12 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
             if can_recurse {
                 let sep_text = &text[pos + rest_offset + separator.len()..];
                 let (other_filter, final_rest) = parse_type_phrase_folding_with_ctx(sep_text, ctx);
+                // A recognized adjective lead does not prove a complete RHS.
+                // Recursive failure preserves its input; do not publish either
+                // leg until this same owner has established a noun there.
+                if final_rest.len() == sep_text.len() {
+                    continue;
+                }
                 if *separator == "or "
                     && card_type.is_none()
                     && subtype.is_none()
@@ -3474,6 +3490,10 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                 return (finalize_or_disjunction(combined, &shared_props), final_rest);
             }
         }
+    }
+
+    if !has_local_noun {
+        return (TargetFilter::Typed(TypedFilter::default()), text);
     }
 
     // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
