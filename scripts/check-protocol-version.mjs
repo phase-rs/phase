@@ -85,6 +85,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // permission's `enters_with_modifications` becomes a `PendingEntersModifications` object
 // (was a `ContinuousModification` array) and `Effect::AddPendingEntersModifications`
 // carries its `rider` object in place of the required `modifications` array.
+// v154 (after v153, #10006's kind-selected activated grant) adds `PendingCostMoveResume::CounterCostRemovalPayment`
+// (CR 616.1 deferred counter-cost removal) and `ManaAbilityCostCursor.counter_removal` to GameState.
+// v158 (after v154; v155–v157 held by concurrent branches) adds `FilterProp::Prepared` (CR 722.3a)
+// and the announced activation source epoch on `ResolvedAbility` / `PendingManaAbility` to GameState.
 // v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
 // v147 adds the Eye to Eye / Mouth to Mouth physical contest.
 // v148 adds Timesifter's top-card exile contest (`Effect::ExileTopCardContest`,
@@ -191,14 +195,17 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +80: v151 carries populated Bestow restoration payloads.
 // +81: v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`,
 //      and `ShortcutProposal.leading_aims`.
-// +83: v154 adds `FilterProp::Prepared` (CR 722.3a), the prepared-designation
+// +82: v153 adds the optional kind selector to GrantAllActivatedAbilitiesOf
+// and removes the loyalty-grant sibling variant.
+// +83: v154 adds `PendingCostMoveResume::CounterCostRemovalPayment` and
+//      `ManaAbilityCostCursor.counter_removal` to GameState.
+// +87: v158 adds `FilterProp::Prepared` (CR 722.3a), the prepared-designation
 //      leaf for source-context trigger conditions in `GameState`; the
 //      announcement source epoch on both carriers — `ResolvedAbility`
 //      (CR 400.7 + CR 602.2a) and `PendingManaAbility` (CR 605.3b) — which
 //      lets a self-moving cost keep the condition on the announced object.
-// +82: v153 adds the optional kind selector to GrantAllActivatedAbilitiesOf
-// and removes the loyalty-grant sibling variant.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 83;
+//      v155–v157 were held by concurrent branches when it was numbered.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 87;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -305,10 +312,11 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 //      effect's `rider` key).
 // +79: wire 133 moves with full-game v151 for populated Bestow payloads.
 // +80: wire 134 moves with full-game v152 for the shortcut suggestion fields.
-// +82: wire 136 moves with full-game v154 for the FilterProp Prepared tag
-//      and the announced activation source epoch.
 // +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 82;
+// +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
+// +86: wire 140 moves with full-game v158 for the FilterProp Prepared tag
+//      and the announced activation source epoch.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 86;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

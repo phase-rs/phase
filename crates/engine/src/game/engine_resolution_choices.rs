@@ -737,6 +737,28 @@ pub(super) fn park_cast_during_resolution_cast_observers(
     Ok(Some(settled))
 }
 
+/// CR 603.2c: the not-yet-collected events of `events[start..end]`. A
+/// completion that resumes a parked counter-cost root before collecting has
+/// already had that root's announcement commit collect and claim them; every
+/// ledger writer pairs its claim with a collection, so this drops only those
+/// re-collections and is a no-op when nothing was claimed.
+fn unclaimed_observer_events(
+    state: &GameState,
+    events: &[GameEvent],
+    start: usize,
+    end: usize,
+) -> Vec<GameEvent> {
+    if end <= start {
+        return Vec::new();
+    }
+    super::triggers::filter_consumed_trigger_events_from(
+        &events[..end],
+        start,
+        super::triggers::TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    )
+}
+
 /// CR 603.2 + CR 603.3b: After a resolution-choice handler has moved objects
 /// (sacrifice, change-zone, bounce, discard) and resolved any reflexive
 /// continuation, dispatch the observer triggers (dies-, discarded-, etc.)
@@ -762,33 +784,46 @@ fn batch_or_drain_observer_triggers(
     // `triggers::filter_already_collected_trigger_events_from` instead.
     zone_changes_are_logically_owned: bool,
 ) -> Option<ResolutionChoiceOutcome> {
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        // B1: this action settled. Merge this slice's observer triggers into
-        // the parked queue before draining — otherwise the last segment's
-        // triggers (e.g. the final Syphon Mind opponent discard) never enter
-        // `deferred_triggers` and are lost when ordering runs (issue #1793).
-        let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
-            .iter()
+    // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement (a child of a
+    // parked cost root, or a resolution-time step under a cast's payment) these
+    // events wait in the announcement's carrier; only the span it does not own is
+    // collected here.
+    let owned =
+        super::announcement_triggers::take_inline_trigger_span(state, events, event_slice_start);
+    let announced = owned.is_empty() && owned.end < events.len();
+    let slice_end = event_slice_end.min(owned.end);
+    let completion_start = event_slice_end.min(owned.end);
+    let trigger_events: Vec<GameEvent> =
+        unclaimed_observer_events(state, events, event_slice_start, slice_end)
+            .into_iter()
             .filter(|ev| {
                 !matches!(ev, GameEvent::PhaseChanged { .. })
                     && (!zone_changes_are_logically_owned
                         || !matches!(ev, GameEvent::ZoneChanged { .. }))
             })
-            .cloned()
             .chain(
                 // CR 603.2 + CR 608.2c: a typed completion continuation may
                 // publish the player action that the interactive move just
                 // completed. Include that semantic event without widening the
                 // owner-bounded zone slice to continuation-produced zone moves.
-                events[event_slice_end..]
-                    .iter()
-                    .filter(|event| matches!(event, GameEvent::PlayerPerformedAction { .. }))
-                    .cloned(),
+                unclaimed_observer_events(state, events, completion_start, owned.end)
+                    .into_iter()
+                    .filter(|event| matches!(event, GameEvent::PlayerPerformedAction { .. })),
             )
             .collect();
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // B1: this action settled. Merge this slice's observer triggers into
+        // the parked queue before draining — otherwise the last segment's
+        // triggers (e.g. the final Syphon Mind opponent discard) never enter
+        // `deferred_triggers` and are lost when ordering runs (issue #1793).
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
             return Some(ResolutionChoiceOutcome::WaitingFor(wf));
+        }
+        if announced {
+            return Some(ResolutionChoiceOutcome::WaitingFor(
+                state.waiting_for.clone(),
+            ));
         }
         Some(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
             state.waiting_for.clone(),
@@ -796,24 +831,6 @@ fn batch_or_drain_observer_triggers(
     } else {
         // B2: paused — `run_post_action_pipeline` will not scan this action.
         // Park this move's observer triggers for a later settle.
-        let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
-            .iter()
-            .filter(|ev| {
-                !matches!(ev, GameEvent::PhaseChanged { .. })
-                    && (!zone_changes_are_logically_owned
-                        || !matches!(ev, GameEvent::ZoneChanged { .. }))
-            })
-            .cloned()
-            .chain(
-                // CR 603.2 + CR 608.2c: see the settled branch above. Park a
-                // completion action across a further continuation prompt, but
-                // do not fold that continuation's zone changes into this owner.
-                events[event_slice_end..]
-                    .iter()
-                    .filter(|event| matches!(event, GameEvent::PlayerPerformedAction { .. }))
-                    .cloned(),
-            )
-            .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         None
     }
@@ -822,16 +839,22 @@ fn batch_or_drain_observer_triggers(
 /// CR 603.2 + CR 603.3b: Preserve triggers from events that occurred while a
 /// resolution choice paused; they trigger now and wait for the next priority
 /// window's APNAP placement rather than being lost with the action's event slice.
+///
+/// `events` is the current action buffer. Under a live announcement only the
+/// span it does not own is collected here (CR 601.2h + CR 603.3), and an event
+/// another collector already claimed this action is not collected again
+/// (CR 603.2c).
 pub(crate) fn defer_observer_triggers_for_paused_choice(
     state: &mut GameState,
-    events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
     event_start: usize,
 ) {
-    let trigger_events: Vec<GameEvent> = events[event_start..]
-        .iter()
-        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
-        .cloned()
-        .collect();
+    let owned = super::announcement_triggers::take_inline_trigger_span(state, events, event_start);
+    let trigger_events: Vec<GameEvent> =
+        unclaimed_observer_events(state, events, owned.start, owned.end)
+            .into_iter()
+            .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+            .collect();
     if !trigger_events.is_empty() {
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
     }
@@ -853,12 +876,16 @@ pub(crate) fn defer_observer_triggers_for_paused_choice(
 /// observers fire twice.
 fn collect_search_observer_triggers(
     state: &mut GameState,
-    events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
     events_before_drain: usize,
 ) -> ResolutionChoiceOutcome {
+    // CR 601.2h + CR 603.3: a live announcement takes custody of the span it owns.
+    let owned =
+        super::announcement_triggers::take_inline_trigger_span(state, events, events_before_drain);
+    let announced = owned.is_empty() && owned.end < events.len();
     let uncollected_events = super::triggers::filter_already_collected_trigger_events_from(
         state,
-        events,
+        &events[..owned.end],
         events_before_drain,
         &state.consumed_before_priority_trigger_events,
     );
@@ -873,6 +900,9 @@ fn collect_search_observer_triggers(
     // shared carrier authority prove that every such frame has drained before
     // retiring the parent and releasing its CR 400.7j self-move link.
     super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+    if announced {
+        return ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone());
+    }
     ResolutionChoiceOutcome::WaitingForWithInlineTriggers(state.waiting_for.clone())
 }
 
@@ -6045,18 +6075,26 @@ pub(super) fn handle_resolution_choice(
             // stay bounded to the move itself, but an early drain after only the
             // discard slice would return `WaitingForWithInlineTriggers` and skip
             // the continuation slice entirely (issue #4245).
+            // CR 601.2h + CR 603.3: a live announcement takes custody of the span
+            // it owns; only the rest is collected here.
+            let owned = super::announcement_triggers::take_inline_trigger_span(
+                state,
+                events,
+                events_before_effect,
+            );
+            let announced = owned.is_empty() && owned.end < events.len();
             for (start, end) in [
-                (events_before_effect, events_after_move),
-                (events_after_move, events.len()),
+                (events_before_effect, events_after_move.min(owned.end)),
+                (events_after_move, owned.end),
             ] {
                 if end <= start {
                     continue;
                 }
-                let trigger_events: Vec<GameEvent> = events[start..end]
-                    .iter()
-                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                    .cloned()
-                    .collect();
+                let trigger_events: Vec<GameEvent> =
+                    unclaimed_observer_events(state, events, start, end)
+                        .into_iter()
+                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                        .collect();
                 if !trigger_events.is_empty() {
                     super::triggers::collect_triggers_into_deferred(state, &trigger_events);
                 }
@@ -6065,6 +6103,9 @@ pub(super) fn handle_resolution_choice(
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
                     return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+                if announced {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
                     waiting_for,
@@ -8395,12 +8436,22 @@ pub(super) fn handle_resolution_choice(
                         return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                     }
                 } else {
-                    let trigger_events: Vec<GameEvent> = events
-                        [events_before_sacrifice..events_after_sacrifice]
-                        .iter()
-                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                        .cloned()
-                        .collect();
+                    // CR 601.2h + CR 603.3: a live announcement takes custody of
+                    // the span it owns; only the rest is parked here.
+                    let owned = super::announcement_triggers::take_inline_trigger_span(
+                        state,
+                        events,
+                        events_before_sacrifice,
+                    );
+                    let trigger_events: Vec<GameEvent> = unclaimed_observer_events(
+                        state,
+                        events,
+                        events_before_sacrifice,
+                        events_after_sacrifice.min(owned.end),
+                    )
+                    .into_iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .collect();
                     super::triggers::collect_triggers_into_deferred(state, &trigger_events);
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -8512,11 +8563,19 @@ pub(super) fn handle_resolution_choice(
                     return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                 }
             } else {
-                let trigger_events: Vec<GameEvent> = events[events_before..]
-                    .iter()
-                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                    .cloned()
-                    .collect();
+                // CR 601.2h + CR 603.3: a live announcement takes custody of the
+                // span it owns; only the rest is parked here, less any event
+                // another collector already claimed (CR 603.2c).
+                let owned = super::announcement_triggers::take_inline_trigger_span(
+                    state,
+                    events,
+                    events_before,
+                );
+                let trigger_events: Vec<GameEvent> =
+                    unclaimed_observer_events(state, events, owned.start, owned.end)
+                        .into_iter()
+                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                        .collect();
                 super::triggers::collect_triggers_into_deferred(state, &trigger_events);
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -8595,12 +8654,22 @@ pub(super) fn handle_resolution_choice(
                         return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                     }
                 } else {
-                    let trigger_events: Vec<GameEvent> = events
-                        [events_before_sacrifice..events_after_sacrifice]
-                        .iter()
-                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                        .cloned()
-                        .collect();
+                    // CR 601.2h + CR 603.3: a live announcement takes custody of
+                    // the span it owns; only the rest is parked here.
+                    let owned = super::announcement_triggers::take_inline_trigger_span(
+                        state,
+                        events,
+                        events_before_sacrifice,
+                    );
+                    let trigger_events: Vec<GameEvent> = unclaimed_observer_events(
+                        state,
+                        events,
+                        events_before_sacrifice,
+                        events_after_sacrifice.min(owned.end),
+                    )
+                    .into_iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .collect();
                     super::triggers::collect_triggers_into_deferred(state, &trigger_events);
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -8686,12 +8755,22 @@ pub(super) fn handle_resolution_choice(
                     return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                 }
             } else {
-                let trigger_events: Vec<GameEvent> = events
-                    [events_before_sacrifice..events_after_sacrifice]
-                    .iter()
-                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                    .cloned()
-                    .collect();
+                // CR 601.2h + CR 603.3: a live announcement takes custody of the
+                // span it owns; only the rest is parked here.
+                let owned = super::announcement_triggers::take_inline_trigger_span(
+                    state,
+                    events,
+                    events_before_sacrifice,
+                );
+                let trigger_events: Vec<GameEvent> = unclaimed_observer_events(
+                    state,
+                    events,
+                    events_before_sacrifice,
+                    events_after_sacrifice.min(owned.end),
+                )
+                .into_iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .collect();
                 super::triggers::collect_triggers_into_deferred(state, &trigger_events);
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())

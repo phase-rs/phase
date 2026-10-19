@@ -14,9 +14,10 @@ use crate::types::actions::{
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion,
-    PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, GameState, LandPlayRecord,
+    LoopDetectionMode, ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind,
+    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterPostAction,
+    PendingEffectResolved, PersistedRestoreError, PostReplacementDrainStack,
     ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
     RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
     StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
@@ -28,6 +29,7 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
+use crate::types::resolution::ResolutionStack;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -1654,6 +1656,24 @@ fn apply_action_boundary_core(
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
     let scan_from = result.events.len();
+    // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
+    // finished and the root resumed before the action returns; when that made
+    // progress, its events join the convergence pass below.
+    let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
+        state,
+        &result.waiting_for,
+        &mut result.events,
+    ) {
+        Ok(Some(waiting_for)) => {
+            result.waiting_for = waiting_for;
+            true
+        }
+        Ok(None) => false,
+        Err(err) => {
+            *state = boundary_snapshot;
+            return Err(err);
+        }
+    };
     let realized_token_entry =
         effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
     // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
@@ -1664,7 +1684,10 @@ fn apply_action_boundary_core(
     // triggers. A token realization and an owed final part on the same action
     // share one pass.
     let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
-    if realized_token_entry || owed_spell_final_part_is_due {
+    if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
+        || realized_token_entry
+        || owed_spell_final_part_is_due
+    {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
             *state = boundary_snapshot;
             return Err(err);
@@ -1706,6 +1729,47 @@ fn owed_spell_final_part_is_due(state: &mut GameState, result: &ActionResult) ->
         sync_waiting_for(state, &result.waiting_for);
     }
     owes_spell_final_part && resolution_instructions_are_done(state)
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 608.2c: the action-boundary resume
+/// authority for a parked counter-cost root under a Priority result. A handler
+/// may finish the root's subtree by draining directly (a resolution-time cost
+/// choice, a mana-colour choice, a Prevented-arm child block), or leave it one
+/// advanceable step short (a mana-colour child whose last instruction is the
+/// mana, leaving its post-replacement dispatch paused), without reaching the
+/// common boundary. The activation is still being announced, so no player may
+/// receive priority until it is complete (CR 602.2b + CR 601.2h; CR 117.3c) and
+/// state-based actions are not checked mid-activation (CR 704.3): the common
+/// boundary's loop runs here, finishing the subtree and resuming the root before
+/// the action returns. `Some` only when that made progress — the wait changed or
+/// the root left its slot — so a subtree the loop cannot advance (residual 3)
+/// runs no convergence pass. Inert with no counter-cost root parked.
+fn resume_parked_counter_cost_root_at_action_boundary(
+    state: &mut GameState,
+    waiting_for: &WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    if !matches!(waiting_for, WaitingFor::Priority { .. })
+        || state.counter_cost_root_subtree() == CounterCostRootSubtree::Absent
+    {
+        return Ok(None);
+    }
+    sync_waiting_for(state, waiting_for);
+    let events_before = events.len();
+    resume_pending_continuation_if_priority(state, events)?;
+    let progressed = state.waiting_for != *waiting_for
+        || state.counter_cost_root_subtree() == CounterCostRootSubtree::Absent;
+    if !progressed {
+        // CR 603.2 + CR 603.3: the loop advanced part of the subtree and stopped
+        // short of the root. Whatever it emitted waits in the still-live
+        // announcement's carrier, as the next pipeline pass would have staged it.
+        super::announcement_triggers::stage_announcement_trigger_events(
+            state,
+            events,
+            events_before,
+        );
+    }
+    Ok(progressed.then(|| state.waiting_for.clone()))
 }
 
 /// The action boundary's convergence pass: the ordinary post-action pipeline,
@@ -8914,12 +8978,18 @@ pub(crate) enum CostMoveDrainBoundary {
 /// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: Drain the one typed cost-move
 /// root eligible at this exact reducer boundary. Replacement delivery happens
 /// before ordinary continuations; the common Priority boundary only resumes
-/// Delve and mana-ability cursors after those continuations have settled.
+/// Delve, mana-ability cursors, and a counter-cost root whose replacement
+/// subtree has retired, after those continuations have settled.
 pub(crate) fn drain_pending_cost_move_resume(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     boundary: CostMoveDrainBoundary,
 ) -> Result<Option<WaitingFor>, EngineError> {
+    // CR 616.1 + CR 608.2c: a root whose replacement subtree is still live is not
+    // resumable at any boundary.
+    if state.counter_cost_root_subtree() == CounterCostRootSubtree::Unfinished {
+        return Ok(None);
+    }
     let eligible = match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { .. } => matches!(
             state.pending_cost_move_resume,
@@ -8932,6 +9002,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
+                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
@@ -8940,7 +9011,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
         // opponent's Solemnity would prevent the counters) must still complete the
         // parked activation instead of wedging, so `LoyaltyActivation` is eligible
-        // at the Prevented boundary as well. Counter-addition unless payments
+        // at the Prevented boundary as well. CR 614.6 + CR 118.11: likewise a
+        // prevented counter-cost removal removed none, which its resume measures,
+        // and the payment continues. Counter-addition unless payments
         // are eligible here too: whether a prevented placement leaves that
         // payment paid or failed is `resume_counter_addition_unless_payment`'s
         // call, argued in its own header; either way the pending unless branch
@@ -8957,6 +9030,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
+                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
@@ -8969,6 +9043,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
                     ..
                 } | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             )
         ),
     };
@@ -9025,6 +9100,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         casting_costs::resume_activation_mill_cost_payment(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterCostRemovalPayment { .. })
+    ) {
+        casting_costs::resume_counter_cost_removal_payment(state, events, action_event_start)?
+    } else if matches!(
+        state.pending_cost_move_resume,
         Some(PendingCostMoveResume::LoyaltyActivation { .. })
     ) {
         super::planeswalker::resume_loyalty_activation(state, events)?
@@ -9048,7 +9128,80 @@ pub(crate) fn drain_pending_cost_move_resume(
     Ok(Some(waiting_for))
 }
 
+/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
+/// for every state except a parked counter-cost root whose replacement subtree
+/// is still live: `resume_resolution_frames` advances one top frame per pass,
+/// so a subtree several frames deep needs several, and the root resumes in the
+/// pass that retires the last of it (a due root resumes mid-pass through
+/// `resume_due_counter_cost_root`; the cost-move drain admits it at
+/// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
+/// the loop ends.
 pub(super) fn resume_pending_continuation_if_priority(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    loop {
+        let before = SubtreePosition::at(&state.resolution_stack);
+        resume_pending_continuation_pass(state, events)?;
+        let after = SubtreePosition::at(&state.resolution_stack);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+            || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            || !after.is_strictly_inside(&before)
+        {
+            return Ok(());
+        }
+    }
+}
+
+/// The loop's progress measure: stack depth, then the drain count of the active
+/// post-replacement frame. Positional on purpose: it only has to be
+/// well-founded, not to name the subtree (that is `ReplacementSubtreeBoundary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubtreePosition {
+    resolution_depth: usize,
+    enclosing_post_replacement_drains: usize,
+}
+
+impl SubtreePosition {
+    fn at(stack: &ResolutionStack) -> Self {
+        Self {
+            resolution_depth: stack.len(),
+            enclosing_post_replacement_drains: stack
+                .active_post_replacement_or_paired_parent()
+                .map_or(0, PostReplacementDrainStack::len),
+        }
+    }
+
+    /// Strictly less of the subtree remains: the stack is lower, or as high
+    /// with fewer drains in the enclosing frame (lexicographic on ℕ×ℕ).
+    fn is_strictly_inside(&self, before: &Self) -> bool {
+        (
+            self.resolution_depth,
+            self.enclosing_post_replacement_drains,
+        ) < (
+            before.resolution_depth,
+            before.enclosing_post_replacement_drains,
+        )
+    }
+}
+
+/// CR 601.2h + CR 605.3b + CR 608.2c + CR 616.1: once a parked counter-cost
+/// root's replacement subtree has retired, resume that root at this boundary
+/// before any further frame, liminal-entry or phase-transition work.
+fn resume_due_counter_cost_root(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.counter_cost_root_is_due()
+    {
+        super::life_safety::observe_boundary_carrier(state);
+        let _ =
+            drain_pending_cost_move_resume(state, events, CostMoveDrainBoundary::PriorityBoundary)?;
+    }
+    Ok(())
+}
+
+fn resume_pending_continuation_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
@@ -9065,12 +9218,14 @@ pub(super) fn resume_pending_continuation_if_priority(
             super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
         }
+        resume_due_counter_cost_root(state, events)?;
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
             && deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary)
         {
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
         }
+        resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
             && state
@@ -13308,9 +13463,24 @@ fn apply_non_priority_pass_action(
             // completed-frame seam, so a second scan here would rediscover
             // events the frame already claimed and dispatch an ordinary cost
             // observer separately from that frame's synthetic reflexive.
+            //
+            // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement (a child
+            // of a parked cost root, or a resolution-time step under a cast's
+            // payment) the announcement takes custody of these events and its
+            // carrier puts their ordinary triggers on the stack once it is
+            // complete; only the span it does not own is scanned here.
+            let mut scanned_inline = true;
             if !is_completed_mana_frame && events.len() > events_before {
-                let mana_events: Vec<_> = events[events_before..].to_vec();
-                super::triggers::process_triggers(state, &mana_events);
+                let owned = super::announcement_triggers::take_inline_trigger_span(
+                    state,
+                    &mut events,
+                    events_before,
+                );
+                scanned_inline = !owned.is_empty();
+                if scanned_inline {
+                    let mana_events: Vec<_> = events[owned].to_vec();
+                    super::triggers::process_triggers(state, &mana_events);
+                }
             }
             // CR 603.3b (#531): if the inline trigger scan paused on an
             // OrderTriggers prompt (controller has 2+ simultaneous TapsForMana
@@ -13334,7 +13504,10 @@ fn apply_non_priority_pass_action(
             // occurrence journal already narrows the pipeline's scan to exactly
             // the events the mana frames did not claim, and the pipeline's
             // guarded deferred drain is what releases their queued contexts once.
-            if !is_completed_mana_frame && matches!(wf, WaitingFor::Priority { .. }) {
+            if !is_completed_mana_frame
+                && scanned_inline
+                && matches!(wf, WaitingFor::Priority { .. })
+            {
                 triggers_processed_inline = true;
             }
             wf
@@ -16459,6 +16632,16 @@ fn apply_non_priority_pass_action(
         semantic_actor,
         &action_for_divergence,
     );
+
+    // CR 704.3 + CR 117.5 + CR 117.3c: a parked counter-cost root's subtree is
+    // finished and the root resumed before the pipeline below, so the activation
+    // is on the stack before the game checks state-based actions — no player
+    // receives priority mid-activation (CR 602.2b + CR 601.2h), and triggers
+    // those actions cause go on the stack above the activation (CR 603.3). Same
+    // authority as the action boundary's call in `apply_action_boundary_core`.
+    let waiting_for =
+        resume_parked_counter_cost_root_at_action_boundary(state, &waiting_for, &mut events)?
+            .unwrap_or(waiting_for);
 
     // Run post-action pipeline (SBAs, triggers, layers) and check for terminal states.
     // When triggers were already processed inline (e.g., DeclareAttackers, combat damage),
@@ -27325,16 +27508,22 @@ mod resolving_carrier_settle_tests {
 #[cfg(test)]
 mod cost_move_drain_priority_boundary_tests {
     use super::{drain_pending_cost_move_resume, CostMoveDrainBoundary};
-    use crate::types::ability::{AbilityCost, Effect, ResolvedAbility, TargetFilter};
-    use crate::types::game_state::{GameState, PendingCostMoveResume};
+    use crate::types::ability::{AbilityCost, Effect, EffectKind, ResolvedAbility, TargetFilter};
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::{
+        GameState, PausedCounterCostRemoval, PendingCostMoveCompletion, PendingCostMoveResume,
+        PendingCounterRemoval, PendingCounterRemovalInFlight, PendingCounterRemovalQueue,
+        ReplacementSubtreeBoundary, WaitingFor,
+    };
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
 
     /// `engine_payment_choices::resume_counter_addition_unless_payment` maps
     /// `CostMoveDrainBoundary::PriorityBoundary` to `unreachable!`, and nothing but
-    /// this eligibility table makes that true: it admits only a Delve-commit `Cast` and
-    /// `ManaAbilityPayment` at that boundary. Nothing else in the crate pinned that
+    /// this eligibility table makes that true: it admits only a Delve-commit `Cast`,
+    /// `ManaAbilityPayment`, and a counter-cost root whose replacement subtree has
+    /// retired at that boundary. Nothing else in the crate pinned that
     /// premise, so widening the table would leave the suite green and abort a live
     /// session instead.
     ///
@@ -27382,6 +27571,86 @@ mod cost_move_drain_priority_boundary_tests {
             "the continuation must stay parked for the replacement boundary that owns it"
         );
         assert!(events.is_empty(), "an ineligible drain must emit no events");
+    }
+
+    /// CR 616.1 + CR 608.2c: a counter-cost root recorded at an empty stack is
+    /// not resumable at any boundary while a frame its replacement installed
+    /// (here an effect removal queue) is live, and is resumable at the priority
+    /// boundary once that frame retires.
+    #[test]
+    fn a_counter_cost_root_waits_for_its_subtree_at_every_boundary() {
+        let mut state = GameState::new_two_player(42);
+        let removal = PendingCounterRemoval {
+            object_id: ObjectId(61),
+            counter_type: CounterType::Generic("charge".to_string()),
+            count: 1,
+        };
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::CounterCostRemovalPayment {
+            player: PlayerId(0),
+            pending: None,
+            removal: Box::new(PausedCounterCostRemoval {
+                in_flight: PendingCounterRemovalInFlight {
+                    removal: removal.clone(),
+                    counter_count_before: 1,
+                },
+                remaining: Vec::new(),
+                replacement_subtree: ReplacementSubtreeBoundary::at(&state.resolution_stack),
+            }),
+            cost_paid_object: None,
+            completion: PendingCostMoveCompletion::FinishPending,
+        });
+        state.push_counter_removals(PendingCounterRemovalQueue {
+            remaining: vec![removal],
+            effect_kind: EffectKind::RemoveCounter,
+            source_ability_id: ObjectId(62),
+            total: 1,
+            applied_total: 0,
+            in_flight: None,
+        });
+
+        for boundary in [
+            CostMoveDrainBoundary::ReplacementDelivered {
+                action_event_start: 0,
+            },
+            CostMoveDrainBoundary::ReplacementPrevented {
+                action_event_start: 0,
+            },
+            CostMoveDrainBoundary::PriorityBoundary,
+        ] {
+            let mut events = Vec::new();
+            let drained = drain_pending_cost_move_resume(&mut state, &mut events, boundary);
+            assert!(
+                matches!(drained, Ok(None)),
+                "{boundary:?}: a live subtree keeps the root parked"
+            );
+            assert!(
+                matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::CounterCostRemovalPayment { .. })
+                ),
+                "{boundary:?}: the root stays parked"
+            );
+            assert!(events.is_empty(), "{boundary:?}: no events while parked");
+        }
+
+        state
+            .take_active_counter_removals()
+            .expect("the queue is the top frame")
+            .expect("the queue is present");
+        let mut events = Vec::new();
+        let drained = drain_pending_cost_move_resume(
+            &mut state,
+            &mut events,
+            CostMoveDrainBoundary::PriorityBoundary,
+        );
+        assert!(
+            matches!(drained, Ok(Some(WaitingFor::Priority { .. }))),
+            "a retired subtree lets the priority boundary resume the root: {drained:?}"
+        );
+        assert!(
+            state.pending_cost_move_resume.is_none(),
+            "the resume took the root"
+        );
     }
 }
 

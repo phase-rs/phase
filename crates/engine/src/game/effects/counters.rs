@@ -15,7 +15,8 @@ use crate::types::game_state::{
     BattlefieldDepartureSourceContext, CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice,
     DelayedTrigger, GameState, PendingCounterAddition, PendingCounterAdditionQueue,
     PendingCounterMove, PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
-    PendingCounterRemovalQueue, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
+    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingEffectResolutionEvent,
+    PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1445,6 +1446,19 @@ pub(crate) fn counter_removal_blocked(
     )
 }
 
+/// CR 122.1 + CR 616.1 + CR 118.11: how one counter removal through the
+/// replacement pipeline ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterRemovalOutcome {
+    /// The removal is over: this many counters were actually removed (0 when a
+    /// prohibition blocked it or a replacement prevented it).
+    Removed(u32),
+    /// A replacement needs its controller's choice first. `waiting_for` holds
+    /// that prompt; the replacement pipeline performs the removal once the
+    /// choice is made, so its count is not known yet.
+    AwaitingReplacementChoice,
+}
+
 /// CR 614.1: Remove counters from an object through the replacement pipeline.
 ///
 /// Single authority for counter removal, mirroring `add_counter_with_replacement`.
@@ -1455,17 +1469,21 @@ pub(crate) fn counter_removal_blocked(
 ///
 /// The count is clamped to the number of counters actually present, so callers
 /// can pass the raw damage/cost amount without pre-clamping.
+///
+/// CR 122.1 + CR 118.3: reports how the removal ended (see
+/// [`CounterRemovalOutcome`]). A blocked or prevented removal removed nothing;
+/// a removal waiting on a replacement choice has not happened yet.
 pub fn remove_counter_with_replacement(
     state: &mut GameState,
     object_id: ObjectId,
     counter_type: CounterType,
     count: u32,
     events: &mut Vec<GameEvent>,
-) {
+) -> CounterRemovalOutcome {
     // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
     // this counter type from this object, bail out immediately.
     if counter_removal_blocked(state, object_id, &counter_type) {
-        return;
+        return CounterRemovalOutcome::Removed(0);
     }
 
     let proposed = ProposedEvent::RemoveCounter {
@@ -1484,13 +1502,23 @@ pub fn remove_counter_with_replacement(
                 ..
             } = event
             {
-                apply_counter_removal(state, object_id, counter_type, count, events);
+                CounterRemovalOutcome::Removed(apply_counter_removal(
+                    state,
+                    object_id,
+                    counter_type,
+                    count,
+                    events,
+                ))
+            } else {
+                CounterRemovalOutcome::Removed(0)
             }
         }
-        ReplacementResult::Prevented => {}
+        // CR 614.6: a prevented removal never happens, so nothing was removed.
+        ReplacementResult::Prevented => CounterRemovalOutcome::Removed(0),
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
+            CounterRemovalOutcome::AwaitingReplacementChoice
         }
     }
 }
@@ -3377,6 +3405,36 @@ pub(crate) fn validate_and_queue_counter_removal(
     Ok(())
 }
 
+/// CR 614.6 + CR 118.11: the in-flight record of a removal about to be handed
+/// to the replacement pipeline: the object's count of that counter type before
+/// the removal is proposed. The single "before" measure for every owner (the
+/// effect queue and the cost payer); `settled_in_flight_counter_removal` takes
+/// the "after" measure with the same count.
+pub(crate) fn begin_in_flight_counter_removal(
+    state: &GameState,
+    removal: PendingCounterRemoval,
+) -> PendingCounterRemovalInFlight {
+    PendingCounterRemovalInFlight {
+        counter_count_before: counter_count(state, removal.object_id, &removal.counter_type),
+        removal,
+    }
+}
+
+/// CR 614.6 + CR 118.11: the number of counters a removal handed to the
+/// replacement pipeline actually removed, measured as the drop in that
+/// object's count of that counter type since the removal was proposed. A
+/// replaced removal counts what the modified event did, not what was asked.
+pub(crate) fn settled_in_flight_counter_removal(
+    state: &GameState,
+    in_flight: &PendingCounterRemovalInFlight,
+) -> u32 {
+    in_flight.counter_count_before.saturating_sub(counter_count(
+        state,
+        in_flight.removal.object_id,
+        &in_flight.removal.counter_type,
+    ))
+}
+
 /// CR 107.1c + CR 608.2h: Drain the pending "remove any number of counters"
 /// selection one `(counter_type, count)` entry at a time through the
 /// single-authority remove pipeline so prevention/modification replacements
@@ -3388,16 +3446,9 @@ pub(crate) fn validate_and_queue_counter_removal(
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(mut queue) = state.active_counter_removals().cloned() {
         if let Some(in_flight) = queue.in_flight.take() {
-            let counter_count_after = counter_count(
-                state,
-                in_flight.removal.object_id,
-                &in_flight.removal.counter_type,
-            );
-            queue.applied_total = queue.applied_total.saturating_add(
-                in_flight
-                    .counter_count_before
-                    .saturating_sub(counter_count_after),
-            );
+            queue.applied_total = queue
+                .applied_total
+                .saturating_add(settled_in_flight_counter_removal(state, &in_flight));
             state
                 .replace_active_counter_removals(queue)
                 .expect("settled counter-removal must retain its active frame");
@@ -3424,14 +3475,14 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
             continue;
         };
         queue.remaining.remove(0);
-        queue.in_flight = Some(crate::types::game_state::PendingCounterRemovalInFlight {
-            counter_count_before: counter_count(state, object_id, &counter_type),
-            removal: PendingCounterRemoval {
+        queue.in_flight = Some(begin_in_flight_counter_removal(
+            state,
+            PendingCounterRemoval {
                 object_id,
                 counter_type: counter_type.clone(),
                 count,
             },
-        });
+        ));
         state
             .replace_active_counter_removals(queue)
             .expect("re-parked counter-removals queue must own the active frame");

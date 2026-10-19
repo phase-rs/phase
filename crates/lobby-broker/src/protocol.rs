@@ -60,12 +60,28 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 154 — `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
+/// 158 — `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
 ///      conditions (and ability/filter definitions) of `GameState`, and the
 ///      announcement source epoch is carried on `ResolvedAbility` and
-///      `PendingManaAbility` (CR 400.7 + CR 602.2a + CR 605.3b). A v153 peer
-///      cannot deserialize the new tagged variant. Full-game peers and P2P move
-///      in lockstep (wire 136); no lobby carrier names it.
+///      `PendingManaAbility` (CR 400.7 + CR 602.2a + CR 605.3b). A v157 or
+///      older peer cannot deserialize the new tagged variant. Full-game peers
+///      and P2P move in lockstep (wire 140); no lobby carrier names it.
+///      155–157 were held by concurrent branches when this entry was numbered.
+///
+/// 154 — `PendingCostMoveResume` gains `CounterCostRemovalPayment`, a
+///      counter-removal cost paused while a replacement choice settles its
+///      current removal (CR 616.1; the settled count is credited to the
+///      activation, CR 118.11), with its `PausedCounterCostRemoval` record
+///      (which carries its `replacement_subtree` boundary);
+///      `ManaAbilityCostCursor` gains the optional `counter_removal` record.
+///      Serialized in `GameState.pending_cost_move_resume`: a v153 peer cannot
+///      parse the new tag. The same version carries the activation-owned
+///      removed-counter count (`SpellContext.cost_removed_counter_amount`,
+///      `ManaAbilityCostCursor.cost_removed_counters`,
+///      `PendingManaAbility.cost_removed_counters`; optional, skipped when
+///      unset), which a v153 peer re-encoding state would drop. Full-game
+///      peers and P2P move in lockstep (wire 136); no lobby carrier names it.
+///
 /// 153 — `ContinuousModification::GrantAllActivatedAbilitiesOf` gains the
 ///      optional kind selector `kind: Option<ActivatedAbilityKind>`, and the
 ///      loyalty-grant sibling variant is removed (Nicol Bolas,
@@ -1168,7 +1184,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 154;
+pub const PROTOCOL_VERSION: u32 = 158;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2425,12 +2441,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 154);
+        assert_eq!(PROTOCOL_VERSION, 158);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 153);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 157);
     }
 
     #[test]

@@ -2949,6 +2949,16 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 616.1g: the drain count of the frame `id` names, if it is still
+    /// resident. Identity-addressed, like the dispatcher's own cleanup.
+    pub(crate) fn post_replacement_frame_drain_count(
+        &self,
+        id: PostReplacementFrameId,
+    ) -> Option<usize> {
+        self.post_replacement_frame(id)
+            .map(PostReplacementDrainStack::len)
+    }
+
     /// The mutable twin of [`Self::post_replacement_frame`].
     fn post_replacement_frame_mut(
         &mut self,

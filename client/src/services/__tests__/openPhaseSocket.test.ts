@@ -421,6 +421,17 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it("rejects Full v152 before it can read a deferred counter-cost removal", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 152 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
   it("rejects Full v151 before it can read the shortcut suggestion", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -432,29 +443,7 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v151 before it can silently drop an activated grant's kind selector", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 151 }));
-
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
-  });
-
-  it("rejects Full v152 before it can silently drop an activated grant's kind selector", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 152 }));
-
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
-  });
-
-  it("rejects Full v153 before it can read the Prepared designation", async () => {
+  it("rejects Full v153 before it can read a deferred counter-cost removal", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: 153 }));
@@ -465,10 +454,21 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v154 prepared-designation protocol", async () => {
+  it("rejects Full v154 before it can read the Prepared designation", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: 154 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("accepts the literal Full v158 prepared-designation and deferred counter-cost removal protocol", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 158 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();

@@ -3473,12 +3473,21 @@ mod tests {
         }
     }
 
-    /// v154: `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
+    /// v158: `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
     /// conditions (and ability/filter definitions) of `GameState`, and the
     /// announcement source epoch is carried on `ResolvedAbility` and
-    /// `PendingManaAbility` (CR 400.7 + CR 602.2a + CR 605.3b); a v153 peer
-    /// cannot deserialize the new tagged variant. P2P moves in lockstep
-    /// (wire 136); lobby messages unchanged.
+    /// `PendingManaAbility` (CR 400.7 + CR 602.2a + CR 605.3b); a v157 or
+    /// older peer cannot deserialize the new tagged variant. P2P moves in
+    /// lockstep (wire 140); lobby messages unchanged.
+    ///
+    /// v154: `PendingCostMoveResume` gains `CounterCostRemovalPayment` (a
+    /// counter-removal cost paused on a CR 616.1 replacement choice, whose
+    /// settled count the activation reads, CR 118.11) and
+    /// `ManaAbilityCostCursor` gains `counter_removal`, both carried in
+    /// `GameState::pending_cost_move_resume`; a v153 peer cannot parse the new
+    /// tag, so it must be refused before it receives v154 state;
+    /// `PausedCounterCostRemoval` carries its `replacement_subtree` boundary.
+    ///
     /// v153: `GrantAllActivatedAbilitiesOf` gains the optional `kind` selector
     /// and the loyalty-grant sibling variant is removed. A v152 peer
     /// drops the defaulted field silently and over-grants, so it must be
@@ -3727,11 +3736,11 @@ mod tests {
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
-    /// The v154 bump adds the `FilterProp::Prepared` tag (CR 722.3a) to the
+    /// The v158 bump adds the `FilterProp::Prepared` tag (CR 722.3a) to the
     /// serialized trigger-condition carrier.
     #[test]
-    fn protocol_version_is_154_for_prepared_designation() {
-        assert_eq!(PROTOCOL_VERSION, 154);
+    fn protocol_version_is_158_for_prepared_designation() {
+        assert_eq!(PROTOCOL_VERSION, 158);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3742,7 +3751,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_154_for_prepared_designation` stays
+    /// `protocol_version_is_158_for_prepared_designation` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

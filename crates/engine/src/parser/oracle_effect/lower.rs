@@ -22,8 +22,8 @@ use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_event_context_quantity_with_context, parse_for_each_clause, parse_for_each_clause_expr,
-    parse_for_each_clause_expr_with_context, parse_for_each_short_of_clause_expr,
-    parse_player_attribute_attr_clause, parse_quantity_ref,
+    parse_for_each_clause_expr_with_context, parse_for_each_grouped_clause_expr,
+    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
@@ -5470,6 +5470,12 @@ pub(crate) fn strip_for_each_prefix_with_difference(
             if let Some(short_of) = parse_for_each_short_of_clause_expr(clause) {
                 let offset = text.len() - remainder.len();
                 return (Some(short_of), None, text[offset..].to_string());
+            }
+            // CR 107.1 + CR 608.2c: "for each N <things>" repeats once per
+            // complete group of N (Sage of Hours).
+            if let Some(grouped) = parse_for_each_grouped_clause_expr(clause) {
+                let offset = text.len() - remainder.len();
+                return (Some(grouped), None, text[offset..].to_string());
             }
             let parsed_clause = parsed_comparison
                 .clone()

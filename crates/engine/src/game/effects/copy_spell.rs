@@ -287,7 +287,14 @@ pub fn resolve(
         // observers must react when a spell copy is created mid-resolution.
         // Collect now; drain after the copy is fully formed (CR 707.10c retarget
         // choice completes, or immediately when no retarget pause is needed).
-        crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+        // CR 601.2h + CR 603.3: under a live announcement it waits in that
+        // announcement's carrier instead.
+        let copied_at = events.len() - 1;
+        let owned =
+            crate::game::announcement_triggers::take_inline_trigger_span(state, events, copied_at);
+        if !owned.is_empty() {
+            crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+        }
     }
 
     // CR 707.10c / CR 115.1: arm retarget selection only when the copy effect

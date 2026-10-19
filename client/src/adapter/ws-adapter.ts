@@ -215,12 +215,21 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 154 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
+ * 158 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
  *      conditions (and ability/filter definitions) of GameState, and the
  *      announcement source epoch is carried on ResolvedAbility and
- *      PendingManaAbility (CR 400.7 + CR 602.2a + CR 605.3b). A v153 peer
- *      cannot deserialize the new tagged variant. P2P moves in lockstep to
- *      wire 136.
+ *      PendingManaAbility (CR 400.7 + CR 602.2a + CR 605.3b). A v157 or older
+ *      peer cannot deserialize the new tagged variant. P2P moves in lockstep to
+ *      wire 140. 155–157 were held by concurrent branches.
+ * 154 — PendingCostMoveResume gains CounterCostRemovalPayment (a counter-removal
+ *       cost paused on a CR 616.1 replacement choice; the activation reads the
+ *       settled count, CR 118.11) and ManaAbilityCostCursor gains
+ *       counter_removal, carried in GameState.pending_cost_move_resume — see
+ *       PROTOCOL_VERSION's own `/// 154` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v153 peer cannot parse the tag;
+ *       the exact-match version check at connect refuses the pairing. Wire 136
+ *       moves with it. PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
  * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
  *       (Nicol Bolas, Dragon-God's loyalty grant is kind Loyalty on the
  *       activated authority; the loyalty-grant sibling variant is
@@ -935,7 +944,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 154;
+export const PROTOCOL_VERSION = 158;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
