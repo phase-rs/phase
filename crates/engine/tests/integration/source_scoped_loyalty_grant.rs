@@ -187,7 +187,7 @@ fn scenario() -> GameScenario {
     scenario
 }
 
-/// Test 9 — row-body census: the token-plus-haste row body is an existing
+/// Row-body census: the token-plus-haste row body is an existing
 /// building block (Comet's `[+2]` row).
 #[test]
 fn row_body_census_token_with_haste_rider() {
@@ -277,7 +277,7 @@ fn row_body_census_loyalty_counters_on_the_source() {
     );
 }
 
-/// Test 1 — the grant is mandatory and scoped to the source permanent, through the
+/// The grant is mandatory and scoped to the source permanent, through the
 /// real activation pipeline. The SHAPE reach-guard proves the toy parsed to the
 /// grant (not `Unimplemented`, not optional); `resolve()` answering any optional
 /// prompt by declining means an optional grant would leave the field at 0.
@@ -348,7 +348,7 @@ fn printed_style_source_grant_is_mandatory_and_scoped_to_the_source_permanent() 
     assert!(activation_is_refused(&mut runner, b, b_spend));
 }
 
-/// Test 2 — the permanent-scoped grant is additive with the player-wide grant.
+/// The permanent-scoped grant is additive with the player-wide grant.
 /// The player-wide axis comes from the same grammar ("each planeswalker's ... an
 /// additional time"), resolved from a real activated ability. A's cap is
 /// 1 + 1 + 2 = 4 and the bystander's is 1 + 1 = 2.
@@ -414,7 +414,7 @@ fn source_grant_is_additive_with_a_player_wide_grant() {
     assert!(!gate_admits(&runner, b, b_spend), "B is refused at 2");
 }
 
-/// Test 3 — an opponent's planeswalker is unaffected. The turn is flipped to the
+/// An opponent's planeswalker is unaffected. The turn is flipped to the
 /// opponent DIRECTLY (as `chain_veil_grant_does_not_leak_to_opponent` does), never
 /// through `start_next_turn`, whose sweep zeroes the field and would make a leak
 /// check pass vacuously. The no-sweep reach-guard shows the grant is still live.
@@ -465,7 +465,7 @@ fn an_opponents_planeswalker_is_unaffected_by_the_source_grant() {
     assert!(activation_is_refused(&mut runner, opposing, spend));
 }
 
-/// Test 4 — the grant expires with the turn (CR 514.2). The pre-rollover guard
+/// The grant expires with the turn (CR 514.2). The pre-rollover guard
 /// shows the field was live and the gate admitted a count of 2; after the
 /// rollover one activation succeeds and the second is refused. The turn is handed
 /// back to P0 directly so the sorcery-speed gate can be exercised.
@@ -507,7 +507,7 @@ fn source_grant_expires_at_turn_rollover() {
     assert!(activation_is_refused(&mut runner, a, spend));
 }
 
-/// Test 5 — the grant is lost when the permanent re-enters (CR 400.7). Scenario-
+/// The grant is lost when the permanent re-enters (CR 400.7). Scenario-
 /// built objects are used because the zone-exit revert resets a hand-built
 /// object's abilities. Loyalty is re-seeded and the gate is called directly so no
 /// state-based action runs. Paired control: before the blink the same count is
@@ -547,7 +547,7 @@ fn source_grant_is_lost_when_the_permanent_re_enters() {
     );
 }
 
-/// Test 6 — the grant covers the printed loyalty ability but not one the
+/// The grant covers the printed loyalty ability but not one the
 /// permanent gained (the card's ruling; CR 613.1f puts ability-adding effects in
 /// layer 6). The gained ability is installed by a real Layer-6 grant.
 #[test]
@@ -609,7 +609,7 @@ fn source_grant_covers_the_printed_ability_but_not_a_gained_one() {
     );
 }
 
-/// Test 7 — the grant resolves inside a die-result branch frame (a full-range
+/// The grant resolves inside a die-result branch frame (a full-range
 /// row, so no RNG pinning). No blink is involved: this row asserts only that the
 /// building block works in that frame. The reach-guards show the die really rolled
 /// and the row's grant parsed as a mandatory grant.
@@ -718,7 +718,7 @@ fn run_chain_walker(blink_in_response: bool) -> ChainRun {
     }
 }
 
-/// Test 8 — CR 400.7 on a stack-entry chain, the real-stack discriminator. The
+/// CR 400.7 on a stack-entry chain, the real-stack discriminator. The
 /// walker is blinked while its `{T}` ability (gain life, then the grant) is on the
 /// stack. The gain-life clause before the grant resolved (so the chain ran and the
 /// absence of a grant is not a fizzle), but the new object receives nothing. The
