@@ -1714,8 +1714,11 @@ pub(crate) fn parse_complete_continuous_modifications(
         } else {
             (tp, false)
         };
-    let (predicate, where_x) = super::oracle_effect::strip_trailing_where_x(predicate);
-    let modifications = complete_modification_clause(predicate.original, where_x.as_deref())?;
+    let (predicate, where_x, remaining) = complete_static_where_x(predicate)?;
+    let mut modifications = complete_modification_clause(predicate.original, where_x)?;
+    if let Some(remaining) = remaining {
+        modifications.extend(complete_modification_clause(remaining, where_x)?);
+    }
     if protection_rider
         && !modifications.iter().any(|m| {
             matches!(
@@ -1729,6 +1732,65 @@ pub(crate) fn parse_complete_continuous_modifications(
         return None;
     }
     Some(modifications)
+}
+
+fn complete_static_where_x<'a>(
+    tp: TextPair<'a>,
+) -> Option<(TextPair<'a>, Option<&'a str>, Option<&'a str>)> {
+    fn marker(input: &str) -> OracleResult<'_, &str> {
+        alt((tag(", where x is "), tag(" where x is "))).parse(input)
+    }
+    // The inner classifier owns quoted where-X clauses. Only an unquoted
+    // binding belongs to this predicate. The quantity grammar owns its span;
+    // any remaining clause must have a complete modification owner as well.
+    let (rest, _) = many0(alt((
+        recognize(nom::sequence::delimited(
+            tag::<_, _, OracleError<'_>>("\""),
+            take_until("\""),
+            tag("\""),
+        )),
+        recognize(preceded(not(marker), nom::character::complete::anychar)),
+    )))
+    .parse(tp.lower)
+    .ok()?;
+    if rest.is_empty() {
+        return Some((tp, None, None));
+    }
+    let (expression, _) = marker(rest).ok()?;
+    let expression = tp
+        .slice(tp.len() - expression.len(), tp.len())
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    let (remaining, _) = super::oracle_nom::quantity::parse_quantity
+        .parse(expression.lower)
+        .ok()?;
+    let expression_end = expression.len() - remaining.len();
+    let remaining = if remaining.trim().is_empty() {
+        None
+    } else {
+        let (tail, _) = alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(" and "),
+            tag(", "),
+        ))
+        .parse(remaining)
+        .ok()?;
+        Some(
+            expression
+                .slice(expression.len() - tail.len(), expression.len())
+                .original,
+        )
+    };
+    let predicate = tp
+        .slice(0, tp.len() - rest.len())
+        .trim_end_matches(',')
+        .trim_end();
+    Some((
+        predicate,
+        Some(expression.slice(0, expression_end).original),
+        remaining,
+    ))
 }
 
 fn complete_protection_rider(text: &str) -> Option<crate::types::ability::ProtectionDoesNotRemove> {
@@ -1862,6 +1924,10 @@ fn complete_modification_clause(
         return (!mods.is_empty()).then_some(mods);
     }
     if matches!(verb, ContinuousVerb::Pump) {
+        // CR 613.4c: "an additional" qualifies this additive pump, while the
+        // base-P/T numeric production retains its separate grammar contract.
+        let body_lower = body.to_lowercase();
+        let body = nom_tag_lower(body, &body_lower, "an additional ").unwrap_or(body);
         if let Ok((rest, (power, toughness))) = parse_pt_mod_with_remainder(body) {
             if rest.trim().is_empty() {
                 return Some(vec![
@@ -1887,7 +1953,7 @@ fn complete_modification_clause(
         .parse(body.to_lowercase().as_str())
         .is_ok()
         {
-            return parse_dynamic_pt_in_text(&lower, where_x);
+            return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x);
         }
     }
     // CR 613.4b: the base-P/T owner must consume both values completely,

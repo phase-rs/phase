@@ -40491,3 +40491,119 @@ fn u14_boundary_rejects_incomplete_subject_predicate_pairs() {
         assert!(mods.len() >= 2);
     }
 }
+
+#[test]
+fn u14_where_x_owns_the_complete_unquoted_expression() {
+    // SHAPE: the public Criminal Past consumer is in jev_chosen_parity.
+    let predicate = "has mobilize X, where X is its power";
+    let mods = parse_complete_continuous_modifications(predicate).unwrap();
+    assert!(matches!(
+        mods.as_slice(),
+        [ContinuousModification::AddDynamicKeyword { .. }]
+    ));
+    let good = format!("Creatures {predicate}.");
+    assert!(parse_static_line_multi(&good)
+        .iter()
+        .any(|d| d.modifications == mods));
+    let modeled = format!("{predicate} and has haste");
+    let complete = parse_complete_continuous_modifications(&modeled).unwrap();
+    assert_eq!(complete.len(), 2);
+    assert!(complete.contains(&ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste
+    }));
+    assert!(
+        parse_complete_continuous_modifications(&format!("{modeled} and draw two cards")).is_none()
+    );
+    for tail in [", draw two cards", " and draw two cards", ", unexplained"] {
+        let bad = format!("{predicate}{tail}");
+        assert!(
+            parse_complete_continuous_modifications(&bad).is_none(),
+            "{bad}"
+        );
+        let line = format!("Creatures {bad}.");
+        let defs = parse_static_line_multi(&line);
+        assert!(!defs.is_empty(), "terminal refusal: {line}");
+        assert!(defs.iter().all(u14_static_residual), "{line}: {defs:?}");
+    }
+    let criminal = "Commander creatures you own have menace and \"This creature gets +X/+0, where X is the number of creature cards in your graveyard.\" (A creature with menace can't be blocked except by two or more creatures.)";
+    let defs = parse_static_line_multi(criminal);
+    assert!(defs.iter().any(|d| d
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Menace
+        })));
+    assert!(defs.iter().any(|d| d
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::GrantStaticAbility { .. }))));
+    assert!(defs.iter().all(|d| !u14_static_residual(d)));
+}
+
+#[test]
+fn u14_noncontinuous_companions_own_pt_and_unknown_tail() {
+    // All three actual attached-subject restriction branches use this admission.
+    for (branch, restriction) in [
+        "can't be blocked",
+        "can't be blocked by creatures with flying",
+        "can't be blocked except by two or more creatures",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let predicate = format!("{restriction} and has haste and gets +1/+1");
+        let line = format!("Enchanted creature {predicate}.");
+        let filter = TargetFilter::SelfRef;
+        let direct = super::grammar::parse_enchanted_equipped_predicate(&predicate, filter, &line);
+        let public = parse_static_line_multi(&line);
+        for defs in [&direct, &public] {
+            assert_eq!(defs.len(), 2, "{line}: {defs:?}");
+            assert!(match branch {
+                0 => matches!(defs[0].mode, StaticMode::CantBeBlocked),
+                1 => matches!(defs[0].mode, StaticMode::CantBeBlockedBy { .. }),
+                _ => matches!(defs[0].mode, StaticMode::CantBeBlockedExceptBy { .. }),
+            });
+            for modification in [
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                },
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ] {
+                assert!(
+                    defs[1].modifications.contains(&modification),
+                    "{line}: {defs:?}"
+                );
+            }
+        }
+        let bad_predicate = format!("{predicate} and draw two cards");
+        let bad = format!("Enchanted creature {bad_predicate}.");
+        for defs in [
+            super::grammar::parse_enchanted_equipped_predicate(
+                &bad_predicate,
+                TargetFilter::SelfRef,
+                &bad,
+            ),
+            parse_static_line_multi(&bad),
+        ] {
+            assert!(!defs.is_empty());
+            assert!(defs.iter().all(u14_static_residual), "{bad}: {defs:?}");
+        }
+    }
+}
+
+#[test]
+fn u14_additional_pump_keeps_strict_tail_and_base_pt_grammar() {
+    let good = parse_complete_continuous_modifications("gets an additional +1/+1").unwrap();
+    assert_eq!(
+        good,
+        vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 }
+        ]
+    );
+    assert!(
+        parse_complete_continuous_modifications("gets an additional +1/+1 and draw two cards")
+            .is_none()
+    );
+    assert!(super::grammar::parse_pt_mod_with_remainder("an additional +1/+1").is_err());
+}

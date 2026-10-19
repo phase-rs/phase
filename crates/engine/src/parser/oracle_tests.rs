@@ -35971,3 +35971,33 @@ fn u14_reference_full_documents_preserve_independent_items() {
         .count();
     assert_eq!(grants, 2);
 }
+
+#[test]
+fn u14_complete_where_x_and_companion_documents() {
+    // SHAPE: exact positives reach each complete owner before its hostile twin.
+    for line in [
+        "Creatures have mobilize X, where X is its power.",
+        "Enchanted creature can't be blocked and has haste and gets +1/+1.",
+        "Enchanted creature can't be blocked by creatures with flying and has haste and gets +1/+1.",
+        "Enchanted creature can't be blocked except by two or more creatures and has haste and gets +1/+1.",
+    ] {
+        let mut good = parse_oracle_ir(line, "Complete static", &[], &["Enchantment".into()], &[]);
+        assert_eq!(good.source_text, line);
+        assert!(!good.items.iter().any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })), "{good:#?}");
+        let parsed = lower_oracle_ir(&mut good);
+        assert!(!parsed.statics.is_empty());
+        if line == "Creatures have mobilize X, where X is its power." {
+            assert!(parsed.statics.iter().flat_map(|s| &s.modifications).any(|m| matches!(m, ContinuousModification::AddDynamicKeyword { .. })));
+        } else {
+            assert_eq!(parsed.statics.len(), 2);
+            assert!(parsed.statics.iter().flat_map(|s| &s.modifications).any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })));
+            assert!(parsed.statics.iter().flat_map(|s| &s.modifications).any(|m| matches!(m, ContinuousModification::AddKeyword { keyword: Keyword::Haste })));
+        }
+        let connector = if line == "Creatures have mobilize X, where X is its power." { "," } else { " and" };
+        let bad = format!("{}{connector} draw two cards.", line.trim_end_matches('.'));
+        let doc = parse_oracle_ir(&bad, "Complete static", &[], &["Enchantment".into()], &[]);
+        assert_eq!(doc.source_text, bad);
+        assert!(doc.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == bad)), "{doc:#?}");
+        assert!(!doc.items.iter().any(|i| matches!(i.node, OracleNodeIr::Static(_))), "no supported partial static: {doc:#?}");
+    }
+}

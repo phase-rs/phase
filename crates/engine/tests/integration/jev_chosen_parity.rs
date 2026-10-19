@@ -6,7 +6,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::types::ability::{
     ChoiceType, ChoiceValue, ChosenAttribute, ContinuousModification, Effect, FilterProp, Parity,
-    ParitySource, TargetFilter,
+    ParitySource, QuantityExpr, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -189,6 +189,130 @@ fn u14_public_entry_stores_parity_and_grants_haste() {
         pause(&mut r, a);
         answer(&mut r, a, choice);
         assert_table(&r, &cards, choice == "Odd", choice == "Even");
+    }
+}
+
+#[test]
+fn u14_complete_where_x_has_public_static_consumers() {
+    // CR 611.3a + CR 613.4c: the quoted grant reads the recipient's
+    // controller's graveyard; the complete outer grant also supplies menace.
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let commander = s.add_creature(P0, "Own commander", 1, 2).commander().id();
+    let ordinary = s.add_creature(P0, "Noncommander sibling", 1, 2).id();
+    let opposing = s
+        .add_creature(P1, "Opposing commander", 1, 2)
+        .commander()
+        .id();
+    for name in ["Creature in graveyard one", "Creature in graveyard two"] {
+        s.add_creature_to_graveyard(P0, name, 1, 1);
+    }
+    s.add_land_to_graveyard(P0, "Noncreature in graveyard");
+    let source = s.add_spell_to_hand(P0, "Criminal Past", false)
+        .as_enchantment()
+        .from_oracle_text("Commander creatures you own have menace and \"This creature gets +X/+0, where X is the number of creature cards in your graveyard.\" (A creature with menace can't be blocked except by two or more creatures.)")
+        .with_mana_cost(ManaCost::zero()).id();
+    let mut r = s.build();
+    r.cast(source).resolve();
+    assert_eq!(r.state().objects[&source].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&commander].power, Some(3));
+    assert_eq!(r.state().objects[&commander].toughness, Some(2));
+    assert!(r.state().objects[&commander]
+        .keywords
+        .contains(&Keyword::Menace));
+    for id in [ordinary, opposing] {
+        assert_eq!(r.state().objects[&id].power, Some(1));
+        assert!(!r.state().objects[&id].keywords.contains(&Keyword::Menace));
+    }
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let own = s.add_creature(P0, "Dynamic own recipient", 3, 4).id();
+    let opposing = s.add_creature(P1, "Dynamic opposing recipient", 1, 2).id();
+    let dynamic = s
+        .add_spell_to_hand(P0, "Synthetic dynamic keyword grant", false)
+        .as_enchantment()
+        .from_oracle_text("Creatures have mobilize X, where X is its power.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut r = s.build();
+    r.cast(dynamic).resolve();
+    for (id, power) in [(own, 3), (opposing, 1)] {
+        assert!(r.state().objects[&id]
+            .keywords
+            .contains(&Keyword::Mobilize(QuantityExpr::Fixed { value: power })));
+    }
+}
+
+#[test]
+fn u14_complete_noncontinuous_companion_has_public_consumer() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let host = s.add_creature(P0, "Companion host", 1, 1).id();
+    let sibling = s.add_creature(P0, "Unaffected sibling", 1, 1).id();
+    let aura = s
+        .add_spell_to_hand(P0, "Synthetic complete companion Aura", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(
+            "Enchant creature\nEnchanted creature can't be blocked and has haste and gets +1/+1.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut r = s.build();
+    r.cast(aura).target_object(host).resolve();
+    assert_eq!(r.state().objects[&aura].zone, Zone::Battlefield);
+    let object = &r.state().objects[&host];
+    assert_eq!((object.power, object.toughness), (Some(2), Some(2)));
+    assert!(object.keywords.contains(&Keyword::Haste));
+    assert!(
+        engine::game::derived_views::derive_views(r.state(), Some(P0))
+            .cant_be_blocked
+            .contains(&host)
+    );
+    let object = &r.state().objects[&sibling];
+    assert_eq!((object.power, object.toughness), (Some(1), Some(1)));
+    assert!(!object.keywords.contains(&Keyword::Haste));
+}
+
+#[test]
+fn u14_divine_sacrament_full_oracle_threshold_consumer() {
+    use engine::types::mana::ManaColor;
+    // CR 611.3a + CR 613.4c: threshold adds its second bonus to the
+    // unconditional bonus, and only the printed white population is modified.
+    for graveyard_size in [6, 7] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        for _ in 0..graveyard_size {
+            s.add_land_to_graveyard(P0, "Threshold card");
+        }
+        let white = s
+            .add_creature(P0, "White creature", 1, 1)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let opposing_white = s
+            .add_creature(P1, "Opposing white creature", 1, 1)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let nonwhite = s
+            .add_creature(P0, "Blue creature", 1, 1)
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let source = s.add_spell_to_hand(P0, "Divine Sacrament", false).as_enchantment()
+            .from_oracle_text("White creatures get +1/+1.\nThreshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.")
+            .with_mana_cost(ManaCost::zero()).id();
+        let mut r = s.build();
+        r.cast(source).resolve();
+        assert_eq!(r.state().objects[&source].zone, Zone::Battlefield);
+        let expected = if graveyard_size == 7 { 3 } else { 2 };
+        for id in [white, opposing_white] {
+            let object = &r.state().objects[&id];
+            assert_eq!(
+                (object.power, object.toughness),
+                (Some(expected), Some(expected))
+            );
+        }
+        let object = &r.state().objects[&nonwhite];
+        assert_eq!((object.power, object.toughness), (Some(1), Some(1)));
     }
 }
 

@@ -1905,25 +1905,9 @@ pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
         }
         Ok((rest, tp.slice(lower.len() - rest.len(), lower.len())))
     })?;
-    // Only an independently modeled clause owns a following non-keyword span.
-    // Unknown tails remain in the keyword leg and are rejected by strict admission.
-    let end = [
-        " and gets ",
-        " and get ",
-        " and is ",
-        " and are ",
-        " and loses ",
-        " and lose ",
-    ]
-    .into_iter()
-    .filter_map(|marker| {
-        body.split_around_outside_quotes(marker)
-            .map(|(before, _)| before.original.len())
-    })
-    .min()
-    .unwrap_or(body.original.len());
-    let start = body.original.as_ptr() as usize - text.as_ptr() as usize;
-    Some(text[start..start + end].trim())
+    // Return the entire suffix: the complete companion owner must consume
+    // every following clause before it can publish either definition.
+    Some(body.original.trim())
 }
 
 /// Extract the keyword text from "lose [keyword]" / "loses [keyword]" clauses.
