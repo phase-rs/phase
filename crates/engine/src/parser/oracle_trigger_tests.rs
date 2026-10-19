@@ -16712,13 +16712,98 @@ fn trigger_unless_you_return_two_forests_to_hand() {
     let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
     match &unless_pay.cost {
         AbilityCost::ReturnToHand {
-            count, from_zone, ..
+            count,
+            from_zone,
+            filter,
         } => {
             assert_eq!(*count, 2);
             assert!(from_zone.is_none());
+            // The counted plural subtype phrase keeps its subtype and controller.
+            match filter {
+                Some(TargetFilter::Typed(tf)) => {
+                    assert_eq!(tf.get_subtype(), Some("Forest"));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("filter should be Typed Forest you control, got {other:?}"),
+            }
         }
         other => panic!("cost should be ReturnToHand, got {:?}", other),
     }
+}
+
+/// A plural owner destination with no parsed count token declines on the
+/// unless side instead of lowering as a count-1 return (r1 M2, second channel).
+#[test]
+fn unless_return_plural_without_count_declines() {
+    // Reach guard: the counted form of the same destination lowers.
+    assert!(matches!(
+        parse_unless_alt_cost("you return two lands you control to their owner's hand"),
+        Some(AbilityCost::ReturnToHand { count: 2, .. })
+    ));
+    assert!(
+        parse_unless_alt_cost("you return x lands you control to their owner's hand").is_none()
+    );
+    // Whole-trigger reach guard: the declined rider becomes the honest
+    // `Unsupported unless clause` gap rather than a count-1 return.
+    let def = parse_trigger_line(
+        "When ~ enters, sacrifice it unless you return X lands you control to their owner's hand.",
+        "Plural Return Witness",
+    );
+    assert!(
+        !matches!(
+            def.unless_pay.as_ref().map(|u| &u.cost),
+            Some(AbilityCost::ReturnToHand { .. })
+        ),
+        "a plural without a count must not lower to ReturnToHand: {:?}",
+        def.unless_pay
+    );
+    assert!(
+        format!("{:?}", def.execute).contains("Unsupported unless clause"),
+        "the declined rider must surface as a parser gap: {:?}",
+        def.execute
+    );
+}
+
+/// A count token followed by a range tail ("two or more") is a quantifier, not
+/// the exact count the token alone would read as: it declines on the unless side.
+/// A guard row, not a discriminator: the object-phrase parse that follows the
+/// splitter already refuses these, so this pins that the splitter change keeps
+/// them declined.
+#[test]
+fn unless_return_range_quantifier_declines() {
+    // Reach guard: the exact count of the same destination lowers.
+    assert!(matches!(
+        parse_unless_alt_cost("you return two forests you control to their owner's hand."),
+        Some(AbilityCost::ReturnToHand { count: 2, .. })
+    ));
+    assert!(
+        parse_unless_return_to_hand("two forests you control to their owner's hand.").is_some()
+    );
+    for text in [
+        "two or more lands you control to their owner's hand.",
+        "one or more lands you control to their owner's hand.",
+        "two or fewer lands you control to their owner's hand.",
+    ] {
+        assert!(
+            parse_unless_return_to_hand(text).is_none(),
+            "{text:?} must decline"
+        );
+    }
+}
+
+/// `parse_hand_possessive` delegates its owner-hand arms to the shared
+/// `parse_owner_hand_possessive` without changing its accepted set or results.
+#[test]
+fn hand_possessive_owner_forms_delegate() {
+    assert_eq!(parse_hand_possessive("their owners' hands"), Ok(("", None)));
+    assert_eq!(parse_hand_possessive("their owner's hand"), Ok(("", None)));
+    assert_eq!(parse_hand_possessive("its owner's hand"), Ok(("", None)));
+    assert_eq!(parse_hand_possessive("a hand"), Ok(("", None)));
+    // Reach guard: the non-delegated "your hand" arm still constrains.
+    assert_eq!(
+        parse_hand_possessive("your hand"),
+        Ok(("", Some(ControllerRef::You)))
+    );
 }
 
 #[test]
@@ -19670,11 +19755,10 @@ fn trigger_necropotence_you_discard_exile_from_graveyard() {
 
 /// CR 701.23a + CR 608.2k: a search result is the parent target of its
 /// delivery continuation, even inside an ETB whose event source would
-/// otherwise lift `ParentTarget` to `TriggeringSource`. That protection ends
-/// at an independent sibling: a later "that creature" still denotes the
-/// entering creature.
+/// otherwise lift `ParentTarget` to `TriggeringSource`. Later siblings retain
+/// that found-object boundary as well.
 #[test]
-fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() {
+fn event_source_lift_stops_at_search_across_independent_siblings() {
     let sponsor = parse_trigger_line(
         "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.",
         "Scholarship Sponsor",
@@ -19727,9 +19811,51 @@ fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() 
     );
     assert_eq!(
         independent_exile_target,
-        Some(TargetFilter::TriggeringSource),
-        "the independent post-search sibling must still bind to the entering creature"
+        Some(TargetFilter::ParentTarget),
+        "the independent post-search sibling must retain the search-result antecedent"
     );
+}
+
+/// SHAPE — CR 608.2c + CR 701.23a: every library search introduces its chosen
+/// result before later anaphors; the common boundary must stop all five walks.
+#[test]
+fn library_search_is_a_chosen_object_boundary_for_the_event_source_lift() {
+    for (name, oracle, types) in [
+        ("Guidelight Pathmaker", "Vigilance\nWhen this Vehicle enters, you may search your library for an artifact card and reveal it. Put it onto the battlefield if its mana value is 2 or less. Otherwise, put it into your hand. If you search your library this way, shuffle.\nCrew 2", vec!["Artifact".to_string()]),
+        ("Stoic Farmer", "When this creature enters, search your library for a basic Plains card and reveal it. If an opponent controls more lands than you, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.\nForetell {1}{W} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)", vec!["Creature".to_string()]),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        assert_eq!(parsed.triggers.len(), 1, "real ETB trigger: {name}");
+        let execute = parsed.triggers[0].execute.as_deref().expect("ETB execute chain");
+        assert!(matches!(execute.effect.as_ref(), Effect::SearchLibrary { .. }), "positive search root: {execute:?}");
+        assert!(introduces_chosen_object_target(execute.effect.as_ref()), "{name}: search must be a common chosen-object boundary");
+        let destination = execute.sub_ability.as_deref().expect("conditional destination");
+        assert!(destination.condition.is_some(), "represented result/board gate: {destination:?}");
+        assert!(matches!(destination.effect.as_ref(), Effect::ChangeZone {
+            target: TargetFilter::ParentTarget, destination: Zone::Battlefield, ..
+        }), "{name}: found card stays ParentTarget: {destination:?}");
+        assert!(matches!(destination.else_ability.as_deref().expect("hand fallback").effect.as_ref(),
+            Effect::ChangeZone { target: TargetFilter::ParentTarget, destination: Zone::Hand, .. }
+        ));
+        assert!(!has_unimplemented(execute), "supported search instruction: {execute:?}");
+    }
+    // Existing non-search event-source lifts remain positive controls.
+    let necropotence = parse_trigger_line(
+        "Whenever you discard a card, exile that card from your graveyard.",
+        "Necropotence",
+    );
+    assert!(matches!(
+        necropotence
+            .execute
+            .as_deref()
+            .expect("discard trigger")
+            .effect
+            .as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
 }
 
 /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be

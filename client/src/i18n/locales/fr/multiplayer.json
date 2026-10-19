@@ -285,7 +285,8 @@
     "botGameNotice": "Vous hébergez la partie Discord {{code}}. La connexion et la confidentialité sont fixées par la publication Discord.",
     "botSeedIgnored": "Certains paramètres de la publication Discord ne peuvent pas être utilisés ici — vérifiez le format et le nombre de joueurs.",
     "botP2PNotice": "Votre appareil exécute la partie. Gardez l’application ouverte et restez connecté.",
-    "botServerNotice": "Un serveur dédié exécute la partie. Il peut ralentir ou se déconnecter."
+    "botServerNotice": "Un serveur dédié exécute la partie. Il peut ralentir ou se déconnecter.",
+    "poolBracketConflict": "Aucun des {{selected}} decks sélectionnés n'est légal avec les filtres actuels, les adversaires aléatoires utiliseront les {{total}} decks."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",

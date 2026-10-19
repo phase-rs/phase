@@ -4237,25 +4237,32 @@ fn each_power_damage_recipient_slot_filter(ability: &ResolvedAbility) -> Option<
 /// role, including an optional role whose declared selection is empty.
 /// Resolution results and declarations on descendants are separate authorities.
 pub(crate) fn node_has_stack_target_declaration(ability: &ResolvedAbility) -> bool {
+    node_has_stack_target_declaration_matching(ability, &|_| true)
+}
+
+/// Views the current node's existing declaration witnesses, including empty
+/// optional declarations. This is not a complete slot enumeration or proof of
+/// selected-object information; descendants and resolution results are separate.
+pub(crate) fn node_has_stack_target_declaration_matching(
+    ability: &ResolvedAbility,
+    predicate: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
     if ability.target_choice_timing != TargetChoiceTiming::Stack
         || paid_instead_delegate(ability).is_some()
     {
         return false;
     }
-    if damage_replacement_target_roles(&ability.effect).is_some()
-        || damage_replacement_source_slot_filter(&ability.effect).is_some()
-    {
-        return true;
+    if let Some(roles) = damage_replacement_target_roles(&ability.effect) {
+        return roles.into_iter().any(|role| predicate(role.filter()));
+    }
+    if let Some(filter) = damage_replacement_source_slot_filter(&ability.effect) {
+        return predicate(filter);
     }
     if paired_subject_filters(&ability.effect).is_some() {
-        return paired_subject_slot_filters(&ability.effect)
-            .next()
-            .is_some();
+        return paired_subject_slot_filters(&ability.effect).any(predicate);
     }
     if let Effect::Fight { subject, target } = &ability.effect {
-        return fight_declared_slot_filters(subject, target)
-            .next()
-            .is_some();
+        return fight_declared_slot_filters(subject, target).any(predicate);
     }
     if let Effect::MoveCounters {
         source,
@@ -4266,10 +4273,11 @@ pub(crate) fn node_has_stack_target_declaration(ability: &ResolvedAbility) -> bo
     {
         return move_counter_stack_target_filters(source, target, *selection)
             .into_iter()
-            .any(|filter| !filter.is_context_ref());
+            .filter(|filter| !filter.is_context_ref())
+            .any(predicate);
     }
     if let Some(role) = mana_multi_role(&ability.effect) {
-        return role.surfaced_filters().next().is_some();
+        return role.surfaced_filters().any(|(_, filter)| predicate(filter));
     }
     if let Effect::Attach {
         attachment,
@@ -4277,22 +4285,30 @@ pub(crate) fn node_has_stack_target_declaration(ability: &ResolvedAbility) -> bo
         selection,
     } = &ability.effect
     {
-        return attach_attachment_claims_announcement_slot(attachment, selection)
-            || attach_host_filter_needs_target_slot(target);
+        return (attach_attachment_claims_announcement_slot(attachment, selection)
+            && predicate(attachment))
+            || (attach_host_filter_needs_target_slot(target) && predicate(target));
     }
     if matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
-        return each_power_damage_recipient_slot_filter(ability).is_some();
+        return each_power_damage_recipient_slot_filter(ability).is_some_and(predicate);
     }
     if is_per_opponent_target_fanout(ability) {
-        return true;
+        return predicate(&TargetFilter::Player)
+            || ability.effect.target_filter().is_some_and(predicate);
     }
-    ability_needs_companion_target_player_slot(ability)
+    (ability_needs_companion_target_player_slot(ability) && predicate(&TargetFilter::Player))
         || (effect_needs_target_creature_quantity_slot(&ability.effect)
-            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect))
-        || effect_needs_parent_target_combat_relation_slot(&ability.effect)
-        || become_copy_recipient_slot_filter(&ability.effect).is_some()
+            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
+            && predicate(
+                &effect_target_slot_filter(&ability.effect)
+                    .expect("slot filter present when gate true")
+                    .filter,
+            ))
+        || (effect_needs_parent_target_combat_relation_slot(&ability.effect)
+            && predicate(&parent_target_combat_relation_slot_filter()))
+        || become_copy_recipient_slot_filter(&ability.effect).is_some_and(predicate)
         || (!effect_target_filter_references_chosen_player(&ability.effect)
-            && triggers::extract_target_filter_from_effect(&ability.effect).is_some())
+            && triggers::extract_target_filter_from_effect(&ability.effect).is_some_and(predicate))
 }
 
 /// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be
@@ -13156,6 +13172,8 @@ fn build_mode_sequences(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -13163,6 +13181,621 @@ mod tests {
         PreventionAmount, PreventionScope,
     };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
+
+    fn assert_declaration_witnesses(
+        ability: &ResolvedAbility,
+        broad: bool,
+        expected: &[TargetFilter],
+    ) {
+        assert_eq!(node_has_stack_target_declaration(ability), broad);
+        assert_eq!(
+            node_has_stack_target_declaration_matching(ability, &|_| true),
+            broad
+        );
+        let seen = RefCell::new(Vec::new());
+        assert!(!node_has_stack_target_declaration_matching(
+            ability,
+            &|filter| {
+                seen.borrow_mut().push(filter.clone());
+                false
+            }
+        ));
+        assert_eq!(*seen.borrow(), expected);
+        for wanted in expected {
+            seen.borrow_mut().clear();
+            assert!(node_has_stack_target_declaration_matching(
+                ability,
+                &|filter| {
+                    seen.borrow_mut().push(filter.clone());
+                    filter == wanted
+                }
+            ));
+            let first = expected.iter().position(|filter| filter == wanted).unwrap();
+            assert_eq!(*seen.borrow(), expected[..=first]);
+        }
+        let mut resolution = ability.clone();
+        resolution.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(!node_has_stack_target_declaration(&resolution));
+        seen.borrow_mut().clear();
+        assert!(!node_has_stack_target_declaration_matching(
+            &resolution,
+            &|filter| {
+                seen.borrow_mut().push(filter.clone());
+                true
+            }
+        ));
+        assert!(seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn declaration_predicate_preserves_damage_role_order_and_exact_source_guard() {
+        let artifact = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let node = |effect| ResolvedAbility::new(effect, vec![], ObjectId(900), PlayerId(0));
+        let mut replacement: Effect = serde_json::from_str(
+            r#"{"type":"CreateDamageReplacement","redirect_to":{"type":"ChosenTarget"}}"#,
+        )
+        .unwrap();
+        if let Effect::CreateDamageReplacement {
+            source_filter,
+            recipient_object_filter,
+            redirect_object_filter,
+            ..
+        } = &mut replacement
+        {
+            *source_filter = Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    artifact.clone(),
+                ],
+            });
+            *recipient_object_filter = Some(creature.clone());
+            *redirect_object_filter = Some(TargetFilter::Player);
+        }
+        assert_declaration_witnesses(
+            &node(replacement.clone()),
+            true,
+            &[artifact.clone(), creature.clone(), TargetFilter::Player],
+        );
+        if let Effect::CreateDamageReplacement {
+            recipient_object_filter,
+            ..
+        } = &mut replacement
+        {
+            *recipient_object_filter = Some(TargetFilter::ParentTarget);
+        }
+        assert_declaration_witnesses(
+            &node(replacement),
+            true,
+            &[artifact.clone(), TargetFilter::Player],
+        );
+        for (index, broad, expected) in [(0, true, vec![artifact.clone()]), (1, false, vec![])] {
+            let prevention = Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::And {
+                    filters: vec![TargetFilter::ParentTargetSlot { index }, artifact.clone()],
+                }),
+                prevention_duration: None,
+            };
+            assert_declaration_witnesses(&node(prevention), broad, &expected);
+        }
+        let roleless: Effect = serde_json::from_str(
+            r#"{"type":"CreateDamageReplacement","redirect_to":{"type":"Controller"}}"#,
+        )
+        .unwrap();
+        assert_declaration_witnesses(&node(roleless), false, &[]);
+    }
+
+    #[test]
+    fn declaration_predicate_preserves_terminal_pairs_counters_mana_and_attach() {
+        let artifact = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let context = TargetFilter::ParentTargetSlot { index: 0 };
+        let node = |effect| ResolvedAbility::new(effect, vec![], ObjectId(900), PlayerId(0));
+        for effect in [
+            Effect::ExchangeControl {
+                target_a: artifact.clone(),
+                target_b: creature.clone(),
+            },
+            Effect::Fight {
+                subject: artifact.clone(),
+                target: creature.clone(),
+            },
+        ] {
+            assert_declaration_witnesses(
+                &node(effect),
+                true,
+                &[artifact.clone(), creature.clone()],
+            );
+        }
+        assert_declaration_witnesses(
+            &node(Effect::ExchangeLifeTotals {
+                player_a: TargetFilter::Opponent,
+                player_b: TargetFilter::Player,
+            }),
+            true,
+            &[TargetFilter::Opponent, TargetFilter::Player],
+        );
+        for effect in [
+            Effect::ExchangeControl {
+                target_a: context.clone(),
+                target_b: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+            },
+            Effect::ExchangeLifeTotals {
+                player_a: TargetFilter::Controller,
+                player_b: TargetFilter::ScopedPlayer,
+            },
+            Effect::Fight {
+                subject: context.clone(),
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+            },
+        ] {
+            assert_declaration_witnesses(&node(effect), false, &[]);
+        }
+        for subject in [
+            TargetFilter::SelfRef,
+            TargetFilter::AttachedTo,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+        ] {
+            assert_declaration_witnesses(
+                &node(Effect::Fight {
+                    subject,
+                    target: creature.clone(),
+                }),
+                true,
+                std::slice::from_ref(&creature),
+            );
+        }
+        for selection in [
+            CounterMoveSelection::StackTarget,
+            CounterMoveSelection::StackTargetAnyNumber,
+            CounterMoveSelection::ResolutionDistributionAnyNumber,
+        ] {
+            for source in [&artifact, &context] {
+                let expected = match (selection, source == &context) {
+                    (CounterMoveSelection::ResolutionDistributionAnyNumber, true) => vec![],
+                    (CounterMoveSelection::ResolutionDistributionAnyNumber, false) => {
+                        vec![artifact.clone()]
+                    }
+                    (_, true) => vec![creature.clone()],
+                    (_, false) => vec![artifact.clone(), creature.clone()],
+                };
+                let broad = !(selection == CounterMoveSelection::ResolutionDistributionAnyNumber
+                    && source == &context);
+                assert_declaration_witnesses(
+                    &node(Effect::MoveCounters {
+                        source: source.clone(),
+                        target: creature.clone(),
+                        counter_type: None,
+                        count: Some(QuantityExpr::Fixed { value: 1 }),
+                        mode: CounterTransferMode::Move,
+                        selection,
+                    }),
+                    broad,
+                    &expected,
+                );
+            }
+        }
+        for (recipient, count_source, broad, expected) in [
+            (
+                TargetFilter::Opponent,
+                artifact.clone(),
+                true,
+                vec![TargetFilter::Opponent, artifact.clone()],
+            ),
+            (
+                TargetFilter::Controller,
+                artifact.clone(),
+                true,
+                vec![artifact.clone()],
+            ),
+            (TargetFilter::Controller, context.clone(), false, vec![]),
+        ] {
+            assert_declaration_witnesses(
+                &node(Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(ManaTargetRole::Both {
+                        recipient,
+                        count_source,
+                    }),
+                }),
+                broad,
+                &expected,
+            );
+        }
+        assert_declaration_witnesses(
+            &node(Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::Player,
+                }),
+            }),
+            true,
+            &[TargetFilter::Player],
+        );
+        for (selection, host, broad, expected) in [
+            (
+                AttachSelection::Targeted,
+                creature.clone(),
+                true,
+                vec![artifact.clone(), creature.clone()],
+            ),
+            (
+                AttachSelection::AtResolution {
+                    count: AttachCardinality::One,
+                },
+                creature.clone(),
+                true,
+                vec![creature.clone()],
+            ),
+            (
+                AttachSelection::Targeted,
+                context.clone(),
+                true,
+                vec![artifact.clone()],
+            ),
+            (
+                AttachSelection::AtResolution {
+                    count: AttachCardinality::One,
+                },
+                context,
+                false,
+                vec![],
+            ),
+            (
+                AttachSelection::AtResolution {
+                    count: AttachCardinality::One,
+                },
+                TargetFilter::LastRevealed,
+                false,
+                vec![],
+            ),
+        ] {
+            assert_declaration_witnesses(
+                &node(Effect::Attach {
+                    attachment: artifact.clone(),
+                    target: host,
+                    selection,
+                }),
+                broad,
+                &expected,
+            );
+        }
+    }
+
+    #[test]
+    fn declaration_predicate_each_power_is_only_the_recipient_witness() {
+        let artifact = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        let extra =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+        let mut ability = ResolvedAbility::new(
+            Effect::EachDealsDamageEqualToPower {
+                sources: artifact.clone(),
+                extra_source: Some(extra.clone()),
+                recipient: TargetFilter::Player,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::fixed(0, 0));
+        assert_declaration_witnesses(&ability, true, &[TargetFilter::Player]);
+        for excluded in [artifact, extra] {
+            let seen = RefCell::new(Vec::new());
+            assert!(!node_has_stack_target_declaration_matching(
+                &ability,
+                &|filter| {
+                    seen.borrow_mut().push(filter.clone());
+                    filter == &excluded
+                }
+            ));
+            assert_eq!(*seen.borrow(), [TargetFilter::Player]);
+        }
+    }
+
+    #[test]
+    fn declaration_predicate_preserves_fanout_companion_and_unless_roles() {
+        let payload =
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::TargetPlayer));
+        let mut fanout = per_opponent_gain_control_ability();
+        assert_declaration_witnesses(&fanout, true, &[TargetFilter::Player, payload.clone()]);
+        fanout.multi_target = Some(MultiTargetSpec::fixed(1, 1));
+        assert_declaration_witnesses(&fanout, true, &[TargetFilter::Player, payload]);
+        let mut companion = ResolvedAbility::new(
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert_declaration_witnesses(&companion, true, &[TargetFilter::Player]);
+        companion.set_test_trigger_source_recursive(1, CardId(1));
+        assert_declaration_witnesses(&companion, false, &[]);
+        let mut payer = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        payer.unless_pay = Some(declared_target_payer(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        )));
+        assert_declaration_witnesses(&payer, true, &[TargetFilter::Player]);
+        payer.unless_pay = Some(declared_target_payer(TargetFilter::Opponent));
+        assert_declaration_witnesses(&payer, false, &[]);
+        payer.unless_pay = Some(declared_target_payer(TargetFilter::Controller));
+        assert_declaration_witnesses(&payer, false, &[]);
+    }
+
+    #[test]
+    fn declaration_predicate_preserves_derived_quantity_combat_and_copy_roles() {
+        let node = |effect| ResolvedAbility::new(effect, vec![], ObjectId(900), PlayerId(0));
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let artifact = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        };
+        assert_declaration_witnesses(
+            &node(Effect::Draw {
+                count: power.clone(),
+                target: TargetFilter::Controller,
+            }),
+            true,
+            std::slice::from_ref(&creature),
+        );
+        assert_declaration_witnesses(
+            &node(Effect::Draw {
+                count: power.clone(),
+                target: TargetFilter::Player,
+            }),
+            true,
+            &[creature.clone(), TargetFilter::Player],
+        );
+        assert_declaration_witnesses(
+            &node(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+            false,
+            &[],
+        );
+        for (scope, expected) in [
+            (
+                ControllerRef::TargetOpponent,
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            ),
+            (ControllerRef::TargetPlayer, TargetFilter::Player),
+        ] {
+            assert_declaration_witnesses(
+                &node(Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::TargetZoneCardCount {
+                            zone: crate::types::ability::ZoneRef::Hand,
+                            scope,
+                            binding: CountBinding::Explicit,
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                }),
+                true,
+                &[expected],
+            );
+        }
+        for (binding, expected) in [
+            (CountBinding::Anaphoric, vec![TargetFilter::Player]),
+            (
+                CountBinding::Explicit,
+                vec![TargetFilter::Player, TargetFilter::Player],
+            ),
+        ] {
+            assert_declaration_witnesses(
+                &node(Effect::Mill {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::TargetZoneCardCount {
+                            zone: crate::types::ability::ZoneRef::Hand,
+                            scope: ControllerRef::TargetPlayer,
+                            binding,
+                        },
+                    },
+                    target: TargetFilter::Player,
+                    destination: Zone::Graveyard,
+                }),
+                true,
+                &expected,
+            );
+        }
+        assert_declaration_witnesses(
+            &node(Effect::DealDamage {
+                amount: power,
+                target: creature.clone(),
+                damage_source: Some(DamageSource::Target),
+                excess: None,
+            }),
+            true,
+            std::slice::from_ref(&creature),
+        );
+        for (subject, broad, expected) in [
+            (
+                CombatRelationSubject::ParentTarget,
+                true,
+                vec![creature.clone()],
+            ),
+            (CombatRelationSubject::Source, false, vec![]),
+        ] {
+            assert_declaration_witnesses(
+                &node(Effect::DestroyAll {
+                    cant_regenerate: false,
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::CombatRelation {
+                            subject,
+                            relation: CombatRelation::BlockingOrBlockedBy,
+                        },
+                    ])),
+                }),
+                broad,
+                &expected,
+            );
+        }
+        for (recipient, target, broad, expected) in [
+            (
+                CopyRecipient::Target(artifact.clone()),
+                creature.clone(),
+                true,
+                vec![artifact.clone(), creature.clone()],
+            ),
+            (
+                CopyRecipient::Target(artifact.clone()),
+                TargetFilter::ParentTarget,
+                true,
+                vec![artifact.clone()],
+            ),
+            (
+                CopyRecipient::Untargeted(artifact),
+                creature.clone(),
+                true,
+                vec![creature.clone()],
+            ),
+            (
+                CopyRecipient::Source,
+                creature.clone(),
+                true,
+                vec![creature],
+            ),
+            (
+                CopyRecipient::Source,
+                TargetFilter::ParentTarget,
+                false,
+                vec![],
+            ),
+        ] {
+            assert_declaration_witnesses(
+                &node(Effect::BecomeCopy {
+                    recipient,
+                    target,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: vec![],
+                }),
+                broad,
+                &expected,
+            );
+        }
+    }
+
+    #[test]
+    fn declaration_predicate_preserves_legacy_filters_and_node_local_guards() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let node = |effect| ResolvedAbility::new(effect, vec![], ObjectId(900), PlayerId(0));
+        let draw = |target| {
+            node(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target,
+            })
+        };
+        assert_declaration_witnesses(&draw(TargetFilter::Player), true, &[TargetFilter::Player]);
+        assert_declaration_witnesses(&draw(TargetFilter::Controller), false, &[]);
+        assert_declaration_witnesses(
+            &draw(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::ChosenPlayer { index: 0 }),
+            )),
+            false,
+            &[],
+        );
+        let declared = node(Effect::Destroy {
+            target: creature.clone(),
+            cant_regenerate: false,
+        });
+        assert_declaration_witnesses(&declared, true, std::slice::from_ref(&creature));
+        assert_declaration_witnesses(
+            &node(Effect::PutAtLibraryPosition {
+                target: TargetFilter::LastRevealed,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
+            }),
+            true,
+            &[TargetFilter::LastRevealed],
+        );
+        let cast: Effect = serde_json::from_str(
+            r#"{"type":"CastFromZone","target":{"type":"LastRevealed"},"without_paying_mana_cost":true,"mode":"Cast"}"#,
+        ).unwrap();
+        assert_declaration_witnesses(&node(cast), false, &[]);
+        for (origin, broad) in [(Zone::Hand, false), (Zone::Graveyard, true)] {
+            let effect: Effect = serde_json::from_value(serde_json::json!({
+                "type":"ChangeZone", "origin":origin, "destination":"Exile", "target":creature,
+            }))
+            .unwrap();
+            let expected = if broad {
+                vec![creature.clone()]
+            } else {
+                vec![]
+            };
+            assert_declaration_witnesses(&node(effect), broad, &expected);
+        }
+        for targets in [
+            vec![],
+            vec![TargetRef::Object(ObjectId(777))],
+            vec![TargetRef::Player(PlayerId(1))],
+        ] {
+            let mut selected = declared.clone();
+            selected.targets = targets;
+            selected.optional_targeting = true;
+            selected.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+            assert_declaration_witnesses(&selected, true, std::slice::from_ref(&creature));
+        }
+        let mut descendant_only = node(Effect::NoOp).sub_ability(declared.clone());
+        descendant_only.else_ability = Some(Box::new(declared.clone()));
+        assert_declaration_witnesses(&descendant_only, false, &[]);
+        let deferred = node(Effect::CreateDelayedTrigger {
+            condition: crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+                phase: crate::types::Phase::End,
+            },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                declared.effect.clone(),
+            )),
+            uses_tracked_set: false,
+        });
+        assert_declaration_witnesses(&deferred, false, &[]);
+        let mut delegated = declared.clone();
+        let mut child = declared.clone();
+        child.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+        delegated.sub_ability = Some(Box::new(child));
+        assert_declaration_witnesses(&delegated, true, std::slice::from_ref(&creature));
+        delegated.context.additional_cost_paid = true;
+        assert_declaration_witnesses(&delegated, false, &[]);
+        assert_declaration_witnesses(
+            delegated.sub_ability.as_deref().unwrap(),
+            true,
+            std::slice::from_ref(&creature),
+        );
+    }
 
     #[test]
     fn node_declaration_query_matches_production_role_boundaries() {

@@ -285,7 +285,9 @@
     "loading": "Ładowanie..."
   },
   "turnBanner": {
-    "turn": "Tura {{number}}"
+    "turn": "Tura {{number}}",
+    "yourTurn": "Twoja tura",
+    "opponentTurn": "Tura: {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Rzut o pierwszego gracza",

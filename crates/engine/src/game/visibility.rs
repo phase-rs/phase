@@ -2170,15 +2170,23 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             // the entire declaration. The predicate itself is `pins_name_hidden_source` (this
             // file), the single authority shared with the `RespondToShortcut` projection below,
             // which receives this very template verbatim one state transition later.
-            let declaration = declaration.clone().filter(|template| {
-                !pins_name_hidden_source(
-                    &template.decisions,
-                    &target_hidden,
-                    PinCarrier::OfferWithSchema,
-                )
-            });
+            let keep_visible =
+                |template: &Option<crate::analysis::decision_template::DecisionTemplate>| {
+                    template.clone().filter(|template| {
+                        !pins_name_hidden_source(
+                            &template.decisions,
+                            &target_hidden,
+                            PinCarrier::OfferWithSchema,
+                        )
+                    })
+                };
+            let declaration = keep_visible(declaration);
             (
                 ShortcutDecisionSchema {
+                    // The suggestion is a declaration like the one above, under the same rule.
+                    suggested_declaration: keep_visible(&schema.suggested_declaration),
+                    // Public: a published slot and the seat a trigger already on the stack targets.
+                    leading_aims: schema.leading_aims.clone(),
                     iteration_count: schema.iteration_count.clone(),
                     // CR 732.2a: BOTH published answers are derived from PUBLIC board state
                     // (life, poison, library sizes over the living players) and the engine's own
@@ -11634,6 +11642,8 @@ mod tests {
                 paused_at_index: 0,
                 destination: Zone::Exile,
                 completion: PendingCostMoveCompletion::FinishPending,
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             },
             PendingCostMoveResume::Foretell {
                 player: PlayerId(0),
@@ -11651,6 +11661,8 @@ mod tests {
                     phyrexian_choices: None,
                     pre_payment_checks: None,
                 },
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             },
             PendingCostMoveResume::SacrificeForCost {
                 player: PlayerId(0),
@@ -12936,6 +12948,8 @@ mod tests {
                 per_cycle: None,
             },
             schema: ShortcutDecisionSchema {
+                suggested_declaration: None,
+                leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(3),
                 measured_repetition_bound: Some(3),
                 deliverable_capacity: 3,
@@ -13364,6 +13378,7 @@ mod tests {
                 per_cycle: None,
                 shortened_by: None,
                 published_declaration: Some(declaration),
+                leading_aims: Vec::new(),
                 road: crate::analysis::loop_check::OfferRoad::Ring,
                 period: Default::default(),
             },

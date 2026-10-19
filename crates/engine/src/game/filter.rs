@@ -2412,23 +2412,160 @@ pub(crate) fn filter_contains_filter_prop(
     filter: &TargetFilter,
     predicate: &dyn Fn(&FilterProp) -> bool,
 ) -> bool {
+    filter_contains_input(
+        filter,
+        &|prop, _, _| predicate(prop),
+        &|_, _, _, _| false,
+        &|_, _, _| false,
+        &|_, _, _| false,
+        false,
+        None,
+    )
+}
+
+pub(crate) fn quantity_expr_contains_filter_prop(
+    expr: &QuantityExpr,
+    predicate: &dyn Fn(&FilterProp) -> bool,
+) -> bool {
+    quantity_expr_contains_input(
+        expr,
+        &|prop, _, _| predicate(prop),
+        &|_, _, _, _| false,
+        &|_, _, _| false,
+        &|_, _, _| false,
+        false,
+        None,
+    )
+}
+
+type RawReferencePredicate<'a> =
+    &'a dyn Fn(&QuantityRef, bool, Option<&ResolvedAbility>, Option<&PlayerFilter>) -> bool;
+
+pub(crate) fn filter_contains_scalar_input(
+    filter: &TargetFilter,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+) -> bool {
+    filter_contains_input(
+        filter,
+        predicate,
+        raw_reference,
+        scalar_filter,
+        population_leaf,
+        object_information_available,
+        slot_context,
+    )
+}
+
+pub(crate) fn quantity_expr_contains_scalar_input(
+    expr: &QuantityExpr,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+) -> bool {
+    quantity_expr_contains_input(
+        expr,
+        predicate,
+        raw_reference,
+        scalar_filter,
+        population_leaf,
+        object_information_available,
+        slot_context,
+    )
+}
+
+pub(crate) fn player_filter_contains_scalar_input(
+    filter: &PlayerFilter,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+) -> bool {
+    player_filter_contains_input(
+        filter,
+        predicate,
+        raw_reference,
+        scalar_filter,
+        population_leaf,
+        object_information_available,
+        slot_context,
+    )
+}
+
+fn filter_contains_input(
+    filter: &TargetFilter,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+) -> bool {
     match filter {
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| filter_contains_filter_prop(inner, predicate)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(|inner| {
+                filter_contains_input(
+                    inner,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_contains_filter_prop(filter, predicate)
+            filter_contains_input(
+                filter,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            )
         }
-        TargetFilter::PlayerMatching { player } => {
-            player_filter_contains_filter_prop(player, predicate)
-        }
-        TargetFilter::ChosenDamageSource { filter } => filter
-            .as_deref()
-            .is_some_and(|inner| filter_contains_filter_prop(inner, predicate)),
-        TargetFilter::Typed(typed) => typed
-            .properties
-            .iter()
-            .any(|prop| filter_prop_contains_filter_prop(prop, predicate)),
+        TargetFilter::PlayerMatching { player } => player_filter_contains_input(
+            player,
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            object_information_available,
+            slot_context,
+        ),
+        TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(|inner| {
+            filter_contains_input(
+                inner,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            )
+        }),
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+            filter_prop_contains_input(
+                prop,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            )
+        }),
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -2483,40 +2620,121 @@ pub(crate) fn filter_contains_filter_prop(
     }
 }
 
-fn filter_prop_contains_filter_prop(
+fn filter_prop_contains_input(
     prop: &FilterProp,
-    predicate: &dyn Fn(&FilterProp) -> bool,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) -> bool {
-    predicate(prop)
+    predicate(prop, object_information_available, slot_context)
         || match prop {
-            FilterProp::CanEnchant { target } => filter_contains_filter_prop(target, predicate),
-            FilterProp::DifferentNameFrom { filter } => {
-                filter_contains_filter_prop(filter, predicate)
+            FilterProp::CanEnchant { target } => filter_contains_input(
+                target,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
+            FilterProp::DifferentNameFrom { filter } => filter_contains_input(
+                filter,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
+            FilterProp::DistinctFrom { reference } => filter_contains_input(
+                reference,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
+            FilterProp::SharesQuality { reference, .. } => {
+                reference.as_deref().is_some_and(|inner| {
+                    filter_contains_input(
+                        inner,
+                        predicate,
+                        raw_reference,
+                        scalar_filter,
+                        population_leaf,
+                        object_information_available,
+                        slot_context,
+                    )
+                })
             }
-            FilterProp::DistinctFrom { reference } => {
-                filter_contains_filter_prop(reference, predicate)
-            }
-            FilterProp::SharesQuality { reference, .. } => reference
-                .as_deref()
-                .is_some_and(|inner| filter_contains_filter_prop(inner, predicate)),
             FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
-                filter_contains_filter_prop(filter, predicate)
+                filter_contains_input(
+                    filter,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
             }
-            FilterProp::Not { prop } => filter_prop_contains_filter_prop(prop, predicate),
-            FilterProp::AnyOf { props } => props
-                .iter()
-                .any(|inner| filter_prop_contains_filter_prop(inner, predicate)),
-            FilterProp::ControllerMatches { player } => {
-                player_filter_contains_filter_prop(player, predicate)
+            FilterProp::Not { prop } => filter_prop_contains_input(
+                prop,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
+            FilterProp::AnyOf { props } => props.iter().any(|inner| {
+                filter_prop_contains_input(
+                    inner,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+            }),
+            FilterProp::ControllerMatches { player } => player_filter_contains_input(
+                player,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
+            FilterProp::DealtDamageThisTurn { recipient, .. } => {
+                recipient.as_ref().is_some_and(|scope| {
+                    player_filter_contains_input(
+                        scope,
+                        predicate,
+                        raw_reference,
+                        scalar_filter,
+                        population_leaf,
+                        object_information_available,
+                        slot_context,
+                    )
+                })
             }
-            FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
-                .as_ref()
-                .is_some_and(|scope| player_filter_contains_filter_prop(scope, predicate)),
             FilterProp::Counters { count, .. }
             | FilterProp::Cmc { value: count, .. }
-            | FilterProp::PtComparison { value: count, .. } => {
-                quantity_expr_contains_filter_prop(count, predicate)
-            }
+            | FilterProp::PtComparison { value: count, .. } => quantity_expr_contains_input(
+                count,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
             FilterProp::Token
             | FilterProp::NonToken
             | FilterProp::RepresentedByCard
@@ -2618,31 +2836,99 @@ fn filter_prop_contains_filter_prop(
         }
 }
 
-fn player_filter_contains_filter_prop(
+fn player_filter_contains_input(
     filter: &PlayerFilter,
-    predicate: &dyn Fn(&FilterProp) -> bool,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    _object_information_available: bool,
+    _slot_context: Option<&ResolvedAbility>,
 ) -> bool {
     match filter {
-        PlayerFilter::OpponentDealtDamage { source, .. } => source
-            .as_deref()
-            .is_some_and(|inner| filter_contains_filter_prop(inner, predicate)),
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            source.as_deref().is_some_and(|inner| {
+                filter_contains_input(
+                    inner,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    false,
+                    None,
+                )
+            })
+        }
         PlayerFilter::ControlsCount { filter, count, .. } => {
-            filter_contains_filter_prop(filter, predicate)
-                || quantity_expr_contains_filter_prop(count, predicate)
+            scalar_filter(filter, false, None)
+                || filter_contains_input(
+                    filter,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    false,
+                    None,
+                )
+                || quantity_expr_contains_input(
+                    count,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    false,
+                    None,
+                )
         }
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
-            quantity_ref_contains_filter_prop(attr, predicate)
-                || quantity_expr_contains_filter_prop(value, predicate)
+            quantity_ref_contains_input(
+                attr,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                false,
+                None,
+                Some(filter),
+            ) || quantity_expr_contains_input(
+                value,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                false,
+                None,
+            )
         }
-        PlayerFilter::TrackedSetPossessor { filter, .. } => {
-            filter_contains_filter_prop(filter, predicate)
-        }
-        PlayerFilter::AllExcept { exclude } => {
-            player_filter_contains_filter_prop(exclude, predicate)
-        }
-        PlayerFilter::AnyOf { filters } => filters
-            .iter()
-            .any(|f| player_filter_contains_filter_prop(f, predicate)),
+        PlayerFilter::TrackedSetPossessor { filter, .. } => filter_contains_input(
+            filter,
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            false,
+            None,
+        ),
+        PlayerFilter::AllExcept { exclude } => player_filter_contains_input(
+            exclude,
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            false,
+            None,
+        ),
+        PlayerFilter::AnyOf { filters } => filters.iter().any(|f| {
+            player_filter_contains_input(
+                f,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                false,
+                None,
+            )
+        }),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2672,12 +2958,26 @@ fn player_filter_contains_filter_prop(
 /// Visits `FilterProp` leaves carried by dynamic quantity thresholds. This is
 /// part of the same filter grammar as the direct property recursion above:
 /// quantities can themselves count filtered object/player populations.
-fn quantity_expr_contains_filter_prop(
+fn quantity_expr_contains_input(
     expr: &QuantityExpr,
-    predicate: &dyn Fn(&FilterProp) -> bool,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) -> bool {
     match expr {
-        QuantityExpr::Ref { qty } => quantity_ref_contains_filter_prop(qty, predicate),
+        QuantityExpr::Ref { qty } => quantity_ref_contains_input(
+            qty,
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            object_information_available,
+            slot_context,
+            None,
+        ),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -2685,27 +2985,70 @@ fn quantity_expr_contains_filter_prop(
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => quantity_expr_contains_filter_prop(inner, predicate),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-            .iter()
-            .any(|inner| quantity_expr_contains_filter_prop(inner, predicate)),
+        } => quantity_expr_contains_input(
+            inner,
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs.iter().any(|inner| {
+            quantity_expr_contains_input(
+                inner,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            )
+        }),
         QuantityExpr::Difference { left, right } => {
-            quantity_expr_contains_filter_prop(left, predicate)
-                || quantity_expr_contains_filter_prop(right, predicate)
+            quantity_expr_contains_input(
+                left,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ) || quantity_expr_contains_input(
+                right,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            )
         }
         QuantityExpr::Fixed { .. } => false,
     }
 }
 
 /// EXHAUSTIVE, wildcard-free leaf classifier for
-/// [`quantity_expr_contains_filter_prop`]. Keep this arm-for-arm with
+/// [`quantity_expr_contains_input`]. Keep this arm-for-arm with
 /// [`rewrite_quantity_ref_filter_props`] so readers and rewriters reach the
 /// same dynamic quantity topology.
-fn quantity_ref_contains_filter_prop(
+#[allow(clippy::too_many_arguments)]
+fn quantity_ref_contains_input(
     qty: &QuantityRef,
-    predicate: &dyn Fn(&FilterProp) -> bool,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+    candidate_attribute_owner: Option<&PlayerFilter>,
 ) -> bool {
-    match qty {
+    raw_reference(
+        qty,
+        object_information_available,
+        slot_context,
+        candidate_attribute_owner,
+    ) || match qty {
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
@@ -2719,38 +3062,112 @@ fn quantity_ref_contains_filter_prop(
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => {
-            filter_contains_filter_prop(filter, predicate)
+            scalar_filter(filter, object_information_available, slot_context)
+                || filter_contains_input(
+                    filter,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
         }
         QuantityRef::TargetObjectManaValue { filter }
         | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
-            filter_contains_filter_prop(filter, predicate)
+            scalar_filter(filter, object_information_available, slot_context)
+                || filter_contains_input(
+                    filter,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
         }
         QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
-            player_filter_contains_filter_prop(filter, predicate)
+            player_filter_contains_input(
+                filter,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                false,
+                None,
+            )
         }
-        QuantityRef::PropertyAggregate(aggregate) => {
-            card_type_set_source_contains_filter_prop(aggregate.source(), predicate)
-        }
+        QuantityRef::PropertyAggregate(aggregate) => card_type_set_source_contains_input(
+            aggregate.source(),
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            object_information_available,
+            slot_context,
+        ),
         QuantityRef::DistinctCardTypes { source }
         | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
-        | QuantityRef::DistinctColorsAmong { source } => {
-            card_type_set_source_contains_filter_prop(source, predicate)
-        }
+        | QuantityRef::DistinctColorsAmong { source } => card_type_set_source_contains_input(
+            source,
+            predicate,
+            raw_reference,
+            scalar_filter,
+            population_leaf,
+            object_information_available,
+            slot_context,
+        ),
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCastThisTurn { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
-        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
-            .as_ref()
-            .is_some_and(|inner| filter_contains_filter_prop(inner, predicate)),
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref().is_some_and(|inner| {
+            scalar_filter(inner, object_information_available, slot_context)
+                || filter_contains_input(
+                    inner,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+        }),
         QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            filter_contains_filter_prop(source, predicate)
-                || filter_contains_filter_prop(target, predicate)
+            scalar_filter(source, object_information_available, slot_context)
+                || filter_contains_input(
+                    source,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
+                || scalar_filter(target, object_information_available, slot_context)
+                || filter_contains_input(
+                    target,
+                    predicate,
+                    raw_reference,
+                    scalar_filter,
+                    population_leaf,
+                    object_information_available,
+                    slot_context,
+                )
         }
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {
-                filter_contains_filter_prop(source_filter, predicate)
+                scalar_filter(source_filter, object_information_available, slot_context)
+                    || filter_contains_input(
+                        source_filter,
+                        predicate,
+                        raw_reference,
+                        scalar_filter,
+                        population_leaf,
+                        object_information_available,
+                        slot_context,
+                    )
             }
             CastManaSpentMetric::Total
             | CastManaSpentMetric::DistinctColors
@@ -2827,32 +3244,67 @@ fn quantity_ref_contains_filter_prop(
 /// Whether a property predicate is reachable through a card-type population.
 /// An exhausted bounded union walk is treated as a possible match, preserving
 /// the reader's conservative dependency contract.
-fn card_type_set_source_contains_filter_prop(
+fn card_type_set_source_contains_input(
     source: &CardTypeSetSource,
-    predicate: &dyn Fn(&FilterProp) -> bool,
+    predicate: &dyn Fn(&FilterProp, bool, Option<&ResolvedAbility>) -> bool,
+    raw_reference: RawReferencePredicate<'_>,
+    scalar_filter: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+    population_leaf: &dyn Fn(&CardTypeSetSource, bool, Option<&ResolvedAbility>) -> bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) -> bool {
-    match source {
-        CardTypeSetSource::Objects { filter } => filter_contains_filter_prop(filter, predicate),
-        CardTypeSetSource::TurnJournal { filter, .. } => filter
-            .as_ref()
-            .is_some_and(|inner| filter_contains_filter_prop(inner, predicate)),
-        CardTypeSetSource::AnyOf { .. } => {
-            let mut contains = false;
-            let complete = source.try_for_each_member(
-                crate::types::ability::UNION_DEPTH_BUDGET,
-                &mut |leaf| {
-                    contains |= card_type_set_source_contains_filter_prop(leaf, predicate);
-                },
-            );
-            // An incomplete walk may have missed the predicate below the
-            // budget boundary. This is a dependency/capability query, where
-            // the conservative answer prevents an under-reported consumer.
-            contains || !complete
+    (!matches!(source, CardTypeSetSource::AnyOf { .. })
+        && population_leaf(source, object_information_available, slot_context))
+        || match source {
+            CardTypeSetSource::Objects { filter } => {
+                scalar_filter(filter, object_information_available, slot_context)
+                    || filter_contains_input(
+                        filter,
+                        predicate,
+                        raw_reference,
+                        scalar_filter,
+                        population_leaf,
+                        object_information_available,
+                        slot_context,
+                    )
+            }
+            CardTypeSetSource::TurnJournal { filter, .. } => filter.as_ref().is_some_and(|inner| {
+                scalar_filter(inner, object_information_available, slot_context)
+                    || filter_contains_input(
+                        inner,
+                        predicate,
+                        raw_reference,
+                        scalar_filter,
+                        population_leaf,
+                        object_information_available,
+                        slot_context,
+                    )
+            }),
+            CardTypeSetSource::AnyOf { .. } => {
+                let mut contains = false;
+                let complete = source.try_for_each_member(
+                    crate::types::ability::UNION_DEPTH_BUDGET,
+                    &mut |leaf| {
+                        contains |= card_type_set_source_contains_input(
+                            leaf,
+                            predicate,
+                            raw_reference,
+                            scalar_filter,
+                            population_leaf,
+                            object_information_available,
+                            slot_context,
+                        );
+                    },
+                );
+                // An incomplete walk may have missed the predicate below the
+                // budget boundary. This is a dependency/capability query, where
+                // the conservative answer prevents an under-reported consumer.
+                contains || !complete
+            }
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
         }
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
-    }
 }
 
 /// Rewrites only `IsChosenCardType` leaves beneath `filter` to the corresponding
@@ -2869,13 +3321,16 @@ pub(crate) fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilt
     let mut complete = true;
     rewrite_filter_props(
         &mut rewritten,
-        &mut |_| {},
+        &mut |_, _, _| {},
         &mut |prop| {
             if matches!(prop, FilterProp::IsChosenCardType) {
                 *prop = FilterProp::IsChosenCreatureType;
             }
         },
+        &mut |_| {},
         &mut complete,
+        false,
+        None,
     );
     if complete {
         *filter = rewritten;
@@ -2911,7 +3366,7 @@ pub(crate) fn bind_declaring_owner_authority(
     let mut complete = true;
     rewrite_filter_props(
         &mut rewritten,
-        &mut |node| {
+        &mut |node, _, _| {
             if typed_filter_is_owner_scoped(node) {
                 let TargetFilter::Typed(typed) = node else {
                     unreachable!("owner-zone predicate accepts only Typed nodes")
@@ -2931,7 +3386,10 @@ pub(crate) fn bind_declaring_owner_authority(
                 };
             }
         },
+        &mut |_| {},
         &mut complete,
+        false,
+        None,
     );
     if complete {
         *filter = rewritten;
@@ -2965,7 +3423,7 @@ pub(crate) fn reanchor_filter_to_holder(filter: &mut TargetFilter, holder: Playe
     let mut complete = true;
     rewrite_filter_props(
         &mut rewritten,
-        &mut |node| {
+        &mut |node, _, _| {
             if matches!(node, TargetFilter::Controller) {
                 *node = TargetFilter::SpecificPlayer { id: holder };
             }
@@ -2985,7 +3443,10 @@ pub(crate) fn reanchor_filter_to_holder(filter: &mut TargetFilter, holder: Playe
                 };
             }
         },
+        &mut |_| {},
         &mut complete,
+        false,
+        None,
     );
     if complete {
         *filter = rewritten;
@@ -3191,9 +3652,12 @@ pub(crate) fn rebind_declared_groups(
     rebind_declared_groups_with(filter, resolve, |filter, binder, complete| {
         rewrite_filter_props(
             filter,
-            &mut |node| binder.node(node),
+            &mut |node, _, _| binder.node(node),
             &mut |prop| binder.prop(prop),
+            &mut |_| {},
             complete,
+            false,
+            None,
         )
     })
 }
@@ -3206,9 +3670,12 @@ pub(crate) fn rebind_declared_groups_in_quantity(
     rebind_declared_groups_with(expr, resolve, |expr, binder, complete| {
         rewrite_quantity_expr_filter_props(
             expr,
-            &mut |node| binder.node(node),
+            &mut |node, _, _| binder.node(node),
             &mut |prop| binder.prop(prop),
+            &mut |_| {},
             complete,
+            false,
+            None,
         )
     })
 }
@@ -3221,9 +3688,12 @@ pub(crate) fn rebind_declared_groups_in_player_filter(
     rebind_declared_groups_with(filter, resolve, |filter, binder, complete| {
         rewrite_player_filter_props(
             filter,
-            &mut |node| binder.node(node),
+            &mut |node, _, _| binder.node(node),
             &mut |prop| binder.prop(prop),
+            &mut |_| {},
             complete,
+            false,
+            None,
         )
     })
 }
@@ -3247,9 +3717,12 @@ fn rebind_declared_groups_in_prop(
     rebind_declared_groups_with(prop, resolve, |prop, binder, complete| {
         rewrite_filter_prop(
             prop,
-            &mut |node| binder.node(node),
+            &mut |node, _, _| binder.node(node),
             &mut |prop| binder.prop(prop),
+            &mut |_| {},
             complete,
+            false,
+            None,
         )
     })
 }
@@ -3378,33 +3851,369 @@ pub(crate) fn bind_declared_groups(
     })
 }
 
+/// CR 608.2c + CR 609.3: bind membership of an unperformed search only in a
+/// predicate operand. Keep its description intact for the owning selector.
+/// An incomplete bounded walk leaves the entire operand unchanged.
+#[cfg(test)]
+pub(crate) fn bind_absent_search_predicate(filter: &mut TargetFilter) -> Option<Option<bool>> {
+    bind_absent_search_predicate_with_context(filter, false, None, &|_, _, _| false)
+}
+
+pub(crate) fn bind_absent_search_predicate_with_context(
+    filter: &mut TargetFilter,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+    retain_reference: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+) -> Option<Option<bool>> {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    rewrite_filter_props(
+        &mut rewritten,
+        &mut |node, information, context| {
+            if !retain_reference(node, information, context) {
+                bind_absent_search_node(node);
+            }
+        },
+        &mut bind_absent_search_property,
+        &mut bind_absent_search_property_after_children,
+        &mut complete,
+        object_information_available,
+        slot_context,
+    );
+    if !complete {
+        return None;
+    }
+    let truth = absent_search_predicate_truth(&rewritten);
+    *filter = rewritten;
+    Some(truth)
+}
+
+/// The same transaction for predicate operands nested in a current quantity.
+/// Required scalar inputs are checked by the instruction owner before binding.
+#[cfg(test)]
+pub(crate) fn bind_absent_search_predicates_in_quantity(
+    expr: &mut QuantityExpr,
+    owns_object: bool,
+) -> bool {
+    bind_absent_search_predicates_in_quantity_with_context(
+        expr,
+        owns_object,
+        None,
+        &|node, information, _| {
+            information
+                && matches!(
+                    node,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                )
+        },
+    )
+}
+
+pub(crate) fn bind_absent_search_predicates_in_quantity_with_context(
+    expr: &mut QuantityExpr,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
+    retain_reference: &dyn Fn(&TargetFilter, bool, Option<&ResolvedAbility>) -> bool,
+) -> bool {
+    let mut rewritten = expr.clone();
+    let mut complete = true;
+    rewrite_quantity_expr_filter_props(
+        &mut rewritten,
+        &mut |node, information, context| {
+            if !retain_reference(node, information, context) {
+                bind_absent_search_node(node);
+            }
+        },
+        &mut bind_absent_search_property,
+        &mut bind_absent_search_property_after_children,
+        &mut complete,
+        object_information_available,
+        slot_context,
+    );
+    if complete {
+        *expr = rewritten;
+    }
+    complete
+}
+
+fn bind_absent_search_node(filter: &mut TargetFilter) {
+    if matches!(
+        filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::LastRevealed
+    ) || matches!(filter, TargetFilter::TrackedSet { id } if id.0 == 0)
+        || matches!(filter, TargetFilter::TrackedSetFiltered { id, caused_by: None, .. } if id.0 == 0)
+    {
+        *filter = TargetFilter::Or { filters: vec![] };
+    }
+}
+
+fn bind_absent_search_property(prop: &mut FilterProp) {
+    if matches!(prop, FilterProp::InTrackedSet { id } if id.0 == 0) {
+        *prop = FilterProp::AnyOf { props: vec![] };
+    }
+}
+
+fn bind_absent_search_property_after_children(prop: &mut FilterProp) {
+    if matches!(prop, FilterProp::DistinctFrom { reference }
+        if absent_search_predicate_truth(reference) == Some(false))
+    {
+        *prop = FilterProp::Not {
+            prop: Box::new(FilterProp::AnyOf { props: vec![] }),
+        };
+    }
+}
+
+// This summary reads Boolean composition only. It never replaces a descriptor
+// with a Boolean-equivalent shape or answers a live game-state predicate.
+fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
+    match filter {
+        TargetFilter::Any => Some(true),
+        TargetFilter::None => Some(false),
+        TargetFilter::Typed(typed) => kleene_and(
+            std::iter::once(
+                (typed.type_filters.is_empty() && typed.controller.is_none()).then_some(true),
+            )
+            .chain(typed.properties.iter().map(absent_search_property_truth)),
+        ),
+        TargetFilter::And { filters } => {
+            kleene_and(filters.iter().map(absent_search_predicate_truth))
+        }
+        TargetFilter::Or { filters } => {
+            kleene_or(filters.iter().map(absent_search_predicate_truth))
+        }
+        TargetFilter::Not { filter } => absent_search_predicate_truth(filter).map(|v| !v),
+        TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => None,
+    }
+}
+
+fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
+    match prop {
+        FilterProp::AnyOf { props } => kleene_or(props.iter().map(absent_search_property_truth)),
+        FilterProp::Not { prop } => absent_search_property_truth(prop).map(|v| !v),
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => None,
+    }
+}
+
 /// Rewrite every node and property reachable through `filter`, recording any incomplete
 /// bounded population walk in `complete` for the transactional caller.
 fn rewrite_filter_props(
     filter: &mut TargetFilter,
-    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) {
-    rewrite_node(filter);
+    rewrite_node(filter, object_information_available, slot_context);
     match filter {
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter_mut()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter_mut().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
+            rewrite_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
         }
-        TargetFilter::PlayerMatching { player } => {
-            rewrite_player_filter_props(player, rewrite_node, rewrite, complete)
+        TargetFilter::PlayerMatching { player } => rewrite_player_filter_props(
+            player,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        TargetFilter::ChosenDamageSource { filter } => {
+            filter.as_deref_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
         }
-        TargetFilter::ChosenDamageSource { filter } => filter
-            .as_deref_mut()
-            .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
-        TargetFilter::Typed(typed) => typed
-            .properties
-            .iter_mut()
-            .for_each(|prop| rewrite_filter_prop(prop, rewrite_node, rewrite, complete)),
+        TargetFilter::Typed(typed) => typed.properties.iter_mut().for_each(|prop| {
+            rewrite_filter_prop(
+                prop,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
+        }),
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -3462,44 +4271,119 @@ fn rewrite_filter_props(
 /// Rewrite one property and every nested filter-bearing payload it owns.
 fn rewrite_filter_prop(
     prop: &mut FilterProp,
-    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) {
     rewrite(prop);
     match prop {
-        FilterProp::CanEnchant { target } => {
-            rewrite_filter_props(target, rewrite_node, rewrite, complete)
+        FilterProp::CanEnchant { target } => rewrite_filter_props(
+            target,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::DifferentNameFrom { filter } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::DistinctFrom { reference } => rewrite_filter_props(
+            reference,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::SharesQuality { reference, .. } => {
+            reference.as_deref_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
         }
-        FilterProp::DifferentNameFrom { filter } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
-        }
-        FilterProp::DistinctFrom { reference } => {
-            rewrite_filter_props(reference, rewrite_node, rewrite, complete)
-        }
-        FilterProp::SharesQuality { reference, .. } => reference
-            .as_deref_mut()
-            .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
+            rewrite_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
         }
-        FilterProp::Not { prop } => rewrite_filter_prop(prop, rewrite_node, rewrite, complete),
-        FilterProp::AnyOf { props } => props
-            .iter_mut()
-            .for_each(|inner| rewrite_filter_prop(inner, rewrite_node, rewrite, complete)),
-        FilterProp::ControllerMatches { player } => {
-            rewrite_player_filter_props(player, rewrite_node, rewrite, complete)
+        FilterProp::Not { prop } => rewrite_filter_prop(
+            prop,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::AnyOf { props } => props.iter_mut().for_each(|inner| {
+            rewrite_filter_prop(
+                inner,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
+        }),
+        FilterProp::ControllerMatches { player } => rewrite_player_filter_props(
+            player,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::DealtDamageThisTurn { recipient, .. } => {
+            recipient.as_mut().into_iter().for_each(|scope| {
+                rewrite_player_filter_props(
+                    scope,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
         }
-        FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
-            .as_mut()
-            .into_iter()
-            .for_each(|scope| rewrite_player_filter_props(scope, rewrite_node, rewrite, complete)),
         FilterProp::Counters { count, .. }
         | FilterProp::Cmc { value: count, .. }
-        | FilterProp::PtComparison { value: count, .. } => {
-            rewrite_quantity_expr_filter_props(count, rewrite_node, rewrite, complete)
-        }
+        | FilterProp::PtComparison { value: count, .. } => rewrite_quantity_expr_filter_props(
+            count,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -3599,37 +4483,102 @@ fn rewrite_filter_prop(
         | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => {}
     }
+    post_property(prop);
 }
 
 /// Rewrite nested property carriers in a player filter.
 fn rewrite_player_filter_props(
     filter: &mut PlayerFilter,
-    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
+    _object_information_available: bool,
+    _slot_context: Option<&ResolvedAbility>,
 ) {
     match filter {
-        PlayerFilter::OpponentDealtDamage { source, .. } => source
-            .as_deref_mut()
-            .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            source.as_deref_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    false,
+                    None,
+                )
+            })
+        }
         PlayerFilter::ControlsCount { filter, count, .. } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete);
-            rewrite_quantity_expr_filter_props(count, rewrite_node, rewrite, complete);
+            rewrite_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
+            rewrite_quantity_expr_filter_props(
+                count,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
         }
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
-            rewrite_quantity_ref_filter_props(attr, rewrite_node, rewrite, complete);
-            rewrite_quantity_expr_filter_props(value, rewrite_node, rewrite, complete);
+            rewrite_quantity_ref_filter_props(
+                attr,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
+            rewrite_quantity_expr_filter_props(
+                value,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
         }
-        PlayerFilter::TrackedSetPossessor { filter, .. } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
-        }
-        PlayerFilter::AllExcept { exclude } => {
-            rewrite_player_filter_props(exclude, rewrite_node, rewrite, complete)
-        }
-        PlayerFilter::AnyOf { filters } => filters
-            .iter_mut()
-            .for_each(|f| rewrite_player_filter_props(f, rewrite_node, rewrite, complete)),
+        PlayerFilter::TrackedSetPossessor { filter, .. } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            false,
+            None,
+        ),
+        PlayerFilter::AllExcept { exclude } => rewrite_player_filter_props(
+            exclude,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            false,
+            None,
+        ),
+        PlayerFilter::AnyOf { filters } => filters.iter_mut().for_each(|f| {
+            rewrite_player_filter_props(
+                f,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            )
+        }),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -3661,14 +4610,23 @@ fn rewrite_player_filter_props(
 /// be found below a dynamic threshold without also being rewritten there.
 fn rewrite_quantity_expr_filter_props(
     expr: &mut QuantityExpr,
-    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) {
     match expr {
-        QuantityExpr::Ref { qty } => {
-            rewrite_quantity_ref_filter_props(qty, rewrite_node, rewrite, complete)
-        }
+        QuantityExpr::Ref { qty } => rewrite_quantity_ref_filter_props(
+            qty,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -3676,15 +4634,47 @@ fn rewrite_quantity_expr_filter_props(
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rewrite_quantity_expr_filter_props(inner, rewrite_node, rewrite, complete),
+        } => rewrite_quantity_expr_filter_props(
+            inner,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             exprs.iter_mut().for_each(|inner| {
-                rewrite_quantity_expr_filter_props(inner, rewrite_node, rewrite, complete)
+                rewrite_quantity_expr_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
             })
         }
         QuantityExpr::Difference { left, right } => {
-            rewrite_quantity_expr_filter_props(left, rewrite_node, rewrite, complete);
-            rewrite_quantity_expr_filter_props(right, rewrite_node, rewrite, complete);
+            rewrite_quantity_expr_filter_props(
+                left,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
+            rewrite_quantity_expr_filter_props(
+                right,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -3694,9 +4684,12 @@ fn rewrite_quantity_expr_filter_props(
 /// [`quantity_ref_contains_filter_prop`].
 fn rewrite_quantity_ref_filter_props(
     qty: &mut QuantityRef,
-    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) {
     match qty {
         QuantityRef::ObjectCount { filter }
@@ -3711,19 +4704,47 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctCounterKindsAmong { filter } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
-        }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         QuantityRef::TargetObjectManaValue { filter }
-        | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
-        }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
-            rewrite_player_filter_props(filter, rewrite_node, rewrite, complete)
+            rewrite_player_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
         }
         QuantityRef::PropertyAggregate(aggregate) => {
             let mut source = aggregate.source().clone();
-            rewrite_card_type_set_source_filter_props(&mut source, rewrite_node, rewrite, complete);
+            rewrite_card_type_set_source_filter_props(
+                &mut source,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
             *aggregate = crate::types::ability::PropertyAggregate::new(
                 aggregate.function(),
                 aggregate.property(),
@@ -3734,25 +4755,62 @@ fn rewrite_quantity_ref_filter_props(
         QuantityRef::DistinctCardTypes { source }
         | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
-        | QuantityRef::DistinctColorsAmong { source } => {
-            rewrite_card_type_set_source_filter_props(source, rewrite_node, rewrite, complete)
-        }
+        | QuantityRef::DistinctColorsAmong { source } => rewrite_card_type_set_source_filter_props(
+            source,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCastThisTurn { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
-        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
-            .as_mut()
-            .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
+        | QuantityRef::SpellsCastThisGame { filter, .. } => {
+            filter.as_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
         QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            rewrite_filter_props(source, rewrite_node, rewrite, complete);
-            rewrite_filter_props(target, rewrite_node, rewrite, complete);
+            rewrite_filter_props(
+                source,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
+            rewrite_filter_props(
+                target,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
         }
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
-            CastManaSpentMetric::FromSource { source_filter } => {
-                rewrite_filter_props(source_filter, rewrite_node, rewrite, complete)
-            }
+            CastManaSpentMetric::FromSource { source_filter } => rewrite_filter_props(
+                source_filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            ),
             CastManaSpentMetric::Total
             | CastManaSpentMetric::DistinctColors
             | CastManaSpentMetric::OfColor { .. } => {}
@@ -3829,23 +4887,49 @@ fn rewrite_quantity_ref_filter_props(
 /// incomplete bounded union walk instead of assuming it was exhaustive.
 fn rewrite_card_type_set_source_filter_props(
     source: &mut CardTypeSetSource,
-    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&ResolvedAbility>,
 ) {
     match source {
-        CardTypeSetSource::Objects { filter } => {
-            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
+        CardTypeSetSource::Objects { filter } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        CardTypeSetSource::TurnJournal { filter, .. } => {
+            filter.as_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
         }
-        CardTypeSetSource::TurnJournal { filter, .. } => filter
-            .as_mut()
-            .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         CardTypeSetSource::AnyOf { .. } => {
             let source_complete = source.try_for_each_member_mut(
                 crate::types::ability::UNION_DEPTH_BUDGET,
                 &mut |leaf| {
-                    rewrite_card_type_set_source_filter_props(leaf, rewrite_node, rewrite, complete)
+                    rewrite_card_type_set_source_filter_props(
+                        leaf,
+                        rewrite_node,
+                        rewrite,
+                        post_property,
+                        complete,
+                        object_information_available,
+                        slot_context,
+                    )
                 },
             );
             *complete &= source_complete;
@@ -11281,6 +12365,850 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn canonical_scalar_reads_preserve_roles_order_and_raw_player_boundaries() {
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let threshold = QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let root = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::ParentTarget,
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: threshold.clone(),
+                }])),
+            ],
+        };
+        let expression = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: root.clone(),
+            },
+        };
+        let order = std::cell::RefCell::new(Vec::new());
+        assert!(quantity_expr_contains_scalar_input(
+            &expression,
+            &|_, information, context| {
+                assert!(information);
+                assert!(std::ptr::eq(context.unwrap(), &ability));
+                order.borrow_mut().push("property");
+                false
+            },
+            &|reference, information, context, _| {
+                assert!(information);
+                assert!(std::ptr::eq(context.unwrap(), &ability));
+                order.borrow_mut().push("reference");
+                matches!(reference, QuantityRef::TrackedSetSize)
+            },
+            &|filter, information, context| {
+                assert!(information);
+                assert!(std::ptr::eq(context.unwrap(), &ability));
+                assert!(*filter == root);
+                order.borrow_mut().push("owned root");
+                false
+            },
+            &|_, _, _| panic!("this expression owns no population leaf"),
+            true,
+            Some(&ability)
+        ));
+        assert_eq!(
+            order.into_inner(),
+            ["reference", "owned root", "property", "reference"]
+        );
+        // Boolean members are membership predicates, not additional required roots.
+        let composite = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
+                },
+            },
+        };
+        let roots = std::cell::Cell::new(0);
+        assert!(!quantity_expr_contains_scalar_input(
+            &composite,
+            &|_, _, _| false,
+            &|_, _, _, _| false,
+            &|filter, _, _| {
+                roots.set(roots.get() + 1);
+                matches!(filter, TargetFilter::ParentTarget)
+            },
+            &|_, _, _| false,
+            false,
+            None
+        ));
+        assert_eq!(roots.get(), 1);
+        assert!(quantity_expr_contains_filter_prop(
+            &expression,
+            &|property| matches!(property, FilterProp::Cmc { .. })
+        ));
+        for player in [
+            PlayerFilter::ControlsCount {
+                relation: crate::types::ability::PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                comparator: Comparator::GE,
+                count: Box::new(threshold.clone()),
+            },
+            PlayerFilter::PlayerAttribute {
+                relation: crate::types::ability::PlayerRelation::All,
+                attr: Box::new(QuantityRef::TrackedSetSize),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Fixed { value: 0 }),
+            },
+            PlayerFilter::PlayerAttribute {
+                relation: crate::types::ability::PlayerRelation::All,
+                attr: Box::new(QuantityRef::TargetControllerCounter {
+                    kind: crate::types::player::PlayerCounterKind::Poison,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Fixed { value: 0 }),
+            },
+            PlayerFilter::PlayerAttribute {
+                relation: crate::types::ability::PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(threshold),
+            },
+        ] {
+            let wrapped = PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::AllExcept {
+                    exclude: Box::new(player),
+                }],
+            };
+            let visits = std::cell::Cell::new(0);
+            assert!(player_filter_contains_scalar_input(
+                &wrapped,
+                &|_, _, _| false,
+                &|reference, information, context, _| {
+                    assert!(!information);
+                    assert!(context.is_none());
+                    visits.set(visits.get() + 1);
+                    matches!(
+                        reference,
+                        QuantityRef::TrackedSetSize | QuantityRef::TargetControllerCounter { .. }
+                    )
+                },
+                &|_, information, context| {
+                    assert!(!information);
+                    assert!(context.is_none());
+                    false
+                },
+                &|_, information, context| {
+                    assert!(!information);
+                    assert!(context.is_none());
+                    false
+                },
+                true,
+                Some(&ability)
+            ));
+            assert!(visits.get() > 0);
+        }
+    }
+
+    #[test]
+    fn canonical_raw_attribute_owner_is_immediate_and_borrowed() {
+        let missing = QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let attribute = PlayerFilter::PlayerAttribute {
+            relation: crate::types::ability::PlayerRelation::All,
+            attr: Box::new(QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::ParentObjectTargetController,
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::GE,
+                        value: missing.clone(),
+                    },
+                ])),
+            }),
+            comparator: Comparator::EQ,
+            value: Box::new(missing),
+        };
+        let visits = std::cell::RefCell::new(Vec::new());
+        assert!(!player_filter_contains_scalar_input(
+            &attribute,
+            &|_, information, context| {
+                assert!(!information && context.is_none());
+                false
+            },
+            &|reference, information, context, owner| {
+                assert!(!information && context.is_none());
+                if let Some(owner) = owner {
+                    assert!(std::ptr::eq(owner, &attribute));
+                }
+                visits.borrow_mut().push((
+                    matches!(reference, QuantityRef::BattlefieldEntriesThisTurn { .. }),
+                    owner.is_some(),
+                ));
+                false
+            },
+            &|_, information, context| {
+                assert!(!information && context.is_none());
+                false
+            },
+            &|_, _, _| false,
+            true,
+            None,
+        ));
+        assert_eq!(
+            *visits.borrow(),
+            [(true, true), (false, false), (false, false)]
+        );
+    }
+
+    #[test]
+    fn canonical_scalar_reads_cover_expression_and_player_property_wrappers() {
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let missing = QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let fixed = QuantityExpr::Fixed { value: 0 };
+        for inner in [missing, fixed.clone()] {
+            let expected = matches!(inner, QuantityExpr::Ref { .. });
+            for expression in [
+                inner.clone(),
+                QuantityExpr::DivideRounded {
+                    inner: Box::new(inner.clone()),
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Down,
+                },
+                QuantityExpr::Offset {
+                    inner: Box::new(inner.clone()),
+                    offset: 1,
+                },
+                QuantityExpr::ClampMin {
+                    inner: Box::new(inner.clone()),
+                    minimum: 0,
+                },
+                QuantityExpr::Multiply {
+                    inner: Box::new(inner.clone()),
+                    factor: 2,
+                },
+                QuantityExpr::up_to(inner.clone()),
+                QuantityExpr::Power {
+                    base: 2,
+                    exponent: Box::new(inner.clone()),
+                },
+                QuantityExpr::Sum {
+                    exprs: vec![fixed.clone(), inner.clone()],
+                },
+                QuantityExpr::Max {
+                    exprs: vec![fixed.clone(), inner.clone()],
+                },
+                QuantityExpr::Difference {
+                    left: Box::new(fixed.clone()),
+                    right: Box::new(inner.clone()),
+                },
+            ] {
+                assert_eq!(
+                    quantity_expr_contains_scalar_input(
+                        &expression,
+                        &|_, _, _| false,
+                        &|reference, _, _, _| matches!(reference, QuantityRef::TrackedSetSize),
+                        &|_, _, _| false,
+                        &|_, _, _| false,
+                        true,
+                        Some(&ability)
+                    ),
+                    expected
+                );
+            }
+            let player = PlayerFilter::ControlsCount {
+                relation: crate::types::ability::PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                comparator: Comparator::GE,
+                count: Box::new(inner.clone()),
+            };
+            let inner_filter = TargetFilter::PlayerMatching {
+                player: Box::new(player.clone()),
+            };
+            for property in [
+                FilterProp::ControllerMatches {
+                    player: Box::new(player.clone()),
+                },
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: Some(player),
+                },
+                FilterProp::CanEnchant {
+                    target: Box::new(inner_filter.clone()),
+                },
+                FilterProp::DifferentNameFrom {
+                    filter: Box::new(inner_filter.clone()),
+                },
+                FilterProp::DistinctFrom {
+                    reference: Box::new(inner_filter.clone()),
+                },
+                FilterProp::Targets {
+                    filter: Box::new(inner_filter.clone()),
+                },
+                FilterProp::TargetsOnly {
+                    filter: Box::new(inner_filter),
+                },
+            ] {
+                let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Not {
+                        prop: Box::new(property),
+                    },
+                ]));
+                assert_eq!(
+                    filter_contains_scalar_input(
+                        &filter,
+                        &|_, _, _| false,
+                        &|reference, information, context, _| {
+                            assert!(!information);
+                            assert!(context.is_none());
+                            matches!(reference, QuantityRef::TrackedSetSize)
+                        },
+                        &|_, _, _| false,
+                        &|_, _, _| false,
+                        true,
+                        Some(&ability)
+                    ),
+                    expected
+                );
+            }
+            // Unsupported runtime attributes still participate in this grammar
+            // contract, without claiming a printed runtime combination.
+            let attribute = PlayerFilter::PlayerAttribute {
+                relation: crate::types::ability::PlayerRelation::All,
+                attr: Box::new(QuantityRef::BattlefieldEntriesThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::GE,
+                            value: inner,
+                        },
+                    ])),
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(fixed.clone()),
+            };
+            assert_eq!(
+                player_filter_contains_scalar_input(
+                    &attribute,
+                    &|_, _, _| false,
+                    &|reference, information, context, _| {
+                        assert!(!information);
+                        assert!(context.is_none());
+                        matches!(reference, QuantityRef::TrackedSetSize)
+                    },
+                    &|_, information, context| {
+                        assert!(!information);
+                        assert!(context.is_none());
+                        false
+                    },
+                    &|_, _, _| false,
+                    true,
+                    Some(&ability)
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_absent_binding_preserves_exact_reference_and_strips_player_context() {
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let keep = |filter: &TargetFilter, _: bool, context: Option<&ResolvedAbility>| {
+            context.is_some_and(|node| std::ptr::eq(node, &ability))
+                && matches!(filter, TargetFilter::ParentTargetSlot { index: 1 })
+        };
+        let mut filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 1 },
+                TargetFilter::ParentTargetSlot { index: 0 },
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert_eq!(
+            bind_absent_search_predicate_with_context(&mut filter, false, Some(&ability), &keep),
+            Some(None)
+        );
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 1 },
+                    TargetFilter::Or { filters: vec![] },
+                    TargetFilter::Typed(TypedFilter::creature())
+                ]
+            }
+        );
+        let mut player = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::ControlsCount {
+                relation: crate::types::ability::PlayerRelation::All,
+                filter: TargetFilter::ParentTargetSlot { index: 1 },
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 0 }),
+            }),
+        };
+        assert_eq!(
+            bind_absent_search_predicate_with_context(&mut player, true, Some(&ability), &keep),
+            Some(None)
+        );
+        assert!(
+            matches!(player, TargetFilter::PlayerMatching { player } if matches!(*player, PlayerFilter::ControlsCount { filter: TargetFilter::Or { ref filters }, .. } if filters.is_empty()))
+        );
+    }
+
+    #[test]
+    fn absent_search_binding_summarizes_none_without_rewriting_boolean_descriptors() {
+        let live = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Tapped]),
+        );
+        for (original, expected) in [
+            (TargetFilter::None, Some(false)),
+            (TargetFilter::Any, Some(true)),
+            (live.clone(), None),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::None),
+                },
+                Some(true),
+            ),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(live.clone()),
+                },
+                None,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, TargetFilter::Or { filters: vec![] }],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, TargetFilter::Any],
+                },
+                Some(true),
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, live.clone()],
+                },
+                None,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![live.clone(), TargetFilter::None],
+                },
+                None,
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![TargetFilter::None, TargetFilter::Any],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![TargetFilter::None, live.clone()],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![live.clone(), TargetFilter::None],
+                },
+                Some(false),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::None),
+                        },
+                        TargetFilter::Any,
+                    ],
+                },
+                Some(true),
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![TargetFilter::Any, live],
+                },
+                None,
+            ),
+        ] {
+            let mut bound = original.clone();
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(expected),
+                "{original:?}"
+            );
+            assert_eq!(bound, original);
+        }
+    }
+
+    #[test]
+    fn absent_search_binding_preserves_property_truth_and_live_unknowns() {
+        let false_prop = FilterProp::AnyOf { props: vec![] };
+        let true_prop = FilterProp::Not {
+            prop: Box::new(false_prop.clone()),
+        };
+        for (properties, expected) in [
+            (vec![], Some(true)),
+            (vec![false_prop.clone()], Some(false)),
+            (vec![true_prop.clone()], Some(true)),
+            (vec![FilterProp::Tapped], None),
+            (
+                vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Tapped),
+                }],
+                None,
+            ),
+            (
+                vec![FilterProp::AnyOf {
+                    props: vec![false_prop.clone(), FilterProp::Tapped],
+                }],
+                None,
+            ),
+            (
+                vec![FilterProp::AnyOf {
+                    props: vec![true_prop.clone(), FilterProp::Tapped],
+                }],
+                Some(true),
+            ),
+            (vec![false_prop, FilterProp::Tapped], Some(false)),
+            (vec![true_prop, FilterProp::Tapped], None),
+        ] {
+            let original = TargetFilter::Typed(TypedFilter::default().properties(properties));
+            let mut bound = original.clone();
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(expected),
+                "{original:?}"
+            );
+            assert_eq!(bound, original);
+        }
+    }
+
+    #[test]
+    fn absent_search_binding_rewrites_distinct_from_a_known_false_reference() {
+        let live = TargetFilter::Typed(TypedFilter::creature());
+        for reference in [
+            TargetFilter::None,
+            TargetFilter::Or {
+                filters: vec![TargetFilter::None, TargetFilter::Or { filters: vec![] }],
+            },
+            TargetFilter::And {
+                filters: vec![live.clone(), TargetFilter::None],
+            },
+        ] {
+            let mut bound = TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::DistinctFrom {
+                    reference: Box::new(reference),
+                },
+            ]));
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(Some(true))
+            );
+            assert_eq!(
+                bound,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::AnyOf { props: vec![] }),
+                }]))
+            );
+        }
+        for reference in [
+            live,
+            TargetFilter::SpecificObject { id: ObjectId(77) },
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::None),
+            },
+        ] {
+            let original = TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::DistinctFrom {
+                    reference: Box::new(reference),
+                },
+            ]));
+            let mut bound = original.clone();
+            assert_eq!(
+                bind_absent_search_predicate_with_context(&mut bound, false, None, &|_, _, _| {
+                    false
+                }),
+                Some(None)
+            );
+            assert_eq!(bound, original);
+        }
+    }
+
+    #[test]
+    fn absent_search_binding_preserves_descriptors_and_boolean_topology() {
+        let membership = FilterProp::InTrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        let false_prop = FilterProp::AnyOf { props: vec![] };
+        let absent = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                    membership.clone(),
+                ]),
+        );
+        let bound_absent = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                    false_prop.clone(),
+                ]),
+        );
+        let artifact = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+        );
+        for (mut input, expected) in [
+            (
+                TargetFilter::Or {
+                    filters: vec![absent.clone(), artifact.clone()],
+                },
+                TargetFilter::Or {
+                    filters: vec![bound_absent.clone(), artifact.clone()],
+                },
+            ),
+            (
+                TargetFilter::And {
+                    filters: vec![
+                        artifact.clone(),
+                        TargetFilter::Not {
+                            filter: Box::new(absent.clone()),
+                        },
+                    ],
+                },
+                TargetFilter::And {
+                    filters: vec![
+                        artifact.clone(),
+                        TargetFilter::Not {
+                            filter: Box::new(bound_absent.clone()),
+                        },
+                    ],
+                },
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(absent.clone()),
+                        },
+                        artifact.clone(),
+                    ],
+                },
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(bound_absent.clone()),
+                        },
+                        artifact,
+                    ],
+                },
+            ),
+        ] {
+            assert!(input.names_enumerable_population());
+            assert!(input.denotes_battlefield_objects());
+            assert!(bind_absent_search_predicate(&mut input).is_some());
+            assert_eq!(input, expected);
+            assert!(input.names_enumerable_population());
+            assert!(input.denotes_battlefield_objects());
+        }
+        let mut properties = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::Not {
+                prop: Box::new(membership.clone()),
+            },
+            FilterProp::AnyOf {
+                props: vec![membership, FilterProp::Tapped],
+            },
+            FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            },
+        ]));
+        assert!(properties.names_enumerable_population());
+        assert!(!properties.denotes_battlefield_objects());
+        assert_eq!(bind_absent_search_predicate(&mut properties), Some(None));
+        assert_eq!(
+            properties,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Not {
+                    prop: Box::new(false_prop.clone())
+                },
+                FilterProp::AnyOf {
+                    props: vec![false_prop.clone(), FilterProp::Tapped]
+                },
+                FilterProp::Not {
+                    prop: Box::new(false_prop)
+                },
+            ]))
+        );
+        assert!(properties.names_enumerable_population());
+        assert!(!properties.denotes_battlefield_objects());
+        let mut private = absent.clone();
+        let TargetFilter::Typed(tf) = &mut private else {
+            unreachable!()
+        };
+        tf.properties[0] = FilterProp::InAnyZone {
+            zones: vec![Zone::Hand, Zone::Graveyard],
+        };
+        assert_eq!(
+            bind_absent_search_predicate(&mut private),
+            Some(Some(false))
+        );
+        assert!(!private.denotes_battlefield_objects());
+        assert_eq!(private.extract_zones(), vec![Zone::Hand, Zone::Graveyard]);
+        // Independently meaningful references are not converted into a population.
+        let prior = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::SpecificObject { id: ObjectId(77) }),
+            },
+            FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(7),
+            },
+        ]));
+        let mut bound_prior = prior.clone();
+        assert_eq!(bind_absent_search_predicate(&mut bound_prior), Some(None));
+        assert_eq!(bound_prior, prior);
+    }
+
+    #[test]
+    fn absent_search_binding_rolls_back_incomplete_nested_population_walk() {
+        let absent = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+        ]));
+        let mut source = CardTypeSetSource::Objects {
+            filter: absent.clone(),
+        };
+        for _ in 0..crate::types::ability::UNION_DEPTH_BUDGET {
+            source = CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::Objects {
+                    filter: absent.clone(),
+                },
+                source,
+            ])
+            .unwrap();
+        }
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { source },
+        };
+        let mut property_filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+            FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::LE,
+                value: quantity.clone(),
+            },
+        ]));
+        let original = property_filter.clone();
+        assert_eq!(bind_absent_search_predicate(&mut property_filter), None);
+        assert_eq!(
+            property_filter, original,
+            "even the shallow membership rewrite rolls back"
+        );
+        let mut rebound_quantity = quantity.clone();
+        assert!(!bind_absent_search_predicates_in_quantity(
+            &mut rebound_quantity,
+            false
+        ));
+        assert_eq!(rebound_quantity, quantity);
+        let mut complete = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Or {
+                    filters: vec![absent, TargetFilter::Typed(TypedFilter::land())],
+                },
+            },
+        };
+        assert!(bind_absent_search_predicates_in_quantity(
+            &mut complete,
+            false
+        ));
+        assert!(
+            matches!(complete, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { filter } }
+            if matches!(&filter, TargetFilter::Or { filters } if matches!(&filters[0], TargetFilter::Typed(tf) if tf.properties == vec![FilterProp::AnyOf { props: vec![] }])))
+        );
+    }
+
+    #[test]
+    fn post_property_callback_preserves_entry_order_and_sees_rewritten_descendants() {
+        let mut filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            },
+        ]));
+        let entries = std::cell::RefCell::new(Vec::new());
+        let mut complete = true;
+        rewrite_filter_props(
+            &mut filter,
+            &mut |node, _, _| {
+                entries.borrow_mut().push("node");
+                bind_absent_search_node(node);
+            },
+            &mut |_| entries.borrow_mut().push("property"),
+            &mut |prop| {
+                entries.borrow_mut().push("post");
+                assert!(
+                    matches!(prop, FilterProp::DistinctFrom { reference } if **reference == (TargetFilter::Or { filters: vec![] }))
+                );
+                bind_absent_search_property_after_children(prop);
+            },
+            &mut complete,
+            false,
+            None,
+        );
+        assert!(complete);
+        assert_eq!(
+            entries.into_inner(),
+            vec!["node", "property", "node", "post"]
+        );
+        assert!(
+            matches!(filter, TargetFilter::Typed(tf) if tf.properties == vec![FilterProp::Not { prop: Box::new(FilterProp::AnyOf { props: vec![] }) }])
+        );
+    }
 
     /// Terse 4-arg wrapper for filter-matching tests.
     ///

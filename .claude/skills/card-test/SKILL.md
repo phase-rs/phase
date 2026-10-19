@@ -1,21 +1,58 @@
 ---
 name: card-test
-description: Canonical recipe for writing engine cast-pipeline tests. Use GameScenario + GameRunner::cast(...).resolve() and assert via CastOutcome deltas. Covers the six test-harness foot-guns (hand-written TargetRef vectors, incomplete modal target submission, wrong-point hand baseline, inline-keyword cards, AST-internal flag assertions, vacuous negative assertions) and the right-way fix for each. Use whenever writing or porting a runtime test that casts a spell and checks its effect.
+description: Write engine runtime tests through production entry points for spells, activations, triggers, and interactive continuations. Use GameScenario and GameRunner, assert required prompts and completion boundaries, and avoid vacuous negatives and constructor shortcuts.
 ---
 
-# card-test — the canonical cast-pipeline test recipe
+# card-test — production-pipeline test recipes
 
-This skill gives ONE rigid recipe for runtime engine tests that cast a spell and
-assert its effect. It exists because six test-harness foot-guns recur; the
-[`SpellCast`] driver and [`CastOutcome`] (in `crates/engine/src/game/scenario.rs`)
-make them structurally impossible when you follow this recipe.
+Choose the production entry point that creates the behavior under test. The
+builders in `crates/engine/src/game/scenario.rs` handle casting and activation
+bookkeeping; assertions must still prove the intended branch and completion.
 
 Reference ports that demonstrate the pattern:
 
-- `crates/engine/tests/chord_of_calling.rs` — X-spell, convoke, `final_waiting_for()` boundary.
-- `crates/engine/src/game/casting.rs` — `exsanguinate_*` (life deltas, 2- and 3-player), `vicious_rivalry_*` (X-cost filter + zones), `kozileks_command_modes_*` (modal + X + multi-target).
+- `crates/engine/tests/integration/chord_of_calling.rs` — X-spell, convoke, `final_waiting_for()` boundary.
+- `crates/engine/src/game/casting_tests.rs` — `exsanguinate_*` (life deltas, 2- and 3-player), `vicious_rivalry_*` (X-cost filter + zones), `kozileks_command_modes_*` (modal + X + multi-target).
 
-## The recipe
+## Choose the production entry point
+
+| Behavior claimed | Entry point and local example |
+|---|---|
+| Spell resolution | `runner.cast(spell).resolve()`; the cast recipe below |
+| Activated ability | `runner.activate(source, ability_index).resolve()`; `tests/integration/goblin_charbelcher.rs::activate_and_finish` |
+| ETB trigger | Cast the permanent so entry emits the event and queues the trigger; `tests/integration/wedding_ring_etb_token_copy.rs::wedding_ring_etb_token_copy_is_opponent_controlled` |
+| Phase trigger | Set up before the phase, then advance through it with the runner; `tests/integration/dark_confidant_upkeep.rs::dark_confidant_upkeep_loses_life_equal_to_revealed_card_mana_value` |
+| Choice / replacement / continuation | Enter the prompt through its producer, assert it, then submit the response with `runner.act(GameAction::...)`; `tests/integration/goblin_charbelcher.rs::nested_ordering_pauses_arrange_each_pile_separately` and `tests/integration/optional_replacement_decline_keeps_resident_drain.rs::alms_collector_tail_reaches_the_drawer_after_a_declined_nested_granted_dredge` |
+
+Example paths in this table are relative to `crates/engine/`. They illustrate
+entry points, not every assertion a new test needs. For other events, use the
+action that emits the event (combat declaration, zone change, etc.). Setting up
+a battlefield is legitimate fixture setup; manually enqueueing the trigger or
+pre-populating its remembered result does not test event delivery or binding.
+
+## Observe the intended completion boundary
+
+- Assert a required prompt **unconditionally**, including its actor and relevant
+  options. `if let WaitingFor::YourChoice { .. } { ... }` can silently skip the
+  behavior the test claims to cover.
+- Submit a discriminating response through the public action path. For ordering,
+  use multiple distinguishable objects and a non-identity order; for optional
+  choices, exercise the relevant accept and empty/decline paths.
+- After the response, assert the downstream effect and the intended waiting state.
+  A fully resolved scenario normally has an empty stack **and** `Priority`; a
+  deliberate next prompt or `GameOver` needs its own explicit assertion. An empty
+  stack alone can coexist with a suspended resolution.
+- A `.resolve()` return is a snapshot, not a completion guarantee. It may stop at
+  an unanswered prompt. Default answers (such as keeping scry cards on top) do
+  not test the choice policy; drive those choices explicitly when they are the
+  subject. For nested pauses, answer each required prompt and verify the parent
+  continuation resumes with the right source, targets, and result.
+
+Use the existing runner and focused test helpers; do not build another generic
+driver for one regression. These assertions belong in the existing runtime tests
+and coverage matrix, not a separate test gate.
+
+## The cast recipe
 
 To inspect an optional resolution choice, use
 `runner.cast(spell).commit().stop_at_optional().resolve()` or
@@ -75,13 +112,17 @@ fn my_card_does_the_thing() {
   intent is reusable (one player may be targeted by several modes).
 - `Priority` (post-cast) → captures the per-player hand baseline at stack commit
   (CR 601.2a) and proceeds to resolution.
-- Resolution auto-answers `OrderTriggers` (CR 603.3b) and `ScryChoice` (keeps
-  looked-at cards on top, CR 701.22a); it stops at stack-empty or at any prompt
-  it is not taught to answer (e.g. `SearchChoice`) so you can assert on it via
-  `final_waiting_for()`.
-- Any unhandled prompt → a clear `extend the driver or drive this case manually`
-  panic. Extending the driver is the correct response; never assert around a
-  silent skip.
+- Resolution answers the prompts enumerated in `scenario.rs::drive_resolution`,
+  including default answers for trigger ordering, Scry/Surveil (keep all on top),
+  and `RippleBottomOrder` / `RevealUntilBottomOrder` (identity order), plus
+  policy-driven choices. Read that match before relying on a prompt to halt.
+  To test a defaulted choice, drive public actions up to the prompt yourself;
+  `final_waiting_for()` cannot recover a prompt the driver already answered.
+  Resolution stops at `Priority` with an empty stack or a prompt without a
+  configured answer; inspect `final_waiting_for()` to distinguish those outcomes.
+- An unhandled **casting** prompt fails loudly. During resolution, prompts without
+  a configured policy can halt normally. Inspect `final_waiting_for()` and drive
+  the specific response manually, or extend an existing policy when reusable.
 
 ### CastOutcome accessors
 
@@ -145,12 +186,12 @@ fn my_card_does_the_thing() {
 
 ## Hard rules
 
-- **Never call the raw `resolve()` stack function directly.** Drive through the
-  `apply()` pipeline (via `runner.cast(..).resolve()` or `runner.act(..)`).
+- **Production-support claims require the public pipeline.** Drive through
+  `apply()` (via the matching runner entry point above).
   Calling `stack::resolve_top` / `effect::resolve` directly bypasses the
   intervening-if recheck and the `cast_from_zone` carry-through, so cast-trigger
-  bugs (cascade/storm/casualty) go invisible. See the memory landmine
-  `project_cast_from_zone_stack_wipe`.
+  bugs (cascade/storm/casualty) go invisible. Direct resolver tests can supplement
+  this with focused unit coverage; they cannot replace the production regression.
 - **Prefer runtime-behavior tests.** Reserve AST-SHAPE tests for parser
   structure; label them SHAPE and assert via semantic accessors, not internal
   flags. The two Kozilek/Chord SHAPE tests

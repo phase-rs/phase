@@ -3746,16 +3746,18 @@ pub fn candidate_actions_broad_with_probe(
             // (nothing to pin, so `template: None` is the complete answer), a published set
             // the offer ALREADY carries a declaration for, or a recorded period the take replays,
             // whose recorded answers `handle_declare_shortcut` admits with `template: None`. That
-            // `template` is the ENGINE'S OWN published declaration — the very value
-            // `handle_declare_shortcut` will validate — so there is exactly one pin authority at
-            // this node and the AI never constructs one. An offer with an empty period,
+            // `template` is the ENGINE'S OWN suggestion (`ShortcutDecisionSchema::suggestion`) —
+            // the very value `handle_declare_shortcut` resolves `template: None` to and validates
+            // — so there is exactly one pin authority at this node and the AI never constructs
+            // one. An offer with an empty period,
             // published points and NO declaration (a seat that never answered, or a `Conflicted`
             // latch) still fail-closes: the conjunct below is false, and `DeclineShortcut`
             // remains the only candidate.
             // CR 732.2a: THE SUGGESTION, not the capacity — and the two are no longer one number.
             // The capacity is the widest count SOME legal declaration may specify; the suggestion
-            // is a count the offer's OWN published declaration drives, which is the declaration
-            // this candidate carries (and which `template: None` would resolve to anyway). A
+            // is the count the offer's suggested declaration drives (see
+            // `ShortcutDecisionSchema::suggested_declaration`), which is the declaration this
+            // candidate carries (and which `template: None` would resolve to anyway). A
             // candidate at the capacity opens the CR 732.2b window and is then refused by the
             // consumption seam's drivability gate, committing zero cycles — the engine refusing
             // its own candidate. Reading `iteration_count` rather than re-deriving anything keeps
@@ -3775,7 +3777,7 @@ pub fn candidate_actions_broad_with_probe(
                 v.push(candidate(
                     GameAction::DeclareShortcut {
                         count: crate::analysis::decision_template::IterationCount::Fixed(n),
-                        template: declaration.clone(),
+                        template: schema.suggestion(declaration.as_ref()).cloned(),
                     },
                     TacticalClass::Utility,
                     Some(*proposer),
@@ -9768,6 +9770,8 @@ mod tests {
                 per_cycle: None,
             },
             schema: ShortcutDecisionSchema {
+                suggested_declaration: None,
+                leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(5),
                 measured_repetition_bound: Some(5),
                 deliverable_capacity: 5,

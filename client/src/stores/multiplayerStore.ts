@@ -4291,7 +4291,7 @@ useMultiplayerStore.subscribe((state, prev) => {
 });
 
 export function getPlayerDisplayName(playerId: number, myId?: number): string {
-  if (playerId === myId) return "You";
+  if (playerId === myId) return i18n.t("game:player.you");
   return getOpponentDisplayName(playerId);
 }
 
@@ -4299,5 +4299,5 @@ export function getOpponentDisplayName(playerId: number): string {
   const state = useMultiplayerStore.getState();
   const name = state.playerNames.get(playerId);
   if (name) return name;
-  return `Opp ${playerId + 1}`;
+  return i18n.t("game:player.opponent", { seat: playerId + 1 });
 }
