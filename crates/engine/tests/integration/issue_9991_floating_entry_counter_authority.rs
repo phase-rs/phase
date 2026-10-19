@@ -163,45 +163,50 @@ fn r3_two_brewings_each_apply_their_own_count_once() {
     assert_cast_trigger(&runner, brewing_b);
 
     let outcome = runner.cast(spell).resolve();
-    // CR 616.1: additive counter riders may be applied silently; if the
-    // engine surfaces an ordering choice, prove its actor and identities.
-    match outcome.final_waiting_for() {
-        WaitingFor::Priority { .. } => {}
-        WaitingFor::ReplacementChoice {
-            player,
-            candidate_count,
-            candidates,
-            kind,
-            ..
-        } => {
-            assert_eq!(*player, P0);
-            assert_eq!(*kind, ReplacementChoiceKind::Order);
-            assert_eq!(*candidate_count, 2);
-            assert_eq!(candidates.len(), 2);
-            let mut sources: Vec<_> = candidates
-                .iter()
-                .map(|candidate| candidate.source_id)
-                .collect();
-            sources.sort();
-            let mut expected = vec![brewing_a, brewing_b];
-            expected.sort();
-            assert_eq!(
-                sources, expected,
-                "same-named Brewings must expose distinct source identities"
-            );
-            let index = candidates
-                .iter()
-                .position(|candidate| candidate.source_id == brewing_b)
-                .expect("Brewing B must be a selectable replacement");
-            runner
-                .act(GameAction::ChooseReplacement { index })
-                .expect("replacement ordering choice must be accepted");
-            runner.advance_until_stack_empty();
-        }
-        other => {
-            panic!("two Brewing riders must reach Priority or ReplacementChoice, got {other:?}")
-        }
-    }
+    // CR 616.1: two applicable replacement effects on one entering permanent
+    // surface an ordering choice to its controller even when the order is
+    // immaterial. Pin that boundary, prove its actor and the two distinct rider
+    // identities (both Brewings share a name), then answer it.
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        candidates,
+        kind,
+        ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "two Brewing riders must reach a ReplacementChoice ordering prompt, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*kind, ReplacementChoiceKind::Order);
+    assert_eq!(*candidate_count, 2);
+    assert_eq!(candidates.len(), 2);
+    let mut sources: Vec<_> = candidates
+        .iter()
+        .map(|candidate| candidate.source_id)
+        .collect();
+    sources.sort();
+    let mut expected = vec![brewing_a, brewing_b];
+    expected.sort();
+    assert_eq!(
+        sources, expected,
+        "same-named Brewings must expose distinct source identities"
+    );
+    let index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == brewing_b)
+        .expect("Brewing B must be a selectable replacement");
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("replacement ordering choice must be accepted");
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
     assert_resolved(runner.state(), 5, &[brewing_a, brewing_b]);
 }
 
