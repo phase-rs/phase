@@ -1312,7 +1312,6 @@ mod tests {
                         .quantity_modification(QuantityModification::Plus { value: 1 }),
                 );
             }
-            drop(install);
             let ability = ability(
                 1,
                 2,

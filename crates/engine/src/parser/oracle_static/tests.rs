@@ -41206,7 +41206,7 @@ fn u14_compound_subject_boundary() {
         assert!(
             parse_static_line_multi(text)
                 .iter()
-                .all(|d| u14_static_residual(d)),
+                .all(u14_static_residual),
             "{text}"
         );
     }

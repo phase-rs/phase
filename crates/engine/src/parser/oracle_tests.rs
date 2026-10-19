@@ -449,11 +449,11 @@ fn u14_relation_refuses_ambiguous_or_unowned_static() {
                     6 => ir.definition.execute.as_mut().unwrap().optional = true,
                     7 => {
                         let a = ir.definition.execute.as_mut().unwrap();
-                        a.effect = Box::new(Effect::Choose {
+                        *a.effect = Effect::Choose {
                             choice_type: ChoiceType::OddOrEven,
                             persist: true,
                             selection: crate::types::ability::TargetSelectionMode::Random,
-                        });
+                        };
                     }
                     8 => {
                         ir.definition.execute.as_mut().unwrap().sub_ability =

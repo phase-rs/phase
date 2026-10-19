@@ -4257,6 +4257,34 @@ fn parse_counters_cant_be_removed_static(
     )
 }
 
+/// The generic turn-scoped owner remains at its existing dispatch position.
+pub(super) fn parse_turn_scoped_subject_continuous_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (body, condition) = if let Some(body) = nom_tag_tp(tp, "during your turn, ") {
+        (body, StaticCondition::DuringYourTurn)
+    } else {
+        (
+            nom_tag_tp(tp, "during turns other than yours, ")?,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+        )
+    };
+    parse_continuous_subject_predicate(&body, |subject, predicate| {
+        let affected = parse_continuous_subject_filter(subject)?;
+        let mut def = parse_complete_continuous_predicate(predicate, affected, description)?;
+        def.condition = Some(match def.condition.take() {
+            Some(existing) => StaticCondition::And {
+                conditions: vec![condition.clone(), existing],
+            },
+            None => condition.clone(),
+        });
+        Some(def)
+    })
+}
+
 /// Structural-marker site: "your opponents and/or planeswalkers they control"
 /// reads "they control" as a marker; the defender is the opponents either way.
 #[cfg(test)]
@@ -4295,32 +4323,4 @@ mod structural_marker_tests {
             );
         }
     }
-}
-
-/// The generic turn-scoped owner remains at its existing dispatch position.
-pub(super) fn parse_turn_scoped_subject_continuous_static(
-    tp: &TextPair<'_>,
-    description: &str,
-) -> Option<StaticDefinition> {
-    let (body, condition) = if let Some(body) = nom_tag_tp(tp, "during your turn, ") {
-        (body, StaticCondition::DuringYourTurn)
-    } else {
-        (
-            nom_tag_tp(tp, "during turns other than yours, ")?,
-            StaticCondition::Not {
-                condition: Box::new(StaticCondition::DuringYourTurn),
-            },
-        )
-    };
-    parse_continuous_subject_predicate(&body, |subject, predicate| {
-        let affected = parse_continuous_subject_filter(subject)?;
-        let mut def = parse_complete_continuous_predicate(predicate, affected, description)?;
-        def.condition = Some(match def.condition.take() {
-            Some(existing) => StaticCondition::And {
-                conditions: vec![condition.clone(), existing],
-            },
-            None => condition.clone(),
-        });
-        Some(def)
-    })
 }
