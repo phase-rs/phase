@@ -868,6 +868,202 @@ fn scope_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
     std::iter::successors(Some(def), |d| d.sub_ability.as_deref()).collect()
 }
 
+// SHAPE supplements the paid casts in integration::jev_spell_scope.
+#[test]
+fn numeric_gain_outer_ownership_preserves_complete_chains() {
+    let feud = "You gain 10 life. Then if you have more life than an opponent, create a 5/5 white Giant Warrior creature token.";
+    let pulse = "You gain 4 life. Then if an opponent has more life than you, return Pulse of the Fields to its owner's hand.";
+    let survival = "You gain 2 life. Then if you have more life than an opponent, draw a card.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
+    for (name, text, amount, card_types) in [
+        (
+            "Feudkiller's Verdict",
+            feud,
+            10,
+            vec!["Kindred".into(), "Sorcery".into()],
+        ),
+        ("Pulse of the Fields", pulse, 4, vec!["Instant".into()]),
+        ("Survival Cache", survival, 2, vec!["Sorcery".into()]),
+    ] {
+        for prefix in ["", "Draw a card.\n"] {
+            let source = format!("{prefix}{text}");
+            let mut ir = parse_oracle_ir(&source, name, &[], &card_types, &[]);
+            assert_eq!(ir.source_text, source);
+            assert!(!ir.items.is_empty());
+            assert!(ir
+                .items
+                .windows(2)
+                .all(|pair| pair[0].source.span().first_line <= pair[1].source.span().first_line));
+            let parsed = lower_oracle_ir(&mut ir);
+            assert_eq!(parsed.abilities.len(), 1, "{source}: {parsed:#?}");
+            assert!(parsed.statics.is_empty(), "{parsed:#?}");
+            assert!(!has_unimplemented(&parsed.abilities[0]), "{parsed:#?}");
+            let chain = scope_chain(&parsed.abilities[0]);
+            let gain_index = usize::from(!prefix.is_empty());
+            assert!(
+                matches!(*chain[gain_index].effect, Effect::GainLife { amount: QuantityExpr::Fixed { value }, .. } if value == amount)
+            );
+            let conditional = chain[gain_index + 1];
+            let (left, right) = if name == "Pulse of the Fields" {
+                (
+                    PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
+                    },
+                    PlayerScope::Controller,
+                )
+            } else {
+                (
+                    PlayerScope::Controller,
+                    PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Min,
+                    },
+                )
+            };
+            assert_eq!(
+                conditional.condition,
+                Some(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal { player: left }
+                    },
+                    comparator: crate::types::ability::Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal { player: right }
+                    },
+                })
+            );
+            assert!(match name {
+                "Feudkiller's Verdict" => matches!(*conditional.effect, Effect::Token { .. }),
+                "Pulse of the Fields" => matches!(
+                    *conditional.effect,
+                    Effect::ChangeZone {
+                        target: TargetFilter::SelfRef,
+                        destination: Zone::Hand,
+                        ..
+                    }
+                ),
+                _ => matches!(*conditional.effect, Effect::Draw { .. }),
+            });
+            if name == "Survival Cache" {
+                assert!(parsed.extracted_keywords.contains(&Keyword::Rebound));
+            }
+            let normalized = source.replace("Pulse of the Fields", "~");
+            let expected_description = if name == "Survival Cache" {
+                format!("{prefix}{}", survival.lines().next().unwrap())
+            } else {
+                normalized
+            };
+            assert_eq!(
+                parsed.abilities[0].description.as_deref(),
+                Some(expected_description.as_str())
+            );
+        }
+    }
+    // The full quoted-token body remains in both clients' positive population.
+    for prefix in ["", "Draw a card.\n"] {
+        assert_white_sun_shape(
+            &scope_spell(&format!("{prefix}{FULL_WHITE_SUN}")),
+            !prefix.is_empty(),
+        );
+    }
+}
+
+#[test]
+fn noun_led_perpetual_then_preserves_whole_instruction() {
+    let discover = "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"";
+    let teferi = "Counter target spell. Each card in its controller's graveyard, hand, and library with the same name as that spell perpetually gains \"This spell costs {2} more to cast.\"";
+    for prefix in ["", "Draw a card.\n"] {
+        let source = format!("{prefix}{discover}");
+        let parsed = scope_spell(&source);
+        assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+        assert!(parsed.statics.is_empty());
+        assert!(!has_unimplemented(&parsed.abilities[0]), "{parsed:#?}");
+        let chain = scope_chain(&parsed.abilities[0]);
+        let grant = chain
+            .iter()
+            .find(|node| matches!(*node.effect, Effect::ApplyPerpetual { .. }))
+            .expect("complete all-hand grant");
+        let Effect::ApplyPerpetual {
+            target,
+            modification,
+        } = grant.effect.as_ref()
+        else {
+            unreachable!()
+        };
+        assert!(
+            matches!(target, TargetFilter::Typed(filter) if filter.controller == Some(ControllerRef::You) && filter.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land))) && filter.properties.contains(&FilterProp::InZone { zone: Zone::Hand })),
+            "{target:#?}"
+        );
+        assert!(
+            matches!(modification, crate::types::ability::PerpetualModification::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount } if *amount == ManaCost::generic(1))
+        );
+        assert!(grant.reads_return_result.is_none());
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some(source.as_str())
+        );
+    }
+    let parsed = parse_oracle_text(
+        teferi,
+        "Teferi's Contingency",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    let ir = parse_oracle_ir(
+        teferi,
+        "Teferi's Contingency",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    assert_eq!(ir.source_text, teferi);
+    assert_eq!(ir.items.len(), 1);
+    assert_eq!(ir.items[0].source.fragment(), Some(teferi));
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let chain = scope_chain(&parsed.abilities[0]);
+    assert!(matches!(*chain[0].effect, Effect::Counter { .. }));
+    assert_eq!(
+        chain.len(),
+        2,
+        "the entire unresolved subject is one instruction"
+    );
+    assert!(
+        matches!(chain[1].effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment == teferi.strip_prefix("Counter target spell. ").unwrap()),
+        "{chain:#?}"
+    );
+    assert!(has_unimplemented(&parsed.abilities[0]));
+    assert!(parsed.statics.is_empty());
+    for text in [
+        "You have no maximum hand size.",
+        "You have no maximum hand size for the rest of the game.",
+    ] {
+        let complete = scope_spell(text);
+        assert!(!has_unimplemented(&complete.abilities[0]), "{complete:#?}");
+    }
+    let bad_text =
+        "You have no maximum hand size for the rest of the game with an unmodeled rider.";
+    let bad = scope_spell(bad_text);
+    assert!(bad.abilities.iter().any(has_unimplemented), "{bad:#?}");
+    assert!(bad.statics.is_empty());
+    assert!(bad.abilities.iter().flat_map(scope_chain).any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.trim_end_matches('.') == bad_text.trim_end_matches('.'))), "{bad:#?}");
+    for (name, text, types, abilities) in [
+        ("Spellbook", "You have no maximum hand size.", "Artifact", 0),
+        (
+            "Reliquary Tower",
+            "You have no maximum hand size.\n{T}: Add {C}.",
+            "Land",
+            1,
+        ),
+    ] {
+        let hosted = parse_oracle_text(text, name, &[], &[types.into()], &[]);
+        assert_eq!(hosted.abilities.len(), abilities, "{hosted:#?}");
+        assert_eq!(hosted.statics.len(), 1);
+        assert_eq!(hosted.statics[0].mode, StaticMode::NoMaximumHandSize);
+        assert!(
+            matches!(&hosted.statics[0].affected, Some(TargetFilter::Typed(filter)) if filter.controller == Some(ControllerRef::You))
+        );
+    }
+}
+
 fn assert_ordinary_spirit_shape(parsed: &ParsedAbilities, target_count: usize) {
     // SHAPE; actual creation is exercised in integration::jev_token_followup.
     assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
@@ -1332,7 +1528,7 @@ fn brood_birthing_keeps_noncategory_collection_boundary() {
     // Both quote-view clients must retain the unquoted "They have" marker.
     for (raw, normalized) in [(FULL_BROOD, NORMALIZED_BROOD), (FULL_WHITE_SUN, "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)")] {
         let lower = normalized.to_lowercase();
-        assert!(parse_outer_spell_instruction_head(&lower).is_err());
+        assert_eq!(parse_outer_spell_instruction_head(&lower).is_ok(), raw == FULL_WHITE_SUN);
         assert!(is_static_pattern(&lower));
         let view = crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower);
         assert_eq!(is_static_pattern(&view), raw == FULL_BROOD);
@@ -35649,6 +35845,21 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
         .condition
         .as_ref()
         .is_some_and(AbilityCondition::is_optional_effect_performed));
+    let rule = gated
+        .sub_ability
+        .as_deref()
+        .expect("independent persistent rule");
+    assert_eq!(rule.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(rule.condition.is_none() && !rule.optional);
+    let Effect::CreateEmblem { statics, .. } = rule.effect.as_ref() else {
+        panic!("{parsed:#?}")
+    };
+    assert_eq!(statics.len(), 1);
+    assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
+    assert_eq!(statics[0].affected, Some(TargetFilter::Controller));
+    assert!(rule.sub_ability.is_none());
+    assert!(parsed.statics.is_empty());
+    assert!(!has_unimplemented(head), "{parsed:#?}");
 }
 
 /// CR 400.3 + CR 701.24c: an owner subject ("the owners of those cards" / "those

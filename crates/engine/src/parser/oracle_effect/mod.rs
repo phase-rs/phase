@@ -79,9 +79,9 @@ use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{is_not, tag, take_till, take_until};
 use nom::character::complete::{
-    anychar, multispace0, multispace1, one_of, satisfy, space0, space1,
+    anychar, char, multispace0, multispace1, one_of, satisfy, space0, space1,
 };
 use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
@@ -8442,28 +8442,24 @@ fn parse_event_context_ref_with_ctx<'a>(
     Some((target, rest))
 }
 
-fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
-    // Strip optional "you " prefix, then match "have no maximum hand size"
-    let after_you = nom_on_lower(tp.original, tp.lower, |i| value((), tag("you ")).parse(i));
-    let rest = after_you.map(|(_, r)| r).unwrap_or(tp.original);
-    let rest_lower = rest.to_lowercase();
-
-    // Match "have no maximum hand size" with optional trailing "for the rest of the game"
-    let matched = tag::<_, _, OracleError<'_>>("have no maximum hand size")
-        .parse(rest_lower.as_str())
-        .ok()?;
-    let remainder = matched.0.trim().trim_end_matches('.');
-    // Allow bare "have no maximum hand size" or "for the rest of the game" suffix
-    if !remainder.is_empty()
-        && tag::<_, _, OracleError<'_>>("for the rest of the game")
-            .parse(remainder)
-            .is_err()
-    {
-        return None;
-    }
+pub(crate) fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
+    // CR 611.2a: the complete stated lifetime belongs to this instruction.
+    all_consuming(terminated(
+        (
+            opt(tag::<_, _, OracleError<'_>>("you ")),
+            tag("have no maximum hand size"),
+            opt(tag(" for the rest of the game")),
+            opt(char('.')),
+        ),
+        multispace0,
+    ))
+    .parse(tp.lower)
+    .ok()?;
 
     Some(Effect::CreateEmblem {
         statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)
+            // CR 109.5: You is the resolving spell's controller, not every player.
+            .affected(TargetFilter::Controller)
             .description("You have no maximum hand size.".to_string())],
         triggers: Vec::new(),
     })
@@ -12352,6 +12348,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only: structural ownership is not semantic acceptance. Preserve
+    // the entire unresolved recipient/body after all complete owners decline.
+    if split_quoted_perpetual_gain_clause(tp.lower).is_some() {
+        return parsed_clause(Effect::unimplemented("perpetual_quoted_scope", tp.original));
+    }
+
     // Digital-only Alchemy: "<subject> perpetually gains your choice of A, B, or
     // C" (Smogbelcher Chariot). No arm models a resolution-time choice among
     // PERPETUAL keyword grants; without this gap the subject-predicate path
@@ -12784,6 +12786,25 @@ pub(super) fn split_perpetual_get_clause(lower: &str) -> Option<(&str, &str)> {
         .parse(subject)
         .ok()?;
     unquoted.is_empty().then_some((subject, rest))
+}
+
+/// Structural head only: retain the whole unquoted subject and untouched quote
+/// body. Complete semantic owners above still decide whether it is supported.
+pub(super) fn split_quoted_perpetual_gain_clause(lower: &str) -> Option<(&str, &str)> {
+    let (rest, subject) = take_until::<_, _, OracleError<'_>>(" perpetually ")
+        .parse(lower)
+        .ok()?;
+    all_consuming(is_not::<_, _, OracleError<'_>>("\"."))
+        .parse(subject)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" perpetually ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("gains "), tag("gain ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = peek(char::<_, OracleError<'_>>('"')).parse(rest).ok()?;
+    Some((subject, rest))
 }
 
 /// True when `subject` belongs to the chain splitter / subject binder rather
@@ -45229,7 +45250,14 @@ fn parse_effect_chain_ir_body(
         if seeded_parent_target_controller_this_chunk {
             chain_parent_target_controller_scope = None;
         }
-        let leading_subject_application = subject::parse_leading_subject_application(&text, ctx);
+        // The complete perpetual owner needs its recipient population intact;
+        // stripping it here can turn an unresolved scope into a global static.
+        let leading_subject_application =
+            if split_quoted_perpetual_gain_clause(&text.to_lowercase()).is_some() {
+                None
+            } else {
+                subject::parse_leading_subject_application(&text, ctx)
+            };
         let deferred_leading_owner_subject = leading_subject_application.is_none()
             && deferred_leading_condition_has_parent_target_owner_subject(&text, ctx);
         // CR 608.2c + CR 109.5: A chained clause whose explicit subject is the caster

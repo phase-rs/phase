@@ -2,14 +2,16 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, peek, value, verify};
+use nom::character::complete::{multispace1, one_of};
+use nom::combinator::{eof, opt, peek, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::condition::parse_reflexive_entry_this_way_rider;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
-use super::oracle_util::{first_sentence, parse_mana_symbols};
+use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_util::{first_sentence, parse_mana_symbols, TextPair};
 use crate::parser::oracle_effect::{
     excise_selection_qualifier, split_leading_conditional, try_parse_named_choice,
     try_parse_named_choice_conjunction,
@@ -215,17 +217,33 @@ pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
 /// CR 113.3a + CR 608.2c: an anchored resolving command owns its later
 /// definitions and grants even when their semantics are not yet supported.
 pub(crate) fn parse_outer_spell_instruction_head(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag("destroy "),
-            tag("create "),
-            tag("seek "),
-            tag("counter "),
-            tag("exile "),
-            tag("tap "),
-        )),
-    )
+    alt((
+        value(
+            (),
+            alt((
+                tag("destroy "),
+                tag("create "),
+                tag("seek "),
+                tag("counter "),
+                tag("exile "),
+                tag("tap "),
+            )),
+        ),
+        value(
+            (),
+            terminated(
+                preceded(
+                    tag("you gain "),
+                    terminated(nom_quantity::parse_quantity_expr_number, tag(" life")),
+                ),
+                peek(alt((
+                    value((), eof),
+                    value((), multispace1),
+                    value((), one_of(".,")),
+                ))),
+            ),
+        ),
+    ))
     .parse(input)
 }
 
@@ -236,7 +254,11 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return false;
     }
     let ability_word_body = super::oracle_modal::strip_ability_word(lower);
-    if parse_outer_spell_instruction_head(ability_word_body.as_deref().unwrap_or(lower)).is_ok() {
+    let body = ability_word_body.as_deref().unwrap_or(lower);
+    if parse_outer_spell_instruction_head(body).is_ok()
+        || super::oracle_effect::try_parse_no_max_hand_size_effect(TextPair::new(body, body))
+            .is_some()
+    {
         return true;
     }
     // CR 114.1: An emblem-granting instant/sorcery ("You get an emblem with
@@ -1413,9 +1435,43 @@ mod tests {
             assert!(!should_defer_spell_to_effect(text), "{text}");
         }
         let white = "you gain x life. create x 1/1 colorless phyrexian mite artifact creature tokens with toxic 1 and \"this token can't block.\" if x is 5 or more, destroy all other creatures.";
-        assert!(parse_outer_spell_instruction_head(white).is_err());
+        assert!(parse_outer_spell_instruction_head(white).is_ok());
         assert!(is_static_pattern(white));
         assert!(!is_static_pattern(&strip_double_quoted_spans(white)));
+    }
+
+    #[test]
+    fn numeric_gain_and_complete_no_max_share_outer_ownership() {
+        for text in [
+            "you gain 10 life.",
+            "you gain four life, then draw a card.",
+            "you gain x life",
+            "you gain 0 life. unsupported rider",
+        ] {
+            assert!(parse_outer_spell_instruction_head(text).is_ok(), "{text}");
+            assert!(should_defer_spell_to_effect(text), "{text}");
+            assert!(should_defer_spell_to_effect(&format!("vivid — {text}")));
+        }
+        for text in [
+            "you gain life",
+            "you gain mysteries life",
+            "you gain 4 lifelink",
+            "you gain 4 life-total",
+            "you gain 4 lifeless",
+            "\"you gain 4 life.\"",
+            "draw a card. you gain 4 life.",
+        ] {
+            assert!(parse_outer_spell_instruction_head(text).is_err(), "{text}");
+        }
+        for text in [
+            "you have no maximum hand size.",
+            "you have no maximum hand size for the rest of the game.",
+        ] {
+            assert!(should_defer_spell_to_effect(text), "{text}");
+        }
+        assert!(!should_defer_spell_to_effect(
+            "you have no maximum hand size for the rest of the game with an unmodeled rider."
+        ));
     }
 
     #[test]

@@ -5,6 +5,77 @@ use super::lower::{
 use super::sequence::split_clause_sequence;
 use super::*;
 
+#[test]
+fn complete_no_max_and_quoted_perpetual_scope_is_transactional() {
+    // SHAPE: paired with actual cleanup and future paid casts in jev_spell_scope.
+    for text in [
+        "You have no maximum hand size.",
+        "have no maximum hand size for the rest of the game.   ",
+    ] {
+        let lower = text.to_lowercase();
+        assert!(try_parse_no_max_hand_size_effect(TextPair::new(text, &lower)).is_some());
+    }
+    for text in [
+        "You have no maximum hand size for the rest of the game with an unmodeled rider.",
+        "You have no maximum hand size. Draw a card.",
+        "You have no maximum hand size for the rest of the games.",
+    ] {
+        let lower = text.to_lowercase();
+        assert!(
+            try_parse_no_max_hand_size_effect(TextPair::new(text, &lower)).is_none(),
+            "{text}"
+        );
+    }
+    let positive = "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"";
+    let ir = parse_effect_chain_ir(positive, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+    assert_eq!(ir.clauses[0].boundary, Some(ClauseBoundary::Then));
+    assert_eq!(
+        ir.clauses[1].source.fragment(),
+        Some("nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"")
+    );
+    let full = parse_effect_chain(positive, AbilityKind::Spell);
+    assert!(matches!(*full.effect, Effect::Seek { .. }));
+    assert!(matches!(
+        *full.sub_ability.as_deref().unwrap().effect,
+        Effect::ApplyPerpetual { .. }
+    ));
+    for tail in [
+        "nonland cards in your hand perpetually gain \"This spell costs {X} less to cast.\"",
+        "nonland cards in your graveyard perpetually gain \"This spell costs {1} less to cast.\"",
+        "each card in its controller's graveyard, hand, and library with the same name as that spell perpetually gains \"This spell costs {2} more to cast.\"",
+        "nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\" with an unmodeled rider",
+        "nonland cards in your hand perpetually gain \"An unknown instruction.\"",
+    ] {
+        let source = format!("Draw a card. {tail}. You gain 2 life.");
+        let chain = parse_effect_chain(&source, AbilityKind::Spell);
+        let nodes: Vec<_> = std::iter::successors(Some(&chain), |node| node.sub_ability.as_deref()).collect();
+        assert!(matches!(*nodes[0].effect, Effect::Draw { .. }));
+        assert!(nodes.iter().any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.trim_end_matches('.') == tail)), "{nodes:#?}");
+        assert!(nodes.iter().any(|node| matches!(*node.effect, Effect::GainLife { amount: QuantityExpr::Fixed { value: 2 }, .. })), "{nodes:#?}");
+        assert!(nodes.iter().all(|node| !matches!(*node.effect, Effect::GenericEffect { .. } | Effect::ApplyPerpetual { .. })));
+    }
+    let unknown_controller = "nonland cards in that player's hand perpetually gain \"This spell costs {1} less to cast.\"";
+    let unresolved = parse_effect_chain(unknown_controller, AbilityKind::Spell);
+    assert!(
+        matches!(*unresolved.effect, Effect::Unimplemented { .. }),
+        "a missing player antecedent must not default to You: {unresolved:#?}"
+    );
+    let unclosed =
+        "nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.";
+    let rejected = parse_effect_chain(unclosed, AbilityKind::Spell);
+    assert!(
+        matches!(rejected.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.trim_end_matches('.') == unclosed.trim_end_matches('.')),
+        "{rejected:#?}"
+    );
+    for text in [
+        "\"creatures perpetually gain \"an ability\"",
+        "Draw a card. Creatures perpetually gain \"an ability\"",
+    ] {
+        assert!(split_quoted_perpetual_gain_clause(&text.to_lowercase()).is_none());
+    }
+}
+
 // SHAPE: public runtime discriminators live in integration::jev_reveal_aggregate.
 #[test]
 fn ordinary_reveal_scalar_chain_preserves_scope_and_source() {
@@ -24523,6 +24594,7 @@ fn effect_you_have_no_max_hand_size_for_rest_of_game() {
         Effect::CreateEmblem { statics, .. } => {
             assert_eq!(statics.len(), 1);
             assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
+            assert_eq!(statics[0].affected, Some(TargetFilter::Controller));
         }
         other => panic!("expected CreateEmblem, got {:?}", other),
     }
@@ -24536,6 +24608,7 @@ fn effect_you_have_no_max_hand_size_bare() {
         Effect::CreateEmblem { statics, .. } => {
             assert_eq!(statics.len(), 1);
             assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
+            assert_eq!(statics[0].affected, Some(TargetFilter::Controller));
         }
         other => panic!("expected CreateEmblem, got {:?}", other),
     }

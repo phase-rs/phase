@@ -3975,7 +3975,8 @@ fn is_spell_resolution_instruction_line(
     let owns_outer_instruction = parse_outer_spell_instruction_head(&effect_lower).is_ok();
     // CR 113.3a + CR 111.3: an anchored command retains its unmasked scope.
     // For other creation lines, keep the compatibility quote view protecting
-    // token-owned abilities (including White Sun's "You gain" instruction).
+    // token-owned abilities. Numeric You-gain heads, including White Sun's,
+    // now belong to the anchored outer instruction category.
     // This view only feeds static classification; grants still reach the
     // semantic parser in the original text and belong to their recipients.
     let static_view = if owns_outer_instruction {
@@ -7489,8 +7490,9 @@ fn parse_normalized_oracle_ir(
                     should_defer_spell_to_effect(&prepared.effect_text.to_lowercase())
                 }));
         // CR 111.3 + CR 111.4: retain the compatibility quote view for creation
-        // lines outside the owned command category (including White Sun's
-        // "You gain" head). It feeds only static classification; the original
+        // lines outside the owned command category. White Sun's numeric
+        // "You gain" head now defers through the shared outer owner. The view
+        // feeds only static classification; the original
         // text still reaches semantic parsing with recipient grants intact.
         let static_classify_view = if is_spell && scan_contains(&lower, "create") {
             crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower)

@@ -2315,6 +2315,12 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     {
         let after_then = &trimmed["then ".len()..];
         let after_then_lower = &trimmed_lower["then ".len()..];
+        // CR 608.2c: noun-led perpetual instructions are ordered siblings too.
+        if super::split_quoted_perpetual_gain_clause(before_sentence_boundary(after_then_lower))
+            .is_some_and(|(subject, _)| perpetual_subject_opens_a_clause(subject))
+        {
+            return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
+        }
         // CR 701.20e + CR 608.2c: "reveal up to N <filter> from among them, then
         // put that card <kept-destination> ..." is a single from-among selection
         // action — the ", then put that card …" placement tail is the KEPT-card
@@ -2463,9 +2469,8 @@ fn starts_mana_spent_conjunct(current_lower: &str, trimmed_lower: &str) -> bool 
 }
 
 /// CR 608.2c: True when the text after the comma is an "and"-joined conjunct
-/// whose own subject takes "perpetually get(s)" ("and the top creature card of
-/// your library perpetually gets +1/+1"). The verb tail is owned by
-/// `split_perpetual_get_clause`; the conjunct ends at the next sentence
+/// whose own subject takes a perpetual P/T edit or quoted gain. The structural
+/// heads share the complete noun/list guard; the conjunct ends at the next sentence
 /// boundary, so a later sentence's "perpetually" cannot promote an earlier
 /// conjunct, and a subject holding a comma or period is not one noun phrase.
 fn starts_perpetual_subject_conjunct(trimmed_lower: &str) -> bool {
@@ -2475,13 +2480,18 @@ fn starts_perpetual_subject_conjunct(trimmed_lower: &str) -> bool {
     )
     .parse(before_sentence_boundary(trimmed_lower))
     .ok()
-    .and_then(|(_, conjunct)| super::split_perpetual_get_clause(conjunct))
-    .is_some_and(|(subject, _)| {
-        all_consuming(is_not::<_, _, OracleError<'_>>(",."))
-            .parse(subject)
-            .is_ok()
-            && super::perpetual_conjunct_subject_opens_a_clause(subject)
+    .and_then(|(_, conjunct)| {
+        super::split_perpetual_get_clause(conjunct)
+            .or_else(|| super::split_quoted_perpetual_gain_clause(conjunct))
     })
+    .is_some_and(|(subject, _)| perpetual_subject_opens_a_clause(subject))
+}
+
+fn perpetual_subject_opens_a_clause(subject: &str) -> bool {
+    all_consuming(is_not::<_, _, OracleError<'_>>(",."))
+        .parse(subject)
+        .is_ok()
+        && super::perpetual_conjunct_subject_opens_a_clause(subject)
 }
 
 /// Phrase shared by every "if {C} was spent to cast <it>" gate.
@@ -16870,6 +16880,36 @@ mod leading_duration_guard_tests_7923 {
                 );
             }
         }
+    }
+
+    #[test]
+    fn quoted_perpetual_noun_and_then_boundaries_preserve_lists_and_quotes() {
+        for connector in ["and", "then"] {
+            let source = format!("Seek three nonland cards, {connector} nonland cards in your hand perpetually gain \"This spell costs {{1}} less to cast.\"");
+            let chunks = split_clause_sequence(&source);
+            assert_eq!(chunks.len(), 2, "{source}");
+            assert_eq!(chunks[0].text, "Seek three nonland cards");
+            assert_eq!(chunks[1].text, "nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"");
+            if connector == "then" {
+                assert_eq!(chunks[0].boundary_after, Some(ClauseBoundary::Then));
+            }
+        }
+        for subject in ["each card in its controller's graveyard, hand, and library with the same name as that spell", "creature cards in your hand, library, and graveyard", "creatures you control and creature cards in your hand"] {
+            let source = format!("{subject} perpetually gain \"This spell costs {{1}} less to cast.\"");
+            assert_eq!(split_clause_sequence(&source).len(), 1, "{source}");
+        }
+        for text in [
+            "and graveyard perpetually gains \"An ability.\"",
+            "and draw a card. creatures perpetually gain \"An ability.\"",
+            "and nonland cards in your hand gain \"An ability.\"",
+            "and \"creatures perpetually gain\" a keyword",
+        ] {
+            assert!(!starts_perpetual_subject_conjunct(text), "{text}");
+        }
+        let quoted = "Creatures you control perpetually gain \"Whenever this creature attacks, draw a card, then discard a card.\"";
+        assert_eq!(split_clause_sequence(quoted).len(), 1);
+        let nested = "Creatures you control perpetually gain \"When this creature enters, create a token with \"This token can't block.\"\"";
+        assert_eq!(split_clause_sequence(nested).len(), 1);
     }
 
     /// CR 608.2c: a compound subject joined by a bare "and" is one noun phrase,
