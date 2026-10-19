@@ -12,12 +12,12 @@ use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChooseOneOfKind, ChosenAttribute, CombatHistoryScope, Comparator, ContinuousModification,
-    ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode,
-    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
-    DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
-    ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
-    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
+    ChooseOneOfKind, ChosenAttribute, CoinFlipRun, CombatHistoryScope, Comparator,
+    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
+    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
+    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
+    ObjectProperty, ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
     PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
     SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
@@ -9600,13 +9600,12 @@ fn etb_token_copier_exile_anaphor_binds_created_token() {
 /// per-win/per-head token-rider shape.
 fn collect_through_flip<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
     out.push(&def.effect);
-    match &*def.effect {
-        Effect::FlipCoinUntilLose { win_effect } => collect_through_flip(win_effect, out),
-        Effect::FlipCoins {
-            win_effect: Some(win_effect),
-            ..
-        } => collect_through_flip(win_effect, out),
-        _ => {}
+    if let Effect::FlipCoins {
+        win_effect: Some(win_effect),
+        ..
+    } = &*def.effect
+    {
+        collect_through_flip(win_effect, out);
     }
     if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
         collect_through_flip(inner, out);
@@ -9650,8 +9649,14 @@ fn mirror_march_flip_win_effect_folds_copy_haste_exile_on_last_created() {
     // Structural fold guard (revert-fails Step 2): the per-win riders live inside
     // `win_effect`, NOT as post-loop siblings of the flip effect.
     assert!(
-        matches!(&*exec.effect, Effect::FlipCoinUntilLose { .. }),
-        "top-level effect must be FlipCoinUntilLose"
+        matches!(
+            &*exec.effect,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                ..
+            }
+        ),
+        "top-level effect must be FlipCoins {{ flips: UntilLoss, .. }}"
     );
     assert!(
         exec.sub_ability.is_none(),
@@ -9722,8 +9727,16 @@ fn flip_coins_present_tense_win_effect_folds_last_created_riders() {
     let exec = def.execute.as_ref().expect("execute must be Some");
 
     assert!(
-        matches!(&*exec.effect, Effect::FlipCoins { .. }),
-        "top-level effect must be FlipCoins"
+        matches!(
+            &*exec.effect,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 }
+                },
+                ..
+            }
+        ),
+        "top-level effect must be FlipCoins {{ flips: Exactly {{ count: Fixed 2 }}, .. }}"
     );
     assert!(
         exec.sub_ability.is_none(),
@@ -38712,7 +38725,8 @@ fn chain_creates_reflexive_ability_descends_nested_definitions() {
     let flip_coin = |win: AbilityDefinition| {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(win)),
                 lose_effect: None,
                 flipper: TargetFilter::Controller,

@@ -7,7 +7,7 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityDefinition, CoinFlipResult, CoinFlipRun, Effect, EffectError, EffectKind,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
@@ -387,46 +387,21 @@ fn complete_run(
 
 /// CR 705: Flip coins and execute the win/lose branches.
 ///
-/// One dispatch target for every coin-flip effect: each current `Effect` variant maps to
-/// a [`CoinFlipRun`] plus its branches and flipper.
+/// The one dispatch target for every coin-flip effect: [`Effect::FlipCoins`] carries the
+/// [`CoinFlipRun`] plus its branches and flipper.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 705.2: "flip a coin until you lose a flip" is always flipped by the controller.
-    let controller_flipper = TargetFilter::Controller;
-    let (flips, win_effect, lose_effect, flipper) = match &ability.effect {
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            flipper,
-        } => (
-            CoinFlipRun::single(),
-            win_effect.as_deref(),
-            lose_effect.as_deref(),
-            flipper,
-        ),
-        Effect::FlipCoins {
-            count,
-            win_effect,
-            lose_effect,
-            flipper,
-        } => (
-            CoinFlipRun::Exactly {
-                count: count.clone(),
-            },
-            win_effect.as_deref(),
-            lose_effect.as_deref(),
-            flipper,
-        ),
-        Effect::FlipCoinUntilLose { win_effect } => (
-            CoinFlipRun::UntilLoss,
-            Some(&**win_effect),
-            None,
-            &controller_flipper,
-        ),
-        _ => return Err(EffectError::MissingParam("FlipCoins".to_string())),
+    let Effect::FlipCoins {
+        flips,
+        win_effect,
+        lose_effect,
+        flipper,
+    } = &ability.effect
+    else {
+        return Err(EffectError::MissingParam("FlipCoins".to_string()));
     };
 
     // CR 705.2: "only the player who flips a coin wins or loses the flip." The
@@ -447,7 +422,7 @@ pub fn resolve(
 
     // CR 107.1b + CR 608.2h: the flip count is resolved once, in the ability's
     // context, when the run starts; a negative result becomes zero.
-    let kind = match &flips {
+    let kind = match flips {
         CoinFlipRun::Exactly { count } => PendingCoinFlipKind::Exactly {
             remaining: resolve_quantity_with_targets(state, count, ability).max(0) as u32,
         },
@@ -469,8 +444,8 @@ pub fn resolve(
         flipper,
         targets: &ability.targets,
         chain_root_targets: &ability.context.chain_root_targets,
-        win_effect,
-        lose_effect,
+        win_effect: win_effect.as_deref(),
+        lose_effect: lose_effect.as_deref(),
     };
     drive_flip_run(state, &run, FlipRunStart::Fresh(kind), test, events)?;
     Ok(())
@@ -560,7 +535,8 @@ mod tests {
     fn flip_coin_emits_event() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: None,
                 flipper: crate::types::ability::TargetFilter::Controller,
@@ -597,7 +573,8 @@ mod tests {
         ));
 
         let ability = ResolvedAbility::new(
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(win_effect),
                 lose_effect: Some(lose_effect),
                 flipper: crate::types::ability::TargetFilter::Controller,
@@ -636,14 +613,17 @@ mod tests {
         }
 
         let ability = ResolvedAbility::new(
-            Effect::FlipCoinUntilLose {
-                win_effect: Box::new(AbilityDefinition::new(
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                win_effect: Some(Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
                     },
-                )),
+                ))),
+                lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -677,7 +657,9 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 5 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 5 },
+                },
                 win_effect: None,
                 lose_effect: None,
                 flipper: crate::types::ability::TargetFilter::Controller,
@@ -701,7 +683,9 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 0 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 0 },
+                },
                 win_effect: None,
                 lose_effect: None,
                 flipper: crate::types::ability::TargetFilter::Controller,
@@ -737,7 +721,9 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 4 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 4 },
+                },
                 win_effect: Some(win_effect),
                 lose_effect: None,
                 flipper: crate::types::ability::TargetFilter::Controller,
@@ -780,7 +766,9 @@ mod tests {
         ));
         let ability = ResolvedAbility::new(
             Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 8 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 8 },
+                },
                 win_effect: Some(win_effect),
                 lose_effect: None,
                 flipper: crate::types::ability::TargetFilter::Controller,
@@ -805,7 +793,7 @@ mod tests {
 
     // --- Issue #432: Ral, Monsoon Mage coin-flip transform ---------------------
     //
-    // Ral's trigger is `FlipCoin { win_effect, lose_effect }` carried on an
+    // Ral's trigger is a single-flip `FlipCoins { win_effect, lose_effect }` carried on an
     // `AbilityDefinition` whose own `sub_ability` is the return-transformed
     // `ChangeZone` gated by `IfYouDo`. `win_effect` is an OPTIONAL
     // `ChangeZone(Exile, SelfRef)` ("you may exile Ral"). The handler used to
@@ -879,7 +867,7 @@ mod tests {
     }
 
     /// Reproduce Ral's parsed trigger `execute` `AbilityDefinition`:
-    /// `FlipCoin` whose `win_effect` is an optional self-exile, with the
+    /// Single-flip `FlipCoins` whose `win_effect` is an optional self-exile, with the
     /// return-transformed `ChangeZone` as the definition's `sub_ability`,
     /// gated `IfYouDo`.
     fn ral_trigger_definition() -> AbilityDefinition {
@@ -938,7 +926,8 @@ mod tests {
         };
         let mut def = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(win_effect),
                 lose_effect: Some(lose_effect),
                 flipper: crate::types::ability::TargetFilter::Controller,
@@ -967,7 +956,7 @@ mod tests {
             "expected OptionalEffectChoice, got {:?}",
             state.waiting_for
         );
-        // The premature `EffectResolved` guard: while suspended, FlipCoin must
+        // The premature `EffectResolved` guard: while suspended, FlipCoins must
         // NOT have reported itself resolved.
         assert!(
             !events.iter().any(|e| matches!(
@@ -1085,9 +1074,13 @@ mod tests {
 
         let trig_def = parse_trigger_line(KRARK_TRIGGER, "Krark, the Thumbless");
         let execute = trig_def.execute.as_ref().unwrap();
-        let Effect::FlipCoin { lose_effect, .. } = execute.effect.as_ref() else {
-            panic!("expected FlipCoin");
+        let Effect::FlipCoins {
+            flips, lose_effect, ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected FlipCoins");
         };
+        assert!(flips.is_single_flip(), "Krark flips a single coin");
         let lose = lose_effect.as_ref().unwrap();
         match lose.effect.as_ref() {
             Effect::Bounce { target, .. } => {
@@ -1295,14 +1288,16 @@ mod tests {
             .execute
             .as_ref()
             .expect("Krark trigger should have execute ability");
-        let Effect::FlipCoin {
+        let Effect::FlipCoins {
+            flips,
             win_effect,
             lose_effect,
             ..
         } = execute.effect.as_ref()
         else {
-            panic!("expected FlipCoin execute, got {:?}", execute.effect);
+            panic!("expected FlipCoins execute, got {:?}", execute.effect);
         };
+        assert!(flips.is_single_flip(), "Krark flips a single coin");
         let win = win_effect.as_ref().expect("win branch should be populated");
         let lose = lose_effect
             .as_ref()
@@ -1349,15 +1344,16 @@ mod tests {
     // player flips a coin", the SUBJECT (the casting player) must flip, and the
     // recorded `CoinFlipped` and the win/lose outcome belong to that player — not
     // the enchantment/source controller. The parser binds this as
-    // `FlipCoin { flipper: TriggeringPlayer }` (see imperative.rs parser tests);
+    // single-flip `FlipCoins { flipper: TriggeringPlayer }` (see imperative.rs parser tests);
     // these tests assert the runtime resolver honors it.
 
-    /// Build the Mirrored Depths flip ability: `FlipCoin { flipper:
+    /// Build the Mirrored Depths flip ability: `FlipCoins { flipper:
     /// TriggeringPlayer }` whose lose branch counters the cast spell. The flip
     /// effect's controller is P0 (the enchantment owner); a SpellCast event names
     /// the actual caster.
     fn triggering_player_flip(lose_effect: Option<Box<AbilityDefinition>>) -> Effect {
-        Effect::FlipCoin {
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
             win_effect: None,
             lose_effect,
             flipper: TargetFilter::TriggeringPlayer,
@@ -1486,7 +1482,8 @@ mod tests {
 
         let mut def = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
@@ -1520,24 +1517,44 @@ mod tests {
     fn flip_coin_flipper_serde_back_compat_and_roundtrip() {
         use crate::types::ability::Effect;
 
-        // CR 705.2: legacy serialized `FlipCoin` with no `flipper` field
-        // deserializes to the Controller default.
-        let legacy: Effect =
-            serde_json::from_str(r#"{"type":"FlipCoin","win_effect":null,"lose_effect":null}"#)
-                .expect("legacy FlipCoin without flipper must deserialize");
+        // (a) CR 705.2: a current `FlipCoins` with no `flipper` field deserializes to
+        // the Controller default.
+        let current: Effect = serde_json::from_str(
+            r#"{"type":"FlipCoins","flips":{"type":"Exactly","count":{"type":"Fixed","value":1}},"win_effect":null,"lose_effect":null}"#,
+        )
+        .expect("current FlipCoins without flipper must deserialize");
         assert!(
             matches!(
-                legacy,
-                Effect::FlipCoin {
+                current,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    },
                     flipper: TargetFilter::Controller,
                     ..
                 }
             ),
-            "missing flipper must default to Controller, got {legacy:?}"
+            "missing flipper must default to Controller, got {current:?}"
+        );
+        let until_loss: Effect =
+            serde_json::from_str(r#"{"type":"FlipCoins","flips":{"type":"UntilLoss"}}"#)
+                .expect("an UntilLoss run with no branches must deserialize");
+        assert!(
+            matches!(
+                until_loss,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::UntilLoss,
+                    win_effect: None,
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                }
+            ),
+            "got {until_loss:?}"
         );
 
-        // The default flipper is skipped on serialize (back-compatible output).
-        let controller_flip = Effect::FlipCoin {
+        // (b) The default flipper is skipped on serialize (back-compatible output).
+        let controller_flip = Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
             win_effect: None,
             lose_effect: None,
             flipper: TargetFilter::Controller,
@@ -1548,8 +1565,9 @@ mod tests {
             "default Controller flipper must be omitted from JSON, got {json}"
         );
 
-        // A non-default flipper round-trips.
-        let subject_flip = Effect::FlipCoin {
+        // (c) A non-default flipper round-trips.
+        let subject_flip = Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
             win_effect: None,
             lose_effect: None,
             flipper: TargetFilter::TriggeringPlayer,
@@ -1562,20 +1580,27 @@ mod tests {
         let back: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(back, subject_flip, "non-default flipper must round-trip");
 
-        // FlipCoins mirrors the same back-compat behavior.
-        let legacy_n: Effect = serde_json::from_str(
+        // (d) Card data fails closed: the retired shapes are `Err` at the type level. Their
+        // only reader is the persisted-state migration (`migrate_legacy_coin_flip_effects`);
+        // an alias or a `flips` default here would let them parse silently, and a legacy
+        // `FlipCoins { count }` would read as one flip because `count` is ignored.
+        for legacy in [
+            r#"{"type":"FlipCoin","win_effect":null,"lose_effect":null}"#,
+            r#"{"type":"FlipCoinUntilLose","win_effect":{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1}}}}"#,
             r#"{"type":"FlipCoins","count":{"type":"Fixed","value":3},"win_effect":null,"lose_effect":null}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Effect>(legacy).is_err(),
+                "retired coin-flip shape must be rejected at the type level: {legacy}"
+            );
+        }
+        let missing_flips = serde_json::from_str::<Effect>(
+            r#"{"type":"FlipCoins","count":{"type":"Fixed","value":3}}"#,
         )
-        .expect("legacy FlipCoins without flipper must deserialize");
+        .unwrap_err();
         assert!(
-            matches!(
-                legacy_n,
-                Effect::FlipCoins {
-                    flipper: TargetFilter::Controller,
-                    ..
-                }
-            ),
-            "missing FlipCoins flipper must default to Controller, got {legacy_n:?}"
+            missing_flips.to_string().contains("flips"),
+            "a legacy counted FlipCoins fails on the missing `flips` field, got {missing_flips}"
         );
     }
 
@@ -1587,7 +1612,8 @@ mod tests {
         use crate::types::ability::TargetFilter;
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
@@ -1628,7 +1654,8 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
@@ -1932,8 +1959,11 @@ mod tests {
     }
 
     fn until_loss_gain_life() -> Effect {
-        Effect::FlipCoinUntilLose {
-            win_effect: Box::new(gain_life_definition(1)),
+        Effect::FlipCoins {
+            flips: CoinFlipRun::UntilLoss,
+            win_effect: Some(Box::new(gain_life_definition(1))),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
         }
     }
 
@@ -1991,6 +2021,78 @@ mod tests {
         assert!(reached, "some seed in 0..64 must win at least two flips");
     }
 
+    /// Engine contract (K-9; no printed card has this shape): an `UntilLoss` run's
+    /// `lose_effect` runs as the losing flip settles (CR 705.2), before the owed
+    /// `win_effect` rewards are paid (CR 608.2c: the reward instruction follows the
+    /// flipping instruction). Win GainLife 1, lose GainLife 7.
+    #[test]
+    fn until_loss_lose_branch_runs_at_the_loss_before_rewards() {
+        let mut reached = false;
+        for seed in 0..64u64 {
+            let mut state = GameState::new_two_player(42);
+            state.rng = crate::types::game_state::GameRng::seed_from_u64(seed);
+            let start_life = state.players[0].life;
+            let ability = ResolvedAbility::new(
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::UntilLoss,
+                    win_effect: Some(Box::new(gain_life_definition(1))),
+                    lose_effect: Some(Box::new(gain_life_definition(7))),
+                    flipper: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let flips = coin_flip_results(&events);
+            let wins = flips.iter().filter(|won| **won).count();
+            // Reach guard: at least one owed reward, so the order is observable.
+            if wins < 1 {
+                continue;
+            }
+            reached = true;
+
+            assert_eq!(
+                flips.last(),
+                Some(&false),
+                "the run ends on the losing flip, got {flips:?}"
+            );
+            let last_flip = events
+                .iter()
+                .rposition(|e| matches!(e, GameEvent::CoinFlipped { .. }))
+                .expect("the run flipped");
+            let life_changes: Vec<(usize, i32)> = events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, e)| match e {
+                    GameEvent::LifeChanged { amount, .. } => Some((index, *amount)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                life_changes.len(),
+                wins + 1,
+                "one lose-branch change plus one reward per won flip (seed {seed}, flips {flips:?})"
+            );
+            let (lose_index, lose_amount) = life_changes[0];
+            assert_eq!(lose_amount, 7, "the lose branch runs first");
+            assert!(
+                lose_index > last_flip,
+                "the lose branch runs once the losing flip has settled"
+            );
+            assert!(
+                life_changes[1..].iter().all(|(_, amount)| *amount == 1),
+                "every later change is a +1 reward, got {life_changes:?}"
+            );
+            assert_eq!(state.players[0].life - start_life, wins as i32 + 7);
+            assert_eq!(coin_run_markers(&events, ObjectId(1)), 1);
+            break;
+        }
+        assert!(reached, "some seed in 0..64 must win at least one flip");
+    }
+
     /// CR 608.2h + CR 107.1b: "flip N coins" determines N once, when the run
     /// starts. A won flip that draws a card grows the hand, but the run still
     /// flips exactly the count the hand size gave at the start.
@@ -2028,9 +2130,11 @@ mod tests {
 
             let ability = ResolvedAbility::new(
                 Effect::FlipCoins {
-                    count: QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize {
-                            player: PlayerScope::Controller,
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
                         },
                     },
                     win_effect: Some(Box::new(AbilityDefinition::new(
@@ -2168,7 +2272,8 @@ mod tests {
         let mut events = Vec::new();
         resolve(
             &mut state,
-            &ability(Effect::FlipCoin {
+            &ability(Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
@@ -2185,7 +2290,9 @@ mod tests {
         resolve(
             &mut state,
             &ability(Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 3 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 3 },
+                },
                 win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
@@ -2202,7 +2309,9 @@ mod tests {
         resolve(
             &mut state,
             &ability(Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 0 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 0 },
+                },
                 win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,

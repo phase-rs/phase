@@ -52,17 +52,18 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     is_oneshot_target_source_prevent_shape, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AttachCardinality, AttachSelection, AttachmentReferent, BounceSelection,
-    CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
-    ControlWindow, ControllerRef, CopyRetargetPermission, CountBinding, CountScope,
-    CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp, Duration,
-    Effect, EffectScope, ExtraPhaseAnchor, ExtraPhaseRecipient, FaceDownProfile, FilterProp,
-    ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition, MassLibraryShuffleMode,
-    MultiTargetSpec, ObjectSelectionCardinality, ObjectSelectionEligibility, OutsideGameSourcePool,
-    PerPlayerScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount,
-    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode,
-    ReturnResultReadSpec, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
-    TapStateChange, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
+    CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, CoinFlipRun,
+    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission, CountBinding,
+    CountScope, CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp,
+    Duration, Effect, EffectScope, ExtraPhaseAnchor, ExtraPhaseRecipient, FaceDownProfile,
+    FilterProp, ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition,
+    MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
+    PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
+    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
+    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
+    ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -13535,7 +13536,9 @@ pub(super) fn parse_imperative_family_ast(
             // "until lose" (since "until lose" always has "a coin"), but
             // before the 1-coin fallback.
             if let Ok((_, ast)) = value::<_, _, OracleError<'_>, _>(
-                ImperativeFamilyAst::FlipCoinUntilLose,
+                ImperativeFamilyAst::FlipCoins {
+                    flips: CoinFlipRun::UntilLoss,
+                },
                 alt((
                     tag::<_, _, OracleError<'_>>("flip a coin until you lose a flip"),
                     tag("flips a coin until they lose a flip"),
@@ -13550,7 +13553,9 @@ pub(super) fn parse_imperative_family_ast(
                 return Some(ast);
             }
             value::<_, _, OracleError<'_>, _>(
-                ImperativeFamilyAst::FlipCoin,
+                ImperativeFamilyAst::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                },
                 alt((
                     tag::<_, _, OracleError<'_>>("flip a coin"),
                     tag("flips a coin"),
@@ -14432,7 +14437,7 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
 /// CR 705.1 + CR 107.1: Parse "flip N coins" / "flip X coins" / "flip two coins" —
 /// the N-coin form. Delegates the count to `parse_count_expr`, covering digit,
 /// word-number, and `X` forms uniformly. Returns None for "flip a coin" / "flip one coin"
-/// so the caller falls back to `FlipCoin` (the existing 1-flip shape).
+/// so the caller falls back to the single-flip `FlipCoins` (`CoinFlipRun::single()`).
 fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("flip "), tag("flips ")))
         .parse(lower)
@@ -14443,7 +14448,7 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
     // `parse_count_expr` returns the remainder with leading whitespace trimmed
     // ("five coins" → rest = "coins"), so we match "coins"/"coin" without the
     // leading space. Word-boundary termination rejects "coinsomething".
-    // "flip a coin" is handled by FlipCoin; "flip one coin" would semantically
+    // "flip a coin" is handled by the single-flip `FlipCoins`; "flip one coin" would semantically
     // match but is never printed.
     let (after_noun, _) = alt((tag::<_, _, OracleError<'_>>("coins"), tag("coin")))
         .parse(after)
@@ -14453,12 +14458,15 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
         return None;
     }
 
-    // Reject count == 1 so "flip 1 coin" (if ever printed) prefers FlipCoin.
+    // Reject count == 1 so "flip 1 coin" (if ever printed) prefers the single-flip
+    // form. This is the parser invariant behind `CoinFlipRun::is_single_flip`.
     if matches!(expr, QuantityExpr::Fixed { value: 1 }) {
         return None;
     }
 
-    Some(ImperativeFamilyAst::FlipCoins { count: expr })
+    Some(ImperativeFamilyAst::FlipCoins {
+        flips: CoinFlipRun::Exactly { count: expr },
+    })
 }
 
 /// CR 706.1: Parse "roll N six-sided dice" / "roll X d12" / "roll two d6" —
@@ -14922,7 +14930,7 @@ fn parse_die_result_row<'a>(text: &'a str, separator: &'static str) -> Option<(u
 ///
 /// Only the "if you win/lose the flip" wording is matched here. This phrasing is
 /// part of the same one-shot resolution as the flip itself (Krark, the
-/// Thumbless), so it folds into the preceding `FlipCoin`'s
+/// Thumbless), so it folds into the preceding `FlipCoins`'s
 /// `win_effect`/`lose_effect` and resolves inline.
 ///
 /// The superficially-similar "WHEN you win/lose the flip, [effect]" wording
@@ -16206,28 +16214,25 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 705.2: the bare imperative lowers with `flipper = Controller`; a
         // player subject ("that player flips a coin") is stamped onto `flipper`
         // afterward by `inject_subject_target`.
-        ImperativeFamilyAst::FlipCoin => Effect::FlipCoin {
-            win_effect: None,
-            lose_effect: None,
-            flipper: TargetFilter::Controller,
-        },
-        ImperativeFamilyAst::FlipCoins { count } => Effect::FlipCoins {
-            count,
-            win_effect: None,
-            lose_effect: None,
-            flipper: TargetFilter::Controller,
-        },
-        ImperativeFamilyAst::FlipCoinUntilLose => Effect::FlipCoinUntilLose {
-            // Stub — subsequent "For each flip you won, ..." clauses are
-            // consolidated into this by consolidate_die_and_coin_defs.
-            win_effect: Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Unimplemented {
-                    name: "flip_coin_until_lose_stub".to_string(),
-                    description: Some("pending consolidation".to_string()),
-                },
-            )),
-        },
+        ImperativeFamilyAst::FlipCoins { flips } => {
+            // CR 705.2: `UntilLoss` carries a stub `win_effect` — subsequent "For each
+            // flip you won, ..." clauses are consolidated into it by
+            // `consolidate_die_and_coin_defs`. `Exactly` branches are attached the same
+            // way, from a following sentence ("for each heads …").
+            let win_effect = match flips {
+                CoinFlipRun::UntilLoss => Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::unimplemented("flip_coin_until_lose_stub", "pending consolidation"),
+                ))),
+                CoinFlipRun::Exactly { .. } => None,
+            };
+            Effect::FlipCoins {
+                flips,
+                win_effect,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            }
+        }
         ImperativeFamilyAst::Put(ast) => lower_put_ast(ast),
         ImperativeFamilyAst::YouMay { text } => super::parse_effect(&text),
         // CR 122.1: Player counter manipulation. Target is set by subject injection.
@@ -24822,9 +24827,9 @@ mod tests {
     }
 
     /// Depth-first search for the first effect matching `pred`, descending
-    /// through `sub_ability`, `else_ability`, AND `FlipCoin` win/lose branches
+    /// through `sub_ability`, `else_ability`, AND `FlipCoins` win/lose branches
     /// (each branch is a boxed `AbilityDefinition`). Needed because the shipped
-    /// Desperate Gambit text produces TWO sibling `FlipCoin` nodes — one per
+    /// Desperate Gambit text produces TWO sibling `FlipCoins` nodes — one per
     /// "If you win / If you lose" sentence — each with only one populated branch.
     #[cfg(test)]
     fn find_effect_in_def<'a>(
@@ -24834,7 +24839,7 @@ mod tests {
         if pred(&def.effect) {
             return Some(&def.effect);
         }
-        if let Effect::FlipCoin {
+        if let Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -26800,7 +26805,7 @@ mod tests {
 
     /// CR 706.1: "Roll two six-sided dice" is the multi-dice word form —
     /// parses to `RollDie { count: Fixed(2), sides: 6 }`. Mirrors the
-    /// `FlipCoins { count }` precedent for the dice axis.
+    /// `FlipCoins { flips: Exactly { count } }` precedent for the dice axis.
     #[test]
     fn roll_two_six_sided_dice_parses_to_roll_die_count_two() {
         let def = super::super::parse_effect_chain("Roll two six-sided dice.", AbilityKind::Spell);
@@ -27564,7 +27569,7 @@ mod tests {
         );
     }
 
-    /// CR 705.1 + CR 705.2: Subject-prefixed coin flips lower to `FlipCoin` AND
+    /// CR 705.1 + CR 705.2: Subject-prefixed coin flips lower to a single-flip `FlipCoins` AND
     /// carry the subject as the typed `flipper` so the right player flips and
     /// wins/loses (CR 705.2: "only the player who flips wins or loses the flip").
     ///   - "you flip a coin" → `flipper = Controller` (the default).
@@ -27587,12 +27592,13 @@ mod tests {
         assert!(
             matches!(
                 &*you.effect,
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips,
                     flipper: TargetFilter::Controller,
                     ..
-                }
+                } if flips.is_single_flip()
             ),
-            "expected FlipCoin {{ flipper: Controller }}, got {:?}",
+            "expected single-flip FlipCoins {{ flipper: Controller }}, got {:?}",
             you.effect
         );
         assert_eq!(you.player_scope, None);
@@ -27608,12 +27614,13 @@ mod tests {
             assert!(
                 matches!(
                     &*ability.effect,
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
+                        flips,
                         flipper: TargetFilter::ParentTargetController,
                         ..
-                    }
+                    } if flips.is_single_flip()
                 ),
-                "expected FlipCoin {{ flipper: ParentTargetController }} for {text:?}, got {:?}",
+                "expected single-flip FlipCoins {{ flipper: ParentTargetController }} for {text:?}, got {:?}",
                 ability.effect
             );
         }
@@ -27629,12 +27636,13 @@ mod tests {
         assert!(
             matches!(
                 &*each.effect,
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips,
                     flipper: TargetFilter::Controller,
                     ..
-                }
+                } if flips.is_single_flip()
             ),
-            "expected FlipCoin {{ flipper: Controller }} for each-player, got {:?}",
+            "expected single-flip FlipCoins {{ flipper: Controller }} for each-player, got {:?}",
             each.effect
         );
         assert_eq!(
@@ -27645,7 +27653,7 @@ mod tests {
     }
 
     /// CR 705.1 + CR 705.2: End-to-end — a trigger whose effect is "that player
-    /// flips a coin" (Mirrored Depths, Planar Chaos) must emit a `FlipCoin` whose
+    /// flips a coin" (Mirrored Depths, Planar Chaos) must emit a `FlipCoins` whose
     /// `flipper` is the TRIGGERING player, not the source's controller. This is
     /// the heart of the maintainer's CHANGES_REQUESTED: a non-controller who casts
     /// must be the one who flips and wins/loses (the runtime consequence is
@@ -27654,9 +27662,7 @@ mod tests {
     fn trigger_subject_flip_a_coin_binds_triggering_player_flipper() {
         fn flip_coin_flipper(def: &AbilityDefinition) -> Option<&TargetFilter> {
             match &*def.effect {
-                Effect::FlipCoin { flipper, .. } | Effect::FlipCoins { flipper, .. } => {
-                    Some(flipper)
-                }
+                Effect::FlipCoins { flipper, .. } => Some(flipper),
                 _ => def.sub_ability.as_ref().and_then(|s| flip_coin_flipper(s)),
             }
         }
@@ -27675,7 +27681,7 @@ mod tests {
                 .triggers
                 .iter()
                 .find_map(|t| t.execute.as_ref().and_then(|e| flip_coin_flipper(e)))
-                .unwrap_or_else(|| panic!("{name}: trigger must lower to FlipCoin, got:\n{parsed:#?}"));
+                .unwrap_or_else(|| panic!("{name}: trigger must lower to FlipCoins, got:\n{parsed:#?}"));
             assert_eq!(
                 *flipper,
                 TargetFilter::TriggeringPlayer,
@@ -27685,10 +27691,10 @@ mod tests {
     }
 
     /// CR 710.4 vs CR 705.1: The Kamigawa "flip <permanent>" flip-card mechanic
-    /// ("flip ~" / "flip it") must NOT be mis-routed to the coin-flip `FlipCoin`
+    /// ("flip ~" / "flip it") must NOT be mis-routed to the coin-flip `FlipCoins`
     /// effect — the flip arm only matches when "a coin" is present. Adding "flip"
     /// to `PREDICATE_VERBS` (so subject-prefixed coin flips strip) must not
-    /// regress this: a bare object-form "flip" never produces FlipCoin.
+    /// regress this: a bare object-form "flip" never produces FlipCoins.
     #[test]
     fn flip_permanent_transform_is_not_coin_flip() {
         for text in ["flip ~", "flip it"] {
@@ -27699,8 +27705,8 @@ mod tests {
                 &mut ctx,
             );
             assert!(
-                !matches!(&*ability.effect, Effect::FlipCoin { .. }),
-                "object-form flip {text:?} must not route to FlipCoin, got {:?}",
+                !matches!(&*ability.effect, Effect::FlipCoins { .. }),
+                "object-form flip {text:?} must not route to FlipCoins, got {:?}",
                 ability.effect
             );
         }

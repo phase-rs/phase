@@ -1477,11 +1477,15 @@ fn targeted_player_conjunct_binds_through_a_target_only_head() {
         assert!(
             matches!(
                 &*body.effect,
-                Effect::FlipCoin { .. }
-                    | Effect::Choose {
-                        choice_type: ChoiceType::NumberRange { .. },
-                        ..
-                    }
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    },
+                    ..
+                } | Effect::Choose {
+                    choice_type: ChoiceType::NumberRange { .. },
+                    ..
+                }
             ),
             "{text:?}: the body is the parsed verb, got {:#?}",
             body.effect
@@ -14295,7 +14299,11 @@ fn effect_krark_full_flip_coin_ir_embeds_win_retarget() {
         .clauses
         .iter()
         .find_map(|c| {
-            if let Effect::FlipCoin {
+            if let Effect::FlipCoins {
+                flips:
+                    CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
                 win_effect: Some(win),
                 ..
             } = &c.parsed.effect
@@ -14305,7 +14313,7 @@ fn effect_krark_full_flip_coin_ir_embeds_win_retarget() {
                 None
             }
         })
-        .expect("win-branch FlipCoin clause");
+        .expect("win-branch single-flip FlipCoins clause");
     if let Effect::CopySpell { retarget, .. } = win_branch.effect.as_ref() {
         assert_eq!(
             *retarget,
@@ -14324,14 +14332,19 @@ fn effect_krark_full_flip_coin_chain_preserves_win_retarget() {
     let text = "flip a coin. If you lose the flip, return that spell to its owner's hand. \
             If you win the flip, copy that spell, and you may choose new targets for the copy.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
+        flips,
         win_effect,
         lose_effect,
         ..
     } = &*def.effect
     else {
-        panic!("expected FlipCoin, got {:?}", def.effect);
+        panic!("expected FlipCoins, got {:?}", def.effect);
     };
+    assert!(
+        flips.is_single_flip(),
+        "expected a single flip, got {flips:?}"
+    );
     let win = win_effect.as_ref().expect("win branch");
     let lose = lose_effect.as_ref().expect("lose branch");
     assert!(
@@ -36545,7 +36558,7 @@ fn ral_zarek_coin_result_shell_preserves_singular_extra_turn_count() {
         AbilityKind::Activated,
     );
     let Effect::FlipCoins {
-        count,
+        flips: CoinFlipRun::Exactly { count },
         win_effect: Some(win_effect),
         lose_effect: None,
         ..
@@ -42436,14 +42449,22 @@ fn effect_flip_coin_branches_keep_next_time_replacements() {
             "flip a coin. if you win the flip, the next time that creature would deal combat damage this turn, it deals double that damage instead. if you lose the flip, the next time that creature would deal combat damage this turn, prevent that damage.",
             AbilityKind::Spell,
         );
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
+        flips,
         win_effect: Some(win),
         lose_effect: Some(lose),
         ..
     } = def.effect.as_ref()
     else {
-        panic!("expected FlipCoin with both branches, got {:?}", def.effect);
+        panic!(
+            "expected FlipCoins with both branches, got {:?}",
+            def.effect
+        );
     };
+    assert!(
+        flips.is_single_flip(),
+        "expected a single flip, got {flips:?}"
+    );
     assert!(matches!(
         win.effect.as_ref(),
         Effect::AddTargetReplacement { replacement, target }
@@ -49927,7 +49948,7 @@ fn ral_zarek_flip_five_coins_skip_turn_per_heads() {
         );
 
     let Effect::FlipCoins {
-        count,
+        flips: CoinFlipRun::Exactly { count },
         win_effect,
         lose_effect,
         ..
@@ -49981,15 +50002,130 @@ fn flip_n_coins_emits_flip_coins_variant() {
         matches!(
             &*def.effect,
             Effect::FlipCoins {
-                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                flips: CoinFlipRun::Exactly {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                },
                 win_effect: None,
                 lose_effect: None,
                 ..
             }
         ),
-        "expected FlipCoins count=2, got {:?}",
+        "expected FlipCoins flips=Exactly(2), got {:?}",
         def.effect
     );
+}
+
+/// CR 705.1 + CR 608.2c: `consolidate_die_and_coin_defs` keeps each run shape's
+/// pre-merge absorb membership, decided by the head's `flips`.
+///
+///   * A single flip ("Flip a coin.") is a complete instruction. A following
+///     sentence ("Draw a card.") is a sibling instruction, not a per-heads
+///     branch, so it stays the `sub_ability` — the `!is_single_flip()` guard on the
+///     `Exactly` absorb. Dropping the guard makes `win_effect == Some(Draw)`.
+///   * A multi-flip `Exactly` run absorbs its following clause as the per-heads
+///     branch (positive sibling: the guard must not disable this).
+///   * An `UntilLoss` run absorbs its per-win clause chain (positive sibling).
+///   * A single flip still merges explicit "if you win/lose the flip" branch stubs.
+#[test]
+fn single_flip_does_not_absorb_a_following_clause() {
+    // Reach guard + negative: the single flip stays bare and `Draw` is its sibling.
+    let def = parse_effect_chain("Flip a coin. Draw a card.", AbilityKind::Spell);
+    let Effect::FlipCoins {
+        flips,
+        win_effect,
+        lose_effect,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected FlipCoins, got {:?}", def.effect);
+    };
+    assert!(flips.is_single_flip(), "expected a single flip: {flips:?}");
+    assert!(
+        win_effect.is_none() && lose_effect.is_none(),
+        "a following sentence must not become a per-heads branch, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("`Draw` stays the single flip's sub_ability");
+    assert!(
+        matches!(&*sub.effect, Effect::Draw { .. }),
+        "expected Draw sub_ability, got {:?}",
+        sub.effect
+    );
+
+    // Positive sibling: a multi-flip run absorbs its following clause.
+    let def = parse_effect_chain("Flip two coins. Draw a card.", AbilityKind::Spell);
+    let Effect::FlipCoins {
+        flips: CoinFlipRun::Exactly { count },
+        win_effect: Some(win),
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected Exactly FlipCoins with a win branch, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 2 });
+    assert!(
+        matches!(&*win.effect, Effect::Draw { .. }),
+        "the multi-flip run absorbs the following clause, got {:?}",
+        win.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "the clause moved into win_effect"
+    );
+
+    // Positive sibling: an until-loss run absorbs its per-win clause.
+    let def = parse_effect_chain(
+        "Flip a coin until you lose a flip. For each flip you won, draw a card.",
+        AbilityKind::Spell,
+    );
+    let Effect::FlipCoins {
+        flips: CoinFlipRun::UntilLoss,
+        win_effect: Some(win),
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected UntilLoss FlipCoins with a win branch, got {:?}",
+            def.effect
+        );
+    };
+    assert!(
+        matches!(&*win.effect, Effect::Draw { .. }),
+        "the until-loss run absorbs its per-win clause, got {:?}",
+        win.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "the clause moved into win_effect"
+    );
+
+    // Positive sibling: a single flip still merges explicit win/lose branch stubs.
+    let def = parse_effect_chain(
+        "Flip a coin. If you win the flip, draw a card. If you lose the flip, discard a card.",
+        AbilityKind::Spell,
+    );
+    let Effect::FlipCoins {
+        flips,
+        win_effect: Some(win),
+        lose_effect: Some(lose),
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected a single flip with both branches, got {:?}",
+            def.effect
+        );
+    };
+    assert!(flips.is_single_flip(), "expected a single flip: {flips:?}");
+    assert!(matches!(&*win.effect, Effect::Draw { .. }));
+    assert!(matches!(&*lose.effect, Effect::Discard { .. }));
+    assert!(def.sub_ability.is_none());
 }
 
 /// CR 614.10: skipping a future turn replaces that turn with nothing.
@@ -61709,7 +61845,7 @@ fn repeat_process_directive_lose_flip_while_condition() {
 /// Regression (CR 705.2): an inline coin-flip branch whose body is NOT "repeat
 /// this process" is body-gated OUT of the repeat directive — the whole function
 /// returns None so the chunk falls through to the inline coin-flip fold, keeping
-/// Krark / Desperate Gambit / Ral Zarek `FlipCoin.win_effect` branches intact.
+/// Krark / Desperate Gambit / Ral Zarek `FlipCoins.win_effect` branches intact.
 #[test]
 fn repeat_process_directive_ignores_non_repeat_flip_branch() {
     let mut ctx = ParseContext::default();
@@ -62002,7 +62138,10 @@ fn unleash_the_flux_parses_repeat_while_lost_flip() {
     assert!(
         matches!(
             &*flip.effect,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 1 }
+                },
                 win_effect: None,
                 lose_effect: None,
                 ..
@@ -68670,9 +68809,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -73406,7 +73543,8 @@ fn counter_gate_rebind_reaches_reveal_from_hand_on_decline() {
 #[test]
 fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
     let gate_qty = gate_qty_fixture();
-    let mut coin = Effect::FlipCoin {
+    let mut coin = Effect::FlipCoins {
+        flips: CoinFlipRun::single(),
         win_effect: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             event_context_put_counter(TargetFilter::Any),
@@ -73418,7 +73556,7 @@ fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
         flipper: TargetFilter::Controller,
     };
     rebind_event_context_amount_counts(&mut coin, &gate_qty);
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
         win_effect,
         lose_effect,
         ..
@@ -73429,16 +73567,18 @@ fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
     assert_put_counter_rebound(
         &win_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoin::win_effect",
+        "FlipCoins(single)::win_effect",
     );
     assert_put_counter_rebound(
         &lose_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoin::lose_effect",
+        "FlipCoins(single)::lose_effect",
     );
 
     let mut coins = Effect::FlipCoins {
-        count: QuantityExpr::Fixed { value: 2 },
+        flips: CoinFlipRun::Exactly {
+            count: QuantityExpr::Fixed { value: 2 },
+        },
         win_effect: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             event_context_put_counter(TargetFilter::Any),
@@ -73453,27 +73593,30 @@ fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
     assert_put_counter_rebound(
         &win_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoins::win_effect",
+        "FlipCoins(Exactly 2)::win_effect",
     );
 }
 
 #[test]
 fn counter_gate_rebind_reaches_flip_coin_until_lose() {
     let gate_qty = gate_qty_fixture();
-    let mut effect = Effect::FlipCoinUntilLose {
-        win_effect: Box::new(AbilityDefinition::new(
+    let mut effect = Effect::FlipCoins {
+        flips: CoinFlipRun::UntilLoss,
+        win_effect: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             event_context_put_counter(TargetFilter::Any),
-        )),
+        ))),
+        lose_effect: None,
+        flipper: TargetFilter::Controller,
     };
     rebind_event_context_amount_counts(&mut effect, &gate_qty);
-    let Effect::FlipCoinUntilLose { win_effect } = &effect else {
+    let Effect::FlipCoins { win_effect, .. } = &effect else {
         unreachable!()
     };
     assert_put_counter_rebound(
-        &win_effect.effect,
+        &win_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoinUntilLose::win_effect",
+        "FlipCoins(UntilLoss)::win_effect",
     );
 }
 

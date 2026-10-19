@@ -9,11 +9,11 @@
 //! creature (its target was `TriggeringSource`) alongside/instead of the copy
 //! tokens. The parser fix lowers the win clause to `CopyTokenOf` and binds the
 //! "those tokens"/"them" anaphora to the created tokens (`LastCreated`), folded
-//! per-win inside the `FlipCoinUntilLose` win_effect.
+//! per-win inside the `FlipCoins { flips: UntilLoss }` win_effect.
 //!
 //! The same per-win quantifier also trails a win clause: Crazed Firecat's
 //! "Put a +1/+1 counter on this creature for each flip you won." runs its
-//! one-counter placement once per win inside the same `FlipCoinUntilLose` loop.
+//! one-counter placement once per win inside the same `FlipCoins { flips: UntilLoss }` loop.
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 705.2: the flip-until-lose win effect runs once per win.

@@ -3685,23 +3685,19 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::RollDie { count, results, .. } => {
             legacy_quantity_expr(count) || results.iter().any(|r| legacy_definition(&r.effect))
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            flipper,
-        } => odef(win_effect) || odef(lose_effect) || legacy_target_filter(flipper),
         Effect::FlipCoins {
-            count,
+            flips,
             win_effect,
             lose_effect,
             flipper,
         } => {
-            legacy_quantity_expr(count)
+            flips
+                .count_expr()
+                .is_some_and(legacy_quantity_expr)
                 || odef(win_effect)
                 || odef(lose_effect)
                 || legacy_target_filter(flipper)
         }
-        Effect::FlipCoinUntilLose { win_effect } => legacy_definition(win_effect),
         Effect::RevealFromHand {
             filter, on_decline, ..
         } => legacy_target_filter(filter) || odef(on_decline),
@@ -6001,38 +5997,21 @@ fn rw_effect(
             }
             (p, None)
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            flipper: _,
-        } => {
-            let mut p = RwProfile::empty();
-            if let Some(w) = win_effect {
-                walk_definition(w, chain_root, chain_move_owner, pscope, &mut p);
-            }
-            if let Some(l) = lose_effect {
-                walk_definition(l, chain_root, chain_move_owner, pscope, &mut p);
-            }
-            (p, None)
-        }
         Effect::FlipCoins {
-            count,
+            flips,
             win_effect,
             lose_effect,
             flipper: _,
         } => {
-            let mut p = rw_quantity_expr(count);
+            let mut p = flips
+                .count_expr()
+                .map_or_else(RwProfile::empty, rw_quantity_expr);
             if let Some(w) = win_effect {
                 walk_definition(w, chain_root, chain_move_owner, pscope, &mut p);
             }
             if let Some(l) = lose_effect {
                 walk_definition(l, chain_root, chain_move_owner, pscope, &mut p);
             }
-            (p, None)
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            let mut p = RwProfile::empty();
-            walk_definition(win_effect, chain_root, chain_move_owner, pscope, &mut p);
             (p, None)
         }
 
@@ -8344,9 +8323,10 @@ mod tests {
 
     #[test]
     fn base_chaotic_goo_flipcoin_self_counters_clean() {
-        // FlipCoin{win: PutCounter(SelfRef), lose: RemoveCounter(SelfRef)} — no
+        // FlipCoins{win: PutCounter(SelfRef), lose: RemoveCounter(SelfRef)} — no
         // reads ⇒ clean even though the self-writes disable source-independence.
-        let e = Effect::FlipCoin {
+        let e = Effect::FlipCoins {
+            flips: crate::types::ability::CoinFlipRun::single(),
             win_effect: Some(Box::new(def(put_counter(qfix(1), TargetFilter::SelfRef)))),
             lose_effect: Some(Box::new(def(remove_counter(TargetFilter::SelfRef)))),
             flipper: TargetFilter::Controller,
@@ -8354,7 +8334,7 @@ mod tests {
         let p = ability_rw_profile(&ra(e));
         assert!(
             p.writes_self.object_counters,
-            "FlipCoin body descends to self-counter write"
+            "FlipCoins body descends to self-counter write"
         );
         assert!(!profiles_conflict(&p, &se_phase()));
     }
@@ -8369,7 +8349,8 @@ mod tests {
 
     #[test]
     fn base_mana_crypt_flipcoin_player_damage_clean() {
-        let e = Effect::FlipCoin {
+        let e = Effect::FlipCoins {
+            flips: crate::types::ability::CoinFlipRun::single(),
             win_effect: None,
             lose_effect: Some(Box::new(def(Effect::DealDamage {
                 amount: qfix(3),

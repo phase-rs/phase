@@ -1731,9 +1731,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::RollDie { .. } => Axes::CONSERVATIVE,
-        Effect::FlipCoin { .. } => Axes::CONSERVATIVE,
         Effect::FlipCoins { .. } => Axes::CONSERVATIVE,
-        Effect::FlipCoinUntilLose { .. } => Axes::CONSERVATIVE,
         Effect::RingTemptsYou => Axes::NONE,
         Effect::VentureIntoDungeon => Axes::NONE,
         Effect::VentureInto { dungeon: _ } => Axes::NONE,
@@ -7136,9 +7134,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -7550,9 +7546,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }

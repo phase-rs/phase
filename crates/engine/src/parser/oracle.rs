@@ -9211,12 +9211,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
                 resolve_guards_in_ability(execute, None)
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -9228,7 +9223,6 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
                 resolve_guards_in_ability(sub, None);
             }
         }
-        Effect::FlipCoinUntilLose { win_effect } => resolve_guards_in_ability(win_effect, None),
         Effect::RollDie { results, .. } => {
             for branch in results {
                 resolve_guards_in_ability(&mut branch.effect, None);
@@ -9817,7 +9811,7 @@ pub fn parse_oracle_text_traced(
 /// net tests (a node's `duration` beside its `effect`) is an ABILITY-NODE
 /// property, and that module's walk is read-only. A first version walked only
 /// `sub_ability` / `else_ability` and missed three of the corpus's 96
-/// `AddTargetReplacement` nodes (two under `FlipCoin`'s win/lose payloads, one
+/// `AddTargetReplacement` nodes (two under `FlipCoins`'s win/lose payloads, one
 /// under `mode_abilities`). For `mode_abilities` the parser also emits the
 /// refused durations at that position on other effects, so that miss was
 /// reachable rather than theoretical; under the coin-flip payloads the corpus
@@ -10311,12 +10305,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
                 demote_lifetimes_in_ability(execute)
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -10328,7 +10317,6 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
                 demote_lifetimes_in_ability(sub);
             }
         }
-        Effect::FlipCoinUntilLose { win_effect } => demote_lifetimes_in_ability(win_effect),
         Effect::RollDie { results, .. } => {
             for branch in results.iter_mut() {
                 demote_lifetimes_in_ability(&mut branch.effect);
@@ -11172,12 +11160,7 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
                 render_ability_descriptions(b, card_name);
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -11188,9 +11171,6 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
             if let Some(l) = lose_effect.as_mut() {
                 render_ability_descriptions(l, card_name);
             }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            render_ability_descriptions(win_effect, card_name)
         }
         Effect::RevealFromHand { on_decline, .. } => {
             if let Some(d) = on_decline.as_mut() {
@@ -13117,9 +13097,10 @@ mod pipeline_snapshot_tests;
 mod has_unimplemented_wrapper_recursion_tests {
     use super::has_unimplemented;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ChooseOneOfKind, ControllerRef, DelayedTriggerCondition,
-        DieResultBranch, Effect, NestedDefinitionEdge, PileSource, PlayerFilter, PlayerScope,
-        QuantityExpr, TargetFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, CoinFlipRun, ControllerRef,
+        DelayedTriggerCondition, DieResultBranch, Effect, NestedDefinitionEdge, PileSource,
+        PlayerFilter, PlayerScope, QuantityExpr, TargetFilter, VoteSubject, VoteTally,
+        VoteVisibility, VoterScope,
     };
     use crate::types::phase::Phase;
 
@@ -13214,7 +13195,8 @@ mod has_unimplemented_wrapper_recursion_tests {
     fn sees_a_failure_under_either_coin_flip_branch() {
         let win_bad = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(failure())),
                 lose_effect: Some(Box::new(clean())),
                 flipper: TargetFilter::Controller,
@@ -13222,7 +13204,8 @@ mod has_unimplemented_wrapper_recursion_tests {
         );
         let lose_bad = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(clean())),
                 lose_effect: Some(Box::new(failure())),
                 flipper: TargetFilter::Controller,
@@ -13230,13 +13213,19 @@ mod has_unimplemented_wrapper_recursion_tests {
         );
         let until_lose_bad = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoinUntilLose {
-                win_effect: Box::new(failure()),
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                win_effect: Some(Box::new(failure())),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
             },
         );
         assert!(has_unimplemented(&win_bad), "win_effect branch");
         assert!(has_unimplemented(&lose_bad), "lose_effect branch");
-        assert!(has_unimplemented(&until_lose_bad), "FlipCoinUntilLose");
+        assert!(
+            has_unimplemented(&until_lose_bad),
+            "FlipCoins {{ flips: UntilLoss }}"
+        );
     }
 
     /// The SECOND half of the C1.4 gap, and the easy one to miss: the old body
@@ -13484,19 +13473,25 @@ mod has_unimplemented_wrapper_recursion_tests {
                 ],
                 modifier: None,
             },
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(payload("flip_win")),
                 lose_effect: Some(payload("flip_lose")),
                 flipper: TargetFilter::Controller,
             },
             Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 2 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
                 win_effect: Some(payload("flips_win")),
                 lose_effect: Some(payload("flips_lose")),
                 flipper: TargetFilter::Controller,
             },
-            Effect::FlipCoinUntilLose {
-                win_effect: payload("until_lose_win"),
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                win_effect: Some(payload("until_lose_win")),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
             },
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
@@ -13528,11 +13523,11 @@ mod has_unimplemented_wrapper_recursion_tests {
                 NestedDefinitionEdge::CreateDelayedTriggerEffect,
                 NestedDefinitionEdge::RollDieResult,
                 NestedDefinitionEdge::RollDieResult,
-                NestedDefinitionEdge::FlipCoinWin,
-                NestedDefinitionEdge::FlipCoinLose,
                 NestedDefinitionEdge::FlipCoinsWin,
                 NestedDefinitionEdge::FlipCoinsLose,
-                NestedDefinitionEdge::FlipCoinUntilLoseWin,
+                NestedDefinitionEdge::FlipCoinsWin,
+                NestedDefinitionEdge::FlipCoinsLose,
+                NestedDefinitionEdge::FlipCoinsWin,
                 NestedDefinitionEdge::ChooseOneOfBranch,
                 NestedDefinitionEdge::ChooseOneOfBranch,
             ]
@@ -13550,7 +13545,8 @@ mod has_unimplemented_wrapper_recursion_tests {
     /// driven by the payloads present rather than by the carrier variants.
     #[test]
     fn a_carrier_with_no_payload_emits_no_edge() {
-        let empty = Effect::FlipCoin {
+        let empty = Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
             win_effect: None,
             lose_effect: None,
             flipper: TargetFilter::Controller,

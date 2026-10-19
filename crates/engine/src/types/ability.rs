@@ -20506,7 +20506,7 @@ pub enum Effect {
     /// six-sided dice", "roll X d12"). Each die is rolled independently with
     /// the same `sides`/`modifier`/`results`. Defaults to one for back-compat
     /// with cards printed in the single-die JSON shape. Mirrors the
-    /// `FlipCoins.count` precedent (CR 705).
+    /// `FlipCoins.flips` count precedent (CR 705).
     /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
     /// `None` means the natural result is used unchanged.
     RollDie {
@@ -20518,7 +20518,11 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         modifier: Option<DieRollModifier>,
     },
-    /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
+    /// CR 705.1 + CR 705.2: flip coins. `flips` says how many and when the run stops.
+    /// `Exactly`: each flip's `win_effect` / `lose_effect` runs as that flip settles.
+    /// `UntilLoss`: `win_effect` is the reward "for each flip you won", paid once per won
+    /// flip after the losing flip (CR 608.2c: the reward instruction follows the flipping
+    /// instruction); `lose_effect` runs as the losing flip settles.
     ///
     /// CR 705.2: "only the player who flips a coin wins or loses the flip." The
     /// `flipper` selects WHICH player flips (and therefore whose win/lose result
@@ -20534,29 +20538,10 @@ pub enum Effect {
     /// surrounding `AbilityDefinition.player_scope` iteration (CR 101.4 APNAP),
     /// which rebinds the acting controller per player so `flipper = Controller`
     /// flips once for each player.
-    FlipCoin {
-        #[serde(default)]
-        win_effect: Option<Box<AbilityDefinition>>,
-        #[serde(default)]
-        lose_effect: Option<Box<AbilityDefinition>>,
-        #[serde(
-            default = "default_target_filter_controller",
-            skip_serializing_if = "is_target_filter_controller"
-        )]
-        flipper: TargetFilter,
-    },
-    /// CR 705: Flip N coins. `win_effect` runs once per heads (win),
-    /// `lose_effect` runs once per tails (loss). Generalization of `FlipCoin`
-    /// for "flip N coins, for each heads …" patterns (Ral Zarek, Guest
-    /// Lecturer). The one-flip degenerate case stays as `FlipCoin` — this
-    /// variant is only emitted when `count > 1` or when the Oracle text
-    /// explicitly binds a count.
-    ///
-    /// CR 705.2: `flipper` selects which player flips all `count` coins (see
-    /// `FlipCoin::flipper`). Defaults to `Controller`.
     FlipCoins {
-        #[serde(default = "default_quantity_one")]
-        count: QuantityExpr,
+        /// No serde default: a legacy `{"type":"FlipCoins","count":…}` payload must fail
+        /// closed ("missing field `flips`") instead of silently reading as one flip.
+        flips: CoinFlipRun,
         #[serde(default)]
         win_effect: Option<Box<AbilityDefinition>>,
         #[serde(default)]
@@ -20566,10 +20551,6 @@ pub enum Effect {
             skip_serializing_if = "is_target_filter_controller"
         )]
         flipper: TargetFilter,
-    },
-    /// CR 705: Flip coins until you lose a flip, then execute effect with win count.
-    FlipCoinUntilLose {
-        win_effect: Box<AbilityDefinition>,
     },
     /// CR 701.54a: The Ring tempts the controller. Increments ring level and prompts
     /// ring-bearer selection if the controller has creatures on the battlefield.
@@ -21791,11 +21772,8 @@ pub enum NestedDefinitionEdge {
     CreateDelayedTriggerEffect,
     CreateBoonTrigger,
     RollDieResult,
-    FlipCoinWin,
-    FlipCoinLose,
     FlipCoinsWin,
     FlipCoinsLose,
-    FlipCoinUntilLoseWin,
     ChooseOneOfBranch,
 }
 
@@ -23640,9 +23618,7 @@ impl Effect {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -23890,9 +23866,7 @@ impl Effect {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -24500,9 +24474,7 @@ impl Effect {
             | Effect::Cloak { .. }
             | Effect::TurnFaceUp { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -24962,9 +24934,7 @@ impl Effect {
             | Effect::Cloak { .. }
             | Effect::TurnFaceUp { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -25525,9 +25495,7 @@ impl Effect {
             // itself moves no card.
             Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RollDie { .. }
             | Effect::ChooseOneOf { .. } => false,
 
@@ -26036,8 +26004,8 @@ macro_rules! define_effect_quantity_walk {
                     m.$name(f);
                 }
             }
-            Effect::FlipCoins { count, .. } => {
-                f(count);
+            Effect::FlipCoins { flips, .. } => {
+                flips.$name(f);
             }
             Effect::Mana { produced, .. } => {
                 // The production descriptor's dynamic `count` slots (Colorless,
@@ -26317,8 +26285,6 @@ macro_rules! define_effect_quantity_walk {
             | Effect::CreateDamageReplacement { .. }
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
-            | Effect::FlipCoin { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -26491,19 +26457,7 @@ impl Effect {
                     f(NestedDefinitionEdge::RollDieResult, &result.effect);
                 }
             }
-            // CR 705.1: coin-flip branches. Each side is its own edge.
-            Effect::FlipCoin {
-                win_effect,
-                lose_effect,
-                ..
-            } => {
-                if let Some(win_effect) = win_effect {
-                    f(NestedDefinitionEdge::FlipCoinWin, win_effect);
-                }
-                if let Some(lose_effect) = lose_effect {
-                    f(NestedDefinitionEdge::FlipCoinLose, lose_effect);
-                }
-            }
+            // CR 705.1: coin-flip branches, in every run mode. Each side is its own edge.
             Effect::FlipCoins {
                 win_effect,
                 lose_effect,
@@ -26515,9 +26469,6 @@ impl Effect {
                 if let Some(lose_effect) = lose_effect {
                     f(NestedDefinitionEdge::FlipCoinsLose, lose_effect);
                 }
-            }
-            Effect::FlipCoinUntilLose { win_effect } => {
-                f(NestedDefinitionEdge::FlipCoinUntilLoseWin, win_effect)
             }
             // CR 608.2d: each choice's body, offered while applying the effect.
             Effect::ChooseOneOf { branches, .. } => {
@@ -26774,6 +26725,9 @@ impl Effect {
     /// a new count/amount-bearing Effect variant is added.
     pub fn count_expr(&self) -> Option<&QuantityExpr> {
         match self {
+            // CR 705.1: the flip count of an `Exactly` run; `UntilLoss` has none.
+            Effect::FlipCoins { flips, .. } => flips.count_expr(),
+
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
@@ -26796,7 +26750,6 @@ impl Effect {
             | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
-            | Effect::FlipCoins { count, .. }
             | Effect::GivePlayerCounter { count, .. }
             | Effect::PutAtLibraryPosition { count, .. }
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
@@ -26980,8 +26933,6 @@ impl Effect {
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-            | Effect::FlipCoin { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
             | Effect::CompletePlayerAction { .. }
             | Effect::Harness
@@ -27043,6 +26994,9 @@ impl Effect {
     /// `count_expr` arm-for-arm.
     pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
         match self {
+            // CR 705.1: the flip count of an `Exactly` run; `UntilLoss` has none.
+            Effect::FlipCoins { flips, .. } => flips.count_expr_mut(),
+
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
@@ -27065,7 +27019,6 @@ impl Effect {
             | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
-            | Effect::FlipCoins { count, .. }
             | Effect::GivePlayerCounter { count, .. }
             | Effect::PutAtLibraryPosition { count, .. }
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
@@ -27249,8 +27202,6 @@ impl Effect {
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-            | Effect::FlipCoin { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
             | Effect::CompletePlayerAction { .. }
             | Effect::Harness
@@ -27459,9 +27410,13 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::LoseTheGame { .. } => "LoseTheGame",
         Effect::WinTheGame { .. } => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
-        Effect::FlipCoin { .. } => "FlipCoin",
-        Effect::FlipCoins { .. } => "FlipCoins",
-        Effect::FlipCoinUntilLose { .. } => "FlipCoinUntilLose",
+        // K-5: the card-data label keeps the three pre-merge run names (SetTapState
+        // precedent), reconstructed from `flips`.
+        Effect::FlipCoins { flips, .. } => match flips {
+            CoinFlipRun::UntilLoss => "FlipCoinUntilLose",
+            CoinFlipRun::Exactly { .. } if flips.is_single_flip() => "FlipCoin",
+            CoinFlipRun::Exactly { .. } => "FlipCoins",
+        },
         Effect::RingTemptsYou => "RingTemptsYou",
         Effect::VentureIntoDungeon => "VentureIntoDungeon",
         Effect::VentureInto { .. } => "VentureInto",
@@ -27994,9 +27949,7 @@ impl From<&Effect> for EffectKind {
             Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,
             Effect::WinTheGame { .. } => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
-            Effect::FlipCoin { .. }
-            | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. } => EffectKind::FlipCoins,
+            Effect::FlipCoins { .. } => EffectKind::FlipCoins,
             Effect::RingTemptsYou => EffectKind::RingTemptsYou,
             Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,
             Effect::VentureInto { .. } => EffectKind::VentureInto,
@@ -32608,6 +32561,13 @@ impl CoinFlipRun {
     /// Visit every quantity expression the run carries (CR 608.2h: the `Exactly` count).
     pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
         if let Some(count) = self.count_expr() {
+            f(count);
+        }
+    }
+
+    /// Mutable form of [`CoinFlipRun::for_each_quantity_expr`].
+    pub fn for_each_quantity_expr_mut<'a>(&'a mut self, f: &mut dyn FnMut(&'a mut QuantityExpr)) {
+        if let Some(count) = self.count_expr_mut() {
             f(count);
         }
     }
@@ -37346,9 +37306,7 @@ impl ResolvedAbility {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
