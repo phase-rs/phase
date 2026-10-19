@@ -1619,11 +1619,12 @@ pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) ->
 /// (CR 115.10 + CR 608.2d). The shape is a population of battlefield objects, or
 /// one together with players ("a creature or player").
 ///
-/// Everything else is determined rather than chosen and stays out: a context
-/// reference (the source, an earlier target, an event participant), an
-/// attachment host (CR 303.4b + CR 301.5f: "enchanted creature" is whatever the
-/// Aura is attached to), a player with no object population beside it ("an
-/// opponent", "a player"), and a filter that matches everything ("any target").
+/// Everything else stays out, each on its own reading: a context reference (the
+/// source, an earlier target, an event participant) and an attachment host (CR
+/// 303.4b + CR 301.5f: "enchanted creature" is whatever the Aura is attached to)
+/// are determined, not chosen; a player-only recipient ("an opponent", "a
+/// player") names no object population and keeps its existing reading; and a
+/// filter that matches everything ("any target") is announced as a target.
 /// The parser (the timing) and the resolver (the prompt) both ask this one
 /// question, so a recipient the parser times for resolution is exactly one the
 /// resolver offers a choice for.
