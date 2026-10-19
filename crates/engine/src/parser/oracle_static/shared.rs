@@ -1576,7 +1576,7 @@ fn segment_is_back_referential_continuation(segment: &str) -> bool {
 /// inside a quoted granted ability or a mana symbol never ends a sentence. Each
 /// returned segment keeps its terminating period and is trimmed; empty segments
 /// are dropped.
-fn split_static_sentences(text: &str) -> Vec<String> {
+pub(crate) fn split_static_sentences(text: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut brace_depth = 0usize;

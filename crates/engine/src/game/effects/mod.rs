@@ -13096,6 +13096,18 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             }
             false
         }
+        // CR 115.10a + CR 608.2d: "you may have it deal 2 damage to another
+        // creature you control. If you do, draw a card" names its recipient with
+        // no "target", so it is chosen as the damage is applied — and "The player
+        // can't choose an option that's illegal or impossible". With no creature
+        // or player to choose, accepting would record a performed effect for a
+        // no-op and run the "If you do" rider anyway (Wicked Guardian drawing a
+        // card with no other creature), which the targeted reading never allowed:
+        // with no legal target the ability was not put on the stack at all.
+        Effect::DealDamage { .. } => {
+            deal_damage::awaits_resolution_recipient_choice(ability)
+                && deal_damage::resolution_recipient_candidates(state, ability).is_empty()
+        }
         _ => false,
     }
 }
@@ -18436,6 +18448,51 @@ fn resolve_chain_body(
                         return Ok(ResolutionProgress::Waiting);
                     }
                 }
+            }
+        }
+    }
+
+    // CR 115.10a + CR 608.2d + CR 609.3: an untargeted described damage
+    // recipient ("a creature or player", "another creature you control" — no
+    // literal "target") is chosen while the damage is APPLIED, at THIS
+    // instruction's own resolution, not announced when the ability went on the
+    // stack. `target_choice_timing_for_clause` (parser) marks such a clause
+    // `Resolution` by the same `names_resolution_chosen_recipient` shape
+    // `awaits_resolution_recipient_choice` reads here, so the two cannot drift.
+    // Mirrors the untargeted `PutCounter` block above: zero candidates is a
+    // silent no-op ("The player can't choose an option that's illegal or
+    // impossible"), a single candidate is forced and binds without a prompt, and
+    // several raise the controller's prompt, parking this node as the
+    // continuation the answer binds. The amount is read once, when the damage is
+    // applied after the pick (CR 608.2h), before any later clause of the chain
+    // (CR 608.2c). Candidates are a plain scan of the live population, never
+    // targeting legality — hexproof, shroud and protection restrict neither the
+    // prompt nor the choice (CR 115.10a); protection only prevents the damage
+    // (CR 702.16e).
+    if deal_damage::awaits_resolution_recipient_choice(ability) {
+        let candidates = deal_damage::resolution_recipient_candidates(state, ability);
+        match candidates.len() {
+            0 => {}
+            1 => {
+                // Re-enter the body, not the chain entry: the depth-0 prelude
+                // (the per-ability resolution counter among it) already ran for
+                // this resolution and must not run twice.
+                let mut bound = ability.clone();
+                bound.set_unpinned_targets(candidates);
+                return resolve_chain_body(state, &bound, events, depth);
+            }
+            _ => {
+                let mut parked = ability.clone();
+                deal_damage::bind_recipient_pool(&mut parked, &candidates);
+                state.park_ability_continuation(PendingContinuation::new(Box::new(parked), state));
+                state.waiting_for = WaitingFor::ChooseObjectsSelection {
+                    player: ability.controller,
+                    eligible: candidates,
+                    min: 1,
+                    max: Some(1),
+                    trigger_event: state.current_trigger_event.clone(),
+                };
+                return Ok(ResolutionProgress::Waiting);
             }
         }
     }

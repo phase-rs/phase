@@ -1332,15 +1332,35 @@ pub struct GameObject {
     pub blocked_abilities: Vec<AbilityBlockEntry>,
 
     /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
-    /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
-    /// for the controller by `GameState::extra_loyalty_activations_this_turn`
-    /// (The Chain Veil class). The gate logic lives in
+    /// the current turn. Default cap is 1 (CR 606.3 "once per turn"), or the value a
+    /// `ModifyActivationLimit` static sets (Oath of Teferi); raised by two grants,
+    /// both composed in `planeswalker::loyalty_activation_cap`: for
+    /// the controller's planeswalkers by `GameState::extra_loyalty_activations_this_turn`
+    /// (The Chain Veil class), and for this permanent's own characteristic loyalty
+    /// abilities by `GameObject::extra_loyalty_activations_this_turn` (the
+    /// Comet, Stellar Pup class). The gate logic lives in
     /// `planeswalker::can_activate_loyalty_ability`. The historical bool
     /// "loyalty_activated_this_turn" is replaced by `count > 0`. Cleared at
     /// turn start (CR 606.3 "that turn" reset) and on battlefield re-entry
     /// (CR 400.7 — a re-entering permanent is a new object with no memory).
     #[serde(skip_deserializing, default, skip_serializing_if = "is_zero_u32_field")]
     pub loyalty_activations_this_turn: u32,
+
+    /// CR 606.3 + CR 101.1: Extra loyalty-ability activations a resolved
+    /// `Effect::GrantExtraLoyaltyActivations { target: SelfRef }` granted to THIS
+    /// permanent for the current turn. Added to the cap on top of the player-wide
+    /// `GameState::extra_loyalty_activations_this_turn`, and only for this
+    /// permanent's own characteristic loyalty abilities (the card's ruling, not
+    /// CR text; a layer-6-gained ability is not covered, CR 613.1f).
+    ///
+    /// Runtime-only and never on the wire: `#[serde(skip)]` omits it from
+    /// serialization, so serialized bytes are identical to a build without the
+    /// field, and a restored object starts at 0 together with
+    /// `loyalty_activations_this_turn` (which `skip_deserializing` also resets).
+    /// Shares that counter's lifecycle: cleared at turn start (CR 514.2) and on
+    /// battlefield re-entry (CR 400.7), and not copied (CR 707.2).
+    #[serde(skip)]
+    pub extra_loyalty_activations_this_turn: u32,
 
     // Commander: whether this object is a commander card
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1879,6 +1899,10 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         available_mana_pips: _,
         blocked_abilities: _,
         loyalty_activations_this_turn: _,
+        // Per-turn accumulator, omitted from the strict comparator like the sibling
+        // above: runtime-only and wire-skipped, compensated analysis-locally by
+        // `loyalty_activation_counts_match`.
+        extra_loyalty_activations_this_turn: _,
         is_commander: _,
         signature_spell: _,
         commander_tax: _,
@@ -3147,6 +3171,7 @@ impl GameObject {
             available_mana_pips: Vec::new(),
             blocked_abilities: Vec::new(),
             loyalty_activations_this_turn: 0,
+            extra_loyalty_activations_this_turn: 0,
             is_commander: false,
             signature_spell: None,
             commander_tax: None,
@@ -3316,6 +3341,10 @@ impl GameObject {
         self.damage_marked = 0;
         self.dealt_deathtouch_damage = false;
         self.loyalty_activations_this_turn = 0;
+        // CR 400.7 + CR 606.3: a re-entering permanent is a new object, so a
+        // per-permanent extra-activation grant made to its previous incarnation
+        // does not carry over.
+        self.extra_loyalty_activations_this_turn = 0;
         self.is_suspected = false;
         self.is_renowned = false;
         self.monstrous = false;
@@ -4603,6 +4632,31 @@ mod tests {
             obj.gift_recipient.is_none(),
             "gift_recipient must clear on battlefield entry (CR 400.7d)"
         );
+    }
+
+    /// CR 400.7 + CR 606.3: a permanent re-entering the battlefield is a new
+    /// object, so a per-permanent extra loyalty-activation grant (and the
+    /// activation count it extends) made to the previous incarnation is gone.
+    /// The incarnation bump is the reach-guard: it proves the entry reset ran
+    /// over an object that held a non-zero grant.
+    #[test]
+    fn reset_for_battlefield_entry_clears_extra_loyalty_activations() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Probe Walker".to_string(),
+            Zone::Exile,
+        );
+        obj.loyalty_activations_this_turn = 1;
+        obj.extra_loyalty_activations_this_turn = 2;
+        let incarnation = obj.incarnation;
+
+        obj.reset_for_battlefield_entry(1, 1);
+
+        assert_eq!(obj.incarnation, incarnation + 1, "the entry reset ran");
+        assert_eq!(obj.extra_loyalty_activations_this_turn, 0);
+        assert_eq!(obj.loyalty_activations_this_turn, 0);
     }
 
     /// CR 400.7d + CR 603.4 (issue #5943 review round): the zone-change

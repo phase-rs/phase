@@ -113,6 +113,19 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
 
+    // CR 614.1c + CR 608.2c: a line of several sentences whose enters-with
+    // sentence names this object or a distributive subset is the enters-with
+    // parser's, and it fails closed there (`EntersWithGap::Clause`). Decline it
+    // here, ahead of every arm, so no arm that reads only the line's first
+    // sentence can claim it whole and drop the enters-with sentence (Power
+    // Level Analyzer's "As ~ enters …, … choose a number … . ~ enters with …").
+    // Routes that consult `enters_with_fails_closed` record the line as the
+    // `enters_with_clause` gap. An arm that reads every sentence of such a line
+    // must dispatch above this gate.
+    if is_line_owned_enters_with_clause(&norm_lower) {
+        return None;
+    }
+
     // Own the whole threshold production before any broad event scanner can
     // mistake an unsupported rider for a different replacement event.
     if parse_fixed_damage_threshold_antecedent(&norm_lower).is_ok() {
@@ -4506,6 +4519,45 @@ impl EntersWithGap {
     }
 }
 
+/// CR 614.1c + CR 608.2c: the multi-sentence step of
+/// [`enters_with_counters_outcome`]. One replacement carries one enters-with
+/// sentence, so a line of several sentences is classified, never claimed
+/// whole. Quoted spans are masked first so a granted ability's own period
+/// ("… and with \"Pay 3 life: Regenerate this creature.\"") does not split the
+/// line, and punctuation-only fragments are not sentences.
+///
+/// `None` when the line has no entry verb followed by "with " or is a single
+/// sentence; otherwise the line's [`classify_multi_sentence`] verdict. Shared
+/// by the enters-with arm and the replacement dispatcher's gate
+/// ([`is_line_owned_enters_with_clause`]) so the two cannot drift.
+fn multi_sentence_enters_with_decline(norm_lower: &str) -> Option<EntersWithDecline> {
+    nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with)?;
+    let masked = nom_primitives::strip_double_quoted_spans(norm_lower);
+    let units: Vec<&str> = nom_primitives::split_sentence_units(&masked)
+        .into_iter()
+        .filter(|unit| unit.chars().any(char::is_alphanumeric))
+        .collect();
+    (units.len() > 1).then(|| classify_multi_sentence(&units))
+}
+
+/// CR 614.1c + CR 608.2c: a line of several sentences whose enters-with
+/// sentence names this object or a distributive subset is the enters-with
+/// parser's, and that parser fails it closed (`EntersWithGap::Clause`). No
+/// replacement arm may claim such a line whole: whichever arm reads its first
+/// sentence would drop the enters-with sentence while the line looks
+/// supported (Power Level Analyzer, issue #9993).
+///
+/// Same normalized input and the same precondition as
+/// [`enters_with_fails_closed`], so every line this gate declines is one that
+/// predicate reports as `EntersWithGap::Clause`; the routes that consult it
+/// (Priority 8, the Priority 5-pre and Priority 7 routes, the Class fallback)
+/// record the line as the `enters_with_clause` gap.
+fn is_line_owned_enters_with_clause(norm_lower: &str) -> bool {
+    has_enters_with_counter_tokens(norm_lower)
+        && multi_sentence_enters_with_decline(norm_lower)
+            == Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))
+}
+
 /// CR 614.1c: The "enters with [counters]" parser with a typed decline, so the
 /// route can tell "not my shape" from "my shape, fails closed"
 /// (`enters_with_fails_closed`).
@@ -4518,18 +4570,10 @@ fn enters_with_counters_outcome(
         return Err(EntersWithDecline::NotThisShape);
     }
 
-    // CR 614.1c + CR 608.2c: one replacement carries one enters-with sentence.
-    // A line of several sentences is classified, never claimed whole. Quoted
-    // spans are masked first so a granted ability's own period ("… and with
-    // \"Pay 3 life: Regenerate this creature.\"") does not split the line, and
-    // punctuation-only fragments are not sentences.
-    let masked = nom_primitives::strip_double_quoted_spans(norm_lower);
-    let units: Vec<&str> = nom_primitives::split_sentence_units(&masked)
-        .into_iter()
-        .filter(|unit| unit.chars().any(char::is_alphanumeric))
-        .collect();
-    if units.len() > 1 {
-        return Err(classify_multi_sentence(&units));
+    // CR 614.1c + CR 608.2c: one replacement carries one enters-with sentence;
+    // a line of several sentences is classified, never claimed whole.
+    if let Some(decline) = multi_sentence_enters_with_decline(norm_lower) {
+        return Err(decline);
     }
 
     let PeeledEntersWithGates {
@@ -13888,14 +13932,15 @@ const BIDIRECTIONAL_ELLIPSIS_ANCHOR: &str = "dealt to and dealt by ";
 ///
 /// `turns::execute_cleanup` reads `expiry` and only `expiry` — no prune infers a
 /// lifetime from `shield_kind` — so a stated window the parser drops produces a
-/// definition nothing can ever remove. That is not hypothetical: Urza's Science
-/// Fair Project's die-roll result row "Prevent all combat damage it would deal
-/// this turn." lowers to a printed, object-hosted `DamageDone` shield with
-/// neither `valid_card` nor `damage_target_filter`, on an Artifact Creature — a
-/// PERMANENT, so unlike the eight Instant/Sorcery hosts of the same shape it is
-/// not neutralized by `object_replacement_candidate_applies`' `[Battlefield,
-/// Command]` zone gate. Unstamped, it prevents ALL combat damage in the game, to
-/// or from either player, for the rest of the game.
+/// definition nothing can ever remove. That was not hypothetical before die-result
+/// rows written as an em-dash list attached to their roll (CR 706.3b): Urza's
+/// Science Fair Project's result row "Prevent all combat damage it would deal this
+/// turn." used to be dispatched as a stand-alone line and lowered to a printed,
+/// object-hosted `DamageDone` shield with neither `valid_card` nor
+/// `damage_target_filter`, on an Artifact Creature, a PERMANENT. That row is now a
+/// die-table branch and no longer reaches this parser; the clause-final window
+/// recognized here is still exercised by the row text fed directly in
+/// `prevention_expiry_records_only_a_clause_final_stated_window`.
 ///
 /// POSITION IS THE WHOLE POINT. `oracle_effect::lower::strip_trailing_duration`
 /// is the phrase→`Duration` authority and owns the *per-turn-quantity* lookback
@@ -18185,9 +18230,11 @@ mod tests {
     }
 
     /// CR 611.2a + CR 514.2 vs CR 604.2: `expiry` records the window a prevention
-    /// clause states FOR ITSELF, and nothing else. Shape-level companion to the
-    /// runtime pin in
-    /// `tests/integration/printed_damage_prevention_survives_turn.rs::turn_windowed_printed_shield_is_stamped_and_does_not_survive_cleanup`.
+    /// clause states FOR ITSELF, and nothing else. Shape-level pin for the stamp.
+    /// Urza's Science Fair Project's row 2 is fed to the parser directly because, as
+    /// a die-table branch (CR 706.3b), it no longer lowers to a printed shield; the
+    /// CR 514.2 cleanup prune is pinned at runtime by
+    /// `tests/integration/printed_damage_prevention_survives_turn.rs::printed_and_turn_bound_shields_on_one_host_part_ways_at_cleanup`.
     ///
     /// The discriminating half is `TRAILING-POSITION` block: every one of those
     /// four inputs ends in `"this turn"` / `"until end of turn"` at the very END of
@@ -32207,6 +32254,85 @@ mod tests {
                 "{line:?}"
             );
         }
+    }
+
+    /// CR 614.1c + CR 608.2c: the replacement dispatcher declines a line of
+    /// several sentences whose enters-with sentence names this object or a
+    /// distributive subset, ahead of every arm — so the arm that reads only the
+    /// first sentence (as-enters choose, self-would-die, …) cannot claim it whole.
+    /// Single-sentence lines and lines without an enters-with sentence are
+    /// untouched (negative rows; each is a structural fact about the gate).
+    #[test]
+    fn multi_sentence_line_owned_enters_with_clause_is_claimed_by_no_replacement_arm() {
+        // Positive rows: gate true, the dispatcher yields None, the gap recorder
+        // owns the line. (name, raw line)
+        for (name, line) in [
+            (
+                "Power Level Analyzer",
+                "As Power Level Analyzer enters the battlefield, you and target opponent each secretly choose a number between 1 and 10, then reveal. Power Level Analyzer enters with a number of +1/+1 counters equal to the distance between the two numbers. If both players chose the same number, put seven +1/+1 counters on Power Level Analyzer instead.",
+            ),
+            // Synthetic: the as-enters choose arm reads only the choice.
+            (
+                "Test Creature",
+                "As Test Creature enters, choose a color. It enters with a +1/+1 counter on it.",
+            ),
+            // Synthetic: a non-as-enters arm (self-would-die) reads only the
+            // second sentence.
+            (
+                "Test Creature",
+                "Test Creature enters with a +1/+1 counter on it. If Test Creature would die, exile it instead.",
+            ),
+        ] {
+            let norm_lower = replace_self_refs(&strip_reminder_text(line), name).to_lowercase();
+            // Reach guards: the gate fires, and the gap recorder records the line.
+            assert!(is_line_owned_enters_with_clause(&norm_lower), "{line:?}");
+            assert_eq!(enters_with_fails_closed(line, name), Some(EntersWithGap::Clause), "{line:?}");
+            assert_eq!(parse_replacement_line(line, name), None, "{line:?}");
+        }
+        // Arm-liveness reach guards for the synthetic rows: each arm still claims
+        // its own sentence alone, so the None above is the gate, not a dead arm.
+        assert!(parse_replacement_line(
+            "As Test Creature enters, choose a color.",
+            "Test Creature"
+        )
+        .is_some());
+        assert!(parse_replacement_line(
+            "If Test Creature would die, exile it instead.",
+            "Test Creature"
+        )
+        .is_some());
+
+        // Negative rows: gate false (verbatim lines unless marked).
+        for (name, line) in [
+            // Banner of Kinship, sentence 1 alone (the sequence route's input).
+            ("Banner of Kinship", "As this artifact enters, choose a creature type."),
+            // Banner of Kinship, sentence 2 alone.
+            ("Banner of Kinship", "This artifact enters with a fellowship counter on it for each creature you control of the chosen type."),
+            // Thriving cycle: multi-sentence, no enters-with clause.
+            ("Thriving Grove", "This land enters tapped. As it enters, choose a color other than green."),
+            // Camato Scout: multi-sentence, at-random selection, no enters-with clause.
+            ("Camato Scout", "As Camato Scout enters, choose a basic land type at random. Camato Scout has landwalk of the chosen type."),
+            // Shock land.
+            ("Blood Crypt", "As this land enters, you may pay 2 life. If you don't, it enters tapped."),
+            // Anointed Peacekeeper.
+            ("Anointed Peacekeeper", "As this creature enters, look at an opponent's hand, then choose any card name."),
+            // Multi-sentence, foreign subject (ForeignSubject, not Clause).
+            ("Test Sorcery", "Create a 1/1 white Soldier creature token. It enters with a +1/+1 counter on it."),
+            // Single sentence the enters-with parser fails closed (Clause) — the
+            // gate is scoped to several sentences (Venser, Visionary Traveler).
+            ("Venser, Visionary Traveler", "Each nontoken creature you control that wasn't cast from your hand enters with two additional +1/+1 counters on it."),
+        ] {
+            let norm_lower = replace_self_refs(&strip_reminder_text(line), name).to_lowercase();
+            assert!(!is_line_owned_enters_with_clause(&norm_lower), "{line:?}");
+        }
+        // Positive reach guard for the Venser negative: the enters-with parser
+        // does own that single sentence as Clause, so the gate's `false` is the
+        // multi-sentence scope, not an unreachable verdict.
+        let venser = "each nontoken creature you control that wasn't cast from your hand enters with two additional +1/+1 counters on it.";
+        assert_eq!(
+            enters_with_counters_outcome(venser, venser).err(),
+            Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))
+        );
     }
 
     /// CR 614.12: a distributive subject whose type phrase does not reach the

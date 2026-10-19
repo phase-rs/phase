@@ -1041,21 +1041,6 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // "the number of card types among cards in all graveyards"
-    // "the number of cards in your opponents' graveyards" / "cards in opponents' graveyards"
-    if text.contains("cards in your opponents' graveyards")
-        || text.contains("cards in opponents' graveyards")
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::ZoneCardCount {
-                zone: ZoneRef::Graveyard,
-                card_types: vec![],
-                scope: CountScope::Opponents,
-                filter: None,
-            },
-        });
-    }
-
     // "the number of noncreature spells they've cast this turn"
     // "the number of spells they've cast this turn"
     // "the number of spells you've cast this turn from anywhere other than your hand"
@@ -5213,6 +5198,110 @@ mod tests {
                     .expect("statically valid property aggregate")
                 ),
             }
+        );
+    }
+
+    /// The whole-phrase reading: one `ZoneCardCount` over the opponents' graveyards.
+    fn opponents_graveyard_zone_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![],
+                scope: CountScope::Opponents,
+                filter: None,
+            },
+        }
+    }
+
+    /// CR 604.3 + CR 208.2a + CR 404.1 + CR 102.2/102.3: preservation and reach
+    /// guard for the whole-phrase reading. Passes before and after the
+    /// substring fallback arm is removed.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_whole_phrase_reads_zone_count() {
+        for phrase in [
+            "the number of cards in your opponents' graveyards",
+            "the number of cards in opponents' graveyards",
+            "the number of cards in your opponents' graveyards.",
+            "cards in your opponents' graveyards",
+        ] {
+            assert_eq!(
+                parse_cda_quantity(phrase),
+                Some(opponents_graveyard_zone_count()),
+                "{phrase}"
+            );
+        }
+    }
+
+    /// CR 614.1c + CR 122.6: an enters-with amount the parser cannot read must
+    /// fail closed. The shared nom grammar requires full consumption, so an
+    /// extremum head, a supertype qualifier, or a trailing relative clause must
+    /// decline the whole phrase rather than leave a truncated zone count.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_extended_text_fails_closed() {
+        // Positive reach guard: the unextended phrase is still read.
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards"),
+            Some(opponents_graveyard_zone_count())
+        );
+        for phrase in [
+            "the greatest number of cards an opponent has drawn this turn among cards in your opponents' graveyards",
+            "the greatest number of cards an opponent has drawn this turn among cards in opponents' graveyards",
+            "the number of nonbasic land cards in your opponents' graveyards",
+            "the number of cards in your opponents' graveyards that were put there from the battlefield this turn",
+        ] {
+            assert_eq!(parse_cda_quantity(phrase), None, "{phrase}");
+        }
+    }
+
+    /// The arithmetic forms compose over the whole-phrase reading instead of
+    /// being shadowed by a bare substring count.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_composes_in_arithmetic() {
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards plus 1"),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(opponents_graveyard_zone_count()),
+                offset: 1,
+            })
+        );
+        assert_eq!(
+            parse_cda_quantity(
+                "the number of cards in your hand plus the number of cards in your opponents' graveyards",
+            ),
+            Some(QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    opponents_graveyard_zone_count(),
+                ],
+            })
+        );
+    }
+
+    /// CR 205.2a + CR 604.3: Nighthawk Scavenger's "1 plus the number of card
+    /// types among cards in your opponents' graveyards" is the preserved
+    /// sibling — the leading offset arm reads the distinct-card-type count
+    /// directly and is unaffected by the whole-phrase arm.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_card_types_among_reads_distinct_types() {
+        assert_eq!(
+            parse_cda_quantity(
+                "1 plus the number of card types among cards in your opponents' graveyards",
+            ),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Opponents,
+                        },
+                    },
+                }),
+                offset: 1,
+            })
         );
     }
 

@@ -11253,6 +11253,36 @@ mod tests {
         assert_eq!(rest, " and");
     }
 
+    /// CR 404.1 + CR 102.2: the whole phrase reading of an opponents'-graveyard
+    /// count — both possessives, the bare "cards in …" head, and an optional
+    /// card-type list — is one shared grammar authority (`parse_zone_card_count`
+    /// + `parse_scoped_zone_ref`). Locks the combinator the deletion relies on.
+    #[test]
+    fn parse_quantity_ref_cards_in_opponents_graveyards_scope() {
+        for (phrase, card_types) in [
+            ("the number of cards in your opponents' graveyards", vec![]),
+            ("the number of cards in opponents' graveyards", vec![]),
+            ("cards in your opponents' graveyards", vec![]),
+            (
+                "creature cards in your opponents' graveyards",
+                vec![TypeFilter::Creature],
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(rest, "", "{phrase}");
+            assert_eq!(
+                q,
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types,
+                    scope: CountScope::Opponents,
+                    filter: None,
+                },
+                "{phrase}"
+            );
+        }
+    }
+
     /// CR 604.3: `" and/or "` joins multiple type filters as a disjunction,
     /// matching cards with any of the listed types. Used by the Ghitu
     /// Lavarunner / Magmatic Channeler / Curious Homunculus class ("instant

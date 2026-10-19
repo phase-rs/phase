@@ -215,10 +215,17 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 153 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
- *      conditions (and ability/filter definitions) of GameState. A v152 peer
+ * 154 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
+ *      conditions (and ability/filter definitions) of GameState. A v153 peer
  *      cannot deserialize the new tagged variant. P2P moves in lockstep to
- *      wire 135.
+ *      wire 136.
+ * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
+ *       (Nicol Bolas, Dragon-God's loyalty grant is kind Loyalty on the
+ *       activated authority; the loyalty-grant sibling variant is
+ *       removed). A v152 peer drops the defaulted field silently and
+ *       over-grants every activated ability of every other planeswalker,
+ *       so the exact-match handshake refuses the pairing. P2P moves in
+ *       lockstep (wire 135).
  * 152 — ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
  *      ShortcutProposal gains leading_aims; a v151 peer drops them. Wire 134 moves
  *      with it.
@@ -926,7 +933,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 153;
+export const PROTOCOL_VERSION = 154;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

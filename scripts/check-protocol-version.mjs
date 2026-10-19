@@ -191,11 +191,13 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +80: v151 carries populated Bestow restoration payloads.
 // +81: v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`,
 //      and `ShortcutProposal.leading_aims`.
-// +82: v153 adds `FilterProp::Prepared` (CR 722.3a), the prepared-designation
+// +83: v154 adds `FilterProp::Prepared` (CR 722.3a), the prepared-designation
 //      leaf for source-context trigger conditions in `GameState`, and
 //      `ResolvedAbility.announced_source_incarnation` (CR 400.7 + CR 602.2a),
 //      the source epoch captured when an activation is announced.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 82;
+// +82: v153 adds the optional kind selector to GrantAllActivatedAbilitiesOf
+// and removes the loyalty-grant sibling variant.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 83;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -302,9 +304,10 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 //      effect's `rider` key).
 // +79: wire 133 moves with full-game v151 for populated Bestow payloads.
 // +80: wire 134 moves with full-game v152 for the shortcut suggestion fields.
-// +81: wire 135 moves with full-game v153 for the FilterProp Prepared tag
+// +82: wire 136 moves with full-game v154 for the FilterProp Prepared tag
 //      and the announced activation source epoch.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 81;
+// +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 82;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

@@ -8,7 +8,7 @@ use crate::types::ability::{
     DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -505,6 +505,28 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
     }
 }
 
+/// CR 706.3b + CR 113.7a + CR 400.7: a results branch is part of the ability that
+/// rolled, so a branch of an ACTIVATED ability acts for the object that activation
+/// captured. Triggered carriers keep their identity in `trigger_source` provenance,
+/// which the CR 400.7j relatch read prefers over the bare stamp, and spells capture
+/// no incarnation, so both stay unstamped (fail-open).
+fn inherit_activation_incarnation(state: &GameState, branch: &mut ResolvedAbility) {
+    let carried = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.source_id == branch.source_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::ActivatedAbility { ability, .. } => ability.source_incarnation,
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
+        });
+    if let Some(incarnation) = carried {
+        branch.set_source_incarnation_recursive(Some(incarnation));
+    }
+}
+
 /// CR 706.6 + CR 614.1a: Finish a die-roll instruction once the ignored rolls
 /// are known.
 ///
@@ -521,6 +543,13 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
 /// Returns the branch verdict when its full instruction remains pending,
 /// and Complete when all survivors and their branches have settled; the
 /// caller then drains the continuation back to Priority.
+///
+/// CR 706.3b + CR 400.7 + CR 113.7a: a results-table row is part of the ability that
+/// rolled, so the branch frame of an ACTIVATED ability acts for the source object
+/// that activation captured when it went on the stack (see
+/// `inherit_activation_incarnation`; a triggered ability's rows stay unstamped). A
+/// source that left and re-entered the zone meanwhile is a new object and does not
+/// receive its old activation's rows.
 pub(crate) fn resume_after_ignore(
     state: &mut GameState,
     pending: PendingDieRoll,
@@ -616,13 +645,16 @@ pub(crate) fn resume_after_ignore(
             // sub_abilities, conditions, etc.). `ResolvedAbility::new` with only the
             // effect drops `player_scope`, so "each opponent loses N life" on a d20
             // table (Herald of Hadar) incorrectly hit the controller (#2026).
-            let sub = build_resolved_from_def_with_targets_and_chain_root(
+            let mut sub = build_resolved_from_def_with_targets_and_chain_root(
                 &branch.effect,
                 source_id,
                 controller,
                 targets.clone(),
                 chain_root_targets.clone(),
             );
+            // CR 706.3b + CR 400.7: the row is part of the ability that rolled, so
+            // it acts for the object that ability captured.
+            inherit_activation_incarnation(state, &mut sub);
             let child_boundary = state.resolution_stack.capture_child_boundary();
             let progress = resolve_ability_chain_step(state, &sub, events, 0)?;
 
@@ -707,7 +739,11 @@ pub(crate) fn resume_after_ignore(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, DieResultBranch, QuantityExpr};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, BounceSelection, DieResultBranch, QuantityExpr,
+        TargetFilter,
+    };
+    use crate::types::game_state::StackEntry;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -1638,5 +1674,236 @@ mod tests {
             2,
             "each of the two dice must resolve the 1..=6 branch, drawing one card per die"
         );
+    }
+
+    /// A d20 whose only row returns the roll's own source to its owner's hand, the
+    /// shape of Loathsome Troll's "Return this card to your hand".
+    fn self_return_roll(source: ObjectId) -> ResolvedAbility {
+        let row = DieResultBranch {
+            min: 1,
+            max: 20,
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Bounce {
+                    target: TargetFilter::SelfRef,
+                    destination: None,
+                    selection: BounceSelection::Targeted,
+                },
+            )),
+        };
+        ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![row],
+                modifier: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// Install the activated-ability stack entry for `source`'s roll as the entry
+    /// being resolved, stamped with `incarnation`: the carrier a die-result branch
+    /// reads.
+    fn install_activated_carrier(state: &mut GameState, source: ObjectId, incarnation: u64) {
+        let mut carrier = self_return_roll(source);
+        carrier.set_source_incarnation_recursive(Some(incarnation));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(carrier),
+            },
+        });
+    }
+
+    /// CR 706.3b + CR 400.7 + CR 113.7a: a die-result row is part of the ability
+    /// that rolled, so "return this card to your hand" in a row of an ACTIVATED
+    /// ability acts for the object that activation captured. A card exiled and
+    /// returned to the graveyard in response is a new object and is not returned.
+    ///
+    /// The blink happens BEFORE the carrier is installed: moving the source while
+    /// the carrier is installed would record a CR 400.7j relatch and make the stale
+    /// frame current, so the relatch reach-guard is part of the row.
+    ///
+    /// Reverting the stamp turns the first row red: the unstamped branch frame
+    /// binds the new object and returns it.
+    #[test]
+    fn a_blinked_graveyard_source_is_not_bound_by_its_die_branch() {
+        use crate::game::zones;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        // Where the source ends up when its roll's branch resolves.
+        let run = |blink: bool, stamp_with_live_incarnation: bool| -> Zone {
+            let mut state = GameState::new_two_player(42);
+            let source = zones::create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Probe Troll".to_string(),
+                Zone::Graveyard,
+            );
+            let captured = state.objects[&source].incarnation;
+            if blink {
+                let mut events = Vec::new();
+                zones::move_to_zone(&mut state, source, Zone::Exile, &mut events);
+                zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+                assert_ne!(
+                    state.objects[&source].incarnation, captured,
+                    "reach-guard: the blinked card is a new object"
+                );
+            }
+            let stamp = if stamp_with_live_incarnation {
+                state.objects[&source].incarnation
+            } else {
+                captured
+            };
+            install_activated_carrier(&mut state, source, stamp);
+            assert!(
+                state.resolution_source_relatch.is_none(),
+                "reach-guard: the blink recorded no relatch that would make the stale frame current"
+            );
+
+            let mut events = Vec::new();
+            resolve(&mut state, &self_return_roll(source), &mut events).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::DieRolled { sides: 20, .. })),
+                "reach-guard: the die rolled"
+            );
+            state.objects[&source].zone
+        };
+
+        assert_eq!(
+            run(true, false),
+            Zone::Graveyard,
+            "the blinked card is a new object and is not returned"
+        );
+        assert_eq!(
+            run(false, false),
+            Zone::Hand,
+            "paired control: without a blink the captured object is returned"
+        );
+        assert_eq!(
+            run(true, true),
+            Zone::Hand,
+            "paired control: a carrier stamped with the current incarnation returns the card"
+        );
+    }
+
+    /// CR 706.3b + CR 400.7 + CR 113.7a: the die branch inherits the captured
+    /// incarnation from an ACTIVATED ability carrier of its own source, recursively
+    /// through the whole chain it builds, and from nothing else. A triggered carrier
+    /// keeps its identity in its `trigger_source` provenance, a spell captures no
+    /// incarnation, another object's activation is not this source's, and an
+    /// unstamped activation has nothing to inherit: each of those stays unstamped
+    /// (fail-open). The first assertion is the positive reach-guard.
+    #[test]
+    fn die_branch_inherits_only_an_activated_carriers_incarnation() {
+        use crate::types::game_state::CastingVariant;
+        use crate::types::identifiers::CardId;
+
+        let source = ObjectId(1);
+        let draw = |object: ObjectId| {
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                object,
+                PlayerId(0),
+            )
+        };
+        // The nested shape a results row builds: a root, its sub-ability and its
+        // else-branch, none of them stamped.
+        let branch = || {
+            let mut root = draw(source);
+            root.sub_ability = Some(Box::new(draw(source)));
+            root.else_ability = Some(Box::new(draw(source)));
+            root
+        };
+        let stamps = |frame: &ResolvedAbility| {
+            [
+                frame.source_incarnation,
+                frame.sub_ability.as_ref().unwrap().source_incarnation,
+                frame.else_ability.as_ref().unwrap().source_incarnation,
+            ]
+        };
+        let stamped = |object: ObjectId, incarnation: Option<u64>| {
+            let mut ability = draw(object);
+            ability.set_source_incarnation_recursive(incarnation);
+            Box::new(ability)
+        };
+        let entry = |object: ObjectId, kind: StackEntryKind| StackEntry {
+            id: ObjectId(900),
+            source_id: object,
+            controller: PlayerId(0),
+            kind,
+        };
+        let inherited = |carrier: Option<StackEntry>| {
+            let mut state = GameState::new_two_player(42);
+            state.resolving_stack_entry = carrier;
+            let mut frame = branch();
+            inherit_activation_incarnation(&state, &mut frame);
+            stamps(&frame)
+        };
+
+        assert_eq!(
+            inherited(Some(entry(
+                source,
+                StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: stamped(source, Some(7)),
+                }
+            ))),
+            [Some(7); 3],
+            "reach-guard: an activated carrier of this source stamps the whole chain"
+        );
+
+        let triggered = StackEntryKind::TriggeredAbility {
+            source_id: source,
+            ability: stamped(source, Some(9)),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: String::new(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        };
+        let spell = StackEntryKind::Spell {
+            card_id: CardId(1),
+            ability: Some(stamped(source, Some(9))),
+            casting_variant: CastingVariant::default(),
+            actual_mana_spent: 0,
+        };
+        let other = ObjectId(2);
+        let activated_other = StackEntryKind::ActivatedAbility {
+            source_id: other,
+            ability: stamped(other, Some(7)),
+        };
+        let unstamped = StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: stamped(source, None),
+        };
+        for (what, carrier) in [
+            ("a triggered carrier", Some(entry(source, triggered))),
+            ("a spell carrier", Some(entry(source, spell))),
+            (
+                "another object's activation",
+                Some(entry(other, activated_other)),
+            ),
+            ("no carrier", None),
+            ("an unstamped activation", Some(entry(source, unstamped))),
+        ] {
+            assert_eq!(inherited(carrier), [None; 3], "{what} stays unstamped");
+        }
     }
 }

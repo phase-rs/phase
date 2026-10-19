@@ -45,7 +45,7 @@ use crate::types::ability::{
     PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PropertyAggregate, PtValue,
     QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -2246,6 +2246,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             .declared_target_choice_timing
             .or_else(|| accepting_player_object_timing(clause_ir, &clause_ir.parsed.effect)),
         clause_ir.multi_target.is_some(),
+        clause_ir.target_selection_mode,
     )
 }
 
@@ -2366,6 +2367,7 @@ pub(super) fn target_choice_timing_for_parsed(
     fragment: &str,
     declared: Option<TargetChoiceTiming>,
     clause_multi_target: bool,
+    selection: TargetSelectionMode,
 ) -> TargetChoiceTiming {
     // CR 115.10a + CR 701.41a: a producer that expanded a keyword-action
     // SHORTHAND into a targeted effect already knows the answer the ladder below
@@ -2468,6 +2470,34 @@ pub(super) fn target_choice_timing_for_parsed(
         // choice at ITS OWN resolution (CR 608.2d), not inherit one shared
         // choice made once when the whole ability went on the stack.
         if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
+    // CR 115.10a + CR 608.2d: an untargeted DESCRIBED damage recipient ("a
+    // creature or player", "another creature you control") is not announced when
+    // the ability goes on the stack — only a thing identified by the word "target"
+    // is a target — it is chosen while the damage is applied. The shape question
+    // ("is this a described population the controller chooses from?") is the
+    // resolver's own predicate, so what is timed for resolution here is exactly
+    // what the resolver prompts for. Excluded and left on their existing readings:
+    // anything the text says "target" about (the same printed-fragment scan as
+    // every arm above), a divided or multi-target announcement, a damage source
+    // other than the ability's own (a targets-positional referent, or the triggering event's source), and a selection the game makes
+    // rather than the controller ("chosen at random": CR 101.1, the card's own
+    // words override the controller's default choice).
+    if let Effect::DealDamage {
+        damage_source: None,
+        target,
+        ..
+    } = &parsed.effect
+    {
+        if selection == TargetSelectionMode::Chosen
+            && !clause_multi_target
+            && parsed.multi_target.is_none()
+            && parsed.distribute.is_none()
+            && !nom_primitives::scan_contains(&lower, "target ")
+            && crate::game::effects::deal_damage::names_resolution_chosen_recipient(target)
+        {
             return TargetChoiceTiming::Resolution;
         }
     }

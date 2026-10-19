@@ -1916,13 +1916,20 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// permanent ("no player has previously activated a loyalty ability of that
 /// permanent that turn"), not its controller. It resets at the start of every
 /// turn for every planeswalker regardless of who controls it.
-/// Objects whose count is already zero are not written, so they stay shared
-/// with clones of the state.
+/// CR 514.2: "this turn" effects end, so a permanent-scoped extra-activation
+/// grant (`Effect::GrantExtraLoyaltyActivations { target: SelfRef }`) is cleared
+/// with the count it extends. No loyalty ability can be activated between the
+/// cleanup step and this sweep (CR 606.3 needs a main phase).
+/// Objects whose count and grant are already zero are not written, so they stay
+/// shared with clones of the state.
 fn reset_loyalty_activation_counts(state: &mut GameState) {
     state.objects.update_where(
-        |_, obj| obj.loyalty_activations_this_turn != 0,
+        |_, obj| {
+            obj.loyalty_activations_this_turn != 0 || obj.extra_loyalty_activations_this_turn != 0
+        },
         |_, obj| {
             obj.loyalty_activations_this_turn = 0;
+            obj.extra_loyalty_activations_this_turn = 0;
         },
     );
 }
@@ -13797,10 +13804,12 @@ mod object_sweep_sharing_tests {
 
     // ---- S8: reset_loyalty_activation_counts ----
 
-    /// BASE-shaped unguarded loyalty-count reset.
+    /// BASE-shaped unguarded loyalty-count reset. CR 514.2 + CR 606.3: the
+    /// count and the per-permanent extra-activation grant both end with the turn.
     fn reference_reset_loyalty_activation_counts(state: &mut GameState) {
         for obj in state.objects.iter_mut().map(|(_, v)| v) {
             obj.loyalty_activations_this_turn = 0;
+            obj.extra_loyalty_activations_this_turn = 0;
         }
     }
 
@@ -13819,9 +13828,37 @@ mod object_sweep_sharing_tests {
     fn loyalty_reset_copies_only_the_activated_permanent() {
         let (mut state, ids) = battlefield_fixture();
         object_mut(&mut state, ids[1]).loyalty_activations_this_turn = 1;
+        object_mut(&mut state, ids[1]).extra_loyalty_activations_this_turn = 2;
         let (before, after) = run_sweep_targeting(state, ids[1], reset_loyalty_activation_counts);
         assert_eq!(before.objects[&ids[1]].loyalty_activations_this_turn, 1);
+        assert_eq!(
+            before.objects[&ids[1]].extra_loyalty_activations_this_turn,
+            2
+        );
         assert_eq!(after.objects[&ids[1]].loyalty_activations_this_turn, 0);
+        assert_eq!(
+            after.objects[&ids[1]].extra_loyalty_activations_this_turn,
+            0
+        );
+    }
+
+    /// A permanent that holds only a per-permanent grant (its own count is 0)
+    /// is still swept, and copied alone: the sweep predicate must read the grant
+    /// field too, or the grant would outlive the turn.
+    #[test]
+    fn loyalty_reset_sweeps_a_grant_held_without_a_count() {
+        let (mut state, ids) = battlefield_fixture();
+        object_mut(&mut state, ids[2]).extra_loyalty_activations_this_turn = 2;
+        assert_eq!(state.objects[&ids[2]].loyalty_activations_this_turn, 0);
+        let (before, after) = run_sweep_targeting(state, ids[2], reset_loyalty_activation_counts);
+        assert_eq!(
+            before.objects[&ids[2]].extra_loyalty_activations_this_turn,
+            2
+        );
+        assert_eq!(
+            after.objects[&ids[2]].extra_loyalty_activations_this_turn,
+            0
+        );
     }
 
     /// Reference equality, with permanents of both controllers reset.
@@ -13829,6 +13866,7 @@ mod object_sweep_sharing_tests {
     fn loyalty_reset_matches_unguarded_sweep() {
         let (mut state, ids) = battlefield_fixture();
         object_mut(&mut state, ids[0]).loyalty_activations_this_turn = 1;
+        object_mut(&mut state, ids[0]).extra_loyalty_activations_this_turn = 2;
         object_mut(&mut state, ids[1]).loyalty_activations_this_turn = 2;
         assert_sweep_matches_reference(
             &state,
@@ -14063,11 +14101,16 @@ mod object_sweep_sharing_tests {
         state.active_player = P0;
         state.turn_number = 1;
         object_mut(&mut state, ids[0]).loyalty_activations_this_turn = 1;
+        object_mut(&mut state, ids[0]).extra_loyalty_activations_this_turn = 2;
         set_sick(&mut state, &[ids[1]], true);
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);
         assert_eq!(state.active_player, P1);
         assert_eq!(state.objects[&ids[0]].loyalty_activations_this_turn, 0);
+        assert_eq!(
+            state.objects[&ids[0]].extra_loyalty_activations_this_turn,
+            0
+        );
         assert!(!state.objects[&ids[1]].summoning_sick);
     }
 

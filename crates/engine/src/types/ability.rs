@@ -34,7 +34,7 @@ use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::filter::FilterContext;
 use crate::game::game_object::{BackFaceData, DisplaySource};
-use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::events::{ActivatedAbilityKind, ClashResult, PlayerActionKind};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -21345,16 +21345,28 @@ pub enum Effect {
         )]
         count: QuantityExpr,
     },
-    /// CR 606.3: Grant the resolved target player the right to activate each of
-    /// their planeswalkers' loyalty abilities `amount` additional times this
-    /// turn. Class lift of The Chain Veil's "{4}, {T}: You may activate each
-    /// planeswalker's loyalty ability an additional time this turn." Stored as
-    /// a per-player counter on `GameState::extra_loyalty_activations_this_turn`,
-    /// read by `planeswalker::can_activate_loyalty_ability` as a +N bump to the
-    /// per-permanent CR 606.3 cap. The counter is cleared at turn start.
-    /// `target` defaults to `Controller` (printed wording is "you may
-    /// activate..."); parameterized for future cards that grant the bonus to a
-    /// different player.
+    /// CR 606.3 + CR 101.1: Grant extra loyalty-ability activations for the rest
+    /// of this turn. The card's text overrides CR 606.3's once-per-permanent
+    /// limit (CR 101.1) by raising the cap by `amount`; both recipient axes feed
+    /// the one gate, `planeswalker::loyalty_activation_cap`.
+    ///
+    /// `target` is the recipient axis (absent in serialized data means `Controller`):
+    /// - `Controller` — every planeswalker the controller controls (The Chain
+    ///   Veil: "For each planeswalker you control, you may activate one of its
+    ///   loyalty abilities once this turn as though none of its loyalty abilities
+    ///   have been activated this turn."). Stored in the per-player map
+    ///   `GameState::extra_loyalty_activations_this_turn`.
+    /// - `SelfRef` — only the resolving permanent ("You may activate ~'s loyalty
+    ///   ability two more times this turn"). Stored in
+    ///   `GameObject::extra_loyalty_activations_this_turn` and usable only for that
+    ///   permanent's own characteristic loyalty abilities; a loyalty ability it
+    ///   gained in layer 6 (CR 613.1f) is not covered. That ability-level scope is
+    ///   the card's ruling, not CR text.
+    ///
+    /// The "may" is the later activation permission, not a choice made while
+    /// applying the effect (CR 608.2d), so the grant itself is mandatory. Both
+    /// stores are cleared at turn start (CR 514.2); the per-permanent store is
+    /// also cleared when the permanent enters the battlefield (CR 400.7).
     GrantExtraLoyaltyActivations {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
@@ -35301,6 +35313,24 @@ pub enum ContinuousModification {
         /// rather than a bool so the cap axis can grow to other use-restrictions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cap: Option<ActivationRestriction>,
+        /// CR 606.1 + CR 606.2: An optional kind selector narrowing which
+        /// activated abilities this grant donates. `None` (the default)
+        /// donates all activated abilities; `Some(Loyalty)` donates only the
+        /// loyalty subset (Nicol Bolas, Dragon-God "has all loyalty abilities
+        /// of all other planeswalkers on the battlefield"). The kind filter is
+        /// ability-level (CR 606.2: an activated ability with a loyalty symbol
+        /// in its cost is a loyalty ability) while `source` is object-level —
+        /// the selector lives on the modification because planeswalkers can
+        /// hold non-loyalty activated abilities, which the unqualified grant
+        /// would over-grant. A typed `Option<ActivatedAbilityKind>` rather
+        /// than a bool so the axis can grow to other kind subsets.
+        /// The parser never pairs `Some(Loyalty)` with `Some(cap)` — an
+        /// implementation limitation (the rider fold declines kind-selected
+        /// grants), not a rules exemption: a use-restriction acquired with an
+        /// ability still applies to it (CR 602.5c). Enforced at the rider fold
+        /// in `fold_grant_cap_rider`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ActivatedAbilityKind>,
     },
     /// CR 613.1f + CR 603.1 + CR 603.2: Grant the affected object **all triggered
     /// abilities of** the objects matching `source` (Koh, the Face Stealer "Koh

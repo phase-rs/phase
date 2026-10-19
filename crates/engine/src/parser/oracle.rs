@@ -133,12 +133,13 @@ use super::oracle_special::{
     parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    is_graveyard_cast_permission_lead, is_speed_unlock_sentence, lower_static_ir,
-    parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_collect_evidence_alt_cost, parse_flashback_trailing_self_spell_cost_reduction,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
-    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
+    find_refused_loyalty_grant_sentence, is_graveyard_cast_permission_lead,
+    is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
+    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
+    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
+    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
+    GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{
     lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
@@ -5369,6 +5370,33 @@ fn attach_trigger_die_result_branches(
     next_line
 }
 
+/// Attaches an immediately following die-result table to the die roll of one
+/// ability, whatever kind of ability it is (an activated ability, a loyalty
+/// ability or a spell paragraph), and returns the line the scanner resumes at.
+///
+/// CR 706.3b: The die roll, any later instructions that depend on its result and
+/// the results table are all part of one ability, even when further instructions
+/// remain in that ability's chain. When the ability has no roll awaiting a table,
+/// or the next line is not a row, nothing is consumed and `start_line` is
+/// returned, so ordinary dispatch keeps the following lines (a roll with no table
+/// is CR 706.4's own case). The collector is the one every table site shares.
+fn attach_following_die_result_table(
+    ir: &mut AbilityIr,
+    lines: &[&str],
+    start_line: usize,
+) -> usize {
+    if !ir.has_result_table_roll_die() {
+        return start_line;
+    }
+
+    let (branches, next_line) = parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell);
+    if branches.is_empty() {
+        return start_line;
+    }
+    ir.die_results = branches;
+    next_line
+}
+
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
 /// parse/lower split (Phase 49, Plan 03).
 ///
@@ -6202,9 +6230,13 @@ fn parse_normalized_oracle_ir(
             }
         }
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
-        if let Some(ability) = try_parse_loyalty_line(&line, &mut ctx) {
-            emitter.ability_ir_at_route(item_line, ability, OuterRoute::Activated);
+        if let Some(mut ability) = try_parse_loyalty_line(&line, &mut ctx) {
             i += 1;
+            // CR 706.3b: a loyalty ability that rolls a die owns the results table
+            // that follows it, exactly as any other activated ability does
+            // (Comet, Stellar Pup's "[0]: Roll a six-sided die.").
+            i = attach_following_die_result_table(&mut ability, &lines, i);
+            emitter.ability_ir_at_route(item_line, ability, OuterRoute::Activated);
             continue;
         }
 
@@ -6563,14 +6595,7 @@ fn parse_normalized_oracle_ir(
             // CR 706.3b: An immediately following valid results table belongs to
             // this ability's die roll, even when later instructions remain in
             // the same activated-ability chain.
-            if ir.has_result_table_roll_die() {
-                let (branches, next_line) =
-                    parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
-                if !branches.is_empty() {
-                    ir.die_results = branches;
-                    i = next_line;
-                }
-            }
+            i = attach_following_die_result_table(&mut ir, &lines, i);
             emitter.ability_ir_at_route(item_line, ir, OuterRoute::Activated);
             continue;
         }
@@ -7394,6 +7419,25 @@ fn parse_normalized_oracle_ir(
                             StaticIr::from_definition(&static_line, __item),
                         );
                     }
+                    // CR 606.2 + CR 607.5: a refused by-reference loyalty sentence
+                    // composed with an adopted static sibling (the whole-line fallback
+                    // keeps the sibling and drops the leaf). Carry the refusal as the
+                    // same typed `static_structure` residual 14a would have emitted —
+                    // Matt review 5564241267 MED. Exactly-once: 14a owns empty-defs
+                    // lines, so this arm and 14a are mutually exclusive.
+                    if let Some(refused) = find_refused_loyalty_grant_sentence(&static_line) {
+                        emitter.unsupported_ir_at(
+                            item_line,
+                            UnsupportedAbilityIr::new(
+                                UnsupportedAbilityCategory::StaticStructure,
+                                format!(
+                                    "Static fallback adopted statics but dropped a refused loyalty-grant sentence: {refused}"
+                                ),
+                                line,
+                            ),
+                            min_x_value,
+                        );
+                    }
                     i += 1;
                     continue;
                 }
@@ -8200,14 +8244,7 @@ fn parse_normalized_oracle_ir(
             // CR 706.3b: An immediately following valid results table belongs to
             // this paragraph's die roll, even when the same ability has later
             // instructions based on that result.
-            if ability_ir.has_result_table_roll_die() {
-                let (branches, next_i) =
-                    parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
-                if !branches.is_empty() {
-                    ability_ir.die_results = branches;
-                    i = next_i;
-                }
-            }
+            i = attach_following_die_result_table(&mut ability_ir, &lines, i);
             // CR 608.2c + CR 614.15: Cross-line "instead" self-replacement — a
             // separate printed line (usually an ability word, per CR 614.15)
             // replaces the preceding ability's effect. Emit the paragraph as its
@@ -13655,6 +13692,58 @@ mod die_table_attach_seam_tests {
                 .is_some(),
             "the row grammar — not the attach predicate — is what fixes Druid"
         );
+    }
+}
+
+/// CR 706.3b: the attach every ability site shares — an ability that rolls a die
+/// owns the results-table rows that follow it, and nothing is consumed when it has
+/// no roll awaiting a table or when the next line is not a row.
+#[cfg(test)]
+mod following_die_result_table_attach_tests {
+    use super::attach_following_die_result_table;
+    use crate::parser::oracle_effect::parse_ability_ir_standalone;
+    use crate::types::ability::AbilityKind;
+
+    const LINES: [&str; 4] = [
+        "[0]: Roll a six-sided die.",
+        "1 or 2 \u{2014} Draw a card.",
+        "3 \u{2014} Draw two cards.",
+        "[\u{2212}2]: Draw three cards.",
+    ];
+
+    /// The roll takes the contiguous rows after it and the scanner resumes at the
+    /// first line that is not one: the next printed ability.
+    #[test]
+    fn a_roll_collects_the_rows_that_follow_and_stops_at_the_next_ability() {
+        let mut ir = parse_ability_ir_standalone("Roll a six-sided die.", AbilityKind::Activated);
+        assert!(ir.has_result_table_roll_die(), "reach-guard");
+
+        let next = attach_following_die_result_table(&mut ir, &LINES, 1);
+
+        assert_eq!(next, 3, "the scanner resumes at the next ability");
+        assert_eq!(
+            ir.die_results
+                .iter()
+                .map(|row| (row.min, row.max))
+                .collect::<Vec<_>>(),
+            [(1, 2), (3, 3)]
+        );
+    }
+
+    /// With no roll, or a roll followed by a line that is not a row, nothing is
+    /// consumed and the scanner stays where it was. The reach-guards show that each
+    /// ability is otherwise a valid owner of the rows.
+    #[test]
+    fn nothing_is_consumed_without_a_roll_or_without_a_row() {
+        let mut roll = parse_ability_ir_standalone("Roll a six-sided die.", AbilityKind::Activated);
+        assert!(roll.has_result_table_roll_die(), "reach-guard");
+        assert_eq!(attach_following_die_result_table(&mut roll, &LINES, 3), 3);
+        assert!(roll.die_results.is_empty(), "the next line is not a row");
+
+        let mut draw = parse_ability_ir_standalone("Draw a card.", AbilityKind::Activated);
+        assert!(!draw.has_result_table_roll_die());
+        assert_eq!(attach_following_die_result_table(&mut draw, &LINES, 1), 1);
+        assert!(draw.die_results.is_empty(), "no roll owns the rows");
     }
 }
 
