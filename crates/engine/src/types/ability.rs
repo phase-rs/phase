@@ -34525,7 +34525,7 @@ pub struct ReplacementDefinition {
     /// as before (every object-attached replacement; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
-    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending damage
+    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending
     /// replacements whose filters, conditions, or exclusions are HOST-RELATIVE.
     ///
     /// The object half of `source_controller` (directly above), added for the same

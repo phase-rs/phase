@@ -9309,10 +9309,11 @@ fn extract_etb_counters_from_effect(
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
                 other => {
                     // CR 109.5 + CR 614.12: "you" is the replacing ability's controller,
-                    // supplied by `replacement_ability_controller` (for an entering object's
-                    // own replacement, the controller of the permanent as it would exist on
-                    // the battlefield; for a floating rider, the installing ability's
-                    // controller).
+                    // supplied by `replacement_ability_controller` (for an object-hosted
+                    // replacement, its host's controller -- for an entering object's own
+                    // replacement, as it would exist on the battlefield; for a floating
+                    // rider, the installing ability's controller latched as
+                    // `source_controller`).
                     crate::game::quantity::resolve_quantity_with_ctx(state, other, controller, ctx)
                         .max(0) as u32
                 }
@@ -9326,10 +9327,11 @@ fn extract_etb_counters_from_effect(
             .iter()
             .map(|(counter_type, count)| {
                 // CR 109.5 + CR 614.12: "you" is the replacing ability's controller,
-                // supplied by `replacement_ability_controller` (for an entering object's
-                // own replacement, the controller of the permanent as it would exist on
-                // the battlefield; for a floating rider, the installing ability's
-                // controller).
+                // supplied by `replacement_ability_controller` (for an object-hosted
+                // replacement, its host's controller -- for an entering object's own
+                // replacement, as it would exist on the battlefield; for a floating
+                // rider, the installing ability's controller latched as
+                // `source_controller`).
                 let ctx = crate::game::quantity::QuantityContext {
                     entering: event.affected_object_id(),
                     ..crate::game::quantity::QuantityContext::new(source_id)

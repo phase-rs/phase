@@ -2122,14 +2122,19 @@ mod tests {
         );
     }
 
-    /// CR 113.7a + CR 109.5 hostile sub-case (b): the effect exists independently
-    /// of its source, so the source leaving the battlefield after install does not
-    /// change whose board "you" counts.
+    /// CR 113.7a + CR 109.5 hostile sub-case (b): the triggered ability, and the
+    /// rider its resolution created, exist independently of its source (CR 113.7a),
+    /// so the source leaving the battlefield after install does not change whose
+    /// board "you" counts. The source is OWNED by P0 but controlled by P1: a
+    /// reverted live read of the departed source (which falls back to its owner in
+    /// the graveyard) would count P0's board (1), while the latched controller
+    /// still counts P1's (3).
     #[test]
     fn floating_entry_counter_rider_survives_source_leaving_battlefield() {
         use crate::types::counter::CounterType;
 
         let (mut state, source, entering) = floating_entry_counter_fixture();
+        state.objects.get_mut(&source).unwrap().owner = PlayerId(0);
         install_dog_wolf_entry_rider(&mut state, source, entering);
         assert_eq!(
             state.pending_damage_replacements[0].source_object,

@@ -4053,9 +4053,10 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
     })
 }
 
-/// CR 113.7a + CR 611.2a + CR 615.3: install a damage replacement created by the
+/// CR 113.7a + CR 611.2a + CR 615.3: install a floating replacement created by the
 /// RESOLUTION of a spell or ability whose scope is its SOURCE rather than a
-/// recipient object.
+/// recipient object -- a source-scoped damage shield, or an
+/// `AddTargetReplacement { target: None }` rider.
 ///
 /// The single authority for the SOURCE-SCOPED DAMAGE-SHIELD installs it owns —
 /// `prevent_damage`'s untargeted branch and player-scoped arm, and
@@ -4070,7 +4071,8 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
 /// `source_controller` through `replacement_with_ability_expiry`, so a
 /// controller-relative gate on that definition resolves to the installer
 /// (CR 113.8 / CR 109.5) rather than to `state.active_player`. Routing that arm
-/// through this authority too is the clean end state.
+/// through this authority too is the clean end state. `create_draw_replacement::
+/// resolve` and `create_planeswalk_replacement::resolve` also push raw.
 ///
 /// CR 113.7a: "Once activated or triggered, an ability exists on the stack
 /// independently of its source. Destruction or removal of the source after that
@@ -4088,14 +4090,16 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
 /// cleanup, end-of-combat teardown, untap step) -- CR 615.3, "until they're used
 /// up or their duration has expired".
 ///
-/// `anchor_zones` is the CALLER'S OWN pre-existing object-hosting zone set --
-/// the zones in which that caller stored the shield on its source before this
-/// authority existed. It is a caller parameter and not a constant because the
+/// `anchor_zones` is the set of zones from which THIS CALLER's source is anchored.
+/// For the three damage-shield callers it is exactly the zone set in which that
+/// caller stored the shield on its source before this authority existed;
+/// `add_target_replacement::resolve`'s `TargetFilter::None` arm is the deliberate
+/// exception described below. It is a caller parameter and not a constant because the
 /// two pre-existing forks disagree: `prevent_damage::resolve`'s untargeted
 /// branch tested `Zone::Battlefield` alone while `push_player_scoped_shield`
 /// tested `Zone::Battlefield | Zone::Command`. Handing each caller its own set
 /// is what makes the ANCHORED population exactly the population that caller
-/// newly moves, and leaves every shield that was ALREADY in the registry
+/// newly moves, and leaves every damage shield that was ALREADY in the registry
 /// carrying `source_object: None` and today's sentinel semantics -- including an
 /// untargeted shield sourced from a Command-zone emblem. A single hardcoded
 /// `Battlefield | Command` test would newly anchor that emblem case and flip
@@ -4129,9 +4133,9 @@ pub(crate) fn install_floating_damage_replacement(
     if shield.source_controller.is_none() {
         shield.source_controller = Some(controller);
     }
-    // CR 113.7a: anchor the host ONLY for a source that was actually
-    // hosting the shield before this authority existed -- i.e. an object in THIS
-    // CALLER'S `anchor_zones`. The callers do not agree on that set (see the
+    // CR 113.7a: anchor the host ONLY for a source in THIS CALLER'S
+    // `anchor_zones` (for the damage-shield callers, exactly the sources that
+    // hosted the shield before this authority existed). The callers do not agree on that set (see the
     // doc comment), so it must not be hardcoded here. A shield created by a
     // resolving instant/sorcery never had a host, and neither did any shield this
     // caller was ALREADY routing to the registry -- for `prevent_damage::resolve`'s
