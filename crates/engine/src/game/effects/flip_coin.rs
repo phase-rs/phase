@@ -2000,4 +2000,348 @@ mod tests {
             "the repeat loop must be fully drained after the winning flip"
         );
     }
+
+    // --- Run-level characterization -------------------------------------------
+    //
+    // These pin how a whole coin-flip run behaves (reward timing, count latching,
+    // the safety cap, and the single completion marker) independently of how the
+    // resolver is structured, so a later consolidation of the flip resolvers must
+    // keep them green unchanged.
+
+    /// Counts the `EffectResolved` markers a coin-flip run reported for `source`.
+    fn coin_run_markers(events: &[GameEvent], source: ObjectId) -> usize {
+        events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::FlipCoin
+                            | EffectKind::FlipCoins
+                            | EffectKind::FlipCoinUntilLose,
+                        source_id,
+                        ..
+                    } if *source_id == source
+                )
+            })
+            .count()
+    }
+
+    /// The `won` result of every `CoinFlipped` event, in order.
+    fn coin_flip_results(events: &[GameEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn gain_life_definition(amount: i32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn until_loss_gain_life() -> Effect {
+        Effect::FlipCoinUntilLose {
+            win_effect: Box::new(gain_life_definition(1)),
+        }
+    }
+
+    /// CR 705.1 + CR 608.2c: "flip a coin until you lose a flip. For each flip you
+    /// won, [reward]" follows its instructions in written order, so every flip of
+    /// the run happens before any reward is paid.
+    #[test]
+    fn until_loss_rewards_follow_every_flip() {
+        let mut reached = false;
+        for seed in 0..64u64 {
+            let mut state = GameState::new_two_player(42);
+            state.rng = crate::types::game_state::GameRng::seed_from_u64(seed);
+            let start_life = state.players[0].life;
+            let ability =
+                ResolvedAbility::new(until_loss_gain_life(), vec![], ObjectId(1), PlayerId(0));
+            let mut events = Vec::new();
+            resolve_until_lose(&mut state, &ability, &mut events).unwrap();
+
+            let flips = coin_flip_results(&events);
+            let wins = flips.iter().filter(|won| **won).count();
+            // Reach guard: at least two won flips, so a reward interleaved after
+            // the first win would sit between two flips.
+            if wins < 2 {
+                continue;
+            }
+            reached = true;
+
+            assert_eq!(
+                flips.last(),
+                Some(&false),
+                "the run ends on the losing flip, got {flips:?}"
+            );
+            let last_flip = events
+                .iter()
+                .rposition(|e| matches!(e, GameEvent::CoinFlipped { .. }))
+                .expect("the run flipped");
+            let rewards: Vec<usize> = events
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| matches!(e, GameEvent::LifeChanged { .. }))
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(
+                rewards.len(),
+                wins,
+                "one reward per won flip (seed {seed}, flips {flips:?})"
+            );
+            assert!(
+                rewards.iter().all(|index| *index > last_flip),
+                "every reward comes after the last flip (seed {seed}, flips {flips:?})"
+            );
+            assert_eq!(state.players[0].life - start_life, wins as i32);
+            break;
+        }
+        assert!(reached, "some seed in 0..64 must win at least two flips");
+    }
+
+    /// CR 608.2h + CR 107.1b: "flip N coins" determines N once, when the run
+    /// starts. A won flip that draws a card grows the hand, but the run still
+    /// flips exactly the count the hand size gave at the start.
+    #[test]
+    fn exactly_count_is_latched_when_the_run_starts() {
+        use crate::types::ability::{PlayerScope, QuantityRef};
+
+        let mut reached = false;
+        for seed in 0..64u64 {
+            let mut state = GameState::new_two_player(42);
+            state.rng = crate::types::game_state::GameRng::seed_from_u64(seed);
+            for i in 0..10 {
+                create_object(
+                    &mut state,
+                    CardId(100 + i),
+                    PlayerId(0),
+                    format!("Library Card {i}"),
+                    Zone::Library,
+                );
+            }
+            for i in 0..2 {
+                create_object(
+                    &mut state,
+                    CardId(200 + i),
+                    PlayerId(0),
+                    format!("Hand Card {i}"),
+                    Zone::Hand,
+                );
+            }
+            assert_eq!(
+                state.players[0].hand.len(),
+                2,
+                "the run starts with 2 cards"
+            );
+
+            let ability = ResolvedAbility::new(
+                Effect::FlipCoins {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    win_effect: Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ))),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve_flip_coins(&mut state, &ability, &mut events).unwrap();
+
+            let flips = coin_flip_results(&events);
+            assert_eq!(
+                flips.len(),
+                2,
+                "the count is latched at the starting hand size (seed {seed}, flips {flips:?})"
+            );
+            // Reach guard: the first flip was won, so the hand had already grown
+            // to 3 when the second flip happened. A per-flip re-read of the hand
+            // size would have flipped a third coin.
+            if !flips[0] {
+                continue;
+            }
+            reached = true;
+            let wins = flips.iter().filter(|won| **won).count();
+            assert_eq!(
+                state.players[0].hand.len(),
+                2 + wins,
+                "each won flip drew exactly one card"
+            );
+            break;
+        }
+        assert!(reached, "some seed in 0..64 must win the first flip");
+    }
+
+    /// A run parked at a kept flip, for the cap tests below.
+    fn pending_until_lose(wins_so_far: u32) -> PendingCoinFlip {
+        PendingCoinFlip {
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: vec![],
+            win_effect: Some(Box::new(gain_life_definition(1))),
+            lose_effect: None,
+            kind: PendingCoinFlipKind::UntilLose { wins_so_far },
+            chain_root_targets: vec![],
+        }
+    }
+
+    /// CR 705.1 + CR 608.2c: a kept win that lands the streak on the safety cap
+    /// ends the run without another flip, pays every owed reward, and reports the
+    /// run resolved exactly once.
+    #[test]
+    fn kept_win_at_the_cap_pays_every_reward_and_reports_once() {
+        // The safety cap is the fn-local `MAX_FLIPS` (1000) in
+        // `flip_until_lose_loop`; it is not nameable from here, so the boundary is
+        // written as a literal. `wins_so_far` counts the wins before the kept one.
+        const CAP: u32 = 1000;
+
+        // At the cap: wins_so_far = CAP - 1, and the kept flip is the CAP-th win.
+        let mut state = GameState::new_two_player(42);
+        let start_life = state.players[0].life;
+        let mut events = Vec::new();
+        let outcome = resume_after_keep(
+            &mut state,
+            pending_until_lose(CAP - 1),
+            vec![true],
+            &mut events,
+        )
+        .expect("resuming the kept win succeeds");
+        assert_eq!(outcome, None, "the run completed");
+        assert_eq!(
+            coin_flip_results(&events),
+            vec![true],
+            "only the kept flip happens: no further flip at the cap"
+        );
+        assert_eq!(
+            state.players[0].life - start_life,
+            CAP as i32,
+            "every one of the {CAP} owed rewards is paid"
+        );
+        assert_eq!(
+            coin_run_markers(&events, ObjectId(1)),
+            1,
+            "the completed run reports resolved exactly once"
+        );
+
+        // Negative pair: one win short of the cap, the kept win still flips again.
+        let mut state = GameState::new_two_player(42);
+        let start_life = state.players[0].life;
+        let mut events = Vec::new();
+        let outcome = resume_after_keep(
+            &mut state,
+            pending_until_lose(CAP - 2),
+            vec![true],
+            &mut events,
+        )
+        .expect("resuming the kept win succeeds");
+        assert_eq!(outcome, None, "the run completed");
+        let flips = coin_flip_results(&events);
+        assert!(
+            flips.len() >= 2,
+            "below the cap the run flips again after the kept win, got {flips:?}"
+        );
+        let later_wins = flips.iter().skip(1).filter(|won| **won).count() as i32;
+        assert_eq!(
+            state.players[0].life - start_life,
+            (CAP - 1) as i32 + later_wins,
+            "rewards paid == the kept win plus every owed and later win"
+        );
+        assert_eq!(coin_run_markers(&events, ObjectId(1)), 1);
+    }
+
+    /// Engine contract: a run that completes with no pending resolution choice
+    /// reports `EffectResolved` exactly once, for every run form.
+    #[test]
+    fn fresh_runs_report_resolved_once() {
+        let source = ObjectId(1);
+        let fresh_state = || {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            state
+        };
+        let ability = |effect: Effect| ResolvedAbility::new(effect, vec![], source, PlayerId(0));
+
+        // Single flip, no branches.
+        let mut state = fresh_state();
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &ability(Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(coin_flip_results(&events).len(), 1);
+        assert_eq!(coin_run_markers(&events, source), 1, "single flip");
+
+        // Three flips, no branches.
+        let mut state = fresh_state();
+        let mut events = Vec::new();
+        resolve_flip_coins(
+            &mut state,
+            &ability(Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 3 },
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(coin_flip_results(&events).len(), 3);
+        assert_eq!(coin_run_markers(&events, source), 1, "three flips");
+
+        // Zero flips: no flip happens, the run still reports resolved once.
+        let mut state = fresh_state();
+        let mut events = Vec::new();
+        resolve_flip_coins(
+            &mut state,
+            &ability(Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 0 },
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert!(coin_flip_results(&events).is_empty(), "no coin is flipped");
+        assert_eq!(coin_run_markers(&events, source), 1, "zero flips");
+
+        // Until-loss with a reward.
+        let mut state = fresh_state();
+        let mut events = Vec::new();
+        resolve_until_lose(&mut state, &ability(until_loss_gain_life()), &mut events).unwrap();
+        assert_eq!(
+            coin_flip_results(&events).last(),
+            Some(&false),
+            "the until-loss run ends on a loss"
+        );
+        assert_eq!(coin_run_markers(&events, source), 1, "until-loss run");
+    }
 }
