@@ -218,9 +218,7 @@ fn coin_run_markers(events: &[GameEvent], source: ObjectId) -> usize {
             matches!(
                 e,
                 GameEvent::EffectResolved {
-                    kind: EffectKind::FlipCoin
-                        | EffectKind::FlipCoins
-                        | EffectKind::FlipCoinUntilLose,
+                    kind: EffectKind::FlipCoins,
                     source_id,
                     ..
                 } if *source_id == source

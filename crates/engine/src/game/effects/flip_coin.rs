@@ -167,7 +167,7 @@ pub fn resolve(
         CoinFlipOutcome::Prevented => {
             // CR 614.6: the flip never happened — no branch, report resolved.
             events.push(GameEvent::EffectResolved {
-                kind: EffectKind::FlipCoin,
+                kind: EffectKind::FlipCoins,
                 source_id: ability.source_id,
                 subject: None,
             });
@@ -215,7 +215,7 @@ pub fn resolve(
     // guard in `pay.rs::resolve_ability_cost_payment`.
     if state.waiting_for == prior_waiting_for {
         events.push(GameEvent::EffectResolved {
-            kind: EffectKind::FlipCoin,
+            kind: EffectKind::FlipCoins,
             source_id: ability.source_id,
             subject: None,
         });
@@ -443,7 +443,7 @@ fn finish_until_lose(
     // suspended for a player choice; otherwise the effect has fully resolved.
     if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
-            kind: EffectKind::FlipCoinUntilLose,
+            kind: EffectKind::FlipCoins,
             source_id,
             subject: None,
         });
@@ -502,9 +502,9 @@ pub fn resume_after_keep(
     });
 
     let effect_kind = match kind {
-        PendingCoinFlipKind::Single => EffectKind::FlipCoin,
-        PendingCoinFlipKind::FlipN { .. } => EffectKind::FlipCoins,
-        PendingCoinFlipKind::UntilLose { .. } => EffectKind::FlipCoinUntilLose,
+        PendingCoinFlipKind::Single
+        | PendingCoinFlipKind::FlipN { .. }
+        | PendingCoinFlipKind::UntilLose { .. } => EffectKind::FlipCoins,
     };
 
     // Clear the resolving keep choice so a re-suspension is unambiguous.
@@ -1088,11 +1088,11 @@ mod tests {
             !events.iter().any(|e| matches!(
                 e,
                 GameEvent::EffectResolved {
-                    kind: EffectKind::FlipCoin,
+                    kind: EffectKind::FlipCoins,
                     ..
                 }
             )),
-            "FlipCoin EffectResolved fired before the optional choice was made"
+            "FlipCoins EffectResolved fired before the optional choice was made"
         );
         assert!(state.active_optional_effect_frame().is_some());
         assert!(matches!(
@@ -2016,9 +2016,7 @@ mod tests {
                 matches!(
                     e,
                     GameEvent::EffectResolved {
-                        kind: EffectKind::FlipCoin
-                            | EffectKind::FlipCoins
-                            | EffectKind::FlipCoinUntilLose,
+                        kind: EffectKind::FlipCoins,
                         source_id,
                         ..
                     } if *source_id == source
