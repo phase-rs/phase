@@ -60,7 +60,7 @@ fn bind_count(
 
 /// CR 400.7 + CR 608.2b: select the original occurrence before filtering it.
 /// A missing/stale first object never selects a later object or a board scan.
-fn recipient(
+pub(super) fn recipient(
     state: &GameState,
     ability: &ResolvedAbility,
     target: &TargetFilter,
@@ -142,7 +142,10 @@ pub fn resolve(
         source_id: ability.source_id,
         subject: None,
     });
-    let Some(pin) = recipient(state, ability, target) else {
+    let recipient = recipient(state, ability, target);
+    let result_binding =
+        super::begin_counter_removal_result(state, ability, recipient, counters.clone())?;
+    let Some(pin) = recipient else {
         return Ok(());
     };
     let object = &state.objects[&pin.object_id];
@@ -159,6 +162,8 @@ pub fn resolve(
     let mut branches = Vec::new();
     // Clone context/attribution but leave the outer resolution chain its sole tail.
     let mut delegated = ability.clone();
+    delegated.declares_return_result = None;
+    delegated.context.counter_removal_result = result_binding;
     delegated.sub_ability = None;
     delegated.else_ability = None;
     delegated.replace_target_occurrences(vec![(TargetRef::Object(pin.object_id), Some(pin))]);

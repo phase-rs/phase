@@ -1377,6 +1377,26 @@ pub(crate) fn apply_counter_removal(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> u32 {
+    apply_counter_removal_with_result(state, object_id, counter_type, count, None, events)
+}
+
+pub(crate) fn apply_counter_removal_with_result(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    binding: Option<&crate::types::game_state::CounterRemovalResultBinding>,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    if binding.is_some_and(|binding| {
+        !super::counter_removal_binding_is_valid(state, binding)
+            || !binding
+                .recipient
+                .is_some_and(|pin| pin.object_id == object_id && pin.is_current(state))
+            || !binding.counters.matches(&counter_type)
+    }) {
+        return 0;
+    }
     if count == 0 {
         return 0;
     }
@@ -1408,6 +1428,35 @@ pub(crate) fn apply_counter_removal(
         .record_object_counter(command)
         .expect("resolved counter removal must have a live journal cause");
 
+    if let Some(binding) = binding {
+        // CR 122.1 + CR 603.12: receipt follows only this successfully journaled
+        // edit, never a proposed amount, a map difference, or a zone reset.
+        let Some(crate::types::game_state::InstructionResult::CounterRemovals(result)) = state
+            .return_result_frames
+            .get_mut(&binding.occurrence)
+            .and_then(|frame| frame.get_mut(&binding.result))
+        else {
+            unreachable!("validated counter-removal result disappeared");
+        };
+        if let Some(record) = result
+            .counter_removals
+            .iter_mut()
+            .find(|record| record.object == object && record.counter_type == counter_type)
+        {
+            record.count = record
+                .count
+                .checked_add(removed)
+                .expect("counter removal receipt overflow");
+        } else {
+            result
+                .counter_removals
+                .push(crate::types::game_state::CounterRemovalRecord {
+                    object,
+                    counter_type: counter_type.clone(),
+                    count: removed,
+                });
+        }
+    }
     events.push(GameEvent::CounterRemoved {
         object_id,
         counter_type,
@@ -1508,6 +1557,17 @@ pub fn remove_counter_with_replacement(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) {
+    remove_counter_with_result(state, object_id, counter_type, count, None, events)
+}
+
+fn remove_counter_with_result(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    result_binding: Option<crate::types::game_state::CounterRemovalResultBinding>,
+    events: &mut Vec<GameEvent>,
+) {
     // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
     // this counter type from this object, bail out immediately.
     if counter_removal_blocked(state, object_id, &counter_type) {
@@ -1518,6 +1578,7 @@ pub fn remove_counter_with_replacement(
         object_id,
         counter_type,
         count,
+        result_binding,
         applied: HashSet::new(),
     };
 
@@ -1527,10 +1588,18 @@ pub fn remove_counter_with_replacement(
                 object_id,
                 counter_type,
                 count,
+                result_binding,
                 ..
             } = event
             {
-                apply_counter_removal(state, object_id, counter_type, count, events);
+                apply_counter_removal_with_result(
+                    state,
+                    object_id,
+                    counter_type,
+                    count,
+                    result_binding.as_ref(),
+                    events,
+                );
             }
         }
         ReplacementResult::Prevented => {}
@@ -3175,6 +3244,29 @@ pub fn resolve_remove(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let mut producer_owned;
+    let ability = if ability.declares_return_result.is_some() {
+        let Effect::RemoveCounter {
+            counter_type,
+            target,
+            ..
+        } = &ability.effect
+        else {
+            return Err(EffectError::InvalidParam("named counter producer".into()));
+        };
+        let recipient = super::choose_counter_adjustment::recipient(state, ability, target);
+        let counters = counter_type.clone().map_or(
+            crate::types::counter::CounterMatch::Any,
+            crate::types::counter::CounterMatch::OfType,
+        );
+        let binding = super::begin_counter_removal_result(state, ability, recipient, counters)?;
+        producer_owned = ability.clone();
+        producer_owned.declares_return_result = None;
+        producer_owned.context.counter_removal_result = binding;
+        &producer_owned
+    } else {
+        ability
+    };
     // CR 107.1c + CR 608.2d: "remove any number of counters" is a resolution-time
     // interactive choice; the parser encodes it as `UpTo { Fixed{-1} }`.
     // Discriminate on the peel FLAG (never on the scalar): if the count wrapper is
@@ -3272,6 +3364,7 @@ pub fn resolve_remove(
 
     let total = remaining.iter().map(|entry| entry.count).sum();
     state.push_counter_removals(PendingCounterRemovalQueue {
+        result_binding: ability.context.counter_removal_result.clone(),
         remaining,
         effect_kind: EffectKind::from(&ability.effect),
         source_ability_id: ability.source_id,
@@ -3419,6 +3512,7 @@ pub(crate) fn validate_and_queue_counter_removal(
         })
         .collect();
     state.push_counter_removals(PendingCounterRemovalQueue {
+        result_binding: pending_effect.context.counter_removal_result.clone(),
         remaining,
         effect_kind: EffectKind::from(&pending_effect.effect),
         source_ability_id: pending_effect.source_id,
@@ -3484,12 +3578,20 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
                 count,
             },
         });
+        let result_binding = queue.result_binding.clone();
         state
             .replace_active_counter_removals(queue)
             .expect("re-parked counter-removals queue must own the active frame");
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
-        remove_counter_with_replacement(state, object_id, counter_type, count, events);
+        remove_counter_with_result(
+            state,
+            object_id,
+            counter_type,
+            count,
+            result_binding,
+            events,
+        );
         // If a replacement needs a player choice, suspend — the ReplacementChoice
         // resume path re-invokes this drain to finish the remaining removals.
         if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
@@ -9328,5 +9430,154 @@ mod tests {
                 vec![ObjectIncarnationRef::from_object(&state.objects[&target])];
             assert_eq!(resolve_defined_or_targets(&state, &ability), vec![target]);
         }
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_receipt_owner_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::ReturnResultId;
+    use crate::types::counter::CounterMatch;
+    use crate::types::game_state::{
+        CounterRemovalInstructionResult, CounterRemovalResultBinding, InstructionResult,
+        ReturnResultOccurrenceId,
+    };
+    use crate::types::identifiers::ObjectIdentityBinding;
+    #[test]
+    fn u13_only_exact_accepted_journaled_delivery_appends_a_canonical_receipt() {
+        let mut s = GameScenario::new();
+        let source = s.add_creature(P0, "Synthetic owner", 2, 4).id();
+        let other = s.add_creature(P1, "Synthetic other recipient", 2, 4).id();
+        let charge = CounterType::Generic("charge".into());
+        let oil = CounterType::Generic("oil".into());
+        s.with_counter(source, charge.clone(), 3)
+            .with_counter(source, oil.clone(), 3)
+            .with_counter(other, charge.clone(), 3);
+        let mut state = s.build().state().clone();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let occurrence = ReturnResultOccurrenceId(1);
+        let result = ReturnResultId(2);
+        let binding = CounterRemovalResultBinding {
+            occurrence,
+            result,
+            source: ObjectIdentityBinding::new(pin, Zone::Battlefield),
+            recipient: Some(pin),
+            counters: CounterMatch::OfType(charge.clone()),
+        };
+        state
+            .return_result_frames
+            .entry(occurrence)
+            .or_default()
+            .insert(
+                result,
+                InstructionResult::CounterRemovals(CounterRemovalInstructionResult {
+                    source: binding.source,
+                    recipient: binding.recipient,
+                    counters: binding.counters.clone(),
+                    counter_removals: vec![],
+                }),
+            );
+        let mut events = vec![];
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                other,
+                charge.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            0
+        );
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                oil.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            0
+        );
+        let mut wrong = binding.clone();
+        wrong.occurrence = ReturnResultOccurrenceId(2);
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&wrong),
+                &mut events
+            ),
+            0
+        );
+        assert!(events.is_empty());
+        assert_eq!(state.objects[&source].counters[&charge], 3);
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            1
+        );
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                99,
+                Some(&binding),
+                &mut events
+            ),
+            2
+        );
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            0
+        );
+        let InstructionResult::CounterRemovals(receipt) =
+            &state.return_result_frames[&occurrence][&result]
+        else {
+            panic!("typed result")
+        };
+        assert_eq!(receipt.counter_removals.len(), 1);
+        assert_eq!(receipt.counter_removals[0].object, pin);
+        assert_eq!(receipt.counter_removals[0].count, 3);
+        assert_eq!(state.objects[&source].counters[&oil], 3);
+        assert_eq!(state.objects[&other].counters[&charge], 3);
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry.command.as_ref(),
+                    Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(_))
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            apply_counter_removal(&mut state, other, charge.clone(), 1, &mut events),
+            1
+        );
+        assert_eq!(
+            state.objects[&other].counters[&charge], 2,
+            "ordinary unbound removal remains live"
+        );
     }
 }

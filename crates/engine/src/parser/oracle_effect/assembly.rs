@@ -3076,6 +3076,35 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         };
         let is_target_only = matches!(clause_effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_effect);
+        if let Some(owner) = clause_ir.declares_instruction_result {
+            // CR 608.2c: declarations are source-addressed and cannot be borrowed
+            // by a duplicate, foreign, or wrong-shaped instruction.
+            let valid = owner == clause_ir.id
+                && ir
+                    .clauses
+                    .iter()
+                    .filter(|clause| clause.id == owner)
+                    .count()
+                    == 1
+                && matches!(&clause_ir.parsed.effect,
+                    Effect::ChooseCounterAdjustment { adjustment, .. } if adjustment.allows_remove())
+                || owner == clause_ir.id
+                    && ir
+                        .clauses
+                        .iter()
+                        .filter(|clause| clause.id == owner)
+                        .count()
+                        == 1
+                    && matches!(&clause_ir.parsed.effect, Effect::RemoveCounter { .. });
+            if valid {
+                def.declares_return_result = Some(ReturnResultId(owner.0));
+            } else {
+                def.effect = Box::new(Effect::unimplemented(
+                    "instruction_result_declaration",
+                    clause_ir.source.fragment().unwrap_or_default(),
+                ));
+            }
+        }
         def.declares_chosen_group = clause_ir
             .declares_chosen_clause
             .map(|id| ChosenGroupId(id.0))

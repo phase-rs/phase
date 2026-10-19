@@ -380,6 +380,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
     };
     let state = runner.state_mut();
     state.pending_replacement = Some(PendingReplacement {
+        damage_source_context: None,
         proposed: ProposedEvent::SearchFound {
             searcher: P0,
             library_owner: Some(P0),

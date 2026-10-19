@@ -6104,6 +6104,8 @@ pub struct PendingCounterRemovalInFlight {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_binding: Option<CounterRemovalResultBinding>,
     /// Remaining per-object counter removals.
     pub remaining: Vec<PendingCounterRemoval>,
     /// Effect kind for the terminating `EffectResolved` event.
@@ -6123,6 +6125,8 @@ pub struct PendingCounterRemovalQueue {
 
 #[derive(Deserialize)]
 struct PendingCounterRemovalQueueWire {
+    #[serde(default)]
+    result_binding: Option<CounterRemovalResultBinding>,
     remaining: Vec<PendingCounterRemovalWire>,
     #[serde(default)]
     source_id: Option<ObjectId>,
@@ -6167,6 +6171,7 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             remaining,
+            result_binding: wire.result_binding,
             effect_kind: wire.effect_kind,
             source_ability_id: wire.source_ability_id,
             total: wire.total,
@@ -6367,6 +6372,101 @@ impl From<InstructionMemberWire> for ObjectIncarnationRef {
 pub enum InstructionResult {
     ZoneChanges(Vec<ZoneChangeRecord>),
     RevealedCards(RevealedInstructionResult),
+    CounterRemovals(CounterRemovalInstructionResult),
+}
+
+/// CR 608.2c + CR 400.7: an instruction-local execution capability. A choice,
+/// queue, and proposed removal transport the same key; none discovers a result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterRemovalResultBinding {
+    pub occurrence: ReturnResultOccurrenceId,
+    pub result: ReturnResultId,
+    #[serde(deserialize_with = "deserialize_counter_source")]
+    pub source: ObjectIdentityBinding,
+    #[serde(deserialize_with = "deserialize_counter_recipient")]
+    pub recipient: Option<ObjectIncarnationRef>,
+    pub counters: crate::types::counter::CounterMatch,
+}
+
+/// CR 122.1: one actual, strictly positive, accepted removal. Repeated
+/// deliveries of the same (incarnation, kind) add to this record's count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterRemovalRecord {
+    #[serde(deserialize_with = "deserialize_counter_member")]
+    pub object: ObjectIncarnationRef,
+    pub counter_type: CounterType,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "CounterRemovalInstructionResultWire")]
+pub struct CounterRemovalInstructionResult {
+    pub source: ObjectIdentityBinding,
+    pub recipient: Option<ObjectIncarnationRef>,
+    pub counters: crate::types::counter::CounterMatch,
+    pub counter_removals: Vec<CounterRemovalRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CounterRemovalInstructionResultWire {
+    #[serde(deserialize_with = "deserialize_counter_source")]
+    source: ObjectIdentityBinding,
+    #[serde(deserialize_with = "deserialize_counter_recipient")]
+    recipient: Option<ObjectIncarnationRef>,
+    counters: crate::types::counter::CounterMatch,
+    counter_removals: Vec<CounterRemovalRecord>,
+}
+
+fn deserialize_counter_member<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ObjectIncarnationRef, D::Error> {
+    InstructionMemberWire::deserialize(deserializer).map(Into::into)
+}
+
+fn deserialize_counter_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ObjectIdentityBinding, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SourceWire {
+        reference: InstructionMemberWire,
+        expected_zone: Zone,
+    }
+    let source = SourceWire::deserialize(deserializer)?;
+    Ok(ObjectIdentityBinding::new(
+        source.reference.into(),
+        source.expected_zone,
+    ))
+}
+
+fn deserialize_counter_recipient<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ObjectIncarnationRef>, D::Error> {
+    Option::<InstructionMemberWire>::deserialize(deserializer).map(|pin| pin.map(Into::into))
+}
+
+impl TryFrom<CounterRemovalInstructionResultWire> for CounterRemovalInstructionResult {
+    type Error = String;
+    fn try_from(wire: CounterRemovalInstructionResultWire) -> Result<Self, Self::Error> {
+        let mut seen = HashSet::new();
+        if wire.counter_removals.iter().any(|record| {
+            record.count == 0
+                || Some(record.object) != wire.recipient
+                || !wire.counters.matches(&record.counter_type)
+                || !seen.insert((record.object, record.counter_type.clone()))
+        }) {
+            return Err("incoherent counter-removal records".into());
+        }
+        Ok(Self {
+            source: wire.source,
+            recipient: wire.recipient,
+            counters: wire.counters,
+            counter_removals: wire.counter_removals,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6397,19 +6497,19 @@ impl InstructionResult {
     pub fn zone_changes(&self) -> Option<&[ZoneChangeRecord]> {
         match self {
             Self::ZoneChanges(records) => Some(records),
-            Self::RevealedCards(_) => None,
+            Self::RevealedCards(_) | Self::CounterRemovals(_) => None,
         }
     }
     pub fn zone_changes_mut(&mut self) -> Option<&mut Vec<ZoneChangeRecord>> {
         match self {
             Self::ZoneChanges(records) => Some(records),
-            Self::RevealedCards(_) => None,
+            Self::RevealedCards(_) | Self::CounterRemovals(_) => None,
         }
     }
     pub fn revealed_cards(&self) -> Option<&[ObjectIncarnationRef]> {
         match self {
             Self::RevealedCards(result) => Some(&result.revealed_cards),
-            Self::ZoneChanges(_) => None,
+            Self::ZoneChanges(_) | Self::CounterRemovals(_) => None,
         }
     }
 }
@@ -12388,6 +12488,10 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
     ability.declares_return_result.is_some()
         || ability.reads_return_result.is_some()
         || ability
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.references_counter_result(None))
+        || ability
             .sub_ability
             .as_deref()
             .is_some_and(has_return_result_metadata)
@@ -12399,9 +12503,13 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
 
 pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: ReturnResultId) -> bool {
     ability
-        .reads_return_result
+        .condition
         .as_ref()
-        .is_some_and(|(id, _)| *id == result_id)
+        .is_some_and(|condition| condition.references_counter_result(Some(result_id)))
+        || ability
+            .reads_return_result
+            .as_ref()
+            .is_some_and(|(id, _)| *id == result_id)
         || ability
             .sub_ability
             .as_deref()
@@ -12417,6 +12525,24 @@ pub(crate) fn live_return_result_occurrences(
 ) -> HashSet<ReturnResultOccurrenceId> {
     let mut live = HashSet::new();
     live.extend(state.active_return_result_occurrence);
+    if let WaitingFor::ChooseOneOfBranch { context, .. } = &state.waiting_for {
+        live.extend(
+            context
+                .counter_removal_result
+                .as_ref()
+                .map(|binding| binding.occurrence),
+        );
+    }
+    if let Some(ProposedEvent::RemoveCounter {
+        result_binding: Some(binding),
+        ..
+    }) = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| &pending.proposed)
+    {
+        live.insert(binding.occurrence);
+    }
     for frame in state.resolution_stack.iter() {
         match frame {
             ResolutionFrame::OptionalEffect(optional) => {
@@ -12446,16 +12572,31 @@ pub(crate) fn live_return_result_occurrences(
                     live.insert(*occurrence_id);
                 }
             }
+            ResolutionFrame::CounterRemovals(queue) => {
+                live.extend(
+                    queue
+                        .result_binding
+                        .as_ref()
+                        .map(|binding| binding.occurrence),
+                );
+            }
+            ResolutionFrame::ChooseOneOf(pending) => {
+                live.extend(
+                    pending
+                        .context
+                        .counter_removal_result
+                        .as_ref()
+                        .map(|binding| binding.occurrence),
+                );
+            }
             ResolutionFrame::RepeatFor(_)
             | ResolutionFrame::RepeatUntil(_)
             | ResolutionFrame::RepeatedOptionalPayment(_)
             | ResolutionFrame::CounterMoves(_)
-            | ResolutionFrame::CounterRemovals(_)
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
-            | ResolutionFrame::ChooseOneOf(_)
             | ResolutionFrame::VoteBallot(_)
             | ResolutionFrame::PerPlayerZoneChoice(_)
             | ResolutionFrame::PerCategoryZoneChoice(_)
@@ -12483,6 +12624,129 @@ pub(crate) fn live_return_result_occurrences(
 }
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
+    let counter_reader_waits_for = |source_id: ObjectId| {
+        state
+            .resolution_stack
+            .ability_continuations()
+            .any(|pending| {
+                pending.chain.source_id == source_id
+                    && pending
+                        .chain
+                        .condition
+                        .as_ref()
+                        .and_then(super::ability::AbilityCondition::counter_removal_event)
+                        .is_some()
+            })
+    };
+    let validate_binding = |binding: &CounterRemovalResultBinding| -> Result<(), String> {
+        if binding.occurrence.0 == 0
+            || !crate::game::effects::counter_removal_binding_is_valid(state, binding)
+        {
+            return Err("counter-removal result binding is missing or incoherent".into());
+        }
+        if state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some_and(|owner| {
+                owner.source_id != binding.source.reference.object_id
+                    || owner
+                        .trigger_source
+                        .as_ref()
+                        .is_some_and(|source| source.identity != binding.source)
+                    || owner
+                        .source_ref(state)
+                        .is_some_and(|pin| pin != binding.source.reference)
+            })
+        {
+            return Err("counter-removal ticket disagrees with its resolving owner".into());
+        }
+        if !state
+            .resolution_stack
+            .ability_continuations()
+            .any(|pending| {
+                pending.return_result_occurrence == Some(binding.occurrence)
+                    && reads_return_result_id(&pending.chain, binding.result)
+            })
+        {
+            return Err("counter-removal ticket has no exact owned reader continuation".into());
+        }
+        Ok(())
+    };
+    if let Some(pending) = &state.pending_replacement {
+        if !crate::game::replacement::damage_source_context_coherent(
+            state,
+            &pending.proposed,
+            pending.damage_source_context.as_ref(),
+        ) {
+            return Err("pending damage source authority is missing or incoherent".into());
+        }
+        if let ProposedEvent::RemoveCounter {
+            result_binding: Some(binding),
+            object_id,
+            counter_type,
+            ..
+        } = &pending.proposed
+        {
+            validate_binding(binding)?;
+            if !binding
+                .recipient
+                .is_some_and(|pin| pin.object_id == *object_id)
+                || !binding.counters.matches(counter_type)
+            {
+                return Err("pending counter removal disagrees with its bound producer".into());
+            }
+        }
+        if matches!(&pending.proposed, ProposedEvent::RemoveCounter { result_binding: None, .. })
+            && state.resolution_stack.iter().any(|frame|
+                matches!(frame, ResolutionFrame::CounterRemovals(queue) if queue.result_binding.is_some()))
+        {
+            return Err("current bound counter proposal is missing its result ticket".into());
+        }
+    }
+    if let WaitingFor::ChooseOneOfBranch {
+        context,
+        continuation,
+        source_id,
+        parent_occurrences,
+        ..
+    } = &state.waiting_for
+    {
+        if let Some(binding) = &context.counter_removal_result {
+            validate_binding(binding)?;
+            if binding.source.reference.object_id != *source_id
+                || !matches!(parent_occurrences.occurrences().as_slice(), [(TargetRef::Object(id), Some(pin))]
+                    if Some(*pin) == binding.recipient && *id == pin.object_id)
+            {
+                return Err("counter branch recipient/source disagrees with result".into());
+            }
+        } else if counter_reader_waits_for(*source_id)
+            || continuation.as_deref().is_some_and(|ability| {
+                ability
+                    .condition
+                    .as_ref()
+                    .and_then(super::ability::AbilityCondition::counter_removal_event)
+                    .is_some()
+            })
+        {
+            return Err("counter branch is missing producer authority".into());
+        }
+    }
+    for frame in state.resolution_stack.iter() {
+        match frame {
+            ResolutionFrame::CounterRemovals(queue) => {
+                if let Some(binding) = &queue.result_binding {
+                    validate_binding(binding)?;
+                }
+            }
+            ResolutionFrame::ChooseOneOf(pending) => {
+                if let Some(binding) = &pending.context.counter_removal_result {
+                    validate_binding(binding)?;
+                }
+            }
+            _ => {}
+        }
+    }
     fn validate_reveal_readers(
         state: &GameState,
         root: &ResolvedAbility,
@@ -12491,6 +12755,18 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
     ) -> Result<(), String> {
         if let Some(id) = root.declares_return_result {
             future.insert(id);
+        }
+        if let Some((result, counters)) = root
+            .condition
+            .as_ref()
+            .and_then(super::ability::AbilityCondition::counter_removal_event)
+        {
+            if !future.contains(&result) {
+                crate::game::effects::counter_reflexive_occurrences_for_occurrence(
+                    state, root, result, counters, occurrence,
+                )
+                .map_err(|error| format!("invalid counter event reader: {error:?}"))?;
+            }
         }
         if crate::game::effects::is_named_revealed_reader(root)
             && root
@@ -25799,6 +26075,10 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
+    /// Private source authority for this exact damage event, established before
+    /// any replacement consult, including synchronous replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_source_context: Option<TriggerSourceContext>,
     pub proposed: ProposedEvent,
     /// CR 701.21a + CR 614.1: An inner Battlefield→graveyard `ZoneChange`
     /// can pause for a `Moved` replacement after its enclosing sacrifice was
@@ -35255,6 +35535,7 @@ mod tests {
     fn pending_counter_removal_queue_migrates_legacy_single_source_entries() {
         let source_id = ObjectId(17);
         let mut legacy_wire = serde_json::to_value(PendingCounterRemovalQueue {
+            result_binding: None,
             remaining: Vec::new(),
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(18),
@@ -48573,5 +48854,75 @@ mod sought_result_current_tests {
         }
         let loaded: GameState = serde_json::from_value(value).unwrap();
         assert!(loaded.return_result_frames.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_result_codec_tests {
+    use super::*;
+    use crate::types::counter::{CounterMatch, CounterType};
+    #[test]
+    fn u13_counter_results_have_strict_pins_positive_counts_and_distinct_typed_accessors() {
+        let pin = ObjectIncarnationRef::of(ObjectId(7), 3);
+        let result = InstructionResult::CounterRemovals(CounterRemovalInstructionResult {
+            source: ObjectIdentityBinding::new(pin, Zone::Battlefield),
+            recipient: Some(pin),
+            counters: CounterMatch::OfType(CounterType::Generic("charge".into())),
+            counter_removals: vec![CounterRemovalRecord {
+                object: pin,
+                counter_type: CounterType::Generic("charge".into()),
+                count: 2,
+            }],
+        });
+        let good = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            serde_json::from_value::<InstructionResult>(good.clone()).unwrap(),
+            result
+        );
+        assert!(result.zone_changes().is_none());
+        assert!(result.revealed_cards().is_none());
+        let zone = InstructionResult::ZoneChanges(vec![]);
+        assert_eq!(zone.zone_changes().unwrap().len(), 0);
+        let reveal = InstructionResult::RevealedCards(RevealedInstructionResult {
+            revealed_cards: vec![pin],
+        });
+        assert_eq!(reveal.revealed_cards().unwrap(), &[pin]);
+        assert!(reveal.zone_changes().is_none());
+        for fault in 0..8 {
+            let mut bad = good.clone();
+            match fault {
+                0 => bad["counter_removals"][0]["count"] = serde_json::json!(0),
+                1 => {
+                    let duplicate = bad["counter_removals"][0].clone();
+                    bad["counter_removals"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(duplicate);
+                }
+                2 => {
+                    bad["counter_removals"][0]["counter_type"] =
+                        serde_json::to_value(CounterType::Time).unwrap()
+                }
+                3 => bad["counter_removals"][0]["object"]["incarnation"] = serde_json::json!(4),
+                4 => bad["recipient"] = serde_json::json!(7),
+                5 => bad["counter_removals"][0]["object"] = serde_json::json!(7),
+                6 => bad["source"]["reference"] = serde_json::json!(7),
+                7 => {
+                    bad.as_object_mut().unwrap().remove("recipient");
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_value::<InstructionResult>(bad).is_err(),
+                "fault {fault}"
+            );
+        }
+        let mut empty = good;
+        empty["counter_removals"] = serde_json::json!([]);
+        empty["recipient"] = serde_json::Value::Null;
+        assert!(matches!(
+            serde_json::from_value::<InstructionResult>(empty).unwrap(),
+            InstructionResult::CounterRemovals(_)
+        ));
     }
 }

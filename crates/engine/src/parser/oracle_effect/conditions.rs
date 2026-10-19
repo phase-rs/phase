@@ -4788,7 +4788,8 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::ConditionInstead { inner: condition } => {
             reads_cast_time_snapshot(condition)
         }
-        AbilityCondition::WhenYouDo
+        AbilityCondition::CounterRemovedThisWay { .. }
+        | AbilityCondition::WhenYouDo
         | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
         | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::AdditionalCostPaidInstead
@@ -6498,6 +6499,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::ObjectsShareQuality { .. }

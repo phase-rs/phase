@@ -1991,6 +1991,7 @@ mod tests {
 
     fn pending_replacement_for(expected_event: ProposedEvent) -> PendingReplacement {
         PendingReplacement {
+            damage_source_context: None,
             proposed: expected_event,
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -3494,6 +3495,7 @@ mod tests {
 
         // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::AddCounter {
                 placement: CounterPlacement::Object {
                     actor: PlayerId(2),
@@ -3641,6 +3643,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -3696,6 +3699,7 @@ mod tests {
         );
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::SearchFound {
                 searcher: PlayerId(0),
                 library_owner: Some(PlayerId(0)),
@@ -3745,6 +3749,7 @@ mod tests {
 
         // Chooser C = P0 (survivor). Player-keyed parked Draw.
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -3823,6 +3828,7 @@ mod tests {
     fn opponent_leaving_preserves_living_choosers_draw_replacement() {
         let mut state = setup_three_player();
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,

@@ -4017,7 +4017,8 @@ impl ResolutionStack {
 /// Version 5 adds the simultaneous-draw dealer to the draw frame.
 /// Version 6 carries exact creation owners, queued work, and saved copy tails.
 /// Version 7 distinguishes revealed membership and preserves original queued origins.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 7;
+/// Version 8 carries exact counter-removal receipts and event-owned damage source authority.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 8;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4433,6 +4434,69 @@ fn has_current_instruction_result_markers(value: &Value) -> bool {
         Ok(())
     });
     revealed || origins
+}
+
+/// Explicit pre-v8 compatibility: reuse only a direct owner's already captured
+/// exact own-source authority. Ordinary/mixed/other-source damage stays ordinary.
+fn migrate_legacy_exact_damage_source(value: &mut Value) -> Result<(), String> {
+    let Some(pending) = value
+        .get("pending_replacement")
+        .filter(|pending| !pending.is_null())
+    else {
+        return Ok(());
+    };
+    if pending
+        .get("damage_source_context")
+        .is_some_and(|context| !context.is_null())
+    {
+        return Ok(());
+    }
+    let Some(proposed) = pending.get("proposed") else {
+        return Ok(());
+    };
+    let proposed: ProposedEvent =
+        serde_json::from_value(proposed.clone()).map_err(|error| error.to_string())?;
+    let ProposedEvent::Damage { source_id, .. } = proposed else {
+        return Ok(());
+    };
+    let Some(owner) = value
+        .get("resolving_stack_entry")
+        .filter(|owner| !owner.is_null())
+    else {
+        return Ok(());
+    };
+    let owner: crate::types::game_state::StackEntry =
+        serde_json::from_value(owner.clone()).map_err(|error| error.to_string())?;
+    let Some(ability) = owner.ability() else {
+        return Ok(());
+    };
+    if !matches!(
+        ability.effect,
+        crate::types::ability::Effect::DealDamage {
+            damage_source: None,
+            ..
+        }
+    ) || ability.source_id != source_id
+        || ability.sub_ability.is_some()
+        || ability.else_ability.is_some()
+    {
+        return Ok(());
+    }
+    let Some(source) = &ability.trigger_source else {
+        return Ok(());
+    };
+    if source.identity.reference.object_id != source_id
+        || ability.source_incarnation != Some(source.identity.reference.incarnation)
+    {
+        return Ok(());
+    }
+    let source = serde_json::to_value(source).map_err(|error| error.to_string())?;
+    value
+        .get_mut("pending_replacement")
+        .and_then(Value::as_object_mut)
+        .expect("checked legacy pending replacement remains an object")
+        .insert("damage_source_context".into(), source);
+    Ok(())
 }
 
 fn validate_current_instruction_batches(value: &Value) -> Result<(), String> {
@@ -4897,14 +4961,15 @@ impl ResolutionStateWire {
             LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
             | 5
             | 6
+            | 7
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, 6, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, 6, 7, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
-        if version < RESOLUTION_STATE_WIRE_VERSION {
+        if version < 7 {
             let mut legacy_authority = value.clone();
             visit_instruction_batches_mut(&mut legacy_authority, |batch| {
                 if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
@@ -4934,6 +4999,9 @@ impl ResolutionStateWire {
             })?;
         } else {
             validate_current_instruction_batches(&value)?;
+        }
+        if version < 8 {
+            migrate_legacy_exact_damage_source(&mut value)?;
         }
         if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
@@ -7584,7 +7652,7 @@ mod tests {
 
     #[test]
     fn resolution_wire_contract_pins_v6_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 7);
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 8);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
@@ -8187,6 +8255,7 @@ mod tests {
         let counter_removals = resume_priority_fixture(restore_v1_counter_removals_fixture(
             counter_removals,
             PendingCounterRemovalQueue {
+                result_binding: None,
                 remaining: Vec::new(),
                 effect_kind: EffectKind::RemoveCounter,
                 source_ability_id: ObjectId(115),
@@ -9203,6 +9272,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
                 source: None,

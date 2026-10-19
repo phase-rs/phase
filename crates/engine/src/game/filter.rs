@@ -3416,6 +3416,7 @@ pub(crate) fn rebind_declared_groups_in_condition(
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
@@ -5508,6 +5509,58 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     entered_incarnation: Option<u64>,
     departed_from: Option<Zone>,
 ) -> bool {
+    matches_target_filter_on_exact_snapshot(
+        state,
+        object_id,
+        lki,
+        filter,
+        ctx,
+        entered_incarnation,
+        departed_from,
+        None,
+    )
+}
+
+/// The subject is independent from the replacement's relative `FilterContext`.
+/// CR 400.7 + CR 608.2h: departed facts remain authoritative through recursive
+/// property evaluation, even when the same storage id holds a returned object.
+pub(crate) fn matches_target_filter_on_exact_source(
+    state: &GameState,
+    subject: &TriggerSourceContext,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if subject.identity.reference.is_current(state)
+        && state
+            .objects
+            .get(&subject.identity.reference.object_id)
+            .is_some_and(|object| object.zone == subject.identity.expected_zone)
+    {
+        return matches_target_filter(state, subject.identity.reference.object_id, filter, ctx);
+    }
+    matches_target_filter_on_exact_snapshot(
+        state,
+        subject.identity.reference.object_id,
+        &subject.lki,
+        filter,
+        ctx,
+        Some(subject.identity.reference.incarnation),
+        Some(subject.identity.expected_zone),
+        Some(subject),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn matches_target_filter_on_exact_snapshot(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    entered_incarnation: Option<u64>,
+    departed_from: Option<Zone>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
     let record = ZoneChangeRecord {
         object_id,
         name: lki.name.clone(),
@@ -5516,7 +5569,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         supertypes: lki.supertypes.clone(),
         keywords: lki.keywords.clone(),
         trigger_definitions: Vec::new(),
-        trigger_source_context: None,
+        trigger_source_context: subject.cloned(),
         power: lki.power,
         toughness: lki.toughness,
         // CR 208.4b + CR 613.4b: Carry base P/T into the synthesized record so
@@ -5541,14 +5594,20 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // instant the host leaves the battlefield (CR 704.5m/n), so the live board can
         // never answer this for a source that is already gone.
         attachments: lki.attachments.clone(),
-        linked_exile_snapshot: vec![],
-        is_token: state
-            .objects
-            .get(&object_id)
-            .is_some_and(|object| object.is_token),
-        combat_status: Default::default(),
+        linked_exile_snapshot: subject
+            .map_or_else(Vec::new, |source| source.linked_exile_snapshot.clone()),
+        is_token: subject.map_or_else(
+            || {
+                state
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|object| object.is_token)
+            },
+            |source| source.is_token,
+        ),
+        combat_status: subject.map_or_else(Default::default, |source| source.combat_status.clone()),
         co_departed: Vec::new(),
-        attached_to: None,
+        attached_to: subject.and_then(|source| source.attached_to.clone()),
         entered_incarnation,
         turn_zone_change_index: 0,
         recorded_turn_number: 0,
@@ -5556,7 +5615,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // `FilterProp::Suspected` reads the cost-paid look-back value.
         is_suspected: lki.is_suspected,
     };
-    matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
+    zone_change_filter_inner_with_subject(state, &record, record.from_zone, filter, ctx, subject)
 }
 
 /// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
@@ -6701,6 +6760,17 @@ fn zone_change_filter_inner(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    zone_change_filter_inner_with_subject(state, record, licensed, filter, ctx, None)
+}
+
+fn zone_change_filter_inner_with_subject(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    licensed: Option<Zone>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
     let source_id = ctx.source_id;
     let source_controller = ctx.source_controller;
     let ability = ctx.ability;
@@ -6867,18 +6937,18 @@ fn zone_change_filter_inner(
                         owned_axis_admits(state, &source_ctx, controller, owner)
                     })
                 }
-                _ => zone_change_record_matches_property(prop, state, record, &source_ctx),
+                _ => zone_change_record_property_with_subject(prop, state, record, &source_ctx, subject),
             })
         }
         TargetFilter::Not { filter: inner } => {
-            !zone_change_filter_inner(state, record, licensed, inner, ctx)
+            !zone_change_filter_inner_with_subject(state, record, licensed, inner, ctx, subject)
         }
         TargetFilter::Or { filters } => filters
             .iter()
-            .any(|inner| zone_change_filter_inner(state, record, licensed, inner, ctx)),
+            .any(|inner| zone_change_filter_inner_with_subject(state, record, licensed, inner, ctx, subject)),
         TargetFilter::And { filters } => filters
             .iter()
-            .all(|inner| zone_change_filter_inner(state, record, licensed, inner, ctx)),
+            .all(|inner| zone_change_filter_inner_with_subject(state, record, licensed, inner, ctx, subject)),
         TargetFilter::SpecificObject { id } => record.object_id == *id,
         // SpecificPlayer scopes to players, not objects — a zone-change record
         // is always an object transition.
@@ -9941,6 +10011,16 @@ fn zone_change_record_matches_property(
     record: &ZoneChangeRecord,
     source: &SourceContext<'_>,
 ) -> bool {
+    zone_change_record_property_with_subject(prop, state, record, source, None)
+}
+
+fn zone_change_record_property_with_subject(
+    prop: &FilterProp,
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    source: &SourceContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
     match prop {
         // -------- Group 1: snapshot-derivable --------
         // CR 702: Keyword presence on the event-time object.
@@ -9967,7 +10047,7 @@ fn zone_change_record_matches_property(
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
         FilterProp::NotHistoric => {
-            !zone_change_record_matches_property(&FilterProp::Historic, state, record, source)
+            !zone_change_record_property_with_subject(&FilterProp::Historic, state, record, source, subject)
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => card_names_match(&record.name, name),
@@ -10186,10 +10266,10 @@ fn zone_change_record_matches_property(
         // a battlefield zone-change event, consult the live object after entry
         // so Soulbond's "another unpaired creature enters" trigger can see the
         // entering creature before any pair-forming effect resolves.
-        FilterProp::Unpaired => state
+        FilterProp::Unpaired => subject.map_or_else(|| state
             .objects
             .get(&record.object_id)
-            .is_some_and(|obj| obj.paired_with.is_none()),
+            .is_some_and(|obj| obj.paired_with.is_none()), |subject| subject.paired_with.is_none()),
 
         // CR 608.2h: predicates whose state IS captured into the exit-time LKI
         // snapshot (counters, tap status) are answered from `lki_cache`, keyed by
@@ -10199,7 +10279,8 @@ fn zone_change_record_matches_property(
             counters,
             comparator,
             count,
-        } => state.lki_cache.get(&record.object_id).is_some_and(|lki| {
+        } => subject.map(|source| &source.lki)
+            .or_else(|| state.lki_cache.get(&record.object_id)).is_some_and(|lki| {
             let selector = match counters {
                 CounterMatch::Any => None,
                 CounterMatch::OfType(ct) => Some(ct),
@@ -10237,18 +10318,16 @@ fn zone_change_record_matches_property(
         // Blunder, evaluated after the bounce/exile). Read the exit-time tap state
         // captured into the LKI snapshot at zone exit (zones.rs), keyed by the
         // record's object id — mirrors the `Counters` arm's `lki_cache` lookup.
-        FilterProp::Tapped => state
-            .lki_cache
-            .get(&record.object_id)
+        FilterProp::Tapped => subject.map(|source| &source.lki)
+            .or_else(|| state.lki_cache.get(&record.object_id))
             .is_some_and(|lki| lki.tapped),
         // CR 110.5 + CR 110.5d: symmetric sibling of `Tapped`. A look-back
         // "was untapped" rider reads the exit-time tap state from the LKI
         // snapshot and asserts it was NOT tapped. Fail-closed (no snapshot ⇒
         // false) mirrors the `Tapped` arm: a card not on the battlefield is
         // neither tapped nor untapped, so absence of a snapshot answers neither.
-        FilterProp::Untapped => state
-            .lki_cache
-            .get(&record.object_id)
+        FilterProp::Untapped => subject.map(|source| &source.lki)
+            .or_else(|| state.lki_cache.get(&record.object_id))
             .is_some_and(|lki| !lki.tapped),
         // CR 508.1a + CR 608.2h: "attacked this turn" is a turn-scoped HISTORICAL FACT about
         // the object as it most recently existed, not a query against live combat state.
@@ -10335,10 +10414,10 @@ fn zone_change_record_matches_property(
         // Disjunctive composite: recurse into inner props under the same record.
         FilterProp::AnyOf { props } => props
             .iter()
-            .any(|p| zone_change_record_matches_property(p, state, record, source)),
+            .any(|p| zone_change_record_property_with_subject(p, state, record, source, subject)),
         // CR 608.2c: Logical negation — recurse under the same record and invert.
         FilterProp::Not { prop } => {
-            !zone_change_record_matches_property(prop, state, record, source)
+            !zone_change_record_property_with_subject(prop, state, record, source, subject)
         }
 
         // -------- Group 4: not-yet-supported (known conservative gaps) --------
@@ -23316,6 +23395,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            damage_source_context: None,
             proposed,
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -23593,5 +23673,90 @@ mod jev_shared_color_filter_tests {
             &filter,
             &ctx
         ));
+    }
+}
+
+#[cfg(test)]
+mod u13_exact_damage_subject_filter_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    #[test]
+    fn u13_recursive_snapshot_properties_do_not_read_the_returned_object_or_unkeyed_lki() {
+        let mut s = GameScenario::new();
+        let source = s.add_creature(P0, "Synthetic exact subject", 4, 4).id();
+        let host = s.add_creature(P1, "Synthetic installer", 2, 2).id();
+        let mut state = s.build().state().clone();
+        let charge = CounterType::Generic("charge".into());
+        let object = state.objects.get_mut(&source).unwrap();
+        object.controller = P1;
+        object.tapped = true;
+        object.is_token = true;
+        object.paired_with = Some(host);
+        object.counters.insert(charge.clone(), 3);
+        let subject = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let ctx = FilterContext::from_source_with_controller(host, P1);
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::AnyOf {
+                                props: vec![FilterProp::Token, FilterProp::NonToken],
+                            },
+                            FilterProp::Counters {
+                                counters: CounterMatch::OfType(charge),
+                                comparator: Comparator::EQ,
+                                count: QuantityExpr::Fixed { value: 3 },
+                            },
+                            FilterProp::Tapped,
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::Untapped),
+                            },
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::Unpaired),
+                            },
+                        ]),
+                ),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent),
+                    )),
+                },
+            ],
+        };
+        assert!(matches_target_filter_on_exact_source(
+            &state, &subject, &filter, &ctx
+        ));
+        let object = state.objects.get_mut(&source).unwrap();
+        object.incarnation += 1;
+        object.controller = P0;
+        object.tapped = false;
+        object.is_token = false;
+        object.paired_with = None;
+        object.counters.clear();
+        let poison = state.objects[&source].snapshot_public_characteristics();
+        state.lki_cache.insert(source, poison);
+        assert!(!matches_target_filter(&state, source, &filter, &ctx));
+        assert!(matches_target_filter_on_exact_source(
+            &state, &subject, &filter, &ctx
+        ));
+        assert!(!matches_target_filter_on_exact_source(
+            &state,
+            &subject,
+            &filter,
+            &FilterContext::from_source_with_controller(host, P0)
+        ));
+        let token =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Token]));
+        assert!(matches_target_filter_on_exact_source(
+            &state, &subject, &token, &ctx
+        ));
+        assert!(!matches_target_filter(&state, source, &token, &ctx));
+        assert_eq!(state.objects[&source].controller, P0);
+        assert!(state.objects[&source].counters.is_empty());
     }
 }

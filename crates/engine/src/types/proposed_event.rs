@@ -772,6 +772,8 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_binding: Option<crate::types::game_state::CounterRemovalResultBinding>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },

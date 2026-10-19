@@ -117,6 +117,62 @@ pub(crate) enum PlayerScopeRewrite {
 }
 
 impl EffectChainIr {
+    /// CR 603.12 + CR 608.2c: name only the terminal printed producer. Earlier
+    /// instructions, another paragraph, and mode-local instructions cannot lend
+    /// this connector an antecedent.
+    pub(crate) fn bind_counter_removal(
+        &mut self,
+        event: &crate::types::counter::CounterMatch,
+    ) -> Option<ClauseId> {
+        let terminal = self.clauses.last()?;
+        let id = terminal.id;
+        if self.clauses.iter().filter(|clause| clause.id == id).count() != 1
+            || terminal.declares_instruction_result.is_some()
+            || terminal.reads_return_result.is_some()
+            || terminal.condition.is_some()
+            || terminal.is_optional
+            || terminal.player_scope.is_some()
+            || terminal.repeat_for.is_some()
+            || terminal.multi_target.is_some()
+            || terminal.opponent_may_scope.is_some()
+            || terminal.unless_pay.is_some()
+            || terminal.delayed_condition.is_some()
+            || terminal.prefix_delayed_condition.is_some()
+            || self.repeat_until.is_some()
+        {
+            return None;
+        }
+        let (producer, target) = match &terminal.parsed.effect {
+            Effect::ChooseCounterAdjustment {
+                adjustment,
+                counters,
+                target,
+                ..
+            } if adjustment.allows_remove() => (counters.clone(), target),
+            Effect::RemoveCounter {
+                counter_type,
+                target,
+                ..
+            } => (
+                counter_type.clone().map_or(
+                    crate::types::counter::CounterMatch::Any,
+                    crate::types::counter::CounterMatch::OfType,
+                ),
+                target,
+            ),
+            _ => return None,
+        };
+        if !matches!(
+            target,
+            TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::Typed(_)
+        ) || !matches!(event, crate::types::counter::CounterMatch::Any) && event != &producer
+        {
+            return None;
+        }
+        self.clauses.last_mut()?.declares_instruction_result = Some(id);
+        Some(id)
+    }
+
     /// Build a one-clause chain while retaining every field represented by
     /// `ParsedEffectClause` plus the clause-level player iteration scope.
     ///
@@ -888,6 +944,9 @@ pub(crate) struct ClauseIr {
     /// The parsed effect clause (effect, duration, sub_ability from parse_effect_clause).
     /// Chain-local identity, assigned in source order by [`ClauseIrBuilder`].
     pub(crate) id: ClauseId,
+    /// CR 608.2c: this exact instruction publishes its own typed result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) declares_instruction_result: Option<ClauseId>,
     /// One choose instruction and its mutually exclusive instead branch share this id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) declares_chosen_clause: Option<ClauseId>,
@@ -1169,6 +1228,7 @@ impl ClauseIr {
         let fragment = self.source.fragment().unwrap_or_default().to_string();
         let ClauseIr {
             id: _,
+            declares_instruction_result,
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads,
@@ -1199,6 +1259,7 @@ impl ClauseIr {
             placement,
             _sealed: _,
         } = self;
+        *declares_instruction_result = None;
         *declares_chosen_clause = None;
         *reads_chosen_clause = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
@@ -1466,7 +1527,24 @@ impl ClauseIrBuilder {
             .enumerate()
             .map(|(offset, c)| (c.id, ClauseId(self.next_clause_id + offset as u32)))
             .collect();
+        let counter_producers: Vec<_> = clauses
+            .iter()
+            .filter(|clause| clause.declares_instruction_result == Some(clause.id))
+            .map(|clause| clause.id)
+            .collect();
         for (offset, clause) in clauses.iter_mut().enumerate() {
+            if clause.condition.as_mut().is_some_and(|condition| {
+                !relocate_counter_condition(condition, &relocation, &counter_producers, offset)
+            }) {
+                clause.replace_with_gap("counter_result_relocation");
+            }
+            if let Some(owner) = clause.declares_instruction_result {
+                if owner == clause.id {
+                    clause.declares_instruction_result = Some(relocation[offset].1);
+                } else {
+                    clause.replace_with_gap("instruction_result_declaration_relocation");
+                }
+            }
             if clause.revealed_result_reader().is_some() && clause.reads_return_result.is_none() {
                 clause.replace_with_gap("all_revealed_result_relocation");
             }
@@ -1531,6 +1609,7 @@ impl ClauseIrBuilder {
     }
 
     fn absorb_clause(&mut self, c: ClauseIr) {
+        let instruction_declaration = c.declares_instruction_result;
         let revealed_relation = c
             .revealed_result_reader()
             .and(c.reads_return_result.clone());
@@ -1568,6 +1647,7 @@ impl ClauseIrBuilder {
         .declared_player_group(c.declared_player_group)
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
+            absorbed.declares_instruction_result = instruction_declaration;
             absorbed.target_reads = c.target_reads;
             if let Some(relation) = revealed_relation {
                 absorbed.reads_return_result = Some(relation);
@@ -1689,6 +1769,40 @@ impl ClauseIrBuilder {
     /// Consume the builder, yielding the source-ordered clause list.
     pub(crate) fn finish(self) -> Vec<ClauseIr> {
         self.clauses
+    }
+}
+
+fn relocate_counter_condition(
+    condition: &mut AbilityCondition,
+    relocation: &[(ClauseId, ClauseId)],
+    producers: &[ClauseId],
+    reader: usize,
+) -> bool {
+    match condition {
+        AbilityCondition::CounterRemovedThisWay { result, .. } => {
+            let owner = ClauseId(result.0);
+            let mut matches = relocation
+                .iter()
+                .enumerate()
+                .filter(|(_, (old, _))| *old == owner);
+            let Some((position, (_, new))) = matches.next() else {
+                return false;
+            };
+            // allow-noncombinator: typed ClauseId set membership, not text dispatch.
+            if position >= reader || matches.next().is_some() || !producers.contains(&owner) {
+                return false;
+            }
+            result.0 = new.0;
+            true
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
+            .iter_mut()
+            .all(|condition| relocate_counter_condition(condition, relocation, producers, reader)),
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            relocate_counter_condition(condition, relocation, producers, reader)
+        }
+        _ => true,
     }
 }
 
@@ -2037,6 +2151,7 @@ impl ClauseDraft<'_> {
         self.builder.next_clause_id += 1;
         self.builder.clauses.push(ClauseIr {
             id,
+            declares_instruction_result: None,
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads: TargetReadOrigin::OwnAnnouncement,

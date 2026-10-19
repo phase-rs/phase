@@ -681,7 +681,8 @@ export type P2PInteractionPreviewAnswer =
 // 126: TargetFilter.CastingSpell requires typed peers that decode the new tag.
 // 127: full-game 145 carries exact token creation and private resolved copy-source tails.
 // 128: full-game 146 carries typed revealed membership and exact queued origins.
-export const WIRE_PROTOCOL_VERSION = 129 as const;
+// 130: exact actual-removal reflexives; moves with full-game protocol 148.
+export const WIRE_PROTOCOL_VERSION = 130 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

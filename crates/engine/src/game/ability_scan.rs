@@ -3129,6 +3129,15 @@ fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes {
 
 fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
     match x {
+        // Immutable occurrence/member storage; conservatively reject projected
+        // freedom without claiming that the triggering object is read live.
+        AbilityCondition::CounterRemovedThisWay {
+            result: _,
+            counters: _,
+        } => Axes {
+            event: false,
+            ..Axes::CONSERVATIVE
+        },
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
         | AbilityCondition::TriggerEventTargetExploitedBySource => Axes {
             event: true,
@@ -11447,5 +11456,44 @@ mod sought_reader_scan_tests {
             ScanMode::Conservative,
         );
         assert!(quantity.event);
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_condition_scan_tests {
+    use super::*;
+    #[test]
+    fn u13_bound_counter_condition_is_dynamic_without_a_live_event_object_read() {
+        let condition = AbilityCondition::CounterRemovedThisWay {
+            result: crate::types::ability::ReturnResultId(1),
+            counters: crate::types::counter::CounterMatch::Any,
+        };
+        for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+            let axes = scan_ability_condition(&condition, mode);
+            assert!(!axes.event);
+            assert!(axes.sibling);
+            assert!(axes.projected);
+        }
+        let plain = scan_ability_condition(&AbilityCondition::WhenYouDo, ScanMode::Conservative);
+        assert!(!plain.event);
+        let quantity = scan_quantity_expr(
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            ScanMode::Conservative,
+        );
+        assert!(quantity.event);
+        let parsed = crate::parser::parse_oracle_text("When this creature enters, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• You gain 1 life.\n• You gain 2 life.", "Synthetic counter classifier", &[], &["Creature".into()], &[]);
+        assert!(parsed.statics.is_empty());
+        let producer = parsed.triggers[0].execute.as_deref().unwrap();
+        assert!(producer.condition.is_none());
+        let reader = producer.sub_ability.as_deref().unwrap();
+        assert!(reader
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .is_some());
+        assert!(reader.declares_return_result.is_none());
     }
 }

@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::KeywordKind;
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -26,8 +26,9 @@ use crate::types::proposed_event::ProposedEvent;
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct DamageContext {
+    pub(crate) trigger_source: Option<TriggerSourceContext>,
     pub(crate) source_id: ObjectId,
     /// CR 400.7: The source incarnation observed before the damage event is
     /// applied. This remains authoritative if the source changes zones while a
@@ -356,10 +357,57 @@ fn no_damage_source_resolved(ability: &ResolvedAbility, events: &mut Vec<GameEve
 }
 
 impl DamageContext {
+    /// CR 113.7a + CR 608.2h + CR 702.15c: one exact source reading supplies
+    /// both damage characteristics and its last battlefield controller.
+    pub(crate) fn from_trigger_source(
+        state: &GameState,
+        source: &TriggerSourceContext,
+    ) -> Option<Self> {
+        let source = select_triggered_damage_source(state, source)?;
+        let has = |kind| {
+            source
+                .lki
+                .keywords
+                .iter()
+                .any(|keyword| keyword.kind() == kind)
+        };
+        let context = Self {
+            source_id: source.identity.reference.object_id,
+            source_incarnation: Some(source.identity.reference.incarnation),
+            controller: if matches!(
+                source.identity.expected_zone,
+                crate::types::zones::Zone::Battlefield | crate::types::zones::Zone::Stack
+            ) {
+                source.lki.controller
+            } else {
+                source.lki.owner
+            },
+            source_is_creature: source.lki.card_types.contains(&CoreType::Creature),
+            has_deathtouch: has(KeywordKind::Deathtouch),
+            has_lifelink: has(KeywordKind::Lifelink),
+            has_wither: has(KeywordKind::Wither),
+            has_infect: has(KeywordKind::Infect),
+            combat_damage_poison: source
+                .lki
+                .keywords
+                .iter()
+                .filter_map(|keyword| match keyword {
+                    crate::types::keywords::Keyword::Toxic(value) => Some(*value),
+                    _ => None,
+                })
+                .sum(),
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            trigger_source: Some(source),
+        };
+        Some(context)
+    }
+
     /// Build context by reading keywords from the source object.
     /// Returns None if source doesn't exist in state.
     pub(crate) fn from_source(state: &GameState, source_id: ObjectId) -> Option<Self> {
         state.objects.get(&source_id).map(|obj| Self {
+            trigger_source: None,
             source_id,
             source_incarnation: Some(obj.incarnation),
             controller: obj.controller,
@@ -407,6 +455,7 @@ impl DamageContext {
     /// source is truly gone with no LKI available, defaulting to false is safe.
     pub(crate) fn fallback(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
+            trigger_source: None,
             source_id,
             source_incarnation: None,
             controller,
@@ -426,6 +475,7 @@ impl DamageContext {
 impl From<DamageContextSnapshot> for DamageContext {
     fn from(snapshot: DamageContextSnapshot) -> Self {
         Self {
+            trigger_source: None,
             source_id: snapshot.source_id,
             source_incarnation: snapshot.source_incarnation,
             controller: snapshot.controller,
@@ -442,6 +492,38 @@ impl From<DamageContextSnapshot> for DamageContext {
             lifelink_bonus: snapshot.lifelink_bonus,
         }
     }
+}
+
+/// CR 400.7 + CR 608.2h: never substitute a returned same-id object or an
+/// unkeyed LKI row. Each caller refreshes this original identity at its read.
+pub(crate) fn select_triggered_damage_source(
+    state: &GameState,
+    anchored: &TriggerSourceContext,
+) -> Option<TriggerSourceContext> {
+    let identity = anchored.identity;
+    if let Some(object) = state
+        .objects
+        .get(&identity.reference.object_id)
+        .filter(|object| {
+            crate::types::identifiers::ObjectIncarnationRef::from_object(object)
+                == identity.reference
+                && object.zone == identity.expected_zone
+        })
+    {
+        return Some(crate::game::triggers::trigger_source_context_for_latch(
+            state, object,
+        ));
+    }
+    Some(
+        state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .filter_map(|record| record.trigger_source_context())
+            .find(|source| source.identity == identity)
+            .unwrap_or(anchored)
+            .clone(),
+    )
 }
 
 impl From<&DamageContext> for DamageContextSnapshot {
@@ -590,7 +672,12 @@ pub(crate) fn apply_damage_to_target(
         return Ok(DamageResult::Applied(0));
     };
 
-    match replacement::replace_event(state, proposed, events) {
+    match replacement::replace_event_with_damage_source_context(
+        state,
+        proposed,
+        ctx.trigger_source.clone(),
+        events,
+    ) {
         ReplacementResult::Execute(event) => Ok(apply_damage_after_replacement(
             state, ctx, event, is_combat, events,
         )),
@@ -658,6 +745,23 @@ pub(crate) fn apply_damage_after_replacement(
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> DamageResult {
+    let refreshed;
+    let ctx = if let Some(source) = &ctx.trigger_source {
+        let Some(mut current) = DamageContext::from_trigger_source(state, source) else {
+            return DamageResult::Applied(0);
+        };
+        if current.source_id != ctx.source_id
+            || current.source_incarnation != ctx.source_incarnation
+        {
+            return DamageResult::Applied(0);
+        }
+        current.excess_recipient = ctx.excess_recipient;
+        current.lifelink_bonus = ctx.lifelink_bonus;
+        refreshed = current;
+        &refreshed
+    } else {
+        ctx
+    };
     let ProposedEvent::Damage {
         target: ref t,
         amount: actual_amount,
@@ -936,7 +1040,10 @@ pub(crate) fn apply_damage_after_replacement(
         // dealt combat damage by ~ or a Dragon this turn") evaluate against the
         // source as it was when the damage was dealt — the source may later
         // change type, leave the battlefield (CR 113.7a LKI), or be removed.
-        let src = state.objects.get(&ctx.source_id);
+        let src = state.objects.get(&ctx.source_id).filter(|object| {
+            ctx.source_incarnation
+                .is_none_or(|stamp| object.incarnation == stamp)
+        });
         // CR 400.7: Use the incarnation captured with the damage context, not
         // a post-application live lookup. The latter can name a later object
         // after a replacement pause or zone change.
@@ -965,7 +1072,21 @@ pub(crate) fn apply_damage_after_replacement(
             source_owner: ctx.controller,
             ..Default::default()
         };
-        if let Some(obj) = src {
+        if let Some(source) = &ctx.trigger_source {
+            let lki = &source.lki;
+            record.source_name = lki.name.clone();
+            record.source_core_types = lki.card_types.clone();
+            record.source_subtypes = lki.subtypes.clone();
+            record.source_supertypes = lki.supertypes.clone();
+            record.source_keywords = lki.keywords.clone();
+            record.source_power = lki.power;
+            record.source_toughness = lki.toughness;
+            record.source_colors = lki.colors.clone();
+            record.source_mana_value = lki.mana_value;
+            record.source_controller_snapshot = ctx.controller;
+            record.source_owner = lki.owner;
+            record.source_zone = source.identity.expected_zone;
+        } else if let Some(obj) = src {
             record.source_name = obj.name.clone();
             record.source_core_types = obj.card_types.core_types.clone();
             record.source_subtypes = obj.card_types.subtypes.clone();
@@ -999,11 +1120,12 @@ pub(crate) fn apply_damage_after_replacement(
         // `has_hexproof` reads — otherwise the conditional hexproof grant for
         // "has hexproof if it hasn't dealt damage yet" would never drop at the
         // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
-        if state
-            .objects
-            .get(&ctx.source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-            && state.objects_that_dealt_damage.insert(ctx.source_id)
+        if state.objects.get(&ctx.source_id).is_some_and(|obj| {
+            obj.zone == crate::types::zones::Zone::Battlefield
+                && ctx
+                    .source_incarnation
+                    .is_none_or(|stamp| obj.incarnation == stamp)
+        }) && state.objects_that_dealt_damage.insert(ctx.source_id)
         {
             state.layers_dirty.mark_full();
         }
@@ -1035,7 +1157,7 @@ pub(crate) fn apply_damage_after_replacement(
                 let redirect_ctx = DamageContext {
                     excess_recipient: None,
                     lifelink_bonus: primary_amount,
-                    ..*ctx
+                    ..ctx.clone()
                 };
                 redirected = true;
                 // Route through the same non-combat single-target pipeline the
@@ -1142,7 +1264,7 @@ fn build_post_replacement_damage_node(
         return None;
     };
 
-    Some(ResolvedAbility::new(
+    let mut node = ResolvedAbility::new(
         Effect::ApplyPostReplacementDamage {
             context: DamageContextSnapshot::from(ctx),
             target: target.clone(),
@@ -1152,7 +1274,10 @@ fn build_post_replacement_damage_node(
         Vec::new(),
         ctx.source_id,
         ctx.controller,
-    ))
+    );
+    node.trigger_source = ctx.trigger_source.clone();
+    node.source_incarnation = ctx.source_incarnation;
+    Some(node)
 }
 
 /// CR 120.4b + CR 616.1e: Stash remaining already-replaced damage survivors so
@@ -1212,14 +1337,37 @@ fn stash_remaining_damage_chain(
 
     let mut head =
         build_remaining_damage_node(damage_source_id, controller, first_target, first_amount);
+    carry_remaining_own_source(&mut head, ability, damage_source_id);
     for (target, amount) in iter {
-        let node = build_remaining_damage_node(damage_source_id, controller, target, amount);
+        let mut node = build_remaining_damage_node(damage_source_id, controller, target, amount);
+        carry_remaining_own_source(&mut node, ability, damage_source_id);
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
         append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
+fn carry_remaining_own_source(
+    node: &mut ResolvedAbility,
+    original: &ResolvedAbility,
+    source_id: ObjectId,
+) {
+    if matches!(
+        original.effect,
+        Effect::DealDamage {
+            damage_source: None,
+            ..
+        } | Effect::DamageAll {
+            damage_source: None,
+            ..
+        }
+    ) && original.source_id == source_id
+    {
+        node.trigger_source = original.trigger_source.clone();
+        node.source_incarnation = original.source_incarnation;
+    }
 }
 
 /// CR 608.2c + CR 616.1e: Clone a damage effect's `sub_ability` tail for a
@@ -1489,7 +1637,22 @@ pub fn resolve_post_replacement(
             ));
         }
     };
-    let ctx = DamageContext::from(context);
+    let mut ctx = if let Some(source) = &ability.trigger_source {
+        if source.identity.reference.object_id != context.source_id
+            || Some(source.identity.reference.incarnation) != context.source_incarnation
+            || ability.source_incarnation != context.source_incarnation
+        {
+            return Err(EffectError::InvalidParam(
+                "post-replacement damage source".into(),
+            ));
+        }
+        DamageContext::from_trigger_source(state, source)
+            .ok_or_else(|| EffectError::InvalidParam("post-replacement exact source".into()))?
+    } else {
+        DamageContext::from(context)
+    };
+    ctx.excess_recipient = context.excess_recipient;
+    ctx.lifelink_bonus = context.lifelink_bonus;
     let event = ProposedEvent::Damage {
         source_id: ctx.source_id,
         target,
@@ -1497,6 +1660,12 @@ pub fn resolve_post_replacement(
         is_combat,
         applied: HashSet::new(),
     };
+
+    if !replacement::damage_source_context_coherent(state, &event, ctx.trigger_source.as_ref()) {
+        return Err(EffectError::InvalidParam(
+            "post-replacement damage lost source authority".into(),
+        ));
+    }
 
     if matches!(
         apply_damage_after_replacement(state, &ctx, event, is_combat, events),
@@ -1538,10 +1707,22 @@ fn single_damage_source(
                 .and_then(|id| DamageContext::from_source(state, id))
                 .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         ),
-        None => Some(
-            DamageContext::from_source(state, ability.source_id)
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        ),
+        None => match &ability.trigger_source {
+            Some(source)
+                if source.identity.reference.object_id == ability.source_id
+                    && ability
+                        .source_incarnation
+                        .is_none_or(|stamp| stamp == source.identity.reference.incarnation) =>
+            {
+                DamageContext::from_trigger_source(state, source)
+            }
+            Some(_) => None,
+            None => Some(
+                DamageContext::from_source(state, ability.source_id).unwrap_or_else(|| {
+                    DamageContext::fallback(ability.source_id, ability.controller)
+                }),
+            ),
+        },
         // CR 120.1: multi-source per-power damage is dispatched to
         // `resolve_each_target_power_damage` (each source has its own
         // `DamageContext`) before a single source is asked for.
@@ -1938,7 +2119,7 @@ pub fn resolve_all(
         None
     };
     let mut ctx = filter::FilterContext::from_ability(ability);
-    if let Some(source_ctx) = target_source_ctx {
+    if let Some(source_ctx) = &target_source_ctx {
         ctx.source_id = source_ctx.source_id;
     }
     let matching_objects: Vec<_> = state
@@ -2930,7 +3111,7 @@ pub fn resolve_each_source_deals_damage(
         };
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
-                replaced.push((*ctx, event));
+                replaced.push((ctx.clone(), event));
             }
             ReplacementResult::Prevented => {
                 // CR 615.5: fire any prevention rider (e.g. Phyrexian Hydra
@@ -8002,5 +8183,96 @@ mod tests {
             assert_eq!(damage_recipients(&state, &root), Vec::<TargetRef>::new());
             assert_eq!(damage_sources(&state, &root), illegal_sources);
         }
+    }
+}
+
+#[cfg(test)]
+mod u13_post_replacement_exact_source_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
+    #[test]
+    fn u13_internal_post_replacement_roundtrip_carries_complete_exact_source_facts() {
+        let mut s = GameScenario::new_n_player(3, 33);
+        let source = s
+            .add_creature(P0, "Synthetic original source", 4, 4)
+            .with_keyword(crate::types::keywords::Keyword::Lifelink)
+            .id();
+        let mut state = s.build().state().clone();
+        state.objects.get_mut(&source).unwrap().controller = P1;
+        let captured = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let old = captured.identity.reference;
+        let context = DamageContext::from_trigger_source(&state, &captured).unwrap();
+        assert!(context.has_lifelink);
+        assert_eq!(context.controller, P1);
+        let proposed = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(2)),
+            amount: 4,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let node = build_post_replacement_damage_node(&context, &proposed).unwrap();
+        assert_eq!(
+            node.trigger_source.as_ref().unwrap().identity.reference,
+            old
+        );
+        let node: ResolvedAbility =
+            serde_json::from_value(serde_json::to_value(&node).unwrap()).unwrap();
+        let object = state.objects.get_mut(&source).unwrap();
+        object.incarnation += 1;
+        object.controller = P0;
+        object.keywords.clear();
+        state.lki_cache.insert(
+            source,
+            state.objects[&source].snapshot_public_characteristics(),
+        );
+        let mut owner = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        owner.set_trigger_source_recursive(captured);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(9000),
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(owner),
+            },
+        });
+        let mut wrong = node.clone();
+        wrong.trigger_source = None;
+        assert!(resolve_post_replacement(&mut state.clone(), &wrong, &mut vec![]).is_err());
+        wrong = node.clone();
+        wrong.source_incarnation = Some(old.incarnation + 1);
+        assert!(resolve_post_replacement(&mut state.clone(), &wrong, &mut vec![]).is_err());
+        let mut events = vec![];
+        resolve_post_replacement(&mut state, &node, &mut events).unwrap();
+        let record = state.damage_dealt_this_turn.last().unwrap();
+        assert_eq!(record.source_incarnation, Some(old.incarnation));
+        assert_eq!(record.source_controller, P1);
+        assert_eq!(record.source_controller_snapshot, P1);
+        assert_eq!(record.source_owner, P0);
+        assert_eq!(record.source_zone, crate::types::zones::Zone::Battlefield);
+        assert_eq!(record.source_name, "Synthetic original source");
+        assert!(record
+            .source_keywords
+            .contains(&crate::types::keywords::Keyword::Lifelink));
+        assert_eq!(record.amount, 4);
+        assert_eq!(state.players[1].life, 24);
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[2].life, 16);
+        assert!(!state.objects_that_dealt_damage.contains(&source));
     }
 }

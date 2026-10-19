@@ -3352,7 +3352,13 @@ pub(crate) enum ReflexiveModalParent {
     /// lowers it as it already does for every non-modal reflexive (Bone
     /// Rattler, Diregraf Horde). Lowering then attaches the modal as that
     /// chain's `WhenYouDo` sub instead of replacing it.
-    Mandatory,
+    Mandatory(Option<CounterRemovalConnector>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CounterRemovalConnector {
+    pub(crate) counters: crate::types::counter::CounterMatch,
+    pub(crate) source_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

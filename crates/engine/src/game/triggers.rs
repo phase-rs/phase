@@ -12031,6 +12031,7 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         // CR 608.2c: the "this way" ledgers — `state.last_zone_changed_ids` and
         // the tracked sets — declined for exactly the reason their
         // `TargetFilter` counterparts are.
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
         // CR 115.1 + CR 608.2k: reads the resolving ability's declared targets or

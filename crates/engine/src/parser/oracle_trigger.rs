@@ -624,6 +624,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::SourceIsTapped
@@ -1777,6 +1778,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 &connector,
             );
             Some(TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                event_producer: None,
                 parent: ReflexiveParent::MayPay {
                     cost,
                     payment_chain: None,
@@ -2067,6 +2069,33 @@ pub(crate) fn lower_trigger_node_ir(ir: &TriggerNodeIr) -> TriggerDefinition {
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
+    if let Some(TriggerBody::Reflexive(reflexive)) = &ir.body {
+        let event = reflexive.connector.counter_removal_event();
+        let valid = match (event, reflexive.event_producer, &reflexive.parent) {
+            (None, None, _) => true,
+            (Some((result, counters)), Some(owner), ReflexiveParent::Mandatory { instruction }) => {
+                // Reuse the creator's complete eligibility predicate. The IR
+                // relation may be malformed even when its effect kind matches.
+                let mut candidate = instruction.clone();
+                let declared = candidate
+                    .clauses
+                    .last_mut()
+                    .and_then(|producer| producer.declares_instruction_result.take());
+                result.0 == owner.0
+                    && declared == Some(owner)
+                    && candidate.bind_counter_removal(counters) == Some(owner)
+            }
+            _ => false,
+        };
+        if !valid {
+            def.execute = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("counter_reflexive_relation", &ir.source_text),
+            )));
+            def.description = Some(ir.source_text.clone());
+            return def;
+        }
+    }
 
     // Lower the body
     let execute = match &ir.body {
@@ -2136,7 +2165,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                     lower_trigger_effect_chain(instruction, modifiers, parent_die_results)
                 }
             };
-            parent_ability.sub_ability = Some(Box::new(reflexive_ability));
+            // CR 608.2c + CR 603.12: retain the complete mandatory parent;
+            // the source-addressed terminal declaration owns the new body.
+            let mut attachment = &mut parent_ability;
+            while let Some(ref mut sub) = attachment.sub_ability {
+                attachment = sub;
+            }
+            if reflexive.event_producer.is_some_and(|producer| {
+                attachment.declares_return_result
+                    != Some(crate::types::ability::ReturnResultId(producer.0))
+            }) {
+                attachment.effect = Box::new(Effect::unimplemented(
+                    "reflexive_result_owner",
+                    &ir.source_text,
+                ));
+            } else {
+                attachment.sub_ability = Some(Box::new(reflexive_ability));
+            }
             Some(Box::new(parent_ability))
         }
         Some(TriggerBody::Modal(modal)) => Some(Box::new(
@@ -7107,6 +7152,7 @@ fn condition_reads_prior_instruction(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::ZoneChangedThisWay { .. } => true,
         AbilityCondition::Not { condition } => condition_reads_prior_instruction(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {

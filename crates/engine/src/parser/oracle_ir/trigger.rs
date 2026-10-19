@@ -165,6 +165,8 @@ pub(crate) enum TriggerBody {
 /// shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReflexiveParentIr {
+    /// The exact terminal instruction named by an action-specific connector.
+    pub(crate) event_producer: Option<super::effect_chain::ClauseId>,
     /// How the parent instruction is printed and offered.
     pub(crate) parent: ReflexiveParent,
     /// The connector between the parent instruction and its dependent body.

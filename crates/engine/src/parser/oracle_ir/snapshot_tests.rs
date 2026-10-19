@@ -4186,18 +4186,25 @@ fn jev_mandatory_counter_adjustment_two_layers() {
         "modal block must reach trigger route"
     );
     for trigger in &full_lowered.triggers {
-        let effect = trigger.execute.as_ref().unwrap().effect.as_ref();
-        let Effect::Unimplemented { description, .. } = effect else {
-            panic!("unfinished actual-removal reflexive must remain strict: {effect:?}")
-        };
-        for fragment in [
-            "put a charge counter",
-            "When you remove a counter this way",
-            "Immard deals 4 damage",
-            "Immard gains lifelink",
-        ] {
-            assert!(description.contains(fragment), "{description}");
-        }
+        let parent = trigger.execute.as_deref().unwrap();
+        assert!(matches!(
+            parent.effect.as_ref(),
+            Effect::ChooseCounterAdjustment { .. }
+        ));
+        let child = parent
+            .sub_ability
+            .as_deref()
+            .expect("independent reflexive modal");
+        assert!(child.condition.as_ref().unwrap().has_when_you_do_marker());
+        let (result, counters) = child
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .unwrap();
+        assert_eq!(Some(result), parent.declares_return_result);
+        assert_eq!(counters, &crate::types::counter::CounterMatch::Any);
+        assert_eq!(child.mode_abilities.len(), 2);
     }
     insta::assert_json_snapshot!(
         "jev_mandatory_counter_adjustment_ir",

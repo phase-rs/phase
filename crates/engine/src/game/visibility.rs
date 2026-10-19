@@ -20,6 +20,7 @@ const HIDDEN_CARD_NAME: &str = "Hidden Card";
 /// The engine retains it for the active loop, while clients need only the
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
+    ability.context.counter_removal_result = None;
     ability.context.parent_target_iteration_members = None;
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         redact_parent_target_iteration_members(sub_ability);
@@ -49,6 +50,18 @@ fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
 /// `state`.
 pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameState {
     let mut projected = state.clone();
+    if let Some(pending) = projected.pending_replacement.as_mut() {
+        pending.damage_source_context = None;
+        if let crate::types::proposed_event::ProposedEvent::RemoveCounter {
+            result_binding, ..
+        } = &mut pending.proposed
+        {
+            *result_binding = None;
+        }
+    }
+    if let WaitingFor::ChooseOneOfBranch { context, .. } = &mut projected.waiting_for {
+        context.counter_removal_result = None;
+    }
     redact_paid_cast_cleanup_authority(&mut projected.waiting_for);
     let object_redactions: Vec<_> = state
         .objects
@@ -1497,7 +1510,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // resolved continuation, that carrier can contain private object IDs and
     // last-known information; clients need only the branch presentation.
     match &mut filtered.waiting_for {
-        WaitingFor::ChooseOneOfBranch { continuation, .. } => *continuation = None,
+        WaitingFor::ChooseOneOfBranch {
+            continuation,
+            context,
+            ..
+        } => {
+            *continuation = None;
+            context.counter_removal_result = None;
+        }
         WaitingFor::CopyTargetChoice {
             purpose: crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation },
             ..
@@ -1580,6 +1600,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // submit no replacement action and must not receive its private source IDs.
     if !replacement_choice_authorized {
         filtered.pending_replacement = None;
+    }
+    if let Some(pending) = filtered.pending_replacement.as_mut() {
+        pending.damage_source_context = None;
+        if let crate::types::proposed_event::ProposedEvent::RemoveCounter {
+            result_binding, ..
+        } = &mut pending.proposed
+        {
+            *result_binding = None;
+        }
     }
 
     filtered.active_library_searches.retain(|_, search| {
@@ -3955,6 +3984,7 @@ fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    ability.context.counter_removal_result = None;
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
     }

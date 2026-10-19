@@ -27,7 +27,7 @@ use crate::types::game_state::{
     NamedChoiceSourceBinding, PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
     ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
     ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
-    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    ReplacementIndexEntry, ResidentDrainPolicy, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -7366,6 +7366,7 @@ fn object_replacement_candidate_applies(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     rid: ReplacementId,
+    damage_subject: Option<&TriggerSourceContext>,
 ) -> bool {
     let liminal_obj = liminal_entry_ref(event)
         .filter(|entry_ref| *entry_ref == rid.source)
@@ -7629,12 +7630,16 @@ fn object_replacement_candidate_applies(
     if let Some(ref sf) = repl_def.damage_source_filter {
         // CR 614.1a: damage-source filters match the damage source object.
         if let ProposedEvent::Damage { source_id, .. } = event {
-            if !matches_target_filter(
-                state,
-                *source_id,
-                sf,
-                &FilterContext::from_source_with_controller(obj.id, replacement_player),
-            ) {
+            let context = FilterContext::from_source_with_controller(obj.id, replacement_player);
+            let matches = damage_subject.map_or_else(
+                || matches_target_filter(state, *source_id, sf, &context),
+                |subject| {
+                    super::filter::matches_target_filter_on_exact_source(
+                        state, subject, sf, &context,
+                    )
+                },
+            );
+            if !matches {
                 return false;
             }
         }
@@ -8178,6 +8183,7 @@ fn legacy_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    damage_subject: Option<&TriggerSourceContext>,
 ) -> Vec<ReplacementId> {
     let mut candidates: Vec<_> = super::functioning_abilities::active_replacements(state)
         .filter_map(|(index, obj, _)| {
@@ -8191,7 +8197,8 @@ fn legacy_object_replacement_candidates(
                 source: obj.id,
                 index,
             };
-            object_replacement_candidate_applies(state, event, registry, rid).then_some(rid)
+            object_replacement_candidate_applies(state, event, registry, rid, damage_subject)
+                .then_some(rid)
         })
         .collect();
     if let Some(entry_ref) = liminal_entry_ref(event) {
@@ -8208,8 +8215,14 @@ fn legacy_object_replacement_candidates(
                             source: entry_ref,
                             index,
                         };
-                        object_replacement_candidate_applies(state, event, registry, rid)
-                            .then_some(rid)
+                        object_replacement_candidate_applies(
+                            state,
+                            event,
+                            registry,
+                            rid,
+                            damage_subject,
+                        )
+                        .then_some(rid)
                     }),
             );
         }
@@ -8227,6 +8240,7 @@ fn indexed_object_replacement_candidates_from_index(
     state: &GameState,
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    damage_subject: Option<&TriggerSourceContext>,
 ) -> Vec<ReplacementId> {
     let mut entries: Vec<ReplacementIndexEntry> = replacement_event_keys_for_event(event)
         .iter()
@@ -8245,7 +8259,7 @@ fn indexed_object_replacement_candidates_from_index(
             if stored_entrant_superseded_by_projection(state, event, entry.id.source) {
                 return None;
             }
-            object_replacement_candidate_applies(state, event, registry, entry.id)
+            object_replacement_candidate_applies(state, event, registry, entry.id, damage_subject)
                 .then_some(entry.id)
         })
         .collect();
@@ -8264,8 +8278,14 @@ fn indexed_object_replacement_candidates_from_index(
                             source: entry_ref,
                             index,
                         };
-                        object_replacement_candidate_applies(state, event, registry, rid)
-                            .then_some(rid)
+                        object_replacement_candidate_applies(
+                            state,
+                            event,
+                            registry,
+                            rid,
+                            damage_subject,
+                        )
+                        .then_some(rid)
                     }),
             );
         }
@@ -8278,24 +8298,26 @@ fn indexed_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    damage_subject: Option<&TriggerSourceContext>,
 ) -> Vec<ReplacementId> {
     #[cfg(test)]
     INDEXED_OBJECT_REPLACEMENT_CANDIDATE_CONSULTS.with(|consults| {
         consults.set(consults.get() + 1);
     });
 
-    let candidates = indexed_object_replacement_candidates_from_index(state, event, registry);
+    let candidates =
+        indexed_object_replacement_candidates_from_index(state, event, registry, damage_subject);
 
     #[cfg(all(debug_assertions, not(test)))]
     {
-        let legacy = legacy_object_replacement_candidates(state, event, registry);
+        let legacy = legacy_object_replacement_candidates(state, event, registry, damage_subject);
         debug_assert_eq!(
             candidates, legacy,
             "replacement index candidate order diverged from legacy scan for {event:?}",
         );
     }
     if std::env::var_os("PHASE_REPLACEMENT_INDEX_AUDIT").is_some() {
-        let legacy = legacy_object_replacement_candidates(state, event, registry);
+        let legacy = legacy_object_replacement_candidates(state, event, registry, damage_subject);
         assert_eq!(
             candidates, legacy,
             "replacement index candidate order diverged from legacy scan for {event:?}",
@@ -8309,14 +8331,15 @@ fn object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    damage_subject: Option<&TriggerSourceContext>,
 ) -> Vec<ReplacementId> {
     if state.replacement_index.pipeline_active
         && state.replacement_index.initialized
         && !state.replacement_index.dirty
     {
-        indexed_object_replacement_candidates(state, event, registry)
+        indexed_object_replacement_candidates(state, event, registry, damage_subject)
     } else {
-        legacy_object_replacement_candidates(state, event, registry)
+        legacy_object_replacement_candidates(state, event, registry, damage_subject)
     }
 }
 
@@ -8363,6 +8386,29 @@ pub fn find_applicable_replacements(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
+    find_applicable_replacements_with_damage_source_context(state, event, registry, None)
+}
+
+pub(crate) fn find_applicable_replacements_with_damage_source_context(
+    state: &GameState,
+    event: &ProposedEvent,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    damage_source_context: Option<&TriggerSourceContext>,
+) -> Vec<ReplacementId> {
+    let selected;
+    let damage_subject = if let Some(source) = damage_source_context {
+        if !matches!(event, ProposedEvent::Damage { source_id, .. } if *source_id == source.identity.reference.object_id)
+        {
+            return Vec::new();
+        }
+        selected = super::effects::deal_damage::select_triggered_damage_source(state, source);
+        let Some(subject) = selected.as_ref() else {
+            return Vec::new();
+        };
+        Some(subject)
+    } else {
+        None
+    };
     let mut candidates = Vec::new();
 
     match event {
@@ -8688,7 +8734,12 @@ pub fn find_applicable_replacements(
         }
     }
 
-    candidates.extend(object_replacement_candidates(state, event, registry));
+    candidates.extend(object_replacement_candidates(
+        state,
+        event,
+        registry,
+        damage_subject,
+    ));
 
     // CR 614.1a + CR 615.3: Also scan game-state-level (floating) replacements
     // installed by spells/abilities with a duration. These use a sentinel source
@@ -8751,7 +8802,15 @@ pub fn find_applicable_replacements(
                                 }
                                 None => FilterContext::from_source(state, source_host),
                             };
-                            if !matches_target_filter(state, *source_id, sf, &ctx) {
+                            let matches = damage_subject.map_or_else(
+                                || matches_target_filter(state, *source_id, sf, &ctx),
+                                |subject| {
+                                    super::filter::matches_target_filter_on_exact_source(
+                                        state, subject, sf, &ctx,
+                                    )
+                                },
+                            );
+                            if !matches {
                                 continue;
                             }
                         }
@@ -11234,6 +11293,7 @@ fn park_entry_controller_choice(
     candidates: Vec<PlayerId>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        damage_source_context: None,
         proposed,
         sacrifice_provenance: None,
         candidates: vec![rid],
@@ -11407,6 +11467,7 @@ fn park_as_enters_named_choice(
 ) -> ReplacementResult {
     let object_id = rid.source;
     state.pending_replacement = Some(PendingReplacement {
+        damage_source_context: None,
         proposed,
         sacrifice_provenance: None,
         candidates: vec![rid],
@@ -11887,6 +11948,7 @@ fn pipeline_loop(
     mut proposed: ProposedEvent,
     mut depth: u16,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    damage_source_context: Option<TriggerSourceContext>,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     // The single recording point (CR 614.1a). This is the pipeline BODY every one
@@ -11899,7 +11961,15 @@ fn pipeline_loop(
             break;
         }
 
-        let candidates = find_applicable_replacements(state, &proposed, registry);
+        if !damage_source_context_coherent(state, &proposed, damage_source_context.as_ref()) {
+            return ReplacementResult::Prevented;
+        }
+        let candidates = find_applicable_replacements_with_damage_source_context(
+            state,
+            &proposed,
+            registry,
+            damage_source_context.as_ref(),
+        );
 
         if candidates.is_empty() {
             state.replacement_auto_choice_tail = None;
@@ -11967,6 +12037,7 @@ fn pipeline_loop(
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(PendingReplacement {
+                    damage_source_context: damage_source_context.clone(),
                     proposed,
                     sacrifice_provenance: None,
                     candidates,
@@ -12032,6 +12103,7 @@ fn pipeline_loop(
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
             state.pending_replacement = Some(PendingReplacement {
+                damage_source_context: damage_source_context.clone(),
                 proposed,
                 sacrifice_provenance: None,
                 candidates,
@@ -12093,6 +12165,46 @@ pub fn replace_event(
     proposed: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    replace_event_with_damage_source_context(state, proposed, None, events)
+}
+
+pub(crate) fn damage_source_context_coherent(
+    state: &GameState,
+    event: &ProposedEvent,
+    context: Option<&TriggerSourceContext>,
+) -> bool {
+    let ProposedEvent::Damage { source_id, .. } = event else {
+        return context.is_none();
+    };
+    let owner = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+        .filter(|ability| {
+            matches!(
+                ability.effect,
+                Effect::DealDamage {
+                    damage_source: None,
+                    ..
+                }
+            ) && ability.source_id == *source_id
+        })
+        .and_then(|ability| ability.trigger_source.as_ref());
+    match context {
+        Some(context) => {
+            context.identity.reference.object_id == *source_id
+                && owner.is_none_or(|owner| owner.identity == context.identity)
+        }
+        None => owner.is_none(),
+    }
+}
+
+pub(crate) fn replace_event_with_damage_source_context(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    damage_source_context: Option<TriggerSourceContext>,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
     // A newly proposed (possibly nested) event cannot inherit another event's tail.
     state.replacement_auto_choice_tail = None;
     let registry = replacement_registry();
@@ -12102,7 +12214,7 @@ pub fn replace_event(
     // `continue_replacement` to resume.
     let staged = stage_transformed_entry_projection(state, &proposed);
     prepare_replacement_index_for_pipeline(state);
-    let result = pipeline_loop(state, proposed, 0, registry, events);
+    let result = pipeline_loop(state, proposed, 0, registry, damage_source_context, events);
     clear_replacement_index_pipeline(state);
     release_transformed_entry_projection(state, staged, &result);
     result
@@ -12148,7 +12260,7 @@ pub(crate) fn replace_combat_damage_batch(
     let mut survivors = Vec::with_capacity(proposed.len());
     for event in proposed {
         prepare_replacement_index_for_pipeline(state);
-        let result = pipeline_loop(state, event, 0, registry, events);
+        let result = pipeline_loop(state, event, 0, registry, None, events);
         clear_replacement_index_pipeline(state);
         // CR 615.5: A `Prevention::Next(N)` shield's rider is stashed per-event
         // by the applier (the `Prevention::All` batch path suppresses its stash
@@ -12195,6 +12307,9 @@ fn continue_search_found_after_decline(
     declined: ReplacementId,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    if pending.damage_source_context.is_some() {
+        return ReplacementResult::Prevented;
+    }
     pending.proposed.mark_applied(declined);
     let ProposedEvent::SearchFound { disposition, .. } = &mut pending.proposed else {
         unreachable!("SearchFound decline continuation requires a SearchFound event");
@@ -12218,6 +12333,7 @@ fn continue_search_found_after_decline(
             pending.proposed,
             pending.depth,
             replacement_registry(),
+            None,
             events,
         ),
         [candidate] if !candidate.is_optional => {
@@ -12229,6 +12345,7 @@ fn continue_search_found_after_decline(
                 proposed,
                 pending.depth + 1,
                 replacement_registry(),
+                None,
                 events,
             )
         }
@@ -12264,6 +12381,10 @@ fn continue_replacement_impl(
             });
         }
     };
+    let damage_source_context = pending.damage_source_context.clone();
+    if !damage_source_context_coherent(state, &pending.proposed, damage_source_context.as_ref()) {
+        return ReplacementResult::Prevented;
+    }
 
     let option_count = pending_replacement_option_count(state, &pending);
     if chosen_index >= option_count {
@@ -12298,7 +12419,14 @@ fn continue_replacement_impl(
             if chosen_index == 0 {
                 let proposed =
                     apply_bound_search_found_candidate(state, pending.proposed, &bound, events);
-                return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+                return pipeline_loop(
+                    state,
+                    proposed,
+                    pending.depth + 1,
+                    registry,
+                    damage_source_context.clone(),
+                    events,
+                );
             }
             return continue_search_found_after_decline(state, pending, rid, events);
         }
@@ -12310,7 +12438,14 @@ fn continue_replacement_impl(
             // applied as declined and continue the ordinary replacement loop.
             let mut proposed = pending.proposed;
             proposed.mark_applied(rid);
-            return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+            return pipeline_loop(
+                state,
+                proposed,
+                pending.depth + 1,
+                registry,
+                damage_source_context.clone(),
+                events,
+            );
         };
         // CR 614.12a: a `true` flag means this is the post-choice resume of an
         // accept whose `MayCost` payment paused for an interactive sub-choice
@@ -12437,6 +12572,7 @@ fn continue_replacement_impl(
                 // `Execute` payload is inert — the flag short-circuits the caller
                 // before it is read.
                 let outer_replacement = crate::types::game_state::PendingReplacement {
+                    damage_source_context: None,
                     proposed: proposed.clone(),
                     sacrifice_provenance: reparked_sacrifice_provenance,
                     candidates: reparked_candidates,
@@ -12631,7 +12767,14 @@ fn continue_replacement_impl(
             Err(ApplyResult::Modified(_)) => unreachable!(),
         }
 
-        return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+        return pipeline_loop(
+            state,
+            proposed,
+            pending.depth + 1,
+            registry,
+            damage_source_context.clone(),
+            events,
+        );
     }
 
     if chosen_index >= pending.candidates.len() {
@@ -12653,7 +12796,14 @@ fn continue_replacement_impl(
                 proposed.mark_applied(candidate.replacement_id);
             }
             dirty_replacement_index(state);
-            return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+            return pipeline_loop(
+                state,
+                proposed,
+                pending.depth + 1,
+                registry,
+                damage_source_context.clone(),
+                events,
+            );
         }
         return ReplacementResult::Execute(pending.proposed);
     }
@@ -12688,7 +12838,14 @@ fn continue_replacement_impl(
             return ReplacementResult::NeedsChoice(affected);
         }
         let proposed = apply_bound_search_found_candidate(state, pending.proposed, &bound, events);
-        return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+        return pipeline_loop(
+            state,
+            proposed,
+            pending.depth + 1,
+            registry,
+            damage_source_context.clone(),
+            events,
+        );
     }
 
     // CR 616.1: Selecting an optional candidate from a material ordering prompt
@@ -12700,7 +12857,14 @@ fn continue_replacement_impl(
         let Some(affected) = replacement_choice_player(state, &pending.proposed, rid) else {
             let mut proposed = pending.proposed;
             proposed.mark_applied(rid);
-            return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+            return pipeline_loop(
+                state,
+                proposed,
+                pending.depth + 1,
+                registry,
+                damage_source_context.clone(),
+                events,
+            );
         };
         pending.candidates = vec![rid];
         pending.is_optional = true;
@@ -12745,7 +12909,14 @@ fn continue_replacement_impl(
         Err(ApplyResult::Modified(_)) => unreachable!(),
     }
 
-    pipeline_loop(state, proposed, pending.depth + 1, registry, events)
+    pipeline_loop(
+        state,
+        proposed,
+        pending.depth + 1,
+        registry,
+        damage_source_context.clone(),
+        events,
+    )
 }
 
 pub fn continue_replacement(
@@ -13484,10 +13655,10 @@ mod tests {
         let registry = replacement_registry();
         let event =
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
-        let legacy = legacy_object_replacement_candidates(&state, &event, registry);
+        let legacy = legacy_object_replacement_candidates(&state, &event, registry, None);
 
         rebuild_replacement_index(&mut state);
-        let indexed = indexed_object_replacement_candidates(&state, &event, registry);
+        let indexed = indexed_object_replacement_candidates(&state, &event, registry, None);
 
         assert_eq!(indexed, legacy);
         assert_eq!(
@@ -13553,7 +13724,8 @@ mod tests {
             .replacement_definitions
             .push(make_repl(ReplacementEvent::Moved));
         assert!(
-            indexed_object_replacement_candidates_from_index(&state, &event, registry).is_empty(),
+            indexed_object_replacement_candidates_from_index(&state, &event, registry, None)
+                .is_empty(),
             "clean stale index intentionally does not see hostile mutation"
         );
 
@@ -14292,6 +14464,7 @@ mod tests {
             ),
             (
                 ProposedEvent::RemoveCounter {
+                    result_binding: None,
                     object_id: ObjectId(1),
                     counter_type: CounterType::Plus1Plus1,
                     count: 1,
@@ -14790,7 +14963,7 @@ mod tests {
         let proposed =
             ProposedEvent::zone_change(ObjectId(30), Zone::Battlefield, Zone::Graveyard, None);
         let legacy =
-            legacy_object_replacement_candidates(&state, &proposed, replacement_registry());
+            legacy_object_replacement_candidates(&state, &proposed, replacement_registry(), None);
         assert_eq!(legacy.len(), 2);
         assert!(!legacy.contains(&ReplacementId {
             source: ObjectId(40),
@@ -15774,6 +15947,7 @@ mod tests {
         // single optional replacement produces): candidate 0 is the real Riot
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
             candidates: vec![ReplacementId {
@@ -15836,6 +16010,7 @@ mod tests {
         ] {
             let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
             state.pending_replacement = Some(PendingReplacement {
+                damage_source_context: None,
                 proposed: ProposedEvent::zone_change(
                     commander,
                     Zone::Battlefield,
@@ -15917,6 +16092,7 @@ mod tests {
                 description: "Retain green mana".to_string(),
             }];
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::EmptyManaPool {
                 player_id: PlayerId(0),
                 units: vec![],
@@ -20757,6 +20933,7 @@ mod tests {
         // ReplacementChoice — covering the non-None branch of the guard.
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
             candidates: vec![],
@@ -25242,3 +25419,75 @@ mod tests {
 #[cfg(test)]
 #[path = "enters_with_unless_runtime_tests.rs"]
 mod enters_with_unless_runtime_tests;
+
+#[cfg(test)]
+mod u13_exact_source_replacement_owner_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    #[test]
+    fn u13_indexed_and_legacy_consults_read_the_same_subject_and_installer_authority() {
+        let mut s = GameScenario::new();
+        let source = s
+            .add_creature(P0, "Synthetic departed damage subject", 4, 4)
+            .id();
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You),
+        );
+        let b = s
+            .add_creature(P1, "Synthetic B Double", 2, 2)
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .damage_modification(crate::types::ability::DamageModification::Double)
+                    .damage_source_filter(filter.clone()),
+            )
+            .id();
+        let a = s
+            .add_creature(P0, "Synthetic A Double", 2, 2)
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .damage_modification(crate::types::ability::DamageModification::Double)
+                    .damage_source_filter(filter),
+            )
+            .id();
+        let mut state = s.build().state().clone();
+        state.objects.get_mut(&source).unwrap().controller = P1;
+        let subject = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let event = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Player(P0),
+            amount: 4,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let registry = replacement_registry();
+        let current =
+            legacy_object_replacement_candidates(&state, &event, registry, Some(&subject));
+        assert!(current.iter().any(|id| id.source == b));
+        assert!(!current.iter().any(|id| id.source == a));
+        let object = state.objects.get_mut(&source).unwrap();
+        object.incarnation += 1;
+        object.controller = P0;
+        let legacy = legacy_object_replacement_candidates(&state, &event, registry, Some(&subject));
+        assert!(legacy.iter().any(|id| id.source == b));
+        assert!(!legacy.iter().any(|id| id.source == a));
+        rebuild_replacement_index(&mut state);
+        let indexed =
+            indexed_object_replacement_candidates(&state, &event, registry, Some(&subject));
+        assert_eq!(indexed, legacy);
+        let production = find_applicable_replacements_with_damage_source_context(
+            &state,
+            &event,
+            registry,
+            Some(&subject),
+        );
+        assert!(production.iter().any(|id| id.source == b));
+        assert!(!production.iter().any(|id| id.source == a));
+        let ordinary = find_applicable_replacements(&state, &event, registry);
+        assert!(ordinary.iter().any(|id| id.source == a));
+        assert!(!ordinary.iter().any(|id| id.source == b));
+    }
+}

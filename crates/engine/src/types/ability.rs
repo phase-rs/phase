@@ -28785,6 +28785,12 @@ pub enum AbilityCondition {
     /// The runtime materializer consumes this root condition on the trigger clone
     /// so the reflexive ability cannot recreate itself.
     WhenYouDo,
+    /// CR 603.12 + CR 122.1: actual matching removals by this exact instruction
+    /// in the creating resolution, rather than any earlier counter event.
+    CounterRemovedThisWay {
+        result: ReturnResultId,
+        counters: crate::types::counter::CounterMatch,
+    },
     /// CR 601.2a + CR 707.10: "if [this spell] was cast from [zone]" — sub_ability
     /// executes only if the spell was cast. `zone: None` = cast from any origin;
     /// `Some(z)` = cast specifically from zone `z`. Evaluated against
@@ -29367,7 +29373,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::CounterRemovedThisWay { .. } => false,
         }
     }
 
@@ -29448,7 +29455,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => None,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::CounterRemovedThisWay { .. } => None,
         }
     }
 
@@ -29462,6 +29470,36 @@ impl AbilityCondition {
         match self {
             AbilityCondition::And { conditions } => conditions.iter().any(is_zone_change),
             condition => is_zone_change(condition),
+        }
+    }
+
+    /// The root action-event member used only when creating a reflexive.
+    pub(crate) fn counter_removal_event(
+        &self,
+    ) -> Option<(ReturnResultId, &crate::types::counter::CounterMatch)> {
+        match self {
+            Self::CounterRemovedThisWay { result, counters } => Some((*result, counters)),
+            Self::And { conditions } => conditions.iter().find_map(|condition| match condition {
+                Self::CounterRemovedThisWay { result, counters } => Some((*result, counters)),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Condition-held exact references participate in occurrence ownership just
+    /// like the existing explicit named-result reader field.
+    pub(crate) fn references_counter_result(&self, result: Option<ReturnResultId>) -> bool {
+        match self {
+            Self::CounterRemovedThisWay { result: id, .. } => {
+                result.is_none_or(|result| result == *id)
+            }
+            Self::And { conditions } | Self::Or { conditions } => conditions
+                .iter()
+                .any(|condition| condition.references_counter_result(result)),
+            Self::Not { condition } => condition.references_counter_result(result),
+            Self::ConditionInstead { inner } => inner.references_counter_result(result),
+            _ => false,
         }
     }
 
@@ -29603,7 +29641,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::CounterRemovedThisWay { .. } => false,
         }
     }
 
@@ -29868,6 +29907,9 @@ pub struct PendingForwardedZoneResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// Private authority owned by one concrete counter-removal producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_removal_result: Option<crate::types::game_state::CounterRemovalResultBinding>,
     /// Present only while an accepted token substitution resolves its own creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,

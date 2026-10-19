@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, multispace0, multispace1, satisfy};
-use nom::combinator::{map, map_opt, not, opt, peek, rest, success, value};
+use nom::combinator::{all_consuming, map, map_opt, not, opt, peek, rest, success, value, verify};
 use nom::multi::{fold_many1, many_till};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -53,7 +53,8 @@ use super::oracle_trigger::parse_trigger_lines_at_index_ir;
 use super::oracle_trigger::unhoisted_modal_guard_body;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{
-    parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst, ReflexiveModalParent,
+    parsed_clause, CounterRemovalConnector, ModalHeaderAst, ModalOptionality, ModeAst,
+    OracleBlockAst, ReflexiveModalParent,
 };
 use crate::types::mana::ManaCost;
 
@@ -1013,6 +1014,14 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
 ///   instruction as the parent chain; lowering then hangs the modal off it.
 /// * `None` — no connector: a plain triggered modal (Pip-Boy 3000).
 fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<ReflexiveModalParent>) {
+    if let Some((instruction, event)) = split_counter_removal_connector(&trigger_line)
+        .filter(|(instruction, _)| has_trigger_prefix(&instruction.to_lowercase()))
+    {
+        return (
+            instruction.to_string(),
+            Some(ReflexiveModalParent::Mandatory(Some(event))),
+        );
+    }
     if let Some((trigger, cost)) = split_reflexive_optional_cost(&trigger_line) {
         return (trigger, Some(ReflexiveModalParent::MayPay(cost)));
     }
@@ -1021,7 +1030,7 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
     {
         return (
             instruction.to_string(),
-            Some(ReflexiveModalParent::Mandatory),
+            Some(ReflexiveModalParent::Mandatory(None)),
         );
     }
     (trigger_line, None)
@@ -1097,6 +1106,48 @@ fn strip_terminal_reflexive_connector(trigger_line: &str) -> Option<&str> {
         return None;
     }
     trigger_line.get(..connector_start?).map(str::trim_end)
+}
+
+/// CR 603.12: a singular removal connector, factored by article and kind.
+/// Complete consumption leaves plural and residual action guards strict-failed.
+fn split_counter_removal_connector(trigger_line: &str) -> Option<(&str, CounterRemovalConnector)> {
+    let lower = trigger_line.to_lowercase();
+    let mut tail = lower.as_str();
+    let mut connector_start = None;
+    while let Ok((after, _)) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". ")).parse(tail)
+    {
+        connector_start = Some(lower.len() - after.len() - 2);
+        tail = after;
+    }
+    let (_, (_, _, kind, _)) = all_consuming(terminated(
+        (
+            tag("when you remove "),
+            verify(nom_primitives::parse_number, |count| *count == 1),
+            preceded(
+                tag(" "),
+                opt(preceded(
+                    not(tag("counter ")),
+                    terminated(nom_primitives::parse_counter_type_typed, tag(" ")),
+                )),
+            ),
+            tag("counter this way"),
+        ),
+        opt(tag(",")),
+    ))
+    .parse(tail.trim())
+    .ok()?;
+    let start = connector_start?;
+    Some((
+        trigger_line.get(..start)?.trim_end(),
+        CounterRemovalConnector {
+            counters: kind.map_or(
+                crate::types::counter::CounterMatch::Any,
+                crate::types::counter::CounterMatch::OfType,
+            ),
+            source_text: trigger_line.get(start + 2..)?.trim().to_string(),
+        },
+    ))
 }
 
 /// CR 603.12 + CR 700.2b: Recognize a reflexive optional-instruction trigger
@@ -1275,8 +1326,14 @@ pub(crate) fn lower_oracle_block_ir(
             ctx.diagnostics.extend(trigger_ctx.diagnostics);
             let unsupported_reflexive =
                 reflexive_parent.is_none() && terminal_action_reflexive(&trigger_line);
+            let complete_header = match &reflexive_parent {
+                Some(ReflexiveModalParent::Mandatory(Some(event))) => {
+                    format!("{trigger_line}. {}", event.source_text)
+                }
+                _ => trigger_line.clone(),
+            };
             let full_fragment = format!(
-                "{trigger_line}, {}\n{}",
+                "{complete_header}, {}\n{}",
                 header.raw,
                 modes
                     .iter()
@@ -1366,6 +1423,7 @@ pub(crate) fn lower_oracle_block_ir(
                 let body = match &reflexive_parent {
                     Some(ReflexiveModalParent::MayPay(cost_text)) => {
                         TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                            event_producer: None,
                             parent: ReflexiveParent::MayPay {
                                 cost: parse_oracle_cost(cost_text),
                                 payment_chain: Some(
@@ -1405,29 +1463,69 @@ pub(crate) fn lower_oracle_block_ir(
                     // that chain as the parent and hang the mode list off it as
                     // the CR 603.12 reflexive body. Replacing it (as this arm
                     // did) dropped the instruction from the card entirely.
-                    Some(ReflexiveModalParent::Mandatory) => match trigger.body.take() {
-                        Some(TriggerBody::EffectChain(instruction)) => {
+                    Some(ReflexiveModalParent::Mandatory(event)) => match trigger.body.take() {
+                        Some(TriggerBody::EffectChain(mut instruction)) => {
+                            let mut connector = reflexive_connector
+                                .clone()
+                                .expect("reflexive parent has a connector");
+                            let event_producer = if let Some(event) = event {
+                                trigger.source_text = full_fragment.clone();
+                                let Some(producer) =
+                                    instruction.bind_counter_removal(&event.counters)
+                                else {
+                                    trigger.body = Some(TriggerBody::EffectChain(
+                                        EffectChainIr::single_clause(
+                                            &full_fragment,
+                                            AbilityKind::Spell,
+                                            parsed_clause(Effect::unimplemented(
+                                                "counter_action_reflexive",
+                                                &full_fragment,
+                                            )),
+                                            None,
+                                            None,
+                                            true,
+                                        ),
+                                    ));
+                                    continue;
+                                };
+                                connector = connector.with_when_you_do_guard(
+                                    AbilityCondition::CounterRemovedThisWay {
+                                        result: crate::types::ability::ReturnResultId(producer.0),
+                                        counters: event.counters.clone(),
+                                    },
+                                );
+                                Some(producer)
+                            } else {
+                                None
+                            };
                             TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                                event_producer,
                                 parent: ReflexiveParent::Mandatory { instruction },
-                                connector: reflexive_connector
-                                    .clone()
-                                    .expect("reflexive parent has a connector"),
+                                connector,
                                 effect_chain: payload.marker.clone(),
                                 modal: Some(payload.clone()),
                             }))
                         }
                         // The connector is there but the instruction did not
-                        // lower to a plain chain. These shapes carry their own
-                        // root transforms and nesting them here would misreport
-                        // what the card does, so keep the pre-existing plain
-                        // modal rather than invent a parent.
+                        // lower to a plain chain. Retain the complete fragment
+                        // as a strict failure rather than discard its parent.
                         Some(
                             TriggerBody::Reflexive(_)
                             | TriggerBody::Modal(_)
                             | TriggerBody::Vote(_)
                             | TriggerBody::Pile(_),
                         )
-                        | None => TriggerBody::Modal(Box::new(payload.clone())),
+                        | None => TriggerBody::EffectChain(EffectChainIr::single_clause(
+                            &full_fragment,
+                            AbilityKind::Spell,
+                            parsed_clause(Effect::unimplemented(
+                                "reflexive_parent",
+                                &full_fragment,
+                            )),
+                            None,
+                            None,
+                            true,
+                        )),
                     },
                     None => TriggerBody::Modal(Box::new(payload.clone())),
                 };
@@ -1658,6 +1756,30 @@ pub(crate) fn lower_oracle_block(
             modes,
             reflexive_parent,
         } => {
+            // The compatibility route shares action-specific producer binding
+            // with native IR; it cannot reconstruct ownership from lowered nodes.
+            if matches!(
+                &reflexive_parent,
+                Some(ReflexiveModalParent::Mandatory(Some(_)))
+            ) {
+                let payload = lower_oracle_block_ir(
+                    OracleBlockAst::TriggeredModal {
+                        trigger_line,
+                        header,
+                        modes,
+                        reflexive_parent,
+                    },
+                    card_name,
+                    host_self_reference,
+                    &mut ParseContext::default(),
+                );
+                if let OracleBlockIr::Triggered(triggers) = payload {
+                    result
+                        .triggers
+                        .extend(triggers.iter().map(super::oracle_trigger::lower_trigger_ir));
+                }
+                return;
+            }
             let mut triggers = parse_trigger_lines(&trigger_line, card_name);
             let reflexive_connector = match reflexive_parent
                 .as_ref()
@@ -1743,7 +1865,7 @@ pub(crate) fn lower_oracle_block(
                 // CR 603.12 + CR 608.2c: a mandatory parent stays in the trigger
                 // line, so the parent is the trigger's own execute and the modal
                 // becomes its reflexive body.
-                Some(ReflexiveModalParent::Mandatory) => {
+                Some(ReflexiveModalParent::Mandatory(_)) => {
                     modal_ability.condition = reflexive_connector.clone();
                     Box::new(modal_ability)
                 }
@@ -1753,8 +1875,12 @@ pub(crate) fn lower_oracle_block(
 
             for trigger in &mut triggers {
                 match (&reflexive_parent, trigger.execute.take()) {
-                    (Some(ReflexiveModalParent::Mandatory), Some(mut instruction)) => {
-                        instruction.sub_ability = Some(execute.clone());
+                    (Some(ReflexiveModalParent::Mandatory(_)), Some(mut instruction)) => {
+                        let mut tail = &mut instruction;
+                        while let Some(ref mut sub) = tail.sub_ability {
+                            tail = sub;
+                        }
+                        tail.sub_ability = Some(execute.clone());
                         trigger.execute = Some(instruction);
                     }
                     _ => trigger.execute = Some(execute.clone()),
@@ -5106,7 +5232,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             // ordinary trigger parser lowers the mandatory parent chain.
             (
                 "When this creature enters or dies, exile another card from a graveyard. When you do",
-                Some(ReflexiveModalParent::Mandatory),
+                Some(ReflexiveModalParent::Mandatory(None)),
                 "When this creature enters or dies, exile another card from a graveyard",
             ),
             // Dialogue Tree is a sorcery, not a triggered parent. Its terminal
@@ -6049,5 +6175,195 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             // allow-noncombinator: test assertion over serialized output, not parser dispatch.
             assert!(!serde_json::to_string(execute).unwrap().contains("counter_action_reflexive"));
         }
+    }
+}
+
+#[cfg(test)]
+mod u13_relation_tests {
+    use super::*;
+    use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ClauseId, ClauseIrBuilder};
+    use crate::types::ability::ReturnResultId;
+    use crate::types::counter::{CounterMatch, CounterType};
+
+    const TEXT: &str = "When this creature enters, you gain 1 life. Put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Draw a card.\n• You gain 2 life.";
+    fn native() -> Vec<TriggerIr> {
+        let lines: Vec<_> = TEXT.lines().collect();
+        let block = parse_oracle_block(&lines, 0).unwrap().0;
+        let OracleBlockIr::Triggered(triggers) = lower_oracle_block_ir(
+            block,
+            "Synthetic relation",
+            None,
+            &mut ParseContext::default(),
+        ) else {
+            panic!("trigger route");
+        };
+        triggers
+    }
+    #[test]
+    fn u13_native_compatibility_keep_multiclause_parent_and_exact_terminal_owner() {
+        let ir = native();
+        assert!(!ir.is_empty());
+        let lines: Vec<_> = TEXT.lines().collect();
+        let block = parse_oracle_block(&lines, 0).unwrap().0;
+        let mut compatibility =
+            crate::parser::parse_oracle_text("", "Synthetic relation", &[], &[], &[]);
+        lower_oracle_block(block, "Synthetic relation", None, &mut compatibility);
+        for (trigger, legacy) in ir.iter().zip(&compatibility.triggers) {
+            let lowered = super::super::oracle_trigger::lower_trigger_ir(trigger);
+            assert_eq!(&lowered, legacy);
+            let head = lowered.execute.as_deref().unwrap();
+            assert!(matches!(head.effect.as_ref(), Effect::GainLife { .. }));
+            let producer = head.sub_ability.as_deref().unwrap();
+            assert!(matches!(
+                producer.effect.as_ref(),
+                Effect::ChooseCounterAdjustment { .. }
+            ));
+            let child = producer.sub_ability.as_deref().unwrap();
+            assert_eq!(
+                child
+                    .condition
+                    .as_ref()
+                    .unwrap()
+                    .counter_removal_event()
+                    .unwrap()
+                    .0,
+                producer.declares_return_result.unwrap()
+            );
+            assert_eq!(child.mode_abilities.len(), 2);
+        }
+    }
+    #[test]
+    fn u13_missing_forward_duplicate_wrong_kind_and_mode_local_relations_refuse_full_fragment() {
+        let baseline = native().remove(0);
+        for fault in 0..9 {
+            let mut ir = baseline.clone();
+            let TriggerBody::Reflexive(ref mut reflexive) = ir.body.as_mut().unwrap() else {
+                panic!("reflexive");
+            };
+            let ReflexiveParent::Mandatory { instruction } = &mut reflexive.parent else {
+                panic!("mandatory");
+            };
+            match fault {
+                0 => reflexive.event_producer = None,
+                1 => reflexive.event_producer = Some(ClauseId(u32::MAX)),
+                2 => {
+                    let duplicate = instruction.clauses.last().unwrap().clone();
+                    instruction.clauses.push(duplicate);
+                }
+                3 => {
+                    instruction
+                        .clauses
+                        .last_mut()
+                        .unwrap()
+                        .declares_instruction_result = None
+                }
+                4 => {
+                    instruction.clauses.last_mut().unwrap().parsed.effect = Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    }
+                }
+                5 => {
+                    reflexive.connector = AbilityCondition::when_you_do_with_guard(
+                        AbilityCondition::CounterRemovedThisWay {
+                            result: ReturnResultId(instruction.clauses.last().unwrap().id.0),
+                            counters: CounterMatch::OfType(CounterType::Generic("oil".into())),
+                        },
+                    )
+                }
+                6 => {
+                    reflexive.connector = AbilityCondition::when_you_do_with_guard(
+                        AbilityCondition::CounterRemovedThisWay {
+                            result: ReturnResultId(0),
+                            counters: CounterMatch::Any,
+                        },
+                    )
+                }
+                7 => instruction.clauses.last_mut().unwrap().is_optional = true,
+                8 => {
+                    let producer = instruction.clauses.pop().unwrap();
+                    reflexive.modal.as_mut().unwrap().modes[0]
+                        .ability
+                        .body
+                        .clauses
+                        .push(producer);
+                }
+                _ => unreachable!(),
+            }
+            let lowered = super::super::oracle_trigger::lower_trigger_ir(&ir);
+            // allow-noncombinator: test destructures the strict diagnostic; no gap is constructed.
+            let Effect::Unimplemented {
+                description: Some(fragment),
+                ..
+            } = lowered.execute.as_deref().unwrap().effect.as_ref()
+            else {
+                panic!("fault {fault}: {lowered:#?}");
+            };
+            for part in [
+                "put a charge counter",
+                "When you remove a counter this way",
+                "Draw a card",
+                "You gain 2 life",
+            ] {
+                // allow-noncombinator: retained diagnostic assertion.
+                assert!(
+                    fragment.to_lowercase().contains(&part.to_lowercase()),
+                    "{fragment}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn u13_instruction_declarations_remint_and_strict_gap_resets() {
+        let ir = native().remove(0);
+        let Some(TriggerBody::Reflexive(reflexive)) = ir.body else {
+            panic!("reflexive");
+        };
+        let ReflexiveParent::Mandatory { mut instruction } = reflexive.parent else {
+            panic!("parent");
+        };
+        let owner = instruction.clauses.last().unwrap().id;
+        let mut gap = instruction.clauses.last().unwrap().clone();
+        gap.replace_with_gap("synthetic strict gap");
+        assert!(gap.declares_instruction_result.is_none());
+        assert!(gap.condition.is_none());
+        let mut reader = instruction.clauses.first().unwrap().clone();
+        reader.id = ClauseId(owner.0 + 1);
+        reader.condition = Some(AbilityCondition::CounterRemovedThisWay {
+            result: ReturnResultId(owner.0),
+            counters: CounterMatch::Any,
+        });
+        instruction.clauses.push(reader);
+        let mut builder = ClauseIrBuilder::new(TEXT);
+        builder
+            .clause(
+                "You gain 2 life.",
+                parsed_clause(Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Fixed { value: 2 },
+                }),
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+        builder.absorb_clauses(instruction.clauses);
+        let clauses = builder.finish();
+        let producer = &clauses[2];
+        assert_eq!(producer.declares_instruction_result, Some(producer.id));
+        assert_ne!(producer.id, owner);
+        assert_eq!(
+            clauses[3]
+                .condition
+                .as_ref()
+                .unwrap()
+                .counter_removal_event()
+                .unwrap()
+                .0
+                 .0,
+            producer.id.0
+        );
     }
 }

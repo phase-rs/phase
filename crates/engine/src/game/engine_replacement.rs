@@ -292,6 +292,10 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.excess_recipient);
+    let parked_damage_source_context = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.damage_source_context.clone());
     let parked_lifelink_bonus = state
         .pending_replacement
         .as_ref()
@@ -517,7 +521,16 @@ fn handle_replacement_choice_inner(
                     is_combat,
                     ..
                 } => {
-                    let mut ctx =
+                    let mut ctx = if let Some(source) = &parked_damage_source_context {
+                        if source.identity.reference.object_id != source_id {
+                            return Err(EngineError::InvalidAction(
+                                "damage source carrier disagrees with event".into(),
+                            ));
+                        }
+                        DamageContext::from_trigger_source(state, source).ok_or_else(|| {
+                            EngineError::InvalidAction("invalid exact damage source".into())
+                        })?
+                    } else {
                         DamageContext::from_source(state, source_id).unwrap_or_else(|| {
                             let controller = state
                                 .objects
@@ -525,7 +538,8 @@ fn handle_replacement_choice_inner(
                                 .map(|obj| obj.controller)
                                 .unwrap_or(state.active_player);
                             DamageContext::fallback(source_id, controller)
-                        });
+                        })
+                    };
                     // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
                     // the deferred lifelink bonus dropped by the source-derived ctx
                     // rebuild, so the resumed hit still redirects and a resumed redirect
@@ -571,13 +585,15 @@ fn handle_replacement_choice_inner(
                     object_id,
                     counter_type,
                     count,
+                    result_binding,
                     ..
                 } => {
-                    effects::counters::apply_counter_removal(
+                    effects::counters::apply_counter_removal_with_result(
                         state,
                         object_id,
                         counter_type,
                         count,
+                        result_binding.as_ref(),
                         events,
                     );
                 }
@@ -1423,6 +1439,17 @@ fn handle_replacement_choice_inner(
             Ok(waiting_for)
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => {
+            if parked_damage_source_context.as_ref().is_some_and(|source| {
+                state
+                    .pending_replacement
+                    .as_ref()
+                    .and_then(|pending| pending.damage_source_context.as_ref())
+                    .is_none_or(|carried| carried.identity != source.identity)
+            }) {
+                return Err(EngineError::InvalidAction(
+                    "re-park lost exact damage source".into(),
+                ));
+            }
             // CR 616.1 + CR 701.24a: a SECOND ordering choice on the same
             // library-placement event re-parked a fresh `PendingReplacement`
             // inside `pipeline_loop` with `library_placement: None`. Reapply the
@@ -4169,6 +4196,7 @@ mod tests {
         // the terminal Connive survivor through `handle_replacement_choice`.
         let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::Connive {
                 object_id: conniver,
                 subject: Box::new(original_subject.snapshot.clone()),
@@ -4846,6 +4874,7 @@ mod tests {
             .description("Regenerate".to_string())]
         .into();
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
                 source: None,

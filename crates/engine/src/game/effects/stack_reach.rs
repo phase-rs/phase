@@ -707,9 +707,37 @@ fn replacement_may_apply(
     bound: &ResolvedAbility,
     acted_on: &[TargetRef],
 ) -> bool {
-    proposed_events(board, bound, acted_on)
-        .iter()
-        .any(|event| !find_applicable_replacements(board, event, replacement_registry()).is_empty())
+    let source = if matches!(
+        bound.effect,
+        Effect::DealDamage {
+            damage_source: None,
+            ..
+        }
+    ) {
+        match &bound.trigger_source {
+            Some(source)
+                if source.identity.reference.object_id == bound.source_id
+                    && bound
+                        .source_incarnation
+                        .is_none_or(|stamp| stamp == source.identity.reference.incarnation) =>
+            {
+                super::deal_damage::select_triggered_damage_source(board, source)
+            }
+            Some(_) => return true,
+            None => None,
+        }
+    } else {
+        None
+    };
+    proposed_events(board, bound, acted_on).iter().any(|event| {
+        !crate::game::replacement::find_applicable_replacements_with_damage_source_context(
+            board,
+            event,
+            replacement_registry(),
+            source.as_ref(),
+        )
+        .is_empty()
+    })
 }
 
 /// The events `bound`'s resolver proposes to the replacement pipeline for what
@@ -850,6 +878,7 @@ fn proposed_events(
                 kinds
                     .into_iter()
                     .map(|counter_type| ProposedEvent::RemoveCounter {
+                        result_binding: None,
                         object_id: object.id,
                         counter_type,
                         count: 1,
@@ -1033,5 +1062,79 @@ mod dandan_read_sweep_tests {
             written.is_none(),
             "the replacement applies to the pile card's move"
         );
+    }
+}
+
+#[cfg(test)]
+mod u13_exact_source_preview_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::QuantityExpr;
+    #[test]
+    fn u13_replacement_preview_uses_bound_source_and_keeps_malformed_carriers_conservative() {
+        let mut s = GameScenario::new();
+        let source = s.add_creature(P0, "Synthetic preview subject", 4, 4).id();
+        s.add_creature(P1, "Synthetic preview B Double", 2, 2)
+            .with_replacement_definition(
+                crate::types::ability::ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::DamageDone,
+                )
+                .damage_modification(crate::types::ability::DamageModification::Double)
+                .damage_source_filter(TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .controller(crate::types::ability::ControllerRef::You),
+                )),
+            );
+        let mut state = s.build().state().clone();
+        state.objects.get_mut(&source).unwrap().controller = P1;
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(P0)],
+            source,
+            P0,
+        );
+        ability.set_trigger_source_recursive(
+            crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            ),
+        );
+        assert!(replacement_may_apply(
+            &state,
+            &ability,
+            &[TargetRef::Player(P0)]
+        ));
+        let object = state.objects.get_mut(&source).unwrap();
+        object.incarnation += 1;
+        object.controller = P0;
+        assert!(replacement_may_apply(
+            &state,
+            &ability,
+            &[TargetRef::Player(P0)]
+        ));
+        let mut ordinary = ability.clone();
+        ordinary.trigger_source = None;
+        assert!(!replacement_may_apply(
+            &state,
+            &ordinary,
+            &[TargetRef::Player(P0)]
+        ));
+        ability
+            .trigger_source
+            .as_mut()
+            .unwrap()
+            .identity
+            .reference
+            .object_id = ObjectId(u64::MAX);
+        assert!(replacement_may_apply(
+            &state,
+            &ability,
+            &[TargetRef::Player(P0)]
+        ));
     }
 }

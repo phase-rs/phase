@@ -1,5 +1,126 @@
 use super::*;
 
+const U13_IMMARD: &str = "Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
+
+#[test]
+fn u13_full_immard_exact_instruction_modal_roundtrip_and_coverage() {
+    // SHAPE; the public card-test flow supplies the runtime discriminator.
+    let parsed = parse_oracle_text(
+        U13_IMMARD,
+        "Immard, the Stormcleaver",
+        &[],
+        &["Creature".into()],
+        &["Human".into(), "Soldier".into()],
+    );
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert_eq!(parsed.triggers.len(), 2);
+    for trigger in &parsed.triggers {
+        let parent = trigger.execute.as_deref().unwrap();
+        assert!(
+            matches!(parent.effect.as_ref(), Effect::ChooseCounterAdjustment {
+            adjustment: CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(crate::types::counter::CounterType::Generic(kind)),
+            count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef,
+        } if kind == "charge")
+        );
+        assert!(!parent.optional);
+        let child = parent.sub_ability.as_deref().unwrap();
+        assert!(child.condition.as_ref().unwrap().has_when_you_do_marker());
+        let (result, counters) = child
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .unwrap();
+        assert_eq!(Some(result), parent.declares_return_result);
+        assert_eq!(counters, &crate::types::counter::CounterMatch::Any);
+        assert_eq!(child.mode_abilities.len(), 2);
+        assert!(matches!(
+            child.mode_abilities[0].effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                damage_source: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            child.mode_abilities[1].duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+    }
+    let encoded = serde_json::to_string(&parsed).unwrap();
+    let roundtrip: ParsedAbilities = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap(),
+        serde_json::to_value(roundtrip).unwrap()
+    );
+    let face = crate::types::card::CardFace {
+        triggers: parsed.triggers,
+        ..Default::default()
+    };
+    assert!(!crate::game::coverage::card_face_has_unimplemented_parts(
+        &face
+    ));
+}
+
+#[test]
+fn u13_kind_connector_specificity_and_complete_strict_neighbors() {
+    for kind in ["charge", "oil", "+1/+1"] {
+        let text = format!("When this creature enters, put a {kind} counter on it or remove one from it. When you remove a {kind} counter this way, choose one —\n• Draw a card.\n• You gain 1 life.");
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic exact counter",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let parent = parsed.triggers[0].execute.as_deref().unwrap();
+        let child = parent
+            .sub_ability
+            .as_deref()
+            .expect("matching counter producer");
+        assert!(child
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .is_some());
+        assert_eq!(child.mode_abilities.len(), 2);
+    }
+    for connector in [
+        "When you remove two counters this way",
+        "When you remove a counter this way if you control a Forest",
+        "When you remove an oil counter this way",
+        "When you add a counter this way",
+    ] {
+        let text = format!("When this creature enters, put a charge counter on it or remove one from it. {connector}, choose one —\n• Draw a card.\n• You gain 1 life.");
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic refused relation",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let parent = parsed.triggers[0].execute.as_deref().unwrap();
+        let Effect::Unimplemented {
+            description: Some(fragment),
+            ..
+        } = parent.effect.as_ref()
+        else {
+            panic!("unmodeled complete connector must remain strict: {parent:#?}");
+        };
+        for retained in [
+            "put a charge counter",
+            connector,
+            "Draw a card",
+            "You gain 1 life",
+        ] {
+            // allow-noncombinator: assertion over diagnostic fragments.
+            assert!(fragment.contains(retained), "{fragment}");
+        }
+    }
+}
+
 #[test]
 fn game_preserve_complete_public_reveal_chain() {
     let scalar = "Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.";
@@ -35359,5 +35480,58 @@ fn mandatory_counter_adjustment_parent_and_legacy_axes_shape() {
                 ..
             }
         ));
+    }
+}
+
+#[test]
+fn u13_paragraph_and_trigger_boundaries_cannot_supply_an_earlier_producer() {
+    let independent = format!("{U13_IMMARD}\n\nWhen this creature dies, you gain 1 life.");
+    let parsed = parse_oracle_text(
+        &independent,
+        "Immard, the Stormcleaver",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 3);
+    assert!(parsed.triggers[..2].iter().all(|trigger| trigger
+        .execute
+        .as_deref()
+        .unwrap()
+        .declares_return_result
+        .is_some()));
+    let separate = parsed.triggers[2].execute.as_deref().unwrap();
+    assert!(matches!(separate.effect.as_ref(), Effect::GainLife { .. }));
+    assert!(separate.declares_return_result.is_none());
+    for split in [
+        "\n\n",
+        "\n\nWhen this creature attacks, you gain 1 life.\n\n",
+    ] {
+        let text = format!("When this creature enters, put a charge counter on it or remove one from it.{split}When you remove a counter this way, choose one —\n• Draw a card.\n• You gain 2 life.");
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic separate producer",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert!(parsed
+            .triggers
+            .iter()
+            .any(
+                |trigger| trigger.execute.as_deref().is_some_and(|parent| matches!(
+                    parent.effect.as_ref(),
+                    Effect::ChooseCounterAdjustment { .. }
+                ) && parent
+                    .declares_return_result
+                    .is_none())
+            ));
+        assert!(
+            parsed.triggers.iter().any(|trigger| trigger
+                .execute
+                .as_deref()
+                .is_some_and(|root| matches!(root.effect.as_ref(), Effect::Unimplemented { .. }))),
+            "unbound complete modal stays strict: {parsed:#?}"
+        );
     }
 }

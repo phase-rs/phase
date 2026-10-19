@@ -878,7 +878,8 @@ export class NativeEngineVersionMismatchError extends Error {
 // 145: current token-creation frames and private copy-source tails use resolution wire 6.
 // 146: typed revealed results and exact queued original origins use resolution wire 7.
 // 147: mandatory specified-kind/exact-recipient counter adjustment.
-export const PROTOCOL_VERSION = 147;
+// 148: exact actual-removal reflexives and private bound damage-source authority.
+export const PROTOCOL_VERSION = 148;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

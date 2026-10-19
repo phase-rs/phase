@@ -6735,6 +6735,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
 
 fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
     match x {
+        // CR 603.12: immutable, member-bound instruction receipts. Neither a
+        // live triggering-object read nor a write to that object.
+        AbilityCondition::CounterRemovedThisWay { result: _, counters: _ } => member_bound_read(),
         // CR 608.2c + CR 603.3b: the damage/exploit record is frozen at the trigger
         // event; a sibling cannot alter whether this source dealt that damage or exploited that creature.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
@@ -9921,5 +9924,33 @@ mod sought_reader_rw_tests {
         // The runtime-built branch remains conservatively external, not a proven
         // event-object write; this axis cannot authorize batch precision.
         assert!(!dynamic.writes_event_object.any());
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_condition_rw_tests {
+    use super::*;
+    #[test]
+    fn u13_counter_result_read_is_member_bound_without_writes_or_event_live_authority() {
+        let condition = AbilityCondition::CounterRemovedThisWay {
+            result: crate::types::ability::ReturnResultId(1),
+            counters: crate::types::counter::CounterMatch::Any,
+        };
+        let profile = rw_ability_condition(&condition);
+        assert!(profile.reads_member_bound());
+        assert!(!profile.reads_event_live);
+        assert!(!profile.writes_event_object.any());
+        assert!(!profile.writes_external.any());
+        let plain = ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(!ability_rw_profile(&plain).reads_member_bound());
+        assert!(ability_rw_profile(&plain).writes_external.any());
     }
 }

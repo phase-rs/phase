@@ -1559,6 +1559,144 @@ fn publish_instruction_result(
     Ok(())
 }
 
+fn counter_producer_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<crate::types::identifiers::ObjectIdentityBinding, EffectError> {
+    if let Some(source) = &ability.trigger_source {
+        if source.identity.reference.object_id != ability.source_id
+            || ability
+                .source_incarnation
+                .is_some_and(|stamp| stamp != source.identity.reference.incarnation)
+        {
+            return Err(EffectError::InvalidParam("counter producer source".into()));
+        }
+        return Ok(source.identity);
+    }
+    let pin = ability
+        .source_ref(state)
+        .ok_or_else(|| EffectError::MissingParam("counter producer source".into()))?;
+    let object = state
+        .objects
+        .get(&pin.object_id)
+        .filter(|object| ObjectIncarnationRef::from_object(object) == pin)
+        .ok_or_else(|| EffectError::MissingParam("counter producer source zone".into()))?;
+    Ok(crate::types::identifiers::ObjectIdentityBinding::new(
+        pin,
+        object.zone,
+    ))
+}
+
+/// CR 608.2c + CR 122.1: unlike a reveal's final publication, a counter
+/// instruction owns an occurrence-local accumulator until all its work drains.
+pub(crate) fn begin_counter_removal_result(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    recipient: Option<ObjectIncarnationRef>,
+    counters: crate::types::counter::CounterMatch,
+) -> Result<Option<crate::types::game_state::CounterRemovalResultBinding>, EffectError> {
+    let Some(result) = ability.declares_return_result else {
+        return Ok(None);
+    };
+    let occurrence = state
+        .active_return_result_occurrence
+        .ok_or_else(|| EffectError::MissingParam("counter result occurrence".into()))?;
+    let source = counter_producer_source(state, ability)?;
+    publish_instruction_result(
+        state,
+        occurrence,
+        result,
+        crate::types::game_state::InstructionResult::CounterRemovals(
+            crate::types::game_state::CounterRemovalInstructionResult {
+                source,
+                recipient,
+                counters: counters.clone(),
+                counter_removals: Vec::new(),
+            },
+        ),
+    )?;
+    Ok(Some(
+        crate::types::game_state::CounterRemovalResultBinding {
+            occurrence,
+            result,
+            source,
+            recipient,
+            counters,
+        },
+    ))
+}
+
+pub(crate) fn counter_removal_binding_is_valid(
+    state: &GameState,
+    binding: &crate::types::game_state::CounterRemovalResultBinding,
+) -> bool {
+    matches!(state.return_result_frames.get(&binding.occurrence).and_then(|frame| frame.get(&binding.result)),
+        Some(crate::types::game_state::InstructionResult::CounterRemovals(result))
+            if result.source == binding.source && result.recipient == binding.recipient && result.counters == binding.counters)
+}
+
+/// CR 603.12: only the exact creating occurrence may supply this event.
+pub(crate) fn counter_reflexive_occurrences(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    result_id: crate::types::ability::ReturnResultId,
+    counters: &crate::types::counter::CounterMatch,
+) -> Result<u32, EffectError> {
+    counter_reflexive_occurrences_for_occurrence(
+        state,
+        ability,
+        result_id,
+        counters,
+        state.active_return_result_occurrence,
+    )
+}
+
+pub(crate) fn counter_reflexive_occurrences_for_occurrence(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    result_id: crate::types::ability::ReturnResultId,
+    counters: &crate::types::counter::CounterMatch,
+    occurrence: Option<ReturnResultOccurrenceId>,
+) -> Result<u32, EffectError> {
+    let occurrence =
+        occurrence.ok_or_else(|| EffectError::MissingParam("counter reader occurrence".into()))?;
+    let Some(crate::types::game_state::InstructionResult::CounterRemovals(result)) = state
+        .return_result_frames
+        .get(&occurrence)
+        .and_then(|frame| frame.get(&result_id))
+    else {
+        return Err(EffectError::MissingParam(
+            "counter-removal instruction result".into(),
+        ));
+    };
+    if result.source != counter_producer_source(state, ability)?
+        || !matches!(counters, crate::types::counter::CounterMatch::Any)
+            && counters != &result.counters
+    {
+        return Err(EffectError::InvalidParam("counter reader authority".into()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    result
+        .counter_removals
+        .iter()
+        .try_fold(0u32, |total, record| {
+            if record.count == 0
+                || Some(record.object) != result.recipient
+                || !result.counters.matches(&record.counter_type)
+                || !seen.insert((record.object, record.counter_type.clone()))
+            {
+                return Err(EffectError::InvalidParam("counter removal receipt".into()));
+            }
+            total
+                .checked_add(if counters.matches(&record.counter_type) {
+                    record.count
+                } else {
+                    0
+                })
+                .ok_or_else(|| EffectError::InvalidParam("counter occurrence overflow".into()))
+        })
+}
+
 fn publish_empty_return_result_for_active(
     state: &mut GameState,
     result_id: crate::types::ability::ReturnResultId,
@@ -3888,6 +4026,7 @@ fn try_begin_deferred_else_branch_target_selection(
 /// Every OTHER chain condition — `EffectOutcome`, `QuantityCheck`, intervening
 /// `if` gates — is left intact and is still re-checked at resolution (CR 603.4).
 fn consume_reflexive_creation_gate(ability: &mut ResolvedAbility) {
+    ability.context.counter_removal_result = None;
     if AbilityCondition::take_when_you_do_marker(&mut ability.condition) {
         settle_reflexive_zone_change_event(&mut ability.condition);
     }
@@ -3961,8 +4100,13 @@ fn freeze_reflexive_attachment_pool(
 /// settled; a `ZoneChangedThisWay` inside `Or`/`Not`/nested `And` is a different
 /// expression and stays.
 fn settle_reflexive_zone_change_event(condition: &mut Option<AbilityCondition>) {
-    let is_zone_change_event =
-        |member: &AbilityCondition| matches!(member, AbilityCondition::ZoneChangedThisWay { .. });
+    let is_zone_change_event = |member: &AbilityCondition| {
+        matches!(
+            member,
+            AbilityCondition::ZoneChangedThisWay { .. }
+                | AbilityCondition::CounterRemovedThisWay { .. }
+        )
+    };
     *condition = match condition.take() {
         Some(AbilityCondition::And { mut conditions }) => {
             conditions.retain(|member| !is_zone_change_event(member));
@@ -4162,6 +4306,20 @@ fn try_materialize_reflexive_trigger_inner(
     // modal-trigger router (as it did before deferral), or the slot-less
     // fallback below would return `Ok(false)` and the descent would resolve
     // every mode without a `WaitingFor::AbilityModeChoice`.
+    if let Some((result, counters)) = reflexive
+        .condition
+        .as_ref()
+        .and_then(AbilityCondition::counter_removal_event)
+    {
+        let count = counter_reflexive_occurrences(state, reflexive, result, counters)?;
+        // CR 603.2c + CR 603.12a: singular counter events earn independent
+        // children. Queue the whole set before ordinary announcement can prompt.
+        for _ in 0..count {
+            let pending = build_reflexive_pending_trigger(state, reflexive, parent);
+            crate::game::triggers::defer_pending_trigger(state, pending);
+        }
+        return Ok(true);
+    }
     if reflexive.modal.is_some() && !reflexive.mode_abilities.is_empty() {
         let pending = build_reflexive_pending_trigger(state, reflexive, parent);
         let trigger_events =
@@ -4677,6 +4835,9 @@ pub(crate) fn apply_parent_chain_context(
     // declaration) carries none, so the wholesale hand-off must not erase it.
     let child_duration_events = std::mem::take(&mut child.context.duration_events);
     child.context = parent.context.clone();
+    // An instruction's ticket belongs only to its generated concrete branch;
+    // ordinary descendants cannot spend that producer's capability.
+    child.context.counter_removal_result = None;
     child.context.face_down_in_exile |= child_face_down_in_exile;
     for event in child_duration_events {
         if !child.context.duration_events.contains(&event) {
@@ -6752,6 +6913,7 @@ fn condition_reads_filter_population(
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
@@ -7250,7 +7412,8 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             // optional-effect decision, so it cannot select a decline branch.
             | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
             | AbilityCondition::TriggerEventTargetExploitedBySource
-            | AbilityCondition::WhenYouDo
+            | AbilityCondition::CounterRemovedThisWay { .. }
+        | AbilityCondition::WhenYouDo
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
             // CR 608.2c: a live current-phase gate, not a decline-alternative
@@ -16832,6 +16995,13 @@ fn resolve_chain_body(
     if is_named_revealed_reader(ability) {
         named_revealed_members(state, ability)?;
     }
+    if let Some((result, counters)) = ability
+        .condition
+        .as_ref()
+        .and_then(AbilityCondition::counter_removal_event)
+    {
+        counter_reflexive_occurrences(state, ability, result, counters)?;
+    }
     if let Some(ref condition) = ability.condition {
         if !evaluate_condition(condition, state, ability) {
             // CR 608.2c: A skipped return instruction has a settled empty
@@ -18885,11 +19055,9 @@ fn resolve_chain_body(
 
         // Check if the sub_ability has a condition that gates its execution.
         // Casting-time conditions are evaluated against the parent's SpellContext.
-        if let Some(condition) = sub
-            .condition
-            .as_ref()
-            .filter(|_| !is_named_revealed_reader(sub))
-        {
+        if let Some(condition) = sub.condition.as_ref().filter(|condition| {
+            !is_named_revealed_reader(sub) && condition.counter_removal_event().is_none()
+        }) {
             // CR 608.2c: "Instead" overrides are terminal — the Cow swap above either
             // replaced the parent's effect (condition met) or didn't (condition not met).
             // When NOT swapped, the base chain (else_ability) runs after the parent's own
@@ -20593,6 +20761,10 @@ pub(crate) fn evaluate_condition(
         return false;
     }
     match condition {
+        AbilityCondition::CounterRemovedThisWay { result, counters } => {
+            counter_reflexive_occurrences(state, ability, *result, counters)
+                .is_ok_and(|count| count > 0)
+        }
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
             let Some(dying_object) =
                 state
@@ -46628,5 +46800,140 @@ mod sought_chain_order_tests {
             ),
             crate::game::resolution_prompt::ResolutionChoiceFreedom::MayPrompt
         ));
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_reader_owner_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::ReturnResultId;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::game_state::{
+        CounterRemovalInstructionResult, CounterRemovalRecord, InstructionResult,
+    };
+    #[test]
+    fn u13_reader_requires_its_exact_occurrence_source_kind_and_typed_present_payload() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Synthetic reader", 2, 4).id();
+        let mut state = scenario.build().state().clone();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let mut reader = ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            source,
+            P0,
+        );
+        reader.set_trigger_source_recursive(
+            crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            ),
+        );
+        let occurrence = ReturnResultOccurrenceId(1);
+        let id = ReturnResultId(3);
+        let charge = CounterType::Generic("charge".into());
+        let result = CounterRemovalInstructionResult {
+            source: reader.trigger_source.as_ref().unwrap().identity,
+            recipient: Some(pin),
+            counters: CounterMatch::OfType(charge.clone()),
+            counter_removals: vec![CounterRemovalRecord {
+                object: pin,
+                counter_type: charge,
+                count: 2,
+            }],
+        };
+        state
+            .return_result_frames
+            .entry(occurrence)
+            .or_default()
+            .insert(id, InstructionResult::CounterRemovals(result.clone()));
+        assert_eq!(
+            counter_reflexive_occurrences_for_occurrence(
+                &state,
+                &reader,
+                id,
+                &CounterMatch::Any,
+                Some(occurrence)
+            )
+            .unwrap(),
+            2
+        );
+        assert!(counter_reflexive_occurrences_for_occurrence(
+            &state,
+            &reader,
+            id,
+            &CounterMatch::Any,
+            Some(ReturnResultOccurrenceId(2))
+        )
+        .is_err());
+        assert!(counter_reflexive_occurrences_for_occurrence(
+            &state,
+            &reader,
+            id,
+            &CounterMatch::OfType(CounterType::Time),
+            Some(occurrence)
+        )
+        .is_err());
+        for fault in 0..5 {
+            let mut changed = result.clone();
+            match fault {
+                0 => changed.source.reference.incarnation += 1,
+                1 => changed.recipient.as_mut().unwrap().incarnation += 1,
+                2 => changed.counter_removals[0].count = 0,
+                3 => changed
+                    .counter_removals
+                    .push(changed.counter_removals[0].clone()),
+                4 => changed.counter_removals[0].counter_type = CounterType::Time,
+                _ => unreachable!(),
+            }
+            state
+                .return_result_frames
+                .get_mut(&occurrence)
+                .unwrap()
+                .insert(id, InstructionResult::CounterRemovals(changed));
+            assert!(counter_reflexive_occurrences_for_occurrence(
+                &state,
+                &reader,
+                id,
+                &CounterMatch::Any,
+                Some(occurrence)
+            )
+            .is_err());
+        }
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(id, InstructionResult::ZoneChanges(vec![]));
+        assert!(counter_reflexive_occurrences_for_occurrence(
+            &state,
+            &reader,
+            id,
+            &CounterMatch::Any,
+            Some(occurrence)
+        )
+        .is_err());
+        let mut empty = result;
+        empty.counter_removals.clear();
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(id, InstructionResult::CounterRemovals(empty));
+        assert_eq!(
+            counter_reflexive_occurrences_for_occurrence(
+                &state,
+                &reader,
+                id,
+                &CounterMatch::Any,
+                Some(occurrence)
+            )
+            .unwrap(),
+            0
+        );
     }
 }

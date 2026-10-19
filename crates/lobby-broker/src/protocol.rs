@@ -1075,7 +1075,8 @@ pub struct TournamentRequestId(pub u64);
 /// 145: current token-creation frames and private resolved copy-source tails require resolution wire 6.
 /// 146: typed revealed results and exact queued original origins require resolution wire 7.
 /// 147: specified-kind and exact-recipient mandatory counter-adjustment capability.
-pub const PROTOCOL_VERSION: u32 = 147;
+/// 148: exact actual-removal reflexives and private bound damage-source authority.
+pub const PROTOCOL_VERSION: u32 = 148;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2332,7 +2333,7 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 147);
+        assert_eq!(PROTOCOL_VERSION, 148);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
