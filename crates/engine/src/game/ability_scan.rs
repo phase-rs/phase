@@ -2676,7 +2676,16 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // not decomposed here because no caller needs a narrower answer.
         QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::SharedCardTypes { .. } => Axes::CONSERVATIVE,
-        QuantityRef::DistinctSubtypes { .. } => Axes::CONSERVATIVE,
+        // `restrict` narrows which subtype VALUES tally within the same
+        // population scan (a value filter, not a new state axis — the
+        // population read is unchanged), so the verdict stays `CONSERVATIVE`.
+        // Explicit destructure (not `{ .. }`) so the next field addition is
+        // compiler-visible.
+        QuantityRef::DistinctSubtypes {
+            source: _,
+            exclude: _,
+            restrict: _,
+        } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
         QuantityRef::ZoneCardCount {

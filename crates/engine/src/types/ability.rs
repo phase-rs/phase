@@ -10007,10 +10007,22 @@ pub enum QuantityRef {
     /// `exclude` (CR 205.3m) drops subtypes that are creature types when set to
     /// `CreatureTypes`; `#[serde(default)]` keeps old saves (implicitly `None`)
     /// deserializable.
+    ///
+    /// `restrict` (CR 205.3) narrows the tally to one subtype category:
+    /// `Some(set)` counts only subtype values belonging to that `SubtypeSet`
+    /// (Tam, the Possibility — "the number of planeswalker types among
+    /// planeswalkers you control", CR 205.3j; Hoshi Sato — "the number of
+    /// creature types among non-Borg creatures you control", CR 205.3m).
+    /// `None` counts every subtype value (Subgoyf). The two axes are mutually
+    /// exclusive by grammar (different heads) and conjunctive in the resolver
+    /// (defense in depth for hand-built payloads). `#[serde(default)]` keeps
+    /// old saves deserializable and the key absent on re-serialize.
     DistinctSubtypes {
         source: CardTypeSetSource,
         #[serde(default)]
         exclude: SubtypeExclusion,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restrict: Option<SubtypeSet>,
     },
     /// CR 406.6 + CR 607.1: Count of cards currently in exile that are linked to the source
     /// via its exile-linked ability. Used by "as long as there are N or more cards exiled
@@ -41648,6 +41660,56 @@ mod tests {
 
         let round_tripped: ChoiceType = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn distinct_subtypes_restrict_absent_by_default_and_round_trips() {
+        // CR 205.3: Subgoyf's committed old-shape node (no `restrict` key)
+        // deserializes with `restrict: None` and re-serializes WITHOUT the key
+        // (byte-identity); a Tam-shaped node WITH the key round-trips.
+        let old_node = serde_json::json!({
+            "type": "DistinctSubtypes",
+            "source": {"type": "Zone", "zone": "Graveyard", "scope": "All"},
+            "exclude": {"type": "CreatureTypes"},
+        });
+        let parsed: QuantityRef =
+            serde_json::from_value(old_node.clone()).expect("old shape deserializes");
+        assert_eq!(
+            parsed,
+            QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+                exclude: SubtypeExclusion::CreatureTypes,
+                restrict: None,
+            }
+        );
+        let reserialized = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(
+            reserialized, old_node,
+            "absent key stays absent (Subgoyf byte-identity)"
+        );
+
+        // Reach-guard: the new node WITH the key round-trips losslessly.
+        let new = QuantityRef::DistinctSubtypes {
+            source: CardTypeSetSource::Zone {
+                zone: ZoneRef::Graveyard,
+                scope: CountScope::All,
+            },
+            exclude: SubtypeExclusion::None,
+            restrict: Some(SubtypeSet::Planeswalker),
+        };
+        let new_json = serde_json::to_value(&new).expect("serialize");
+        assert_eq!(
+            new_json.get("restrict"),
+            Some(&serde_json::json!("Planeswalker")),
+            "the category axis serializes as the SubtypeSet name"
+        );
+        assert_eq!(
+            serde_json::from_value::<QuantityRef>(new_json).expect("round trip"),
+            new
+        );
     }
 
     #[test]

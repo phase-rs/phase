@@ -1911,6 +1911,7 @@ mod swords_life_equals_power_counters_2895;
 mod swords_target_legality_recheck;
 mod taigam_master_opportunist_exiles_cast_spell_749;
 mod taii_wakeen;
+mod tam_the_possibility;
 mod tamiyo_inquisitive_student_flip;
 mod target_incarnation_revalidation;
 mod target_occurrence_authority;

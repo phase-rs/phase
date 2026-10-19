@@ -27,7 +27,7 @@ use crate::types::ability::{
     ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnJournalKind,
     TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet};
 use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -5830,16 +5830,26 @@ fn resolve_ref(
         // `state.all_creature_types` are skipped (Subgoyf: "different subtypes
         // other than creature types"). Subtype values are stored capitalized
         // (e.g. "Goblin"); inserted as-is to preserve consistent casing.
-        QuantityRef::DistinctSubtypes { source, exclude } => {
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude,
+            restrict,
+        } => {
             // CR 205.3m: skip subtypes that are creature types when excluding
             // creature types. Subtype values are stored capitalized ("Goblin")
             // and inserted as-is; a card with three subtypes contributes three.
             let exclude_creature = matches!(exclude, SubtypeExclusion::CreatureTypes);
+            // CR 205.3: `restrict` narrows the tally to one subtype category —
+            // `Some(Creature)` reuses this same set (positive membership,
+            // mirroring the exclude path); other `Some(set)` reads the static
+            // table; `None` keeps today's path untouched. Conjunctive with the
+            // exclude check below (defense in depth; no grammar produces both).
+            let restrict_creature = matches!(restrict, Some(SubtypeSet::Creature));
             // Collect the creature-type names into a set ONCE for O(1) membership,
             // rather than a linear scan of `all_creature_types` (hundreds of entries)
             // per subtype per object — layer 7a recomputes this every pass, so the
             // inner loop is hot.
-            let creature_types: HashSet<&str> = if exclude_creature {
+            let creature_types: HashSet<&str> = if exclude_creature || restrict_creature {
                 state
                     .all_creature_types
                     .iter()
@@ -5863,6 +5873,15 @@ fn resolve_ref(
                 controller,
                 &mut |_, view, _| {
                     for sub in view.subtypes() {
+                        // The binding filter first: skip unless in-category.
+                        let in_category = match restrict {
+                            None => true,
+                            Some(SubtypeSet::Creature) => creature_types.contains(sub.as_str()),
+                            Some(set) => noncreature_subtype_set(sub.as_str()) == Some(*set),
+                        };
+                        if !in_category {
+                            continue;
+                        }
                         if exclude_creature && creature_types.contains(sub.as_str()) {
                             continue;
                         }
@@ -12655,6 +12674,7 @@ mod tests {
             QuantityRef::DistinctSubtypes {
                 source: union(),
                 exclude: SubtypeExclusion::None,
+                restrict: None,
             },
             QuantityRef::DistinctColorsAmong { source: union() },
             QuantityRef::PropertyAggregate(
@@ -14413,6 +14433,137 @@ mod tests {
             .map(|subtype| (*subtype).to_string())
             .collect();
         id
+    }
+
+    /// CR 205.3j + CR 205.3m: `restrict` narrows the distinct-subtype tally to
+    /// one subtype category (Tam, the Possibility / Hoshi Sato). Population
+    /// carries subtypes {Jace, Bear}: `Planeswalker` counts Jace only,
+    /// `Creature` counts Bear only, `None` counts both (positive reach-guard
+    /// proving the visitor reached both members).
+    #[test]
+    fn distinct_subtypes_restrict_narrows_to_one_category() {
+        use crate::types::card_type::SubtypeSet;
+
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Bear".to_string()];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Jace Creature", &["Jace"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Grizzly Bears", &["Bear"]);
+        let source = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+        for (restrict, expected) in [
+            (Some(SubtypeSet::Planeswalker), 1),
+            (Some(SubtypeSet::Creature), 1),
+            (None, 2),
+        ] {
+            let expr = QuantityExpr::Ref {
+                qty: QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                    restrict,
+                },
+            };
+            assert_eq!(
+                resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+                expected,
+                "restrict={restrict:?} over subtypes {{Jace, Bear}}"
+            );
+        }
+
+        // Hostile (same fn): a crewed Smuggler's Copter (Artifact Creature —
+        // Vehicle) contributes nothing under `restrict: Creature` ("Vehicle" ∉
+        // `all_creature_types` → skipped); Grizzly Bears still counts → 1.
+        let mut copter_state = GameState::new_two_player(43);
+        copter_state.all_creature_types = vec!["Bear".to_string()];
+        let copter = add_creature_with_subtypes(
+            &mut copter_state,
+            PlayerId(0),
+            "Smuggler's Copter",
+            &["Vehicle"],
+        );
+        copter_state
+            .objects
+            .get_mut(&copter)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        add_creature_with_subtypes(&mut copter_state, PlayerId(0), "Grizzly Bears", &["Bear"]);
+        let copter_expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctSubtypes {
+                source,
+                exclude: SubtypeExclusion::None,
+                restrict: Some(SubtypeSet::Creature),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&copter_state, &copter_expr, PlayerId(0), ObjectId(0)),
+            1,
+            "Vehicle is not a creature type → skipped; Bear counts"
+        );
+    }
+
+    /// CR 205.3: `restrict` counts DISTINCT subtype values, not members — two
+    /// planeswalkers sharing type Jace + one Chandra → 2, not 3 (a
+    /// HashSet→counter regression reads 3). Reach-guard: three distinct → 3.
+    #[test]
+    fn distinct_subtypes_restrict_dedupes_shared_values() {
+        use crate::types::card_type::SubtypeSet;
+
+        let mut state = GameState::new_two_player(42);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Jace One", &["Jace"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Jace Two", &["Jace"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Chandra", &["Chandra"]);
+        let source = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctSubtypes {
+                source: source.clone(),
+                exclude: SubtypeExclusion::None,
+                restrict: Some(SubtypeSet::Planeswalker),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            2,
+            "two Jaces + one Chandra = 2 distinct planeswalker types"
+        );
+
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Teferi", &["Teferi"]);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            3,
+            "reach-guard: three distinct planeswalker types = 3"
+        );
+    }
+
+    /// `exclude` + `restrict` apply conjunctively (defense in depth for
+    /// hand-built payloads — no grammar produces both): Creature-excluded +
+    /// Creature-restricted over a creature-subtyped population → 0.
+    #[test]
+    fn distinct_subtypes_exclude_and_restrict_conjoin() {
+        use crate::types::card_type::SubtypeSet;
+
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Bear".to_string()];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Grizzly Bears", &["Bear"]);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+                exclude: SubtypeExclusion::CreatureTypes,
+                restrict: Some(SubtypeSet::Creature),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "in-category (Bear) but excluded (creature type) → 0"
+        );
     }
 
     #[test]

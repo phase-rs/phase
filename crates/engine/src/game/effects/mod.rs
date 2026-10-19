@@ -23826,6 +23826,7 @@ mod tests {
                     QuantityRef::DistinctSubtypes {
                         source: objects.clone(),
                         exclude: crate::types::ability::SubtypeExclusion::None,
+                        restrict: None,
                     },
                     QuantityRef::DistinctColorsAmong { source: journal },
                     QuantityRef::ZoneCardCount {
@@ -25908,6 +25909,7 @@ mod tests {
             QuantityRef::DistinctSubtypes {
                 source: source.clone(),
                 exclude: Default::default(),
+                restrict: None,
             },
             QuantityRef::DistinctColorsAmong {
                 source: source.clone(),
@@ -26262,6 +26264,7 @@ mod tests {
                     QuantityRef::DistinctSubtypes {
                         source: population.clone(),
                         exclude: Default::default(),
+                        restrict: None,
                     },
                     QuantityRef::DistinctColorsAmong {
                         source: population.clone(),
