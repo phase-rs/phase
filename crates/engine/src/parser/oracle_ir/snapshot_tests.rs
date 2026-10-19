@@ -5,6 +5,15 @@
 //! both layers so structural drift and assembly bugs are independently caught.
 
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
+
+#[test]
+fn jev_source_parity_static() {
+    let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
+    let mut doc = parse_oracle_ir(text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+    insta::assert_json_snapshot!("jev_source_parity_static_ir", doc);
+    let lowered = lower_oracle_ir(&mut doc);
+    insta::assert_json_snapshot!("jev_source_parity_static_lowered", lowered);
+}
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
 use crate::parser::oracle_ir::trace::OuterRoute;

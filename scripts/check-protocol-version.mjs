@@ -166,7 +166,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +75: v146 carries exact revealed results and required queued origins (resolution wire 7).
 // +76: v147 requires specified-kind/exact-recipient mandatory counter adjustment.
 // +77: v148 carries exact counter-removal results and bound damage source context.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 77;
+// +78: v149 adds source-bound chosen-parity references.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 78;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -267,7 +268,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +74: wire 128 moves with full-game v146 for exact revealed results/resolution wire 7.
 // +75: wire 129 moves with full-game v147 for mandatory counter-adjustment parameters.
 // +76: wire 130 moves with full-game v148 for exact removal/source authority.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 76;
+// +77: wire 131 moves with full-game v149 for source-bound chosen parity.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 77;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

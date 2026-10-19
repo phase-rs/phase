@@ -7,6 +7,13 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn jev_chosen_quality_haste() {
+    let def = parse_static_line("Each creature with mana value of the chosen quality has haste.")
+        .unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
 fn repeated_population_dismissal() {
     let def = parse_static_line("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.").unwrap();
     insta::assert_json_snapshot!(def);

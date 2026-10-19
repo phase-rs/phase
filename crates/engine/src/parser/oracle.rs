@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::game::effects::cast_from_zone;
 use crate::game::filter::{
-    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type,
+    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type, rewrite_filter_props,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
@@ -19,10 +19,10 @@ use crate::types::ability::{
     CastManaSpentMetric, CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CounterSourceRider,
     DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GuardReading, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    GuardReading, ManaProduction, ModalChoice, ParitySource, ParsedCondition, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition,
+    SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -1396,6 +1396,7 @@ fn finalize_document_relations(mut doc: OracleDocIr, types: &[String]) -> Oracle
     detect_linked_choice_linked_color(&doc.items, &mut relations);
     finalize_relation_syntheses(&mut doc, &relations);
     apply_linked_color_choice_suppression(&mut doc, &relations);
+    apply_source_parity_statics(&mut doc, &relations);
     doc.relations.extend(relations);
     doc
 }
@@ -1624,8 +1625,211 @@ fn finalize_relation_syntheses(doc: &mut OracleDocIr, relations: &[DocumentRelat
     }
 }
 
+/// CR 607.2d + CR 614.12a: only an unconditional, mandatory self-entry choice
+/// supplies a separate durable parity reader. No category-vector inference.
+fn source_parity_chooser(item: &OracleItemIr) -> bool {
+    let OracleNodeIr::Replacement(ir) = &item.node else {
+        return false;
+    };
+    let def = &ir.definition;
+    if def.event != ReplacementEvent::Moved
+        || def.mode != ReplacementMode::Mandatory
+        || def.destination_zone != Some(Zone::Battlefield)
+        || def.valid_card != Some(TargetFilter::SelfRef)
+        || def.condition.is_some()
+        || def.runtime_execute.is_some()
+    {
+        return false;
+    }
+    def.execute.as_deref().is_some_and(|a| {
+        a.sub_ability.is_none() && a.else_ability.is_none() && a.condition.is_none()
+            && !a.optional && a.mode_abilities.is_empty()
+            && matches!(a.effect.as_ref(), Effect::Choose { choice_type: ChoiceType::OddOrEven, persist: true, selection } if selection.is_chosen())
+    })
+}
+
+fn source_parity_static_reader(filter: &TargetFilter) -> bool {
+    target_filter_uses_filter_prop(filter, &|p| {
+        matches!(
+            p,
+            FilterProp::ManaValueParity {
+                parity: ParitySource::LastNamedChoice
+            }
+        )
+    })
+}
+
+fn detect_source_parity_statics(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
+    let suppliers: Vec<_> = items
+        .iter()
+        .filter(|item| source_parity_chooser(item))
+        .collect();
+    let [chooser] = suppliers.as_slice() else {
+        return;
+    };
+    let statics: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            item_static(item)
+                .is_some_and(|s| s.affected.as_ref().is_some_and(source_parity_static_reader))
+        })
+        .map(|i| i.id)
+        .collect();
+    if !statics.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::SourceParityStatic {
+                chooser: chooser.id,
+                statics,
+            },
+        ));
+    }
+}
+
+/// CR 607.2d + CR 607.5a: validate the complete source-addressed relation before
+/// any mutation. An unowned/ambiguous/forward/stale reader is a complete strict
+/// failure on its original item; it may never borrow a resolution-local choice.
+fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelationIr]) {
+    for item in &mut doc.items {
+        let OracleNodeIr::Static(ir) = &item.node else {
+            continue;
+        };
+        if ir.definition.modifications.iter().any(|m| {
+            matches!(m,
+            ContinuousModification::GrantAbility { definition }
+                if matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }))
+        }) {
+            let fragment = ir.source_text.clone();
+            item.node = OracleNodeIr::Unsupported {
+                unsupported: UnsupportedAbilityIr::new(
+                    UnsupportedAbilityCategory::StaticStructure,
+                    fragment.clone(),
+                    fragment,
+                ),
+                min_x_value: 0,
+            };
+        }
+    }
+    let readers: Vec<_> = doc
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let OracleNodeIr::Static(ir) = &item.node else {
+                return None;
+            };
+            ir.definition
+                .affected
+                .as_ref()
+                .is_some_and(source_parity_static_reader)
+                .then_some(index)
+        })
+        .collect();
+    if readers.is_empty() {
+        return;
+    }
+    let parity_relations: Vec<_> = relations
+        .iter()
+        .filter_map(|r| match r {
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                chooser,
+                statics,
+            }) => Some((*chooser, statics)),
+            _ => None,
+        })
+        .collect();
+    let prepared = (|| {
+        let [(chooser_id, statics)] = parity_relations.as_slice() else {
+            return None;
+        };
+        if statics.len() != readers.len()
+            || doc
+                .items
+                .iter()
+                .enumerate()
+                .any(|(index, item)| doc.items[..index].iter().any(|other| other.id == item.id))
+            || statics
+                .iter()
+                .enumerate()
+                .any(|(index, id)| statics[..index].contains(id))
+            || doc
+                .items
+                .iter()
+                .filter(|i| source_parity_chooser(i))
+                .count()
+                != 1
+        {
+            return None;
+        }
+        let chooser = doc.items.iter().find(|i| i.id == *chooser_id)?;
+        if !source_parity_chooser(chooser) {
+            return None;
+        }
+        let before = chooser.source.span();
+        let mut rewritten = Vec::new();
+        for index in &readers {
+            let item = &doc.items[*index];
+            let after = item.source.span();
+            if !statics.contains(&item.id)
+                || item.id == *chooser_id
+                || (before.first_line, before.ordinal_within_span)
+                    >= (after.first_line, after.ordinal_within_span)
+                || before.start_byte > after.start_byte
+            {
+                return None;
+            }
+            let OracleNodeIr::Static(ir) = &item.node else {
+                return None;
+            };
+            let mut filter = ir.definition.affected.clone()?;
+            let mut complete = true;
+            rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: parity @ ParitySource::LastNamedChoice,
+                    } = prop
+                    {
+                        *parity = ParitySource::SourceChosen;
+                    }
+                },
+                &mut complete,
+            );
+            if !complete || source_parity_static_reader(&filter) {
+                return None;
+            }
+            rewritten.push((*index, filter));
+        }
+        Some(rewritten)
+    })();
+    if let Some(rewritten) = prepared {
+        for (index, filter) in rewritten {
+            if let OracleNodeIr::Static(ir) = &mut doc.items[index].node {
+                ir.definition.affected = Some(filter);
+            }
+        }
+    } else {
+        for index in readers {
+            let item = &mut doc.items[index];
+            let OracleNodeIr::Static(ir) = &item.node else {
+                continue;
+            };
+            let fragment = ir.source_text.clone();
+            item.node = OracleNodeIr::Unsupported {
+                unsupported: UnsupportedAbilityIr::new(
+                    UnsupportedAbilityCategory::StaticStructure,
+                    fragment.clone(),
+                    fragment,
+                ),
+                min_x_value: 0,
+            };
+        }
+    }
+}
+
 fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
     let mut relations = Vec::new();
+    detect_source_parity_statics(items, &mut relations);
     detect_linked_choice_etb_counter(items, &mut relations);
     detect_linked_choice_constrained_card_type_static(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);

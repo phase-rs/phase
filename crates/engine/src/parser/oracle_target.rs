@@ -1,6 +1,57 @@
 use std::str::FromStr;
 
 #[cfg(test)]
+mod u14_quality_tests {
+    use super::*;
+
+    #[test]
+    fn u14_quality_grammar_preserves_scope() {
+        for subject in ["creature", "creatures", "each creature"] {
+            for head in ["with", "that have", "that each have"] {
+                for quality in ["the chosen quality", "that quality"] {
+                    let text = format!("{subject} {head} mana value of {quality}");
+                    let (filter, rest) =
+                        parse_type_phrase_folding_with_ctx(&text, &mut ParseContext::default());
+                    assert!(rest.is_empty(), "{text}: {rest}");
+                    assert!(crate::game::filter::filter_contains_filter_prop(
+                        &filter,
+                        &|p| matches!(
+                            p,
+                            FilterProp::ManaValueParity {
+                                parity: ParitySource::LastNamedChoice
+                            }
+                        )
+                    ));
+                }
+            }
+        }
+        let mut ctx = ParseContext::default();
+        assert!(
+            parse_mana_value_suffix("with mana value of the chosen quality", &mut ctx).is_some()
+        );
+        assert!(
+            parse_mana_value_suffix("with mana value of the chosen qualityness", &mut ctx)
+                .is_none()
+        );
+        assert!(matches!(
+            parse_mana_value_suffix("with mana value 3 or less", &mut ctx),
+            Some((FilterProp::Cmc { .. }, _))
+        ));
+        for text in [
+            "creatures of the chosen color",
+            "creatures of the chosen type",
+        ] {
+            let (filter, rest) = parse_type_phrase_folding_with_ctx(text, &mut ctx);
+            assert!(rest.is_empty(), "{text}: {rest}");
+            assert!(!crate::game::filter::filter_contains_filter_prop(
+                &filter,
+                &|p| matches!(p, FilterProp::ManaValueParity { .. })
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
 mod prior_controller_population_tests {
     use super::*;
 
@@ -7035,6 +7086,7 @@ pub(crate) fn parse_mana_value_suffix(
             tag::<_, _, OracleError<'_>>("the chosen quality"),
             tag::<_, _, OracleError<'_>>("that quality"),
         )),
+        not(satisfy(|c| c.is_alphanumeric() || c == '_')),
     )
         .parse(trimmed)
     {

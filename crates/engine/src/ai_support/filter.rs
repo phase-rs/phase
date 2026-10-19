@@ -926,8 +926,11 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         FilterProp::Cmc { value, .. } => quantity_reads_only_memo_safe_state(value),
         FilterProp::PtComparison { value, .. } => quantity_reads_only_memo_safe_state(value),
 
-        // SAFE only for a fixed parity; `LastNamedChoice` reads a resolution choice.
-        FilterProp::ManaValueParity { parity } => matches!(parity, ParitySource::Fixed(_)),
+        // Contextual choices are not properties of the candidate fingerprint.
+        FilterProp::ManaValueParity { parity } => match parity {
+            ParitySource::Fixed(_) => true,
+            ParitySource::LastNamedChoice | ParitySource::SourceChosen => false,
+        },
 
         // Combinators: SAFE iff ALL children SAFE.
         FilterProp::AnyOf { props } => props.iter().all(filterprop_reads_only_candidate_fp),
@@ -1502,6 +1505,32 @@ fn legality_equivalence_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u14_parity_memo_refuses_contextual_sources() {
+        use crate::types::ability::{Parity, ParitySource};
+        for parity in [
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+            ParitySource::SourceChosen,
+        ] {
+            let prop = FilterProp::ManaValueParity { parity };
+            let safe = matches!(parity, ParitySource::Fixed(_));
+            assert_eq!(filterprop_reads_only_candidate_fp(&prop), safe);
+            assert_eq!(
+                filterprop_reads_only_candidate_fp(&FilterProp::Not {
+                    prop: Box::new(prop.clone())
+                }),
+                safe
+            );
+            assert_eq!(
+                filterprop_reads_only_candidate_fp(&FilterProp::AnyOf {
+                    props: vec![FilterProp::Tapped, prop]
+                }),
+                safe
+            );
+        }
+    }
     use crate::ai_support::candidate_actions;
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;

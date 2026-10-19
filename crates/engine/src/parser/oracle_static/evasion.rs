@@ -491,29 +491,18 @@ pub(crate) fn parse_compound_subject_keyword_static(
     // Locate the continuous predicate verb ("have"/"has"/"gain"/"gains"/…) so
     // the object subject can be any phrase `parse_rule_static_subject_filter`
     // understands — not a hard-coded controller-phrase alt list.
-    let subject_end = find_continuous_predicate_start(after_you.lower)?;
-    let (object_subject, predicate) = after_you.split_at(subject_end);
-    let object_subject = object_subject.trim_start().trim_end();
-    let predicate = predicate.trim_start().trim_end();
-    if object_subject.is_empty() || predicate.is_empty() {
-        return None;
-    }
-
-    let affected = if multi_object {
-        parse_oxford_object_conjuncts(object_subject.original)?
-    } else {
-        let filter = parse_rule_static_subject_filter(object_subject.original)?;
-        // Player half is reserved for the controller; refuse a second player
-        // scope ("you and each player have …") so we never emit two player defs.
-        if rule_static_affected_is_player_scope(&filter) {
-            return None;
-        }
-        filter
-    };
-
-    // Object-half: delegate the predicate to the shared keyword-grant builder
-    // (also peels trailing " as long as <cond>" onto `object_def.condition`).
-    let mut object_def = parse_continuous_gets_has(predicate.original, affected, text)?;
+    let mut object_def = parse_continuous_subject_predicate(&after_you, |subject, predicate| {
+        let affected = if multi_object {
+            parse_oxford_object_conjuncts(subject)?
+        } else {
+            let filter = parse_rule_static_subject_filter(subject)?;
+            if rule_static_affected_is_player_scope(&filter) {
+                return None;
+            }
+            filter
+        };
+        super::anthem::parse_complete_continuous_predicate(predicate, affected, text)
+    })?;
 
     // Derive the player-half mode from the granted keyword. Only player-
     // applicable keyword modes claim this pattern.
@@ -3612,11 +3601,9 @@ pub(crate) fn try_split_and_foreign_subject_grant(text: &str) -> Option<Vec<Stat
 
             let companion_mods = match predicate_kind {
                 ForeignPredicate::KeywordGrant => {
-                    let mut companion_mods = Vec::new();
-                    for part in split_keyword_list(keyword_text) {
-                        push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
-                    }
-                    companion_mods
+                    super::keyword_grant::parse_complete_continuous_modifications(&format!(
+                        "has {keyword_text}"
+                    ))?
                 }
                 ForeignPredicate::Modification => {
                     let predicate_start = kw_start - verb.trim_start().len();

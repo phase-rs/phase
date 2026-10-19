@@ -3475,7 +3475,7 @@ pub(crate) fn bind_declared_groups(
 
 /// Rewrite every node and property reachable through `filter`, recording any incomplete
 /// bounded population walk in `complete` for the transactional caller.
-fn rewrite_filter_props(
+pub(crate) fn rewrite_filter_props(
     filter: &mut TargetFilter,
     rewrite_node: &mut dyn FnMut(&mut TargetFilter),
     rewrite: &mut dyn FnMut(&mut FilterProp),
@@ -7853,7 +7853,10 @@ fn spell_object_matches_property(
         }
         FilterProp::ManaValueParity { parity } => {
             let choice = context.and_then(|ctx| ctx.state.last_named_choice.as_ref());
-            mana_value_matches_parity_source(record.mana_value, parity, choice)
+            let attributes = context
+                .and_then(|ctx| ctx.state.objects.get(&ctx.source_id))
+                .map_or(&[][..], |source| source.chosen_attributes.as_slice());
+            mana_value_matches_parity_source(record.mana_value, parity, choice, attributes)
         }
         FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
             context
@@ -8042,7 +8045,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
             }
         },
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, None)
+            mana_value_matches_parity_source(record.mana_value, parity, None, &[])
         }
         // CR 202.1: SpellCastRecord retains colors + mana_value but no per-shard
         // ManaCost, so colored-pip count is unsupported here. RUNTIME: TODO.
@@ -8803,13 +8806,27 @@ fn matches_last_chosen_card_predicate(
     }
 }
 
-fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Option<Parity> {
+fn parity_from_source(
+    source: &ParitySource,
+    choice: Option<&ChoiceValue>,
+    chosen_attributes: &[crate::types::ability::ChosenAttribute],
+) -> Option<Parity> {
     match source {
         ParitySource::Fixed(parity) => Some(*parity),
         ParitySource::LastNamedChoice => match choice {
             Some(ChoiceValue::OddOrEven(parity)) => Some(*parity),
             _ => None,
         },
+        // CR 607.2d + CR 607.5a: only this source's linked stored choice is
+        // authority; later local choices and another source cannot supply it.
+        ParitySource::SourceChosen => {
+            chosen_attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    crate::types::ability::ChosenAttribute::OddOrEven(parity) => Some(*parity),
+                    _ => None,
+                })
+        }
     }
 }
 
@@ -8824,8 +8841,9 @@ fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
     choice: Option<&ChoiceValue>,
+    chosen_attributes: &[crate::types::ability::ChosenAttribute],
 ) -> bool {
-    parity_from_source(source, choice)
+    parity_from_source(source, choice, chosen_attributes)
         .is_some_and(|parity| mana_value_matches_parity(mana_value, parity))
 }
 
@@ -9151,7 +9169,12 @@ fn matches_filter_prop(
             // CR 202.3d + CR 709.4b: combined mana value off the stack (a split
             // card's parity is that of both halves), chosen half on the stack.
             let mana_value = obj.effective_mana_value();
-            mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                &source.chosen_attributes,
+            )
         }
         // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
         // mana cost via the single counting authority, then compare with the
@@ -10075,10 +10098,10 @@ fn zone_change_record_property_with_subject(
             record.mana_value as i32,
             resolve_filter_threshold(state, value, source),
         ),
-        // CR 202.3 + CR 608.2c: The event-time mana value is fixed in the
-        // snapshot; the chosen odd/even quality is read from resolution state.
+        // CR 202.3 + CR 607.2d + CR 608.2h: candidate mana value is event-time;
+        // durable choice belongs to the already resolved exact/captured source.
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref(), &source.chosen_attributes)
         }
         // CR 202.1: Zone-change records currently snapshot mana value, not the
         // full printed mana cost. Exact-cost predicates fail closed here.
@@ -11524,6 +11547,238 @@ fn player_matches_target_filter_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u14_parity_current_legacy_and_captured_sources() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Odd source");
+        let candidate = add_creature(&mut state, PlayerId(1), "Even chosen candidate");
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(3);
+        state.objects.get_mut(&candidate).unwrap().chosen_attributes =
+            vec![ChosenAttribute::OddOrEven(Parity::Even)];
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![
+            ChosenAttribute::Color(ManaColor::Blue),
+            ChosenAttribute::OddOrEven(Parity::Odd),
+            ChosenAttribute::OddOrEven(Parity::Even),
+        ];
+        state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Even));
+        let record = spell_cast_record_from_object(&state.objects[&candidate]);
+        let event = state.objects[&candidate].snapshot_for_zone_change(
+            candidate,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        let captured = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let fixed: ParitySource =
+            serde_json::from_str(r#"{"type":"Fixed","value":"Even"}"#).unwrap();
+        let local: ParitySource = serde_json::from_str(r#"{"type":"LastNamedChoice"}"#).unwrap();
+        for (parity, expected) in [
+            (ParitySource::SourceChosen, true),
+            (local, false),
+            (fixed, false),
+        ] {
+            let prop = FilterProp::ManaValueParity { parity };
+            let context = source_context_from_filter(
+                &state,
+                source,
+                Some(PlayerId(0)),
+                None,
+                Some(&captured),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                matches_filter_prop(
+                    &prop,
+                    &state,
+                    &state.objects[&candidate],
+                    candidate,
+                    &context
+                ),
+                expected
+            );
+            assert_eq!(
+                zone_change_record_matches_property(&prop, &state, &event, &context),
+                expected
+            );
+            let spell_context = SpellFilterContext {
+                state: &state,
+                source_id: source,
+                source_controller: PlayerId(0),
+                spell_object_id: Some(candidate),
+                casting_spell: None,
+            };
+            assert_eq!(
+                spell_object_matches_property(
+                    &record,
+                    Zone::Stack,
+                    &prop,
+                    &[],
+                    Some(spell_context)
+                ),
+                expected
+            );
+            assert!(!spell_record_matches_property(&record, &prop));
+        }
+        let even_record = SpellCastRecord {
+            mana_value: 2,
+            ..record.clone()
+        };
+        assert!(spell_record_matches_property(
+            &even_record,
+            &FilterProp::ManaValueParity { parity: fixed }
+        ));
+        assert!(spell_object_matches_property(
+            &even_record,
+            Zone::Stack,
+            &FilterProp::ManaValueParity { parity: fixed },
+            &[],
+            None
+        ));
+        for parity in [ParitySource::SourceChosen, ParitySource::LastNamedChoice] {
+            assert!(!spell_object_matches_property(
+                &even_record,
+                Zone::Stack,
+                &FilterProp::ManaValueParity { parity },
+                &[],
+                None
+            ));
+            assert!(!spell_record_matches_property(
+                &even_record,
+                &FilterProp::ManaValueParity { parity }
+            ));
+        }
+        let durable_prop = FilterProp::ManaValueParity {
+            parity: ParitySource::SourceChosen,
+        };
+        assert_eq!(
+            target_filter_characteristic_reads(&TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![durable_prop.clone()])
+            )),
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::MANA_COST)
+        );
+        // CR 608.2h: the event record retains MV3 while the live candidate changes.
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(2);
+        let context = source_context_from_filter(
+            &state,
+            source,
+            None,
+            None,
+            Some(&captured),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(zone_change_record_matches_property(
+            &durable_prop,
+            &state,
+            &event,
+            &context
+        ));
+        assert!(!matches_filter_prop(
+            &durable_prop,
+            &state,
+            &state.objects[&candidate],
+            candidate,
+            &context
+        ));
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(3);
+        state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Odd));
+        let local_prop = FilterProp::ManaValueParity { parity: local };
+        assert!(spell_object_matches_property(
+            &record,
+            Zone::Stack,
+            &local_prop,
+            &[],
+            Some(SpellFilterContext {
+                state: &state,
+                source_id: source,
+                source_controller: PlayerId(0),
+                spell_object_id: Some(candidate),
+                casting_spell: None
+            })
+        ));
+        // CR 400.7 + CR 608.2h: an old captured source cannot read a returned
+        // same-ID incarnation, even though its live stored answer is opposite.
+        state.objects.get_mut(&source).unwrap().incarnation += 1;
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::OddOrEven(Parity::Even)];
+        let old = source_context_from_filter(
+            &state,
+            source,
+            Some(PlayerId(0)),
+            None,
+            Some(&captured),
+            None,
+            None,
+            None,
+            None,
+        );
+        let prop = FilterProp::ManaValueParity {
+            parity: ParitySource::SourceChosen,
+        };
+        assert!(matches_filter_prop(
+            &prop,
+            &state,
+            &state.objects[&candidate],
+            candidate,
+            &old
+        ));
+        assert!(zone_change_record_matches_property(
+            &prop, &state, &event, &old
+        ));
+        let live =
+            source_context_from_filter(&state, source, None, None, None, None, None, None, None);
+        assert!(!matches_filter_prop(
+            &prop,
+            &state,
+            &state.objects[&candidate],
+            candidate,
+            &live
+        ));
+        state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Odd));
+        for attrs in [vec![], vec![ChosenAttribute::Color(ManaColor::Blue)]] {
+            state.objects.get_mut(&source).unwrap().chosen_attributes = attrs;
+            let missing = source_context_from_filter(
+                &state, source, None, None, None, None, None, None, None,
+            );
+            assert!(!matches_filter_prop(
+                &prop,
+                &state,
+                &state.objects[&candidate],
+                candidate,
+                &missing
+            ));
+            assert!(!zone_change_record_matches_property(
+                &prop, &state, &event, &missing
+            ));
+            assert!(!spell_object_matches_property(
+                &record,
+                Zone::Stack,
+                &prop,
+                &[],
+                Some(SpellFilterContext {
+                    state: &state,
+                    source_id: source,
+                    source_controller: PlayerId(0),
+                    spell_object_id: Some(candidate),
+                    casting_spell: None
+                })
+            ));
+        }
+        for mv in [0, 2, 3] {
+            assert_eq!(
+                mana_value_matches_parity_source(mv, &fixed, None, &[]),
+                mv != 3
+            );
+        }
+    }
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,

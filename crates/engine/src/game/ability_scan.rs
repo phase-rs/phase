@@ -4771,6 +4771,13 @@ fn typed_filter_axes(tf: &TypedFilter, mode: ScanMode) -> Axes {
 /// (analysis/resource.rs): a field is projected iff that fn clears it.
 fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
     match x {
+        // All alternatives read board/source characteristics, never projected
+        // player resources. Keep the parameter exhaustive for future additions.
+        FilterProp::ManaValueParity { parity } => match parity {
+            crate::types::ability::ParitySource::Fixed(_)
+            | crate::types::ability::ParitySource::LastNamedChoice
+            | crate::types::ability::ParitySource::SourceChosen => Axes::NONE,
+        },
         // --- board / object / printed-characteristic leaves: no player resource.
         // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
         FilterProp::Token
@@ -4794,7 +4801,6 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::HasKeywordKind { .. }
         | FilterProp::WithoutKeyword { .. }
         | FilterProp::WithoutKeywordKind { .. }
-        | FilterProp::ManaValueParity { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
@@ -7529,6 +7535,31 @@ fn effect_census_role(e: &Effect) -> CensusRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u14_parity_has_no_projected_player_resource_axes() {
+        use crate::types::ability::{Parity, ParitySource};
+        for parity in [
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+            ParitySource::SourceChosen,
+        ] {
+            for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+                let prop = FilterProp::ManaValueParity { parity };
+                let axes = scan_filter_prop(&prop, mode);
+                assert!(!axes.event && !axes.sibling && !axes.projected);
+                let nested = scan_filter_prop(
+                    &FilterProp::AnyOf {
+                        props: vec![FilterProp::Not {
+                            prop: Box::new(prop),
+                        }],
+                    },
+                    mode,
+                );
+                assert!(!nested.event && !nested.sibling && !nested.projected);
+            }
+        }
+    }
     use crate::types::ability::{
         AbilityKind, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
         CombatHistoryScope, Comparator, CostDerivation, DamageKindFilter, DelayedTriggerLifetime,

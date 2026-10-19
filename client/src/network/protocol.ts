@@ -682,7 +682,8 @@ export type P2PInteractionPreviewAnswer =
 // 127: full-game 145 carries exact token creation and private resolved copy-source tails.
 // 128: full-game 146 carries typed revealed membership and exact queued origins.
 // 130: exact actual-removal reflexives; moves with full-game protocol 148.
-export const WIRE_PROTOCOL_VERSION = 130 as const;
+// 131: source-bound parity references; moves with full-game protocol 149.
+export const WIRE_PROTOCOL_VERSION = 131 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

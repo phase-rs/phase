@@ -1,4 +1,50 @@
 use super::anthem::*;
+
+#[test]
+fn u14_quality_static_grammar_preserves_scope() {
+    for (subject, controller) in [
+        ("Each creature", None),
+        ("All creatures", None),
+        ("Creatures you control", Some(ControllerRef::You)),
+        (
+            "Creatures your opponents control",
+            Some(ControllerRef::Opponent),
+        ),
+    ] {
+        for head in ["with", "that have", "that each have"] {
+            for quality in ["the chosen quality", "that quality"] {
+                let text = format!("{subject} {head} mana value of {quality} has haste.");
+                let def = parse_static_line(&text).expect(&text);
+                let TargetFilter::Typed(filter) = def.affected.unwrap() else {
+                    panic!("typed subject")
+                };
+                assert!(filter.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(filter.controller, controller);
+                assert!(filter.properties.contains(&FilterProp::ManaValueParity {
+                    parity: crate::types::ability::ParitySource::LastNamedChoice
+                }));
+                assert!(def
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste
+                    }));
+            }
+        }
+    }
+    assert!(
+        parse_static_line("Each creature with mana value of the chosen quality has haste.")
+            .is_some()
+    );
+    for text in [
+        "Each creature with mana value of the chosen qualityness has haste.",
+        "Each creature with mana value of the chosen quality has haste and dances.",
+    ] {
+        assert!(
+            parse_static_line(text).is_none_or(|def| u14_static_residual(&def)),
+            "semantic residue: {text}"
+        );
+    }
+}
 use super::keyword_grant::*;
 use super::prelude::*;
 use super::restriction::*;
@@ -32522,19 +32568,19 @@ fn protection_chosen_color_drops_trailing_this_aura_exemption() {
     );
 }
 
-/// Building-block: `push_grant_clause_modifications` must drop the trailing prose
-/// sentence directly on the bare keyword leg and emit one
-/// `Protection(ChosenColor)`. (fail-if-reverted)
+/// A modeled protection exemption owns its rider; arbitrary prose cannot vanish.
 #[test]
-fn push_grant_clause_drops_trailing_sentence_chosen_color() {
+fn push_grant_clause_preserves_modeled_protection_rider_chosen_color() {
     use crate::types::keywords::{Keyword, ProtectionTarget};
 
     let mut mods = Vec::new();
-    push_grant_clause_modifications(
+    push_grant_clause_modifications_with_policy(
         &mut mods,
         "protection from the chosen color. this effect doesn't remove auras",
         None,
-    );
+        super::oracle_keyword::KeywordRemainderPolicy::RequireAllConsuming,
+    )
+    .unwrap();
     assert_eq!(
         mods,
         vec![ContinuousModification::AddKeyword {
@@ -32542,6 +32588,15 @@ fn push_grant_clause_drops_trailing_sentence_chosen_color() {
         }],
         "expected exactly one Protection(ChosenColor), got {mods:?}"
     );
+    let mut rejected = Vec::new();
+    assert!(push_grant_clause_modifications_with_policy(
+        &mut rejected,
+        "protection from the chosen color. draw two cards",
+        None,
+        super::oracle_keyword::KeywordRemainderPolicy::RequireAllConsuming
+    )
+    .is_none());
+    assert!(rejected.is_empty());
 }
 
 /// No-regression: a plain chosen-color grant with NO trailing ". " sentence is
@@ -40022,5 +40077,417 @@ fn prior_controller_quoted_blocker_malformed_tail_refuses() {
             )),
             "invalid rule must not become supported: {quoted:#?}"
         );
+    }
+}
+
+fn u14_static_residual(def: &StaticDefinition) -> bool {
+    def.modifications.iter().any(|m| {
+        matches!(m, ContinuousModification::GrantAbility { definition }
+        if matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }))
+    })
+}
+
+#[test]
+fn u14_complete_subject_boundary_heads() {
+    for subject in [
+        "Creatures",
+        "Each creature",
+        "Other creatures you control",
+        "Creatures your opponents control",
+    ] {
+        for head in ["with", "that have", "that each have"] {
+            for quality in ["the chosen quality", "that quality"] {
+                for predicate in [
+                    "have haste",
+                    "gain haste",
+                    "get +1/+1 and have haste",
+                    "lose flying",
+                ] {
+                    let text = format!("{subject} {head} mana value of {quality} {predicate}.");
+                    let def = parse_subject_continuous_static(&text).expect(&text);
+                    assert!(!u14_static_residual(&def), "{text}: {def:#?}");
+                    assert!(crate::game::filter::filter_contains_filter_prop(
+                        def.affected.as_ref().unwrap(),
+                        &|p| matches!(
+                            p,
+                            FilterProp::ManaValueParity {
+                                parity: crate::types::ability::ParitySource::LastNamedChoice
+                            }
+                        )
+                    ));
+                    assert!(!def.modifications.is_empty());
+                    assert_eq!(def.description.as_deref(), Some(text.as_str()));
+                }
+            }
+        }
+    }
+    let numeric =
+        parse_subject_continuous_static("Creatures that have mana value 2 or less have haste.")
+            .unwrap();
+    assert!(crate::game::filter::filter_contains_filter_prop(
+        numeric.affected.as_ref().unwrap(),
+        &|p| matches!(p, FilterProp::Cmc { .. })
+    ));
+    for text in [
+        "Creatures named Éowyn have haste.",
+        "Creatures have \"{T}: Add {G}.\".",
+    ] {
+        let def = parse_subject_continuous_static(text).unwrap();
+        assert_eq!(def.description.as_deref(), Some(text));
+        assert!(!u14_static_residual(&def));
+    }
+}
+
+#[test]
+fn u14_compound_subject_boundary() {
+    for head in ["that have", "that each have"] {
+        for quality in ["the chosen quality", "that quality"] {
+            for prefix in ["", "During your turn, "] {
+                let text = format!("{prefix}You and creatures you control {head} mana value of {quality} have hexproof.");
+                let defs = super::evasion::parse_compound_subject_keyword_static(
+                    &text,
+                    &text.to_lowercase(),
+                )
+                .unwrap();
+                assert_eq!(defs.len(), 2);
+                assert!(defs[0]
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Hexproof
+                    }));
+                assert_eq!(defs[1].mode, StaticMode::Hexproof);
+                assert_eq!(defs[0].condition, defs[1].condition);
+                assert_eq!(defs[0].condition.is_some(), !prefix.is_empty());
+                assert_eq!(parse_static_line_multi(&text).len(), 2);
+            }
+        }
+    }
+    let oxford = "You, planeswalkers you control, and other creatures you control have hexproof.";
+    assert_eq!(
+        super::evasion::parse_compound_subject_keyword_static(oxford, &oxford.to_lowercase())
+            .unwrap()
+            .len(),
+        2
+    );
+    for text in [
+        "You and each player have hexproof.",
+        "You and creatures you control have haste.",
+        "You and creatures you control have hexproof and draw two cards.",
+        "You and creatures you control that dance have hexproof.",
+    ] {
+        assert!(
+            super::evasion::parse_compound_subject_keyword_static(text, &text.to_lowercase())
+                .is_none(),
+            "{text}"
+        );
+        assert!(
+            parse_static_line_multi(text)
+                .iter()
+                .all(|d| u14_static_residual(d)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn u14_turn_subject_boundary() {
+    for (prefix, expected) in [
+        ("During your turn, ", StaticCondition::DuringYourTurn),
+        (
+            "During turns other than yours, ",
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+        ),
+    ] {
+        let text =
+            format!("{prefix}creatures that have mana value of the chosen quality have haste.");
+        let lower = text.to_lowercase();
+        let direct = super::dispatch::parse_turn_scoped_subject_continuous_static(
+            &TextPair::new(&text, &lower),
+            &text,
+        )
+        .unwrap();
+        assert_eq!(direct.condition, Some(expected.clone()));
+        assert_eq!(parse_static_line(&text).unwrap().condition, Some(expected));
+        for bad in [
+            "creatures that have mana value of the chosen quality.",
+            "creatures that have mana value of the chosen qualityness have haste.",
+            "creatures that have mana value of the chosen quality have haste and draw two cards.",
+        ] {
+            let bad = format!("{prefix}{bad}");
+            assert!(
+                super::dispatch::parse_turn_scoped_subject_continuous_static(
+                    &TextPair::new(&bad, &bad.to_lowercase()),
+                    &bad
+                )
+                .is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn u14_controller_prefix_subject_boundary() {
+    for prefix in ["Creatures you control", "Other creatures you control"] {
+        for head in ["that have", "that each have"] {
+            for quality in ["the chosen quality", "that quality"] {
+                let suffix = format!("{head} mana value of {quality} have haste.");
+                let lower = suffix.to_lowercase();
+                let (filter, predicate) =
+                    parse_qualified_creatures_you_control_suffix(prefix, &suffix, &lower).unwrap();
+                let TargetFilter::Typed(tf) = &filter else {
+                    panic!("typed")
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(
+                    tf.properties.contains(&FilterProp::Another),
+                    prefix == "Other creatures you control"
+                );
+                assert_eq!(predicate, "have haste.");
+                let full = format!("{prefix} {suffix}");
+                assert_eq!(parse_static_line(&full).unwrap().affected, Some(filter));
+            }
+        }
+        let bad = "that dance have haste.";
+        assert!(parse_qualified_creatures_you_control_suffix(prefix, bad, bad).is_none());
+        assert!(
+            parse_static_line(&format!("{prefix} {bad}")).is_none_or(|d| u14_static_residual(&d))
+        );
+    }
+}
+
+#[test]
+fn u14_keyword_predicate_refuses_residue() {
+    for predicate in [
+        "has haste",
+        "has flying and haste",
+        "has haste and gains flying",
+        "gets +1/+1 and has haste",
+        "has haste and gets +1/+1",
+        "has that ability",
+        "has mobilize X, where X is its power",
+        "has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\"",
+    ] {
+        let mods = parse_complete_continuous_modifications(predicate).expect(predicate);
+        assert!(!mods.is_empty());
+        assert!(!u14_static_residual(
+            &StaticDefinition::continuous().modifications(mods)
+        ));
+    }
+    for predicate in [
+        "has haste and draw two cards",
+        "has haste unexplained restriction",
+        "has hasteful",
+        "has blorple, flying, haste",
+        "has flying, blorple, haste",
+        "has flying, haste, blorple",
+        "has haste. Draw two cards.",
+        "has protection from red. Draw two cards. This effect doesn't remove this Aura.",
+        "has haste. This effect doesn't remove this Aura.",
+        "has haste and",
+        "has haste,",
+        "has that ability and draw two cards",
+        "has mobilize X unexplained, where X is its power",
+    ] {
+        assert!(
+            parse_complete_continuous_modifications(predicate).is_none(),
+            "{predicate}"
+        );
+        let text = format!("Creatures that have mana value of the chosen quality {predicate}.");
+        assert!(
+            parse_static_line(&text).is_none_or(|d| u14_static_residual(&d)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn u14_continuous_grammar_reference_preservation() {
+    use crate::types::ability::ProtectionDoesNotRemove;
+    let gruul = parse_static_line_multi("During your turn, you and this creature have hexproof.");
+    assert_eq!(gruul.len(), 2);
+    assert!(gruul
+        .iter()
+        .all(|d| d.condition == Some(StaticCondition::DuringYourTurn)));
+    let cloud = parse_static_line(
+        "During your turn, as long as ~ is equipped, it has double strike and indestructible.",
+    )
+    .unwrap();
+    assert_eq!(
+        cloud.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::SourceIsEquipped
+            ]
+        })
+    );
+    assert_eq!(
+        cloud.modifications,
+        vec![
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Indestructible
+            }
+        ]
+    );
+    for (text, prop) in [
+        (
+            "Each creature you control with a mana ability gets +2/+2.",
+            FilterProp::HasManaAbility,
+        ),
+        (
+            "Creatures with no abilities get +2/+2.",
+            FilterProp::HasNoAbilities,
+        ),
+    ] {
+        let d = parse_subject_continuous_static(text).unwrap();
+        assert!(crate::game::filter::filter_contains_filter_prop(
+            d.affected.as_ref().unwrap(),
+            &|p| p == &prop
+        ));
+        assert_eq!(
+            d.modifications,
+            vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 2 }
+            ]
+        );
+    }
+    for (rider, exemption) in [("This effect doesn't remove this Aura.", ProtectionDoesNotRemove::Source),
+        ("This effect doesn't remove Auras and Equipment you control that are already attached to it.", ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached)] {
+        let text = format!("Enchanted creature has protection from the chosen color. {rider}");
+        let d = parse_static_line(&text).unwrap();
+        assert_eq!(d.protection_does_not_remove, Some(exemption));
+        assert!(d.modifications.iter().any(|m| matches!(m, ContinuousModification::AddKeyword { keyword: Keyword::Protection(crate::types::keywords::ProtectionTarget::ChosenColor) })));
+    }
+    let whip = parse_subject_continuous_static("Equipped creature has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\".").unwrap();
+    assert!(whip
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Reach
+        }));
+    let granted: Vec<_> = whip
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(granted.len(), 2);
+    for (a, expected) in granted.iter().zip([2, 8]) {
+        let Some(AbilityCost::Composite { costs }) = &a.cost else {
+            panic!("mana and tap cost")
+        };
+        assert!(costs.contains(&AbilityCost::Mana {
+            cost: ManaCost::generic(expected)
+        }));
+        assert!(costs.contains(&AbilityCost::Tap));
+    }
+    assert!(matches!(
+        granted[0].effect.as_ref(),
+        Effect::SetTapState { .. }
+    ));
+    assert!(matches!(
+        granted[1].effect.as_ref(),
+        Effect::Discover {
+            mana_value_limit: QuantityExpr::Fixed { value: 10 },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn u14_companions_cannot_publish_a_partial_primary() {
+    let positive = "This creature has haste and creatures you control have flying.";
+    let defs = try_split_and_foreign_subject_grant(positive).expect("foreign keyword owner");
+    assert_eq!(defs.len(), 2);
+    assert!(defs.iter().any(|d| d
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        })));
+    let bad = "This creature has haste and creatures you control have flying and draw two cards.";
+    assert!(try_split_and_foreign_subject_grant(bad).is_none());
+    assert!(parse_static_line_multi(bad).iter().all(u14_static_residual));
+    let filter = TargetFilter::SelfRef;
+    let primary = StaticDefinition::new(StaticMode::CantBeBlocked).affected(filter.clone());
+    let good = super::grammar::with_keyword_companion(
+        primary.clone(),
+        "can't be blocked and has haste",
+        &filter,
+        "complete positive",
+        None,
+    );
+    assert_eq!(good.len(), 2);
+    let failed = super::grammar::with_keyword_companion(
+        primary,
+        "can't be blocked and has haste and draw two cards",
+        &filter,
+        bad,
+        None,
+    );
+    assert_eq!(failed.len(), 1);
+    assert!(u14_static_residual(&failed[0]));
+    for predicate in [
+        "gets +1/+0 for each Mountain you control and has flying",
+        "has first strike and gets +1/+0 for each Mountain you control",
+        "has base power and toughness 2/2 and has haste",
+        "gets +X/+X, where X is its power",
+    ] {
+        assert!(
+            parse_complete_continuous_modifications(predicate).is_some(),
+            "{predicate}"
+        );
+    }
+    for predicate in [
+        "has flying, , haste",
+        "has flying and and haste",
+        "has flying and unexplained and haste",
+    ] {
+        assert!(
+            parse_complete_continuous_modifications(predicate).is_none(),
+            "{predicate}"
+        );
+    }
+}
+
+#[test]
+fn u14_boundary_rejects_incomplete_subject_predicate_pairs() {
+    let positive = "Creatures that each have mana value of the chosen quality have haste.";
+    assert!(!u14_static_residual(
+        &parse_subject_continuous_static(positive).unwrap()
+    ));
+    for text in [
+        "have haste.",
+        "Creatures have.",
+        "Creatures that have mana value of the chosen quality.",
+        "Creatures that each have mana value of the chosen quality.",
+        "Creatures havehaste.",
+        "Creatures that dance have haste.",
+        "Creatures with mana value of the chosen qualityness have haste.",
+        "Creatures that have mana value of the chosen quality have haste and.",
+    ] {
+        assert!(
+            parse_subject_continuous_static(text).is_none_or(|d| u14_static_residual(&d)),
+            "{text}"
+        );
+    }
+    let text = "You and creatures you control that have mana value of that quality have hexproof as long as you control an artifact.";
+    let defs =
+        super::evasion::parse_compound_subject_keyword_static(text, &text.to_lowercase()).unwrap();
+    assert_eq!(defs.len(), 2);
+    assert!(defs[0].condition.is_some());
+    assert_eq!(defs[0].condition, defs[1].condition);
+    for text in [
+        "gets +1/+1 and are Bears in addition to their other creature types",
+        "has haste and loses flying",
+    ] {
+        let mods = parse_complete_continuous_modifications(text).unwrap();
+        assert!(mods.len() >= 2);
     }
 }

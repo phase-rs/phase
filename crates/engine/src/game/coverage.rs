@@ -951,6 +951,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     crate::types::ability::ParitySource::LastNamedChoice => {
                         "chosen odd/even mana value".to_string()
                     }
+                    crate::types::ability::ParitySource::SourceChosen => {
+                        "source-chosen odd/even mana value".to_string()
+                    }
                 };
                 parts.push(label);
             }
@@ -13678,6 +13681,21 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn u14_parity_formatter_distinguishes_authorities() {
+        use crate::types::ability::{FilterProp, Parity, ParitySource, TypedFilter};
+        let label = |parity| {
+            super::fmt_typed_filter(
+                &TypedFilter::creature().properties(vec![FilterProp::ManaValueParity { parity }]),
+            )
+        };
+        assert!(label(ParitySource::SourceChosen).contains("source-chosen"));
+        assert_ne!(
+            label(ParitySource::SourceChosen),
+            label(ParitySource::LastNamedChoice)
+        );
+        assert!(label(ParitySource::Fixed(Parity::Even)).contains("even"));
+    }
     /// Fixture shared by the replacement-payload stranding tests: an unbound
     /// delayed tracked-set return nested in an `AddTargetReplacement` execute
     /// body — the minimal carrier for the shape CodeRabbit's Major flagged as

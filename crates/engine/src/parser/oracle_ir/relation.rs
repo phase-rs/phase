@@ -110,6 +110,12 @@ pub(crate) enum LinkedReturnOutcome {
 /// `DocumentRelationIr` variant.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum LinkedChoiceKind {
+    /// CR 607.2d: exact printed as-enters parity supplier and separate static
+    /// affected-filter readers. Applied transactionally before lowering.
+    SourceParityStatic {
+        chooser: OracleItemId,
+        statics: Vec<OracleItemId>,
+    },
     /// CR 607.2d + CR 614.1c + CR 614.12a: an as-enters replacement makes a
     /// persisted labeled card-type choice, and distinct static item(s) read the
     /// source's `IsChosenCardType` property. `options` is the proven exact

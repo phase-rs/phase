@@ -879,7 +879,8 @@ export class NativeEngineVersionMismatchError extends Error {
 // 146: typed revealed results and exact queued original origins use resolution wire 7.
 // 147: mandatory specified-kind/exact-recipient counter adjustment.
 // 148: exact actual-removal reflexives and private bound damage-source authority.
-export const PROTOCOL_VERSION = 148;
+// 149: source-bound chosen-parity references in serialized static definitions.
+export const PROTOCOL_VERSION = 149;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

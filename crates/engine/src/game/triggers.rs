@@ -13047,6 +13047,10 @@ fn parity_source_binding_diverges(parity: &crate::types::ability::ParitySource) 
         ParitySource::LastNamedChoice => true,
         // A printed parity is a literal — nothing to bind.
         ParitySource::Fixed { .. } => false,
+        // CR 607.2d: durable choice is already bound to the source; unlike the
+        // local choice it is not produced by this resolution. Distinct-source
+        // ordering is separately protected by the member-bound read profile.
+        ParitySource::SourceChosen => false,
     }
 }
 
@@ -17426,6 +17430,22 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn u14_parity_binding_divergence_is_distinct_from_member_binding() {
+        use crate::types::ability::{Parity, ParitySource};
+        for (parity, divergent) in [
+            (ParitySource::Fixed(Parity::Even), false),
+            (ParitySource::LastNamedChoice, true),
+            (ParitySource::SourceChosen, false),
+        ] {
+            assert_eq!(parity_source_binding_diverges(&parity), divergent);
+            assert_eq!(
+                filter_prop_binding_diverges(&FilterProp::ManaValueParity { parity }),
+                divergent
+            );
+        }
+    }
     use crate::game::filter::{matches_target_filter, FilterContext};
     use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{

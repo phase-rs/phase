@@ -1830,6 +1830,10 @@ pub enum ParitySource {
     /// CR 608.2c: Reads the most recent odd/even named choice made earlier in
     /// the same resolving instruction sequence.
     LastNamedChoice,
+    /// CR 607.2d + CR 607.5a: Reads the linked odd/even choice stored on this
+    /// source incarnation; an undefined choice contributes no match.
+    /// RUNTIME: implemented by the shared mana-value parity filter evaluator.
+    SourceChosen,
 }
 
 /// A branch in a d20/d6/d4 result table (CR 706.2).
@@ -37542,6 +37546,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u14_parity_current_and_legacy_tags() {
+        for (value, json) in [
+            (
+                ParitySource::Fixed(Parity::Even),
+                r#"{"type":"Fixed","value":"Even"}"#,
+            ),
+            (
+                ParitySource::LastNamedChoice,
+                r#"{"type":"LastNamedChoice"}"#,
+            ),
+            (ParitySource::SourceChosen, r#"{"type":"SourceChosen"}"#),
+        ] {
+            assert_eq!(serde_json::from_str::<ParitySource>(json).unwrap(), value);
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::from_str::<serde_json::Value>(json).unwrap()
+            );
+        }
+        assert!(serde_json::from_str::<ParitySource>(r#"{"type":"UnknownParity"}"#).is_err());
+    }
     use crate::types::events::GameEvent;
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;

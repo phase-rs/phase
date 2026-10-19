@@ -1,5 +1,210 @@
 use super::*;
 
+const U14_STANDARD: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
+const U14_ASHLING: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+
+#[test]
+fn u14_source_parity_relation_two_layers() {
+    // SHAPE: runtime entry and haste are exercised by jev_chosen_parity.
+    for text in [
+        U14_STANDARD.to_string(),
+        format!("Creatures have vigilance.\n{U14_STANDARD}\nCreatures have trample."),
+        format!("As this enchantment enters, choose a color.\n{U14_STANDARD}"),
+    ] {
+        let mut doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        let relation = doc
+            .relations
+            .iter()
+            .find_map(|r| match r {
+                DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                    chooser,
+                    statics,
+                }) => Some((*chooser, statics)),
+                _ => None,
+            })
+            .expect("exact linked parity relation");
+        assert_eq!(relation.1.len(), 1);
+        assert_ne!(relation.0, relation.1[0]);
+        let chooser = doc.items.iter().find(|i| i.id == relation.0).unwrap();
+        assert!(source_parity_chooser(chooser));
+        let consumer = doc.items.iter().find(|i| i.id == relation.1[0]).unwrap();
+        let OracleNodeIr::Static(ir) = &consumer.node else {
+            panic!("static")
+        };
+        assert!(target_filter_uses_filter_prop(
+            ir.definition.affected.as_ref().unwrap(),
+            &|p| matches!(
+                p,
+                FilterProp::ManaValueParity {
+                    parity: crate::types::ability::ParitySource::SourceChosen
+                }
+            )
+        ));
+        assert!(ir
+            .definition
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(parsed
+            .statics
+            .iter()
+            .any(|s| s
+                .affected
+                .as_ref()
+                .is_some_and(|f| target_filter_uses_filter_prop(f, &|p| matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: crate::types::ability::ParitySource::SourceChosen
+                    }
+                )))));
+        assert!(parsed
+            .abilities
+            .iter()
+            .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })));
+    }
+}
+
+#[test]
+fn u14_relation_refuses_ambiguous_or_unowned_static() {
+    let reader = "Each creature with mana value of the chosen quality has haste.";
+    for text in [reader.to_string(), format!("{reader}\nAs this enchantment enters, choose odd or even."), format!("As this enchantment enters, choose a color.\n{reader}"), format!("As this enchantment enters, choose odd or even.\nAs this enchantment enters, choose odd or even.\n{reader}")] {
+        let mut doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        assert!(doc.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == reader)), "{doc:#?}");
+        assert!(lower_oracle_ir(&mut doc).statics.iter().all(|s| !s.affected.as_ref().is_some_and(source_parity_static_reader)));
+    }
+    // Every malformed relation starts with the same successfully parsed nodes.
+    for corruption in 0..10 {
+        let mut doc = parse_oracle_ir(
+            U14_STANDARD,
+            "Parity Standard",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        let relation = doc
+            .relations
+            .iter()
+            .find(|r| {
+                matches!(
+                    r,
+                    DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+                )
+            })
+            .unwrap()
+            .clone();
+        // Recreate the local reader so the applier must validate before rewriting.
+        if let OracleNodeIr::Static(ir) = &mut doc.items[1].node {
+            ir.definition.affected = Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::ManaValueParity {
+                    parity: crate::types::ability::ParitySource::LastNamedChoice,
+                }],
+            )));
+        }
+        let original = doc.items[1].source.clone();
+        match corruption {
+            0 => {
+                doc.items.remove(0);
+            }
+            1 => {
+                doc.items[0].id = doc.items[1].id;
+            }
+            2 => {
+                let source = doc.items[1].source.clone();
+                doc.items[0].source = source;
+            }
+            n => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[0].node else {
+                    panic!("replacement")
+                };
+                match n {
+                    3 => ir.definition.valid_card = Some(TargetFilter::Any),
+                    4 => ir.definition.mode = ReplacementMode::Optional { decline: None },
+                    5 => ir.definition.destination_zone = Some(Zone::Graveyard),
+                    6 => ir.definition.execute.as_mut().unwrap().optional = true,
+                    7 => {
+                        let a = ir.definition.execute.as_mut().unwrap();
+                        a.effect = Box::new(Effect::Choose {
+                            choice_type: ChoiceType::OddOrEven,
+                            persist: true,
+                            selection: crate::types::ability::TargetSelectionMode::Random,
+                        });
+                    }
+                    8 => {
+                        ir.definition.execute.as_mut().unwrap().sub_ability =
+                            Some(Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    player: TargetFilter::Controller,
+                                },
+                            )));
+                    }
+                    9 => {
+                        ir.definition.execute.as_mut().unwrap().else_ability =
+                            Some(Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    player: TargetFilter::Controller,
+                                },
+                            )));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        apply_source_parity_statics(&mut doc, &[relation]);
+        let failed = doc
+            .items
+            .iter()
+            .find(|i| matches!(i.node, OracleNodeIr::Unsupported { .. }))
+            .unwrap();
+        assert_eq!(failed.source, original);
+        assert!(
+            matches!(&failed.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == reader)
+        );
+    }
+}
+
+#[test]
+fn u14_full_ashling_keeps_entry_gap() {
+    let mut doc = parse_oracle_ir(
+        U14_ASHLING,
+        "Ashling's Prerogative",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, U14_ASHLING);
+    assert!(doc.items.iter().any(source_parity_chooser));
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| s
+            .affected
+            .as_ref()
+            .is_some_and(|f| target_filter_uses_filter_prop(f, &|p| matches!(
+                p,
+                FilterProp::ManaValueParity {
+                    parity: crate::types::ability::ParitySource::SourceChosen
+                }
+            )))));
+    let face = crate::types::card::CardFace {
+        name: "Ashling's Prerogative".into(),
+        oracle_text: Some(U14_ASHLING.into()),
+        replacements: parsed.replacements,
+        static_abilities: parsed.statics,
+        abilities: parsed.abilities,
+        ..Default::default()
+    };
+    assert!(crate::game::coverage::card_face_gaps(&face)
+        .iter()
+        .any(|g| g == crate::game::coverage::ENTRY_PROJECTION_GAP));
+}
+
 const U13_IMMARD: &str = "Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
 
 #[test]
@@ -35534,4 +35739,235 @@ fn u13_paragraph_and_trigger_boundaries_cannot_supply_an_earlier_producer() {
             "unbound complete modal stays strict: {parsed:#?}"
         );
     }
+}
+
+#[test]
+fn u14_relation_is_transactional_and_exact_item_bound() {
+    let text = format!("{U14_STANDARD}\nEach creature with mana value of the chosen quality has flying.\nCreatures have vigilance.");
+    for corruption in 0..4 {
+        let mut doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        let mut relation = doc
+            .relations
+            .iter()
+            .find(|r| {
+                matches!(
+                    r,
+                    DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+                )
+            })
+            .unwrap()
+            .clone();
+        let unrelated = doc.items.last().unwrap().clone();
+        let mut reader_ids = Vec::new();
+        for item in &mut doc.items {
+            if let OracleNodeIr::Static(ir) = &mut item.node {
+                if ir.definition.affected.as_ref().is_some_and(|f| {
+                    target_filter_uses_filter_prop(f, &|p| {
+                        matches!(
+                            p,
+                            FilterProp::ManaValueParity {
+                                parity: ParitySource::SourceChosen
+                            }
+                        )
+                    })
+                }) {
+                    reader_ids.push(item.id);
+                    let mut complete = true;
+                    rewrite_filter_props(
+                        ir.definition.affected.as_mut().unwrap(),
+                        &mut |_| {},
+                        &mut |p| {
+                            if let FilterProp::ManaValueParity { parity } = p {
+                                *parity = ParitySource::LastNamedChoice;
+                            }
+                        },
+                        &mut complete,
+                    );
+                    assert!(complete);
+                }
+            }
+        }
+        assert_eq!(reader_ids.len(), 2);
+        if let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+            chooser,
+            statics,
+        }) = &mut relation
+        {
+            match corruption {
+                0 => {}
+                1 => statics[1] = unrelated.id,
+                2 => statics[1] = OracleItemId(u32::MAX),
+                3 => *chooser = unrelated.id,
+                _ => unreachable!(),
+            }
+        }
+        let sources: Vec<_> = doc
+            .items
+            .iter()
+            .filter(|i| reader_ids.contains(&i.id))
+            .map(|i| (i.id, i.source.clone()))
+            .collect();
+        apply_source_parity_statics(&mut doc, &[relation]);
+        assert_eq!(doc.items.last().unwrap(), &unrelated);
+        for (id, source) in sources {
+            let item = doc.items.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(item.source, source);
+            if corruption == 0 {
+                let OracleNodeIr::Static(ir) = &item.node else {
+                    panic!("valid exact reader")
+                };
+                assert!(target_filter_uses_filter_prop(
+                    ir.definition.affected.as_ref().unwrap(),
+                    &|p| matches!(
+                        p,
+                        FilterProp::ManaValueParity {
+                            parity: ParitySource::SourceChosen
+                        }
+                    )
+                ));
+            } else {
+                assert!(
+                    matches!(&item.node, OracleNodeIr::Unsupported { unsupported, .. } if text.contains(&unsupported.fragment) && !unsupported.fragment.is_empty())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn u14_full_extinction_retains_local_choice_and_complete_residue() {
+    let text = "Choose odd or even. Exile each creature with mana value of the chosen quality. (Zero is even.)";
+    let mut doc = parse_oracle_ir(text, "Extinction Event", &[], &["Sorcery".into()], &[]);
+    assert!(!doc.relations.iter().any(|r| matches!(
+        r,
+        DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+    )));
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(matches!(
+        parsed.abilities[0].effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::OddOrEven,
+            persist: false,
+            ..
+        }
+    ));
+    let tail = parsed.abilities[0].sub_ability.as_deref().unwrap();
+    let Effect::ChangeZone {
+        target,
+        destination: Zone::Exile,
+        ..
+    } = tail.effect.as_ref()
+    else {
+        panic!("local exile tail")
+    };
+    assert!(target_filter_uses_filter_prop(target, &|p| matches!(
+        p,
+        FilterProp::ManaValueParity {
+            parity: ParitySource::LastNamedChoice
+        }
+    )));
+    for (head, quality) in [
+        ("with", "the chosen quality"),
+        ("that have", "that quality"),
+        ("that each have", "the chosen quality"),
+    ] {
+        let good = format!("As this enchantment enters, choose odd or even.\nCreatures {head} mana value of {quality} have haste.");
+        let good_doc = parse_oracle_ir(&good, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        assert!(good_doc.items.iter().any(source_parity_chooser));
+        assert!(good_doc.relations.iter().any(|r| matches!(
+            r,
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+        )));
+        let failed_line =
+            format!("Creatures {head} mana value of {quality} have haste and draw two cards.");
+        let bad = format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+        let bad_doc = parse_oracle_ir(&bad, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        assert!(bad_doc.items.iter().any(source_parity_chooser));
+        assert!(bad_doc.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)));
+    }
+}
+
+#[test]
+fn u14_compound_and_turn_documents_link_only_affected_object_filters() {
+    for line in [
+        "You and creatures you control that each have mana value of the chosen quality have hexproof.",
+        "During your turn, creatures that have mana value of that quality have haste.",
+        "During turns other than yours, creatures that each have mana value of the chosen quality have haste.",
+        "Other creatures you control that have mana value of that quality have haste.",
+    ] {
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        let readers = doc.items.iter().filter_map(|i| match &i.node { OracleNodeIr::Static(ir) => Some(ir), _ => None }).collect::<Vec<_>>();
+        assert!(doc.items.iter().any(source_parity_chooser));
+        assert!(readers.iter().any(|ir| ir.definition.affected.as_ref().is_some_and(|f|
+            target_filter_uses_filter_prop(f, &|p| matches!(p, FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))));
+        assert!(readers.iter().all(|ir| !ir.definition.affected.as_ref().is_some_and(source_parity_static_reader)));
+    }
+}
+
+#[test]
+fn u14_reference_full_documents_preserve_independent_items() {
+    let cloud = "During your turn, as long as Cloud is equipped, it has double strike and indestructible. (This creature deals both first-strike and regular combat damage. Damage and effects that say \"destroy\" don't destroy this creature.)\nEquip abilities you activate that target Cloud cost {2} less to activate.";
+    let mut doc = parse_oracle_ir(
+        cloud,
+        "Cloud, Planet's Champion",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, cloud);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| matches!(s.mode, StaticMode::ModifyCost { .. })));
+    assert!(parsed.statics.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::DoubleStrike
+        }
+    ) && s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible
+        }
+    )));
+    let raggadragga = "Each creature you control with a mana ability gets +2/+2.\nWhenever a creature you control with a mana ability attacks, untap it.\nWhenever you cast a spell, if at least seven mana was spent to cast it, untap target creature. It gets +7/+7 and gains trample until end of turn.";
+    let mut doc = parse_oracle_ir(
+        raggadragga,
+        "Raggadragga, Goreguts Boss",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, raggadragga);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.triggers.len(), 2);
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| s
+            .affected
+            .as_ref()
+            .is_some_and(|f| target_filter_uses_filter_prop(f, &|p| matches!(
+                p,
+                FilterProp::HasManaAbility
+            )))));
+    let whip = "Equipped creature has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\" (Exile cards from the top of your library until you exile a nonland card with mana value 10 or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)\nEquip {1}";
+    let mut doc = parse_oracle_ir(
+        whip,
+        "Swashbuckler's Whip",
+        &[],
+        &["Artifact".into()],
+        &["Equipment".into()],
+    );
+    assert_eq!(doc.source_text, whip);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.abilities.len(), 1, "independent equip ability");
+    let grants = parsed
+        .statics
+        .iter()
+        .flat_map(|s| &s.modifications)
+        .filter(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .count();
+    assert_eq!(grants, 2);
 }

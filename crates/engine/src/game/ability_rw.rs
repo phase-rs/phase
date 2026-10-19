@@ -2776,6 +2776,12 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
 /// authoritative `rw_quantity_expr` member-bound bit.
 fn member_bound_filter_prop(p: &FilterProp) -> bool {
     match p {
+        // CR 607.2d: a durable choice belongs to this member's own source.
+        FilterProp::ManaValueParity { parity } => match parity {
+            crate::types::ability::ParitySource::SourceChosen => true,
+            crate::types::ability::ParitySource::Fixed(_)
+            | crate::types::ability::ParitySource::LastNamedChoice => false,
+        },
         FilterProp::CanEnchant { target } => member_bound_target_filter(target),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
@@ -2849,7 +2855,6 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasKeywordKind { .. }
         | FilterProp::WithoutKeyword { .. }
         | FilterProp::WithoutKeywordKind { .. }
-        | FilterProp::ManaValueParity { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
@@ -3951,6 +3956,16 @@ fn board_membership_read(filter: &TargetFilter) -> RwProfile {
     // CR 603.10a (PR-6.75 c5): a read whose filter names a per-member-bound set /
     // attachment / chosen referent is member-distinct ⇒ refuses batch-T1.
     p.reads_member_bound |= member_bound_target_filter(filter);
+    if super::filter::filter_contains_filter_prop(filter, &|prop| {
+        matches!(
+            prop,
+            FilterProp::ManaValueParity {
+                parity: crate::types::ability::ParitySource::SourceChosen
+            }
+        )
+    }) {
+        p.merge(reads_src_of(StateKind::Other));
+    }
     p
 }
 
@@ -7304,6 +7319,16 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
     // (target_chooser / nested filter) refuses batch-T1. Position-agnostic —
     // `member_bound_target_filter` descends composites itself.
     p.reads_member_bound |= member_bound_target_filter(x);
+    if super::filter::filter_contains_filter_prop(x, &|prop| {
+        matches!(
+            prop,
+            FilterProp::ManaValueParity {
+                parity: crate::types::ability::ParitySource::SourceChosen
+            }
+        )
+    }) {
+        p.merge(reads_src_of(StateKind::Other));
+    }
     p
 }
 
@@ -7476,6 +7501,51 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u14_parity_classification_axes() {
+        use crate::types::ability::{Parity, ParitySource};
+        for parity in [
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+            ParitySource::SourceChosen,
+        ] {
+            let prop = FilterProp::ManaValueParity { parity };
+            let bound = parity == ParitySource::SourceChosen;
+            assert_eq!(member_bound_filter_prop(&prop), bound);
+            assert!(!legacy_filter_prop(&prop));
+            let typed =
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                    props: vec![FilterProp::Not {
+                        prop: Box::new(prop),
+                    }],
+                }]));
+            for filter in [
+                typed.clone(),
+                TargetFilter::And {
+                    filters: vec![TargetFilter::Any, typed.clone()],
+                },
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, typed.clone()],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(typed.clone()),
+                },
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::DistinctFrom {
+                        reference: Box::new(typed.clone()),
+                    },
+                ])),
+            ] {
+                for profile in [rw_target_filter(&filter), board_membership_read(&filter)] {
+                    assert_eq!(profile.reads_member_bound, bound);
+                    assert_eq!(profile.reads_src.other, bound);
+                    assert!(!profile.reads_event_live && !profile.writes_event_object.any());
+                    assert!(!profile.writes_self.any() && !profile.writes_external.any());
+                }
+            }
+        }
+    }
     use crate::types::ability::{
         AbilityKind, AggregateFunction, ChoiceType, CombatHistoryScope, Comparator, CountScope,
         LetterQuery, PropertyAggregate, PtValue, ReciprocalZoneChoiceRole, TargetSelectionMode,

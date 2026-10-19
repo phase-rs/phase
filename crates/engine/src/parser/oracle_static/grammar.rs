@@ -462,12 +462,16 @@ pub(crate) fn with_keyword_companion(
     if matches!(primary.mode, StaticMode::Continuous) {
         return vec![primary];
     }
-    let mut companion_mods = Vec::new();
-    if let Some(keyword_text) = extract_keyword_clause(predicate) {
-        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
-            push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+    let companion_mods = if let Some(keyword_text) = extract_keyword_clause(predicate) {
+        match super::keyword_grant::parse_complete_continuous_modifications(&format!(
+            "has {keyword_text}"
+        )) {
+            Some(modifications) => modifications,
+            None => return vec![continuous_predicate_residual(affected.clone(), description)],
         }
-    }
+    } else {
+        Vec::new()
+    };
     if companion_mods.is_empty() {
         return vec![primary];
     }
@@ -1883,29 +1887,43 @@ pub(crate) fn strip_trailing_keyword_clause(clause: &str) -> &str {
 
 pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
     let lower = text.to_lowercase();
-
-    for needle in [
-        " and gains ",
-        " and gain ",
-        " and has ",
-        " and have ",
-        " gains ",
-        " gain ",
-        " has ",
-        " have ",
-    ] {
-        if let Some(pos) = lower.find(needle) {
-            return Some(&text[pos + needle.len()..]);
+    let tp = TextPair::new(text, &lower);
+    let body = nom_primitives::scan_at_word_boundaries(lower.as_str(), |candidate| {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gains "),
+            tag("gain "),
+            tag("has "),
+            tag("have "),
+        ))
+        .parse(candidate)?;
+        let offset = lower.len() - candidate.len();
+        if text[..offset].chars().filter(|c| *c == '"').count() % 2 != 0 {
+            return Err(nom::Err::Error(OracleError::new(
+                candidate,
+                nom::error::ErrorKind::Fail,
+            )));
         }
-    }
-
-    for prefix in ["gains ", "gain ", "has ", "have "] {
-        if nom_tag_lower(&lower, &lower, prefix).is_some() {
-            return Some(&text[prefix.len()..]);
-        }
-    }
-
-    None
+        Ok((rest, tp.slice(lower.len() - rest.len(), lower.len())))
+    })?;
+    // Only an independently modeled clause owns a following non-keyword span.
+    // Unknown tails remain in the keyword leg and are rejected by strict admission.
+    let end = [
+        " and gets ",
+        " and get ",
+        " and is ",
+        " and are ",
+        " and loses ",
+        " and lose ",
+    ]
+    .into_iter()
+    .filter_map(|marker| {
+        body.split_around_outside_quotes(marker)
+            .map(|(before, _)| before.original.len())
+    })
+    .min()
+    .unwrap_or(body.original.len());
+    let start = body.original.as_ptr() as usize - text.as_ptr() as usize;
+    Some(text[start..start + end].trim())
 }
 
 /// Extract the keyword text from "lose [keyword]" / "loses [keyword]" clauses.
@@ -2060,6 +2078,28 @@ pub(crate) fn map_keyword(text: &str) -> Option<Keyword> {
         Ok(kw) => Some(kw),
         Err(_) => None, // Infallible, but satisfy the compiler
     }
+}
+
+/// Complete continuous predicates share the router's remainder-preserving core.
+pub(crate) fn map_keyword_complete(text: &str) -> Option<Keyword> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    map_self_cost_graveyard_keyword(&lower)
+        .or_else(|| {
+            all_consuming(value(
+                Keyword::Changeling,
+                tag::<_, _, OracleError<'_>>("all creature types"),
+            ))
+            .parse(lower.as_str())
+            .ok()
+            .map(|(_, kw)| kw)
+        })
+        .or_else(|| {
+            all_consuming(parse_basic_landwalk_qualifier)
+                .parse(lower.as_str())
+                .ok()
+                .map(|(_, land)| Keyword::Landwalk(land.to_string()))
+        })
+        .or_else(|| super::oracle_keyword::parse_router_keyword_fragment(&lower))
 }
 
 pub(crate) fn parse_landwalk_keyword(text: &str) -> Option<Keyword> {

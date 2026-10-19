@@ -1619,7 +1619,7 @@ pub(crate) fn parse_static_line_inner(
         if let Some(def) = parse_all_subject_are_color(&tp, &text) {
             return Some(def);
         }
-        if let Some(def) = parse_continuous_gets_has(
+        if let Some(def) = parse_complete_continuous_predicate(
             rest.original,
             TargetFilter::Typed(TypedFilter::creature()),
             &text,
@@ -1828,7 +1828,7 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) = parse_complete_continuous_predicate(predicate_text, filter, &text) {
             return Some(def);
         }
     }
@@ -1907,7 +1907,7 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) = parse_complete_continuous_predicate(predicate_text, filter, &text) {
             return Some(def);
         }
     }
@@ -2024,36 +2024,8 @@ pub(crate) fn parse_static_line_inner(
 
     // --- "During your turn, [subject] has/gets ..." ---
     // --- "During turns other than yours, [subject] has/gets ..." ---
-    let (turn_rest_tp, turn_condition) =
-        if let Some(rest_tp) = nom_tag_tp(&tp, "during your turn, ") {
-            (Some(rest_tp), Some(StaticCondition::DuringYourTurn))
-        } else if let Some(rest_tp) = nom_tag_tp(&tp, "during turns other than yours, ") {
-            (
-                Some(rest_tp),
-                Some(StaticCondition::Not {
-                    condition: Box::new(StaticCondition::DuringYourTurn),
-                }),
-            )
-        } else {
-            (None, None)
-        };
-    if let (Some(rest_tp), Some(condition)) = (turn_rest_tp, turn_condition) {
-        if let Some(subject_end) = find_continuous_predicate_start(rest_tp.lower) {
-            let subject = rest_tp.original[..subject_end].trim();
-            let predicate = rest_tp.original[subject_end + 1..].trim();
-            if let Some(affected) = parse_continuous_subject_filter(subject) {
-                let modifications = parse_continuous_modifications(predicate);
-                if !modifications.is_empty() {
-                    return Some(
-                        StaticDefinition::continuous()
-                            .affected(affected)
-                            .modifications(modifications)
-                            .condition(condition)
-                            .description(text.to_string()),
-                    );
-                }
-            }
-        }
+    if let Some(def) = parse_turn_scoped_subject_continuous_static(&tp, &text) {
+        return Some(def);
     }
 
     if let Some(def) = parse_subject_rule_static(&text) {
@@ -4314,4 +4286,32 @@ mod structural_marker_tests {
             );
         }
     }
+}
+
+/// The generic turn-scoped owner remains at its existing dispatch position.
+pub(super) fn parse_turn_scoped_subject_continuous_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (body, condition) = if let Some(body) = nom_tag_tp(tp, "during your turn, ") {
+        (body, StaticCondition::DuringYourTurn)
+    } else {
+        (
+            nom_tag_tp(tp, "during turns other than yours, ")?,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+        )
+    };
+    parse_continuous_subject_predicate(&body, |subject, predicate| {
+        let affected = parse_continuous_subject_filter(subject)?;
+        let mut def = parse_complete_continuous_predicate(predicate, affected, description)?;
+        def.condition = Some(match def.condition.take() {
+            Some(existing) => StaticCondition::And {
+                conditions: vec![condition.clone(), existing],
+            },
+            None => condition.clone(),
+        });
+        Some(def)
+    })
 }
