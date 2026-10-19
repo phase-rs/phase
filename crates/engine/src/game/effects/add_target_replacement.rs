@@ -1974,11 +1974,13 @@ mod tests {
         (state, source, entering)
     }
 
-    /// Resolve the floating cast-enters-with rider the way "Whenever you cast a
-    /// creature spell, that creature enters with an additional +1/+1 counter on it
-    /// for each Dog and/or Wolf you control" installs it: `AddTargetReplacement`
-    /// with `TargetFilter::None`, a `PutCounter` whose count reads the installing
-    /// controller's board, and a `valid_card` bound to the triggering spell.
+    /// Resolve a floating cast-enters-with rider shaped like Torgal, A Fine
+    /// Hound's payload ("that creature enters with an additional +1/+1 counter on
+    /// it for each Dog and/or Wolf you control"; the first-Human-each-turn trigger
+    /// gate is omitted) the way a resolving trigger installs it:
+    /// `AddTargetReplacement` with `TargetFilter::None`, a `PutCounter` whose count
+    /// reads the installing controller's board, and a `valid_card` bound to the
+    /// triggering spell.
     fn install_dog_wolf_entry_rider(state: &mut GameState, source: ObjectId, entering: ObjectId) {
         use crate::types::ability::{
             AbilityKind, ControllerRef, QuantityExpr, QuantityRef, TypedFilter,
@@ -2065,10 +2067,12 @@ mod tests {
     /// (counted once) and a Wolf; P0 controls one Wolf; so P1's creature enters
     /// with 3 counters, not P0's 1.
     ///
-    /// Reverting the controller threading in `extract_etb_counters_from_effect`
-    /// (back to the `PlayerId(0)` fallback for the sentinel source) makes the
-    /// `3` assertion read P0's board (1); reverting the install-time anchor leaves
-    /// `source_object` as `None`, which the provenance assertion catches.
+    /// Reverting the install-time anchor leaves `source_object` as `None`, which
+    /// the provenance assertion catches. The controller threading in
+    /// `extract_etb_counters_from_effect` is guarded by
+    /// `floating_entry_counter_rider_you_is_latched_when_source_changes_control`:
+    /// here the anchored source is still P1's, so a reverted live-source read also
+    /// yields P1.
     #[test]
     fn floating_entry_counter_rider_counts_installing_controllers_board() {
         use crate::types::counter::CounterType;
