@@ -566,3 +566,61 @@ fn active_multi_draw_frame() -> ResolutionFrame {
         connive_reentry: None,
     })
 }
+
+#[test]
+fn current_creation_frame_transition_roundtrip_retains_its_operation_and_public_child_resume() {
+    use engine::game::scenario::{GameRunner, GameScenario, P0};
+    use engine::types::actions::GameAction;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0,"Jinnie Fay, Jetmir's Second",3,3,"If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.");
+    let spell=scenario.add_spell_to_hand_from_oracle(P0,"Synthetic transition source",false,"Create two 1/1 white Soldier creature tokens. Sacrifice those tokens at the beginning of the next end step.").id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    let frame = frames(runner.state())
+        .into_iter()
+        .find(|frame| matches!(frame, ResolutionFrame::CopyToken(_)))
+        .unwrap();
+    let ResolutionFrame::CopyToken(ref owner) = frame else {
+        unreachable!()
+    };
+    assert!(owner.creation_id.is_some());
+    assert!(owner.continuation.is_some());
+    assert!(!owner.work.is_empty() || owner.pending.is_some());
+    assert_command_round_trip(&command(ResolvedFrameTransition::Push { frame }));
+    runner = GameRunner::from_state(
+        serde_json::from_value::<ResolutionStateWire>(
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap(),
+        )
+        .unwrap()
+        .into_game_state(),
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseOneOfBranch { .. }
+    ));
+    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    assert!(runner.state().resolution_stack.is_empty());
+    let delayed = runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .find(|trigger| trigger.source_id == spell)
+        .unwrap();
+    assert_eq!(delayed.ability.target_incarnations.len(), 2);
+    for member in &delayed.ability.target_incarnations {
+        let token = &runner.state().objects[&member.object_id];
+        assert_eq!(
+            (token.name.as_str(), token.base_power, token.base_toughness),
+            ("Dog", Some(3), Some(1))
+        );
+    }
+}

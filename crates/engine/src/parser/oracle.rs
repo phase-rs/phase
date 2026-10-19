@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::game::effects::cast_from_zone;
 use crate::game::filter::{
-    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type,
+    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type, rewrite_filter_props,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
@@ -19,10 +19,10 @@ use crate::types::ability::{
     CastManaSpentMetric, CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CounterSourceRider,
     DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GuardReading, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    GuardReading, ManaProduction, ModalChoice, ParitySource, ParsedCondition, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition,
+    SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -64,8 +64,8 @@ use super::oracle_classifier::{
     is_instead_replacement_line, is_one_time_boon_grant_line, is_opening_hand_begin_game,
     is_pay_life_as_colored_mana_pattern, is_replacement_pattern,
     is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
-    strip_entry_this_way_riders,
+    parse_outer_spell_instruction_head, should_defer_spell_to_effect,
+    split_flashback_trailing_self_spell_cost_reduction, strip_entry_this_way_riders,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
@@ -1417,6 +1417,7 @@ fn finalize_document_relations(mut doc: OracleDocIr, types: &[String]) -> Oracle
     detect_linked_choice_linked_color(&doc.items, &mut relations);
     finalize_relation_syntheses(&mut doc, &relations);
     apply_linked_color_choice_suppression(&mut doc, &relations);
+    apply_source_parity_statics(&mut doc, &relations);
     doc.relations.extend(relations);
     doc
 }
@@ -1645,8 +1646,313 @@ fn finalize_relation_syntheses(doc: &mut OracleDocIr, relations: &[DocumentRelat
     }
 }
 
+/// CR 607.2d + CR 614.12a: only an unconditional, mandatory self-entry choice
+/// supplies a separate durable parity reader. No category-vector inference.
+fn source_parity_chooser(item: &OracleItemIr) -> bool {
+    let OracleNodeIr::Replacement(ir) = &item.node else {
+        return false;
+    };
+    let def = &ir.definition;
+    if def.event != ReplacementEvent::Moved
+        || def.mode != ReplacementMode::Mandatory
+        || def.destination_zone != Some(Zone::Battlefield)
+        || def.valid_card != Some(TargetFilter::SelfRef)
+        || def.condition.is_some()
+        || def.runtime_execute.is_some()
+    {
+        return false;
+    }
+    def.execute.as_deref().is_some_and(|a| {
+        a.sub_ability.is_none() && a.else_ability.is_none() && a.condition.is_none()
+            && !a.optional && a.mode_abilities.is_empty()
+            && matches!(a.effect.as_ref(), Effect::Choose { choice_type: ChoiceType::OddOrEven, persist: true, selection } if selection.is_chosen())
+            && a == &AbilityDefinition::new(AbilityKind::Spell, a.effect.as_ref().clone())
+    })
+        && {
+            let mut plain = ReplacementDefinition::new(ReplacementEvent::Moved);
+            plain.valid_card = Some(TargetFilter::SelfRef);
+            plain.destination_zone = Some(Zone::Battlefield);
+            plain.execute = def.execute.clone();
+            plain.description = def.description.clone();
+            def == &plain
+        }
+}
+
+fn source_parity_static_reader(filter: &TargetFilter) -> bool {
+    target_filter_uses_filter_prop(filter, &|p| {
+        matches!(
+            p,
+            FilterProp::ManaValueParity {
+                parity: ParitySource::LastNamedChoice
+            }
+        )
+    })
+}
+
+fn source_parity_replacement_reader(def: &ReplacementDefinition) -> bool {
+    def.event == ReplacementEvent::Moved
+        && def.destination_zone == Some(Zone::Battlefield)
+        && def.mode == ReplacementMode::Mandatory
+        && def.condition.is_none()
+        && def.runtime_execute.is_none()
+        && def.valid_card.as_ref().is_some_and(|filter| {
+            crate::game::filter::filter_implies_battlefield_permanent(filter)
+                && source_parity_static_reader(filter)
+        })
+        && def.execute.as_deref().is_some_and(|ability| {
+            !ability.optional
+                && ability.condition.is_none()
+                && ability.sub_ability.is_none()
+                && ability.else_ability.is_none()
+                && ability.mode_abilities.is_empty()
+                && matches!(
+                    ability.effect.as_ref(),
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap | TapStateChange::Untap,
+                    }
+                )
+                && ability
+                    == &AbilityDefinition::new(AbilityKind::Spell, ability.effect.as_ref().clone())
+        })
+        && {
+            let mut plain = ReplacementDefinition::new(ReplacementEvent::Moved);
+            plain.destination_zone = Some(Zone::Battlefield);
+            plain.valid_card = def.valid_card.clone();
+            plain.execute = def.execute.clone();
+            plain.description = def.description.clone();
+            def == &plain
+        }
+}
+
+fn detect_source_parity_statics(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
+    let suppliers: Vec<_> = items
+        .iter()
+        .filter(|item| source_parity_chooser(item))
+        .collect();
+    let [chooser] = suppliers.as_slice() else {
+        return;
+    };
+    let statics: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            item_static(item)
+                .is_some_and(|s| s.affected.as_ref().is_some_and(source_parity_static_reader))
+        })
+        .map(|i| i.id)
+        .collect();
+    let replacements: Vec<_> = items
+        .iter()
+        .filter_map(|item| match &item.node {
+            OracleNodeIr::Replacement(ir) if source_parity_replacement_reader(&ir.definition) => {
+                Some(item.id)
+            }
+            _ => None,
+        })
+        .collect();
+    if !statics.is_empty() || !replacements.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::SourceParityStatic {
+                chooser: chooser.id,
+                statics,
+                replacements,
+            },
+        ));
+    }
+}
+
+/// CR 607.2d + CR 607.5a: validate the complete source-addressed relation before
+/// any mutation. An unowned/ambiguous/forward/stale reader is a complete strict
+/// failure on its original item; it may never borrow a resolution-local choice.
+fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelationIr]) {
+    for item in &mut doc.items {
+        let OracleNodeIr::Static(ir) = &item.node else {
+            continue;
+        };
+        if ir.definition.modifications.iter().any(|m| {
+            matches!(m,
+            ContinuousModification::GrantAbility { definition }
+                if matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }))
+        }) {
+            let fragment = ir.source_text.clone();
+            item.node = OracleNodeIr::Unsupported {
+                unsupported: UnsupportedAbilityIr::new(
+                    UnsupportedAbilityCategory::StaticStructure,
+                    fragment.clone(),
+                    fragment,
+                ),
+                min_x_value: 0,
+            };
+        }
+    }
+    let readers: Vec<_> = doc
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let filter = match &item.node {
+                OracleNodeIr::Static(ir) => ir.definition.affected.as_ref(),
+                OracleNodeIr::Replacement(ir) => ir.definition.valid_card.as_ref(),
+                _ => None,
+            };
+            filter
+                .is_some_and(source_parity_static_reader)
+                .then_some(index)
+        })
+        .collect();
+    if readers.is_empty() {
+        return;
+    }
+    // Item spans belong to the parser's normalized line buffer, not raw Oracle.
+    // Reuse that exact normalization before trusting an externally supplied
+    // relation's item/source pair; a foreign or stale fragment is no supplier.
+    let normalized = normalize_card_name_refs(&doc.source_text, &doc.card_name);
+    let source_lines: Vec<_> = normalized.split('\n').collect();
+    let source_is_current = |item: &OracleItemIr| {
+        let span = item.source.span();
+        if item.source.id().item != item.id
+            || span.first_line > span.last_line
+            || span.last_line >= source_lines.len()
+            || span.precision != super::oracle_ir::doc::SpanPrecision::Exact
+        {
+            return false;
+        }
+        let start: usize = source_lines[..span.first_line]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum();
+        let end: usize = source_lines[..=span.last_line]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum::<usize>()
+            - 1;
+        span.start_byte == start
+            && span.end_byte == end
+            && item.source.fragment() == Some(source_lines[span.first_line])
+    };
+    let parity_relations: Vec<_> = relations
+        .iter()
+        .filter_map(|r| match r {
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                chooser,
+                statics,
+                replacements,
+            }) => Some((*chooser, statics, replacements)),
+            _ => None,
+        })
+        .collect();
+    let prepared = (|| {
+        let [(chooser_id, statics, replacements)] = parity_relations.as_slice() else {
+            return None;
+        };
+        if statics.len() + replacements.len() != readers.len()
+            || statics.iter().any(|id| replacements.contains(id))
+            || replacements
+                .iter()
+                .enumerate()
+                .any(|(index, id)| replacements[..index].contains(id))
+            || doc
+                .items
+                .iter()
+                .enumerate()
+                .any(|(index, item)| doc.items[..index].iter().any(|other| other.id == item.id))
+            || statics
+                .iter()
+                .enumerate()
+                .any(|(index, id)| statics[..index].contains(id))
+            || doc
+                .items
+                .iter()
+                .filter(|i| source_parity_chooser(i))
+                .count()
+                != 1
+        {
+            return None;
+        }
+        let chooser = doc.items.iter().find(|i| i.id == *chooser_id)?;
+        if !source_parity_chooser(chooser) || !source_is_current(chooser) {
+            return None;
+        }
+        let before = chooser.source.span();
+        let mut rewritten = Vec::new();
+        for index in &readers {
+            let item = &doc.items[*index];
+            let after = item.source.span();
+            if item.id == *chooser_id
+                || !source_is_current(item)
+                || (before.first_line, before.ordinal_within_span)
+                    >= (after.first_line, after.ordinal_within_span)
+                || before.start_byte > after.start_byte
+            {
+                return None;
+            }
+            let mut filter = match &item.node {
+                OracleNodeIr::Static(ir) if statics.contains(&item.id) => {
+                    ir.definition.affected.clone()?
+                }
+                OracleNodeIr::Replacement(ir)
+                    if replacements.contains(&item.id)
+                        && source_parity_replacement_reader(&ir.definition) =>
+                {
+                    ir.definition.valid_card.clone()?
+                }
+                _ => return None,
+            };
+            let mut complete = true;
+            rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: parity @ ParitySource::LastNamedChoice,
+                    } = prop
+                    {
+                        *parity = ParitySource::SourceChosen;
+                    }
+                },
+                &mut complete,
+            );
+            if !complete || source_parity_static_reader(&filter) {
+                return None;
+            }
+            rewritten.push((*index, filter));
+        }
+        Some(rewritten)
+    })();
+    if let Some(rewritten) = prepared {
+        for (index, filter) in rewritten {
+            match &mut doc.items[index].node {
+                OracleNodeIr::Static(ir) => ir.definition.affected = Some(filter),
+                OracleNodeIr::Replacement(ir) => ir.definition.valid_card = Some(filter),
+                _ => unreachable!("validated reader category"),
+            }
+        }
+    } else {
+        for index in readers {
+            let item = &mut doc.items[index];
+            let (category, fragment) = match &item.node {
+                OracleNodeIr::Static(ir) => (
+                    UnsupportedAbilityCategory::StaticStructure,
+                    ir.source_text.clone(),
+                ),
+                OracleNodeIr::Replacement(ir) => (
+                    UnsupportedAbilityCategory::ReplacementStructure,
+                    ir.source_text.clone(),
+                ),
+                _ => unreachable!("collected reader category"),
+            };
+            item.node = OracleNodeIr::Unsupported {
+                unsupported: UnsupportedAbilityIr::new(category, fragment.clone(), fragment),
+                min_x_value: 0,
+            };
+        }
+    }
+}
+
 fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
     let mut relations = Vec::new();
+    detect_source_parity_statics(items, &mut relations);
     detect_linked_choice_etb_counter(items, &mut relations);
     detect_linked_choice_constrained_card_type_static(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);
@@ -3663,19 +3969,15 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    // CR 111.3 + CR 111.4: mask double-quoted spans (a created token/permanent's
-    // defined inline ability text) before spell-line static classification, so a
-    // token's quoted "can't block" etc. doesn't mark this resolution line static.
-    // This function is already spell-scoped (caller is inside `if is_spell {`).
-    // The adjacent is_replacement_pattern check below stays on the UNMASKED text.
-    //
-    // Gate the mask on a token/permanent-creation verb being present: only then is
-    // a quoted span an inline ability *of the created object* ("create ... with
-    // \"…\""). On a line with no creation verb the quote is instead a granted-
-    // ability payload ("…perpetually gain \"This spell costs {1} less\""), whose
-    // inner static shape is load-bearing for routing — masking it there misroutes
-    // the grant (coverage regression: Circadian Struggle, Absorb Energy).
-    let static_view = if scan_contains(&effect_lower, "create") {
+    let owns_outer_instruction = parse_outer_spell_instruction_head(&effect_lower).is_ok();
+    // CR 113.3a + CR 111.3: an anchored command retains its unmasked scope.
+    // For other creation lines, keep the compatibility quote view protecting
+    // token-owned abilities (including White Sun's "You gain" instruction).
+    // This view only feeds static classification; grants still reach the
+    // semantic parser in the original text and belong to their recipients.
+    let static_view = if owns_outer_instruction {
+        std::borrow::Cow::Borrowed(effect_lower.as_str())
+    } else if scan_contains(&effect_lower, "create") {
         crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&effect_lower)
     } else {
         std::borrow::Cow::Borrowed(effect_lower.as_str())
@@ -3761,6 +4063,12 @@ fn is_spell_resolution_instruction_line(
         .is_ok()
     {
         return false;
+    }
+
+    // CR 113.3a + CR 608.2c: structural owners above take precedence; the
+    // command's ownership does not depend on completing its later semantics.
+    if owns_outer_instruction {
+        return true;
     }
 
     let snapshot = ctx.diagnostics.len();
@@ -5517,6 +5825,8 @@ fn parse_normalized_oracle_ir(
     // `normalize_card_name_refs` on this pre-normalized text; strategies 1-4
     // find nothing to replace and strategy 5 is short-circuited by its
     // `!result.contains('~')` guard, making re-entry an idempotent no-op.
+    // Item geometry uses these normalized physical lines. The document retains
+    // original Oracle separately; item byte offsets cannot index that raw buffer.
     let lines: Vec<&str> = normalized_oracle_text.split('\n').collect();
 
     // u4-c2 source-order emission: the document builder, wrapped in the emitter
@@ -7165,26 +7475,26 @@ fn parse_normalized_oracle_ir(
         // effect parser at Priority 9. Damage-verb lines are also deferred because
         // parse_effect_chain handles embedded statics via split_clause_sequence.
         //
-        // CR 111.3 + CR 111.4: a double-quoted span is an inline granted ability of
-        // a created token/permanent (the token's defined "text"), not the host
-        // line's own static clause; mask it before spell-line static classification
-        // so e.g. a token's "This token can't block." doesn't route the whole
-        // sorcery to the static parser. Spell-scoped only — the masked view feeds
-        // the gate predicate exclusively; every replacement gate below and the
-        // static_line passed to parse_static_line* stay on the UNMASKED text.
-        //
-        // Gate on a creation verb: only "create ... with \"…\"" makes the quote an
-        // inline ability of the created object. Without one, the quote is a granted-
-        // ability payload ("…perpetually gain \"This spell costs {1} less\"") whose
-        // inner static shape is load-bearing for routing — masking it there
-        // misroutes the grant (coverage regression: Circadian Struggle, Absorb
-        // Energy). Non-creation lines therefore keep the UNMASKED baseline view.
+        // CR 113.3a + CR 608.2c: decide outer ownership from the prepared,
+        // unmasked instruction before any consuming static branch. Genuine
+        // host costs remain static through the shared self-cost-first guard.
+        let is_ability_word_trigger = strip_ability_word(&line)
+            .is_some_and(|stripped| has_trigger_prefix(&stripped.to_lowercase()));
+        let defer_to_effect_parser = is_ability_word_trigger
+            || (is_spell
+                && prepare_spell_resolution_line(&line).is_some_and(|prepared| {
+                    should_defer_spell_to_effect(&prepared.effect_text.to_lowercase())
+                }));
+        // CR 111.3 + CR 111.4: retain the compatibility quote view for creation
+        // lines outside the owned command category (including White Sun's
+        // "You gain" head). It feeds only static classification; the original
+        // text still reaches semantic parsing with recipient grants intact.
         let static_classify_view = if is_spell && scan_contains(&lower, "create") {
             crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower)
         } else {
             std::borrow::Cow::Borrowed(lower.as_str())
         };
-        if is_static_pattern(&static_classify_view) {
+        if !defer_to_effect_parser && is_static_pattern(&static_classify_view) {
             if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
                 i += 1;
                 continue;
@@ -7315,15 +7625,6 @@ fn parse_normalized_oracle_ir(
                     continue;
                 }
             }
-            // Guard: ability-word-prefixed trigger lines (e.g., "Flurry — Whenever...")
-            // handled above at Priority 6b. The check below is kept as a defensive
-            // guard for any edge cases that reach Priority 7.
-            let is_ability_word_trigger = strip_ability_word(&line).is_some_and(|stripped| {
-                let sl = stripped.to_lowercase();
-                has_trigger_prefix(&sl)
-            });
-            let defer_to_effect_parser =
-                is_ability_word_trigger || (is_spell && should_defer_spell_to_effect(&lower));
             if !defer_to_effect_parser {
                 // B7: Ability-word-prefixed static lines — strip prefix and attach condition.
                 // Must happen here (Priority 7) because Priority 9 (spell catch-all) would
@@ -8340,6 +8641,8 @@ fn parse_normalized_oracle_ir(
                     ResidualConditionPolicy::Clear,
                 );
             }
+            // The item anchors the normalized head line; AbilityIr and its root
+            // description retain the complete prepared body and collected lines.
             emitter.ability_ir_at(item_line, ability_ir);
             continue;
         }

@@ -3412,13 +3412,14 @@ pub(super) fn handle_resolution_choice(
                                         controller: player,
                                     }),
                                 };
-                                crate::game::effects::token_copy::drive_copy_token_batches(
-                                    state,
-                                    std::collections::VecDeque::from([batch]),
-                                    EffectKind::CopyTokenOf,
-                                    ObjectId(0),
-                                    events,
-                                );
+                                let progress =
+                                    crate::game::effects::token_copy::drive_copy_token_batches(
+                                        state,
+                                        std::collections::VecDeque::from([batch]),
+                                        EffectKind::CopyTokenOf,
+                                        ObjectId(0),
+                                        events,
+                                    );
                                 // DEFENSE-IN-DEPTH AT ACCEPT ONLY. The offer firewall runs at
                                 // CERTIFICATION. It
                                 // cannot bind this mint, which happens later: a replacement
@@ -3445,7 +3446,10 @@ pub(super) fn handle_resolution_choice(
                                 // stay correct because the ∞ marks are not cleared). No
                                 // `debug_assert!` — the defensive test deliberately drives this
                                 // pause, which a debug_assert would panic.
-                                if state.active_copy_token().is_some() {
+                                if matches!(
+                                    progress,
+                                    crate::types::game_state::TokenCreationProgress::Pending(_)
+                                ) {
                                     // CR 732.2a pause-safe transaction: cash out the axes already
                                     // applied THIS pass (a mixed stash, Edit 1 puts Tokens last) so
                                     // no finite-applied Counters/Life axis is left with a stale ∞
@@ -3750,14 +3754,31 @@ pub(super) fn handle_resolution_choice(
                     "Selected token not in valid populate choices".into(),
                 ));
             }
-            let dummy_ability = ResolvedAbility::new(
-                crate::types::ability::Effect::Populate,
-                vec![],
-                source_id,
-                player,
-            );
-            let _ = effects::populate::create_token_copy(state, token_id, &dummy_ability, events);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            if effects::populate::answer_current_selection(state, token_id, events)
+                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+                .is_some()
+            {
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                let mut legacy = ResolvedAbility::new(
+                    crate::types::ability::Effect::Populate,
+                    vec![],
+                    source_id,
+                    player,
+                );
+                if let Some(pending) = state
+                    .take_active_ability_continuation()
+                    .expect("legacy Populate consumes only its top continuation")
+                {
+                    legacy.sub_ability = Some(pending.pending.chain);
+                }
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::populate::create_token_copy(state, token_id, &legacy, events)
+                    .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            }
         }
         (
             WaitingFor::BeholdChoice { player, choices },
@@ -14696,5 +14717,132 @@ mod tests {
             vec![pile[1], pile[3], p1c, pile[5], pile[9]],
             "separate libraries place the card third from the top of its owner's"
         );
+    }
+}
+
+#[cfg(test)]
+mod token_materialization_completion_tests {
+    use super::*;
+    #[test]
+    fn persistent_token_materialization_waits_for_queued_and_counter_children_after_reload() {
+        use crate::game::effects::token_copy::tests::{
+            creation_test_source, install_creation_fixture_replacements, CreationPauseCase,
+        };
+        for pause in [
+            CreationPauseCase::Synchronous,
+            CreationPauseCase::Queued,
+            CreationPauseCase::Counter,
+            CreationPauseCase::ReloadQueued,
+            CreationPauseCase::ReloadCounter,
+        ] {
+            let mut state = GameState::new_two_player(997);
+            let source = creation_test_source(
+                &mut state,
+                "Persistent token class",
+                vec![crate::types::card_type::CoreType::Creature],
+                vec![],
+                2,
+                3,
+            );
+            let profile =
+                crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+            install_creation_fixture_replacements(&mut state, pause);
+            let life = state.players[0].life;
+            let phase = state.phase;
+            state.register_pending_materialization(
+                PlayerId(0),
+                PersistentAxisMaterialization::Tokens(Box::new(
+                    crate::types::game_state::TokenGrowth {
+                        profile: Box::new(profile),
+                        per_cycle_delta: 1,
+                    },
+                )),
+            );
+            state.register_pending_materialization(
+                PlayerId(0),
+                PersistentAxisMaterialization::Life {
+                    player: PlayerId(0),
+                    per_cycle_delta: 2,
+                },
+            );
+            state.waiting_for = WaitingFor::PayAmountChoice {
+                player: PlayerId(0),
+                resource: PayableResource::LoopCollapse,
+                min: 1,
+                max: 1,
+                accumulated: 0,
+                source_id: ObjectId(0),
+                pending_mana_ability: None,
+            };
+            let mut events = crate::game::apply_as_current(
+                &mut state,
+                GameAction::SubmitPayAmount { amount: 1 },
+            )
+            .unwrap()
+            .events;
+            if !matches!(pause, CreationPauseCase::Synchronous) {
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ));
+                assert_eq!(state.phase, phase);
+                assert_eq!(state.players[0].life, life + 2);
+            }
+            if matches!(
+                pause,
+                CreationPauseCase::ReloadQueued | CreationPauseCase::ReloadCounter
+            ) {
+                state = serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_game_state();
+            }
+            for _ in 0..60 {
+                let action = match state.waiting_for {
+                    WaitingFor::ReplacementChoice { .. } => {
+                        GameAction::ChooseReplacement { index: 0 }
+                    }
+                    WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 1 },
+                    WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => break,
+                    ref other => panic!("persistent token completion: {other:?}"),
+                };
+                events.extend(
+                    crate::game::apply_as_current(&mut state, action)
+                        .unwrap()
+                        .events,
+                );
+            }
+            let births = events
+                .iter()
+                .filter_map(|event| {
+                    if let GameEvent::TokenCreated { object_id, .. } = event {
+                        Some(*object_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                births.len(),
+                if matches!(
+                    pause,
+                    CreationPauseCase::Queued | CreationPauseCase::ReloadQueued
+                ) {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert!(state.resolution_stack.is_empty());
+            assert_eq!(state.players[0].life, life + 2);
+            for id in births {
+                assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+                assert!(state.objects[&id].tapped);
+            }
+        }
     }
 }

@@ -929,7 +929,13 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 153;
+// 154: TargetFilter.CastingSpell is serialized inside full GameState.
+// 155: exact token creation frames and private copy-source tails use resolution wire 7.
+// 156: typed revealed results and exact queued original origins use resolution wire 8.
+// 157: mandatory specified-kind/exact-recipient counter adjustment.
+// 158: exact removal reflexives and private damage-source authority use resolution wire 9.
+// 159: source-bound chosen-parity references in serialized static definitions.
+export const PROTOCOL_VERSION = 159;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

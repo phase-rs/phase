@@ -297,7 +297,8 @@ mod tests {
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
-    use std::time::Duration;
+    use std::sync::{Arc, RwLock};
+    use web_time::Duration;
 
     const BEAST_WITHIN_ORACLE: &str =
         "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.";
@@ -1037,6 +1038,235 @@ mod tests {
             remaining <= Duration::from_millis(15),
             "the interactive projection budget must not exceed the 15 ms cap; got {remaining:?}"
         );
+    }
+
+    #[test]
+    fn velocity_score_projection_deadline_observer_is_live_on_a_traversing_fixture() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // The grower is both the reachability mechanism for the
+        // `OpponentBeginCombat` horizon and the removal target under test: a
+        // creature that grows before the opponent's combat is precisely what
+        // `velocity_score` exists to prioritize.
+        let grower = crate::projection::projection_fixtures::seed_opponent_begin_combat_horizon(
+            &mut scenario,
+            P0,
+            PlayerId(1),
+        );
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&bolt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Lightning Bolt fixture should reach target selection");
+
+        // No horizon mutation here: unlike T7, this state is used exactly as the
+        // engine produced it, so `decision` and `state` cannot disagree.
+        let state = runner.state().clone();
+        let decision = build_decision_context(&state);
+        assert!(
+            matches!(&decision.waiting_for, WaitingFor::TargetSelection { .. }),
+            "T7b fixture: the policy's first gate needs a live TargetSelection"
+        );
+
+        // Guard 1 — the begin-combat trigger still parses. Without it the
+        // horizon is unreachable from any state, and guard 2 would report a
+        // confusing GameOverDuringProjection instead.
+        crate::projection::projection_fixtures::assert_begin_combat_trigger_parsed(&state, grower);
+
+        // Guard 2 — and the state genuinely TRAVERSES `project_to`'s loop to
+        // the horizon `velocity_score` hardcodes. A `Confidence::Exact` result
+        // here would mean the fixture had drifted into the short-circuit class,
+        // which is what makes T7 blind to the deadline; both arms below would
+        // then be vacuous.
+        crate::projection::projection_fixtures::assert_traverses_to(
+            &state,
+            P0,
+            PlayerId(1),
+            crate::projection::ProjectionHorizon::OpponentBeginCombat,
+        );
+
+        let measurement = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+
+        let candidate = candidate_for(grower);
+        let horizon = crate::projection::ProjectionHorizon::OpponentBeginCombat;
+
+        // Control — the policy's non-velocity gates pass on THIS fixture.
+        // `Deadline::after(0)` is expired, so `can_afford_projection` is false
+        // and `velocity_score` returns before `get_or_project`. A non-zero total
+        // therefore proves the other gates accept the fixture, so a red positive
+        // arm below is a wiring failure and not a fixture failure.
+        let mut expired_ctx = crate::context::AiContext::empty(&measurement.weights);
+        let expired_observed = Arc::new(RwLock::new(Vec::new()));
+        Arc::get_mut(&mut expired_ctx.session)
+            .expect("fresh expired-control session")
+            .projection_deadline_observer = Some(Arc::clone(&expired_observed));
+        assert!(expired_observed.read().unwrap().is_empty());
+        expired_ctx.deadline = engine::util::Deadline::after(0);
+        assert!(
+            !policy_ctx(&state, &decision, &candidate, &measurement, &expired_ctx)
+                .can_afford_projection()
+        );
+        let control =
+            policy_score_in_context(&state, &decision, grower, &measurement, &expired_ctx);
+        assert_ne!(
+            control, 0.0,
+            "T7b control: EvasionRemovalPriorityPolicy::score must reach velocity_score on this \
+             fixture — a 0.0 means one of its gates rejected it. Stop and report; do not weaken \
+             the arms below."
+        );
+        assert!(
+            expired_ctx
+                .session
+                .projection_cache
+                .read()
+                .unwrap()
+                .is_empty(),
+            "T7b control: with can_afford_projection() false, velocity_score must not project"
+        );
+        assert!(expired_observed.read().unwrap().is_empty());
+
+        // Measurement arm — kills `Deadline::after(0)` and `Deadline::after(15)`.
+        let mut ai_ctx = crate::context::AiContext::empty(&measurement.weights);
+        let measurement_observed = Arc::new(RwLock::new(Vec::new()));
+        Arc::get_mut(&mut ai_ctx.session)
+            .expect("fresh measurement session")
+            .projection_deadline_observer = Some(Arc::clone(&measurement_observed));
+        assert!(measurement_observed.read().unwrap().is_empty());
+        assert!(ai_ctx.session.projection_cache.read().unwrap().is_empty());
+        assert!(
+            policy_ctx(&state, &decision, &candidate, &measurement, &ai_ctx)
+                .can_afford_projection()
+        );
+        let measurement_score =
+            policy_score_in_context(&state, &decision, grower, &measurement, &ai_ctx);
+        let received_measurement = {
+            let deadlines = measurement_observed.read().unwrap();
+            assert_eq!(
+                deadlines.len(),
+                1,
+                "measurement must request one projection"
+            );
+            deadlines[0]
+        };
+        assert_eq!(received_measurement.remaining(), None);
+        assert!(!received_measurement.expired());
+        assert_eq!(
+            ai_ctx.session.projection_cache.read().unwrap().len(),
+            1,
+            "the real measurement traversal must complete and cache"
+        );
+        let cached = ai_ctx
+            .session
+            .cached_projection(&state, P0, PlayerId(1), horizon)
+            .expect("measurement caches the exact requested coordinates");
+        assert_eq!(cached.horizon_reached, horizon);
+        assert_eq!(cached.target_opponent, PlayerId(1));
+        assert!(matches!(
+            cached.confidence,
+            crate::projection::Confidence::Approximated { choice_count } if choice_count >= 1
+        ));
+
+        // The successful measurement cache wins even when the caller's budget expires.
+        ai_ctx.deadline = engine::util::Deadline::after(0);
+        let cached_score =
+            policy_score_in_context(&state, &decision, grower, &measurement, &ai_ctx);
+        assert_eq!(cached_score, measurement_score);
+        let cached_again = ai_ctx
+            .session
+            .cached_projection(&state, P0, PlayerId(1), horizon)
+            .expect("expired caller retains the exact cached projection");
+        assert!(Arc::ptr_eq(&cached, &cached_again));
+        assert_eq!(ai_ctx.session.projection_cache.read().unwrap().len(), 1);
+        assert_eq!(measurement_observed.read().unwrap().len(), 1);
+
+        // Interactive arm — kills `ctx.context.deadline`.
+        let interactive = create_config(AiDifficulty::Medium, Platform::Native);
+        assert!(
+            !interactive.execution_mode.is_measurement(),
+            "T7b interactive arm: create_config must default to ExecutionMode::Interactive"
+        );
+        let mut interactive_ctx = crate::context::AiContext::empty(&interactive.weights);
+        let interactive_observed = Arc::new(RwLock::new(Vec::new()));
+        Arc::get_mut(&mut interactive_ctx.session)
+            .expect("fresh interactive session")
+            .projection_deadline_observer = Some(Arc::clone(&interactive_observed));
+        assert!(interactive_observed.read().unwrap().is_empty());
+        assert!(interactive_ctx
+            .session
+            .projection_cache
+            .read()
+            .unwrap()
+            .is_empty());
+        assert_eq!(interactive_ctx.deadline.remaining(), None);
+        // Non-vacuity guard: the arm is only meaningful if the policy actually
+        // REACHES `get_or_project` in this context. `AiContext::empty` carries
+        // `Deadline::none()`, so `can_afford_projection`'s `is_none_or` floor
+        // bypass applies despite Medium's 2000 ms `projection_min_budget_ms`.
+        // Were that false, the cache would be empty because nothing projected,
+        // and the assertion below would pass no matter what deadline the
+        // production line passes.
+        assert!(
+            policy_ctx(
+                &state,
+                &decision,
+                &candidate,
+                &interactive,
+                &interactive_ctx
+            )
+            .can_afford_projection(),
+            "T7b interactive arm would be vacuous: velocity_score never reaches get_or_project \
+             because can_afford_projection() is false"
+        );
+        let _ = policy_score_in_context(&state, &decision, grower, &interactive, &interactive_ctx);
+        let received_interactive = {
+            let deadlines = interactive_observed.read().unwrap();
+            assert_eq!(
+                deadlines.len(),
+                1,
+                "interactive must request one projection"
+            );
+            deadlines[0]
+        };
+        assert!(
+            received_interactive
+                .remaining()
+                .expect("interactive must receive a finite cap, not the caller's none deadline")
+                <= Duration::from_millis(15)
+        );
+        let interactive_cache_len = interactive_ctx
+            .session
+            .projection_cache
+            .read()
+            .unwrap()
+            .len();
+        assert!(interactive_cache_len <= 1);
+        if interactive_cache_len == 1 {
+            let projected = interactive_ctx
+                .session
+                .cached_projection(&state, P0, PlayerId(1), horizon)
+                .expect("any interactive cache entry must use the exact requested coordinates");
+            assert_eq!(projected.horizon_reached, horizon);
+            assert_eq!(projected.target_opponent, PlayerId(1));
+        }
+        assert!(expired_observed.read().unwrap().is_empty());
+        assert_eq!(measurement_observed.read().unwrap().len(), 1);
     }
 
     #[test]

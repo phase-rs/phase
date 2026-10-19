@@ -677,7 +677,7 @@ fn apply_pending_counter_post_action(
             count,
             ability,
         } => super::amass::continue_amass_after_token_creation(
-            state, controller, &subtype, count, &ability, events,
+            state, controller, &subtype, count, &ability, None, events,
         ),
         // CR 701.71a: the token-creation replacement settled; choose a Jace
         // token and put the counters on it. `false` = paused again, either on
@@ -690,11 +690,19 @@ fn apply_pending_counter_post_action(
             state, controller, source_id, count, events,
         ),
         PendingCounterPostAction::FinalizeAmass {
+            creation_frame,
             object_id,
             subtype,
             ability,
         } => {
-            super::amass::finalize_amass(state, object_id, &subtype, &ability, events);
+            super::amass::finalize_amass(
+                state,
+                object_id,
+                &subtype,
+                &ability,
+                creation_frame,
+                events,
+            );
             true
         }
         PendingCounterPostAction::InjectPredefinedTokenAbilities { object_id } => {
@@ -719,6 +727,7 @@ fn apply_pending_counter_post_action(
             true
         }
         PendingCounterPostAction::FinalizeTokenEntry {
+            creation_frame,
             object_id,
             name,
             attach_to,
@@ -758,7 +767,12 @@ fn apply_pending_counter_post_action(
             // that keeps `restrictions::record_token_created` above from writing a row. See that
             // function's doc for the wrong-trigger-fire measurement this prevents.
             super::token::push_committed_token_entry_events(
-                state, object_id, name, source_id, events,
+                state,
+                creation_frame,
+                object_id,
+                name,
+                source_id,
+                events,
             );
             if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
                 let sacrifice_token = DelayedTrigger {
@@ -787,6 +801,8 @@ fn apply_pending_counter_post_action(
             true
         }
         PendingCounterPostAction::ContinueTokenCreation {
+            creation_frame,
+            instructions,
             owner,
             spec,
             enter_tapped,
@@ -796,6 +812,8 @@ fn apply_pending_counter_post_action(
                 return true;
             }
             let event = ProposedEvent::CreateToken {
+                creation_frame,
+                instructions,
                 owner,
                 spec,
                 copy: None,
@@ -813,6 +831,7 @@ fn apply_pending_counter_post_action(
             )
         }
         PendingCounterPostAction::FinalizeCopyTokenEntry {
+            creation_frame,
             object_id,
             name,
             enters_attacking,
@@ -823,7 +842,9 @@ fn apply_pending_counter_post_action(
             // replacement-processed counters finish, preserving attacking
             // placement and the normal token ETB events.
             if enters_attacking {
-                crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+                crate::game::effects::token::apply_entry_attack_instruction(
+                    state, object_id, source_id, controller,
+                );
             }
             super::token::inject_predefined_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
@@ -841,17 +862,23 @@ fn apply_pending_counter_post_action(
             // `None` verdict, so it never disagrees with the existence-guarded
             // `record_token_created` ledger write immediately above it.
             super::token::push_committed_token_entry_events(
-                state, object_id, name, source_id, events,
+                state,
+                creation_frame,
+                object_id,
+                name,
+                source_id,
+                events,
             );
             // The anaphora slot has TWO destinations on this route — ledger 3 and the in-flight
             // copy batch's `created_ids`, which `token_copy.rs`'s drain assigns WHOLESALE back onto
             // ledger 3 — so one guarded call owns both. Guarding the ledger write and pushing the
             // buffer as a separate statement republished the withheld id and overwrote the guarded
             // list with it.
-            super::token::record_last_created_copy_batch_token(state, object_id);
+            super::token::record_last_created_copy_batch_token(state, creation_frame, object_id);
             true
         }
         PendingCounterPostAction::ContinueCopyTokenCreation {
+            creation_frame,
             owner,
             copy,
             enter_tapped,
@@ -863,6 +890,7 @@ fn apply_pending_counter_post_action(
             }
             let status = super::token_copy::apply_copy_token_after_replacement(
                 state,
+                creation_frame,
                 owner,
                 *copy,
                 enter_tapped,
@@ -871,7 +899,11 @@ fn apply_pending_counter_post_action(
                 events,
             );
             let completion = status.completion;
-            super::token_copy::extend_copy_batch_created_ids(state, status.created_ids);
+            super::token_copy::extend_copy_batch_created_ids(
+                state,
+                creation_frame,
+                status.created_ids,
+            );
             match completion {
                 super::token_copy::CopyTokenApplyCompletion::Completed => true,
                 super::token_copy::CopyTokenApplyCompletion::Paused => false,
@@ -886,6 +918,7 @@ fn apply_pending_counter_post_action(
             )
         }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+            creation_frame,
             object_id,
             name,
             enters_attacking,
@@ -894,6 +927,7 @@ fn apply_pending_counter_post_action(
             remaining_modifications,
         } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
             state,
+            creation_frame,
             object_id,
             name,
             enters_attacking,
@@ -911,6 +945,7 @@ fn apply_pending_counter_post_action(
             super::token::finalize_committed_liminal_token_entry_from_action(state, action, events)
         }
         PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+            creation_frame,
             owner,
             copy,
             enter_tapped,
@@ -918,6 +953,7 @@ fn apply_pending_counter_post_action(
             remaining_count,
         } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
             state,
+            creation_frame,
             owner,
             copy,
             enter_tapped,
@@ -943,6 +979,11 @@ fn apply_pending_counter_post_action(
             // in-`apply_action` call orders the CR 400.7 row ahead of that action's CR 704.3 SBA
             // pass (CR 704.5f). `false` means an earlier convergence point already realized it
             // (structurally idempotent, `Option::take_if`), which is not an error.
+            let creation_owner = state
+                .pending_token_battlefield_entry
+                .as_ref()
+                .filter(|entry| entry.object_id == object_id)
+                .and_then(|entry| entry.creation_frame);
             let _ = super::token::flush_pending_token_battlefield_entry(state, object_id, events);
             if !state.last_created_token_ids.contains(&object_id) {
                 super::token::record_last_created_token(state, object_id);
@@ -954,7 +995,13 @@ fn apply_pending_counter_post_action(
             // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
             // which is what `state.last_created_token_ids` is after the call above.
             let created_ids = state.last_created_token_ids.clone();
-            if let Some(pending) = state.active_copy_token_mut() {
+            let owner = match creation_owner {
+                Some(id) => state.resolution_stack.token_creation_mut(id),
+                None => state
+                    .active_copy_token_mut()
+                    .filter(|pending| pending.creation_id.is_none()),
+            };
+            if let Some(pending) = owner {
                 pending.created_ids = created_ids;
             }
             true
@@ -1331,6 +1378,26 @@ pub(crate) fn apply_counter_removal(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> u32 {
+    apply_counter_removal_with_result(state, object_id, counter_type, count, None, events)
+}
+
+pub(crate) fn apply_counter_removal_with_result(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    binding: Option<&crate::types::game_state::CounterRemovalResultBinding>,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    if binding.is_some_and(|binding| {
+        !super::counter_removal_binding_is_valid(state, binding)
+            || !binding
+                .recipient
+                .is_some_and(|pin| pin.object_id == object_id && pin.is_current(state))
+            || !binding.counters.matches(&counter_type)
+    }) {
+        return 0;
+    }
     if count == 0 {
         return 0;
     }
@@ -1362,6 +1429,35 @@ pub(crate) fn apply_counter_removal(
         .record_object_counter(command)
         .expect("resolved counter removal must have a live journal cause");
 
+    if let Some(binding) = binding {
+        // CR 122.1 + CR 603.12: receipt follows only this successfully journaled
+        // edit, never a proposed amount, a map difference, or a zone reset.
+        let Some(crate::types::game_state::InstructionResult::CounterRemovals(result)) = state
+            .return_result_frames
+            .get_mut(&binding.occurrence)
+            .and_then(|frame| frame.get_mut(&binding.result))
+        else {
+            unreachable!("validated counter-removal result disappeared");
+        };
+        if let Some(record) = result
+            .counter_removals
+            .iter_mut()
+            .find(|record| record.object == object && record.counter_type == counter_type)
+        {
+            record.count = record
+                .count
+                .checked_add(removed)
+                .expect("counter removal receipt overflow");
+        } else {
+            result
+                .counter_removals
+                .push(crate::types::game_state::CounterRemovalRecord {
+                    object,
+                    counter_type: counter_type.clone(),
+                    count: removed,
+                });
+        }
+    }
     events.push(GameEvent::CounterRemoved {
         object_id,
         counter_type,
@@ -1462,6 +1558,17 @@ pub fn remove_counter_with_replacement(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) {
+    remove_counter_with_result(state, object_id, counter_type, count, None, events)
+}
+
+fn remove_counter_with_result(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    result_binding: Option<crate::types::game_state::CounterRemovalResultBinding>,
+    events: &mut Vec<GameEvent>,
+) {
     // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
     // this counter type from this object, bail out immediately.
     if counter_removal_blocked(state, object_id, &counter_type) {
@@ -1472,6 +1579,7 @@ pub fn remove_counter_with_replacement(
         object_id,
         counter_type,
         count,
+        result_binding,
         applied: HashSet::new(),
     };
 
@@ -1481,10 +1589,18 @@ pub fn remove_counter_with_replacement(
                 object_id,
                 counter_type,
                 count,
+                result_binding,
                 ..
             } = event
             {
-                apply_counter_removal(state, object_id, counter_type, count, events);
+                apply_counter_removal_with_result(
+                    state,
+                    object_id,
+                    counter_type,
+                    count,
+                    result_binding.as_ref(),
+                    events,
+                );
             }
         }
         ReplacementResult::Prevented => {}
@@ -2304,6 +2420,25 @@ pub(super) fn counter_removal_targets(
 }
 
 /// Resolve targeting to object IDs using the typed TargetFilter.
+/// CR 400.7: ordinary chosen-counter recipients honor both positional pins
+/// and the delayed keyed pins. Raw-target fallback predicates remain upstream.
+fn current_chosen_counter_objects(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter_map(|(index, target)| {
+            let TargetRef::Object(id) = target else {
+                return None;
+            };
+            (ability.target_occurrence_is_current(index, state)
+                && ability.target_pin_is_current(*id, state)
+                && state.objects.contains_key(id))
+            .then_some(*id)
+        })
+        .collect()
+}
+
 pub(super) fn resolve_defined_or_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -2458,14 +2593,7 @@ pub(super) fn resolve_defined_or_targets(
     // player. The object guard deliberately excludes the chooser-only target
     // bookkeeping used by `ChooseOneOf` branches above.
     if matches!(target_spec, Some(TargetFilter::ParentTarget)) && has_object_target {
-        return ability
-            .live_object_targets(state)
-            .into_iter()
-            .filter_map(|target| match target {
-                TargetRef::Object(id) => Some(id),
-                TargetRef::Player(_) => None,
-            })
-            .collect();
+        return current_chosen_counter_objects(state, ability);
     }
 
     if let Some(filter) = target_spec {
@@ -2511,17 +2639,7 @@ pub(super) fn resolve_defined_or_targets(
     // here with the returned card in `targets`. She is correct only because the
     // pin is never STAMPED for her (her condition names the referent's own
     // entry) — not because this read is exempted.
-    ability
-        .live_object_targets(state)
-        .into_iter()
-        .filter_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(id)
-            } else {
-                None
-            }
-        })
-        .collect()
+    current_chosen_counter_objects(state, ability)
 }
 
 /// CR 122.5 / CR 122.8: Read counters from source and transfer them to target.
@@ -3123,6 +3241,29 @@ pub fn resolve_remove(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let mut producer_owned;
+    let ability = if ability.declares_return_result.is_some() {
+        let Effect::RemoveCounter {
+            counter_type,
+            target,
+            ..
+        } = &ability.effect
+        else {
+            return Err(EffectError::InvalidParam("named counter producer".into()));
+        };
+        let recipient = super::choose_counter_adjustment::recipient(state, ability, target);
+        let counters = counter_type.clone().map_or(
+            crate::types::counter::CounterMatch::Any,
+            crate::types::counter::CounterMatch::OfType,
+        );
+        let binding = super::begin_counter_removal_result(state, ability, recipient, counters)?;
+        producer_owned = ability.clone();
+        producer_owned.declares_return_result = None;
+        producer_owned.context.counter_removal_result = binding;
+        &producer_owned
+    } else {
+        ability
+    };
     // CR 107.1c + CR 608.2d: "remove any number of counters" is a resolution-time
     // interactive choice; the parser encodes it as `UpTo { Fixed{-1} }`.
     // Discriminate on the peel FLAG (never on the scalar): if the count wrapper is
@@ -3220,6 +3361,7 @@ pub fn resolve_remove(
 
     let total = remaining.iter().map(|entry| entry.count).sum();
     state.push_counter_removals(PendingCounterRemovalQueue {
+        result_binding: ability.context.counter_removal_result.clone(),
         remaining,
         effect_kind: EffectKind::from(&ability.effect),
         source_ability_id: ability.source_id,
@@ -3367,6 +3509,7 @@ pub(crate) fn validate_and_queue_counter_removal(
         })
         .collect();
     state.push_counter_removals(PendingCounterRemovalQueue {
+        result_binding: pending_effect.context.counter_removal_result.clone(),
         remaining,
         effect_kind: EffectKind::from(&pending_effect.effect),
         source_ability_id: pending_effect.source_id,
@@ -3432,12 +3575,20 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
                 count,
             },
         });
+        let result_binding = queue.result_binding.clone();
         state
             .replace_active_counter_removals(queue)
             .expect("re-parked counter-removals queue must own the active frame");
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
-        remove_counter_with_replacement(state, object_id, counter_type, count, events);
+        remove_counter_with_result(
+            state,
+            object_id,
+            counter_type,
+            count,
+            result_binding,
+            events,
+        );
         // If a replacement needs a player choice, suspend — the ReplacementChoice
         // resume path re-invokes this drain to finish the remaining removals.
         if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
@@ -8557,6 +8708,7 @@ mod tests {
             );
             let liminal_entry =
                 |entry_events| PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
                     source_id,
@@ -8571,6 +8723,7 @@ mod tests {
                 };
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
                     enters_attacking: false,
@@ -8578,6 +8731,7 @@ mod tests {
                     controller: PlayerId(0),
                 },
                 Route::FinalizeTokenEntry => PendingCounterPostAction::FinalizeTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
                     attach_to: None,
@@ -8590,6 +8744,7 @@ mod tests {
                 // without needing an `, except` body.
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        creation_frame: None,
                         object_id,
                         name: "Saproling".to_string(),
                         enters_attacking: false,
@@ -8830,6 +8985,16 @@ mod tests {
                 Zone::Battlefield,
             );
             state.push_copy_token(PendingCopyTokenResolution {
+                creation_id: None,
+                result_parent: None,
+                work: std::collections::VecDeque::new(),
+                pending: None,
+                replacement_queue_tail: None,
+                created_incarnations: Vec::new(),
+                creator: None,
+                continuation: None,
+                caller: crate::types::game_state::TokenCreationCallerState::Plain,
+                segment_start: 0,
                 created_ids: vec![survivor],
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
@@ -8847,6 +9012,7 @@ mod tests {
             );
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    creation_frame: None,
                     object_id,
                     name: "Copy Token".to_string(),
                     enters_attacking: false,
@@ -8855,6 +9021,7 @@ mod tests {
                 },
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        creation_frame: None,
                         object_id,
                         name: "Copy Token".to_string(),
                         enters_attacking: false,
@@ -9201,6 +9368,213 @@ mod tests {
             vec![referent],
             "CR 608.2k: an undeparted cost-paid referent is still the counter \
              subject, and the inherited parent target does not displace it"
+        );
+    }
+
+    #[test]
+    fn ordinary_chosen_counter_reader_checks_positional_and_delayed_pins_before_fallback() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Recipient".into(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, target);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::Typed(TypedFilter::creature()),
+        ] {
+            let mut ability = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Time,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: filter,
+                },
+                vec![TargetRef::Object(target)],
+                source,
+                PlayerId(0),
+            );
+            assert_eq!(
+                resolve_defined_or_targets(&state, &ability),
+                vec![target],
+                "legacy unpinned live target"
+            );
+            let pin = ObjectIncarnationRef::from_object(&state.objects[&target]);
+            ability.replace_target_occurrences(vec![(TargetRef::Object(target), Some(pin))]);
+            assert_eq!(resolve_defined_or_targets(&state, &ability), vec![target]);
+            state.objects.get_mut(&target).unwrap().incarnation += 1;
+            assert!(
+                resolve_defined_or_targets(&state, &ability).is_empty(),
+                "stale chosen authority cannot become a source fallback"
+            );
+            ability.replace_target_occurrences(vec![(TargetRef::Object(target), None)]);
+            assert_eq!(resolve_defined_or_targets(&state, &ability), vec![target]);
+            ability.target_incarnations = vec![pin];
+            assert!(
+                resolve_defined_or_targets(&state, &ability).is_empty(),
+                "delayed keyed pin remains independently authoritative"
+            );
+            ability.target_incarnations =
+                vec![ObjectIncarnationRef::from_object(&state.objects[&target])];
+            assert_eq!(resolve_defined_or_targets(&state, &ability), vec![target]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_receipt_owner_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::ReturnResultId;
+    use crate::types::counter::CounterMatch;
+    use crate::types::game_state::{
+        CounterRemovalInstructionResult, CounterRemovalResultBinding, InstructionResult,
+        ReturnResultOccurrenceId,
+    };
+    use crate::types::identifiers::ObjectIdentityBinding;
+    #[test]
+    fn u13_only_exact_accepted_journaled_delivery_appends_a_canonical_receipt() {
+        let mut s = GameScenario::new();
+        let source = s.add_creature(P0, "Synthetic owner", 2, 4).id();
+        let other = s.add_creature(P1, "Synthetic other recipient", 2, 4).id();
+        let charge = CounterType::Generic("charge".into());
+        let oil = CounterType::Generic("oil".into());
+        s.with_counter(source, charge.clone(), 3)
+            .with_counter(source, oil.clone(), 3)
+            .with_counter(other, charge.clone(), 3);
+        let mut state = s.build().state().clone();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let occurrence = ReturnResultOccurrenceId(1);
+        let result = ReturnResultId(2);
+        let binding = CounterRemovalResultBinding {
+            occurrence,
+            result,
+            source: ObjectIdentityBinding::new(pin, Zone::Battlefield),
+            recipient: Some(pin),
+            counters: CounterMatch::OfType(charge.clone()),
+        };
+        state
+            .return_result_frames
+            .entry(occurrence)
+            .or_default()
+            .insert(
+                result,
+                InstructionResult::CounterRemovals(CounterRemovalInstructionResult {
+                    source: binding.source,
+                    recipient: binding.recipient,
+                    counters: binding.counters.clone(),
+                    counter_removals: vec![],
+                }),
+            );
+        let mut events = vec![];
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                other,
+                charge.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            0
+        );
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                oil.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            0
+        );
+        let mut wrong = binding.clone();
+        wrong.occurrence = ReturnResultOccurrenceId(2);
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&wrong),
+                &mut events
+            ),
+            0
+        );
+        assert!(events.is_empty());
+        assert_eq!(state.objects[&source].counters[&charge], 3);
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            1
+        );
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                99,
+                Some(&binding),
+                &mut events
+            ),
+            2
+        );
+        assert_eq!(
+            apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            0
+        );
+        let InstructionResult::CounterRemovals(receipt) =
+            &state.return_result_frames[&occurrence][&result]
+        else {
+            panic!("typed result")
+        };
+        assert_eq!(receipt.counter_removals.len(), 1);
+        assert_eq!(receipt.counter_removals[0].object, pin);
+        assert_eq!(receipt.counter_removals[0].count, 3);
+        assert_eq!(state.objects[&source].counters[&oil], 3);
+        assert_eq!(state.objects[&other].counters[&charge], 3);
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry.command.as_ref(),
+                    Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(_))
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            apply_counter_removal(&mut state, other, charge.clone(), 1, &mut events),
+            1
+        );
+        assert_eq!(
+            state.objects[&other].counters[&charge], 2,
+            "ordinary unbound removal remains live"
         );
     }
 }

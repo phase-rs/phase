@@ -45,6 +45,84 @@ use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+/// CR 108.3 + CR 110.2a: the entire named set enters under individual owners.
+pub(crate) fn parse_all_revealed_move(text: &str) -> Option<Effect> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = (
+            opt(tag::<_, _, OracleError<'_>>("then ")),
+            alt((tag("put "), tag("puts "))),
+            alt((
+                tag("those cards"),
+                tag("all cards revealed this way"),
+                tag("all cards revealed in this way"),
+                tag("the revealed cards"),
+            )),
+        )
+            .parse(input)?;
+        let (input, _) =
+            alt((tag(" onto the battlefield"), tag(" on the battlefield"))).parse(input)?;
+        let (input, _) = (
+            tag(" under "),
+            alt((tag("their owners'"), tag("their owners’"))),
+            tag(" control"),
+        )
+            .parse(input)?;
+        let (input, _) = (opt(tag(".")), eof).parse(input)?;
+        Ok((input, ()))
+    })?;
+    Some(Effect::ChangeZone {
+        origin: Some(Zone::Library),
+        destination: Zone::Battlefield,
+        target: TargetFilter::None,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: Vec::new(),
+        face_down_profile: None,
+        enters_modified_if: None,
+    })
+}
+
+/// Complete fixed own-library producer grammar for a named instruction result.
+pub(crate) fn fixed_revealed_producer_count(text: &str) -> Option<u32> {
+    nom_on_lower(text, &text.to_lowercase(), |input| {
+        let (input, _) = opt(tag::<_, _, OracleError<'_>>("then ")).parse(input)?;
+        let (input, _) = alt((
+            tag("reveal "),
+            tag("you reveal "),
+            preceded(
+                alt((tag("each player "), tag("each opponent "))),
+                tag("reveals "),
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = tag("the top ").parse(input)?;
+        let (input, count) = alt((
+            value(1, tag("card")),
+            terminated(nom_primitives::parse_number, tag(" cards")),
+        ))
+        .parse(input)?;
+        let (input, _) = (
+            tag(" of "),
+            alt((
+                tag("your library"),
+                tag("their library"),
+                tag("their own library"),
+            )),
+            opt(tag(".")),
+            eof,
+        )
+            .parse(input)?;
+        Ok((input, count))
+    })
+    .map(|(count, _)| count)
+}
+
 /// CR 303.4f: Parse the host of "put it onto the battlefield attached to X"
 /// inside a library-search compound.
 fn parse_search_attach_host_ref(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -1631,16 +1709,20 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // correct `affected` filter inherited from the subject.
                         let have_base_pt_continuation =
                             starts_have_base_power_toughness(remainder_trimmed);
-                        let continuous_modifier_conjunct =
-                            starts_you_control_subject_predicate(&before_lower)
-                                && alt((
-                                    tag::<_, _, OracleError<'_>>("gain "),
-                                    tag("gains "),
-                                    tag("have "),
-                                    tag("has "),
-                                ))
-                                .parse(remainder_trimmed)
-                                .is_ok();
+                        let continuous_modifier_conjunct = (starts_you_control_subject_predicate(&before_lower)
+                                // CR 611.2c: become plus grant is one frozen
+                                // continuous population, with one duration.
+                                || nom_primitives::scan_at_word_boundaries(
+                                    &before_lower, parse_become_verb,
+                                ).is_some())
+                            && alt((
+                                tag::<_, _, OracleError<'_>>("gain "),
+                                tag("gains "),
+                                tag("have "),
+                                tag("has "),
+                            ))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                         // CR 706.2: "roll a d{N} and (add|subtract) {quantity}" —
                         // the modifier clause is part of the same RollDie effect
                         // (it shifts the natural result) and must NOT be peeled
@@ -5059,6 +5141,7 @@ pub(super) fn apply_clause_continuation(
     continuation: ContinuationAst,
     kind: AbilityKind,
     env: &super::assembly::AssemblyEnv,
+    fragment: &str,
 ) {
     match continuation {
         ContinuationAst::SearchDestination {
@@ -6341,23 +6424,13 @@ pub(super) fn apply_clause_continuation(
                 enter_with_counters.push((counter_type, count));
             }
         }
-        ContinuationAst::TokenSourcePowerToughness {
-            power: followup_power,
-            toughness: followup_toughness,
-        } => {
-            let Some(previous) = defs.last_mut() else {
-                return;
-            };
-            // CR 608.2h + CR 111.3: source-defined token P/T is locked in as
-            // the token is created, using the resolving ability source's
-            // characteristics.
-            if let Effect::Token {
-                power, toughness, ..
-            } = &mut *previous.effect
-            {
-                *power = followup_power;
-                *toughness = followup_toughness;
-            }
+        ContinuationAst::TokenSourcePowerToughness { .. } => {
+            // Only assembly can consume an exact ClauseId owner. Intrinsic and
+            // scratch callers have no such authority and must refuse visibly.
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::unimplemented("token_definition_owner", fragment),
+            ));
         }
         ContinuationAst::RevealUntilKept {
             destination,
@@ -13410,6 +13483,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::Dig {
@@ -13489,6 +13563,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::DealDamage { excess, .. } = &*defs[0].effect else {
@@ -13525,6 +13600,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::Dig {
@@ -13574,6 +13650,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         // The Dig is patched into the choose-one exile shape.
@@ -13647,6 +13724,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         assert!(
@@ -13692,6 +13770,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         let Effect::Dig {
@@ -13744,6 +13823,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
 
         assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");
@@ -13814,6 +13894,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "synthetic continuation unit fixture",
         );
         // The Mill is left intact; a new ChangeZone def is pushed.
         assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");
@@ -15119,6 +15200,43 @@ mod tests {
         // Other verbs that happen to mention counters must not match.
         let result = try_parse_put_counters_on_token_followup("remove a +1/+1 counter on it");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn token_definition_without_assembly_owner_preserves_full_fragment_gap() {
+        let fragment = "Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+        let mut defs = vec![super::super::parse_effect_chain(
+            "Create a 1/2 green Bear creature token.",
+            AbilityKind::Spell,
+        )];
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            &defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::TokenSourcePowerToughness {
+                power: source_token_power_value(),
+                toughness: source_token_toughness_value(),
+            },
+            AbilityKind::Spell,
+            &env,
+            fragment,
+        );
+        assert!(matches!(
+            *defs[0].effect,
+            Effect::Token {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(2),
+                ..
+            }
+        ));
+        assert_eq!(
+            defs.last().unwrap().effect.unimplemented_description(),
+            Some(fragment)
+        );
     }
 
     #[test]
@@ -16819,6 +16937,30 @@ mod leading_duration_guard_tests_7923 {
             1,
             "a serial-list subject is one clause"
         );
+    }
+    #[test]
+    fn craterous_prior_controller_continuous_conjunct_stays_whole() {
+        let text = "Deal 3 damage to target creature. Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+        let clauses = split_clause_sequence(text);
+        assert_eq!(
+            clauses.len(),
+            2,
+            "quoted OR and grant share the become subject"
+        );
+        assert_eq!(clauses[1].text, "Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"");
+    }
+
+    #[test]
+    fn token_definition_sentence_and_later_cleanup_keep_distinct_sequence_roles() {
+        let clauses=split_clause_sequence("Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.");
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(clauses[0].text, "Create a black Spirit creature token");
+        assert_eq!(clauses[1].text,"Its power is equal to that creature's power and its toughness is equal to that creature's toughness");
+        assert_eq!(
+            clauses[2].text,
+            "Sacrifice the token at the beginning of the next end step"
+        );
+        for text in ["Create two 1/1 red Warrior creature tokens that are tapped and attacking. Sacrifice them at the beginning of the next end step.","Create a token that's a copy of target creature you control. Exile that token at end of combat."] {assert_eq!(split_clause_sequence(text).len(),2);}
     }
 }
 

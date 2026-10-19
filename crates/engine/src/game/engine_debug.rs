@@ -640,50 +640,37 @@ pub fn apply_debug_action(
                 controller: owner,
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
-            let proposed = ProposedEvent::CreateToken {
-                owner,
-                spec: Box::new(spec),
-                copy: None,
-                enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
-                count,
-                applied: HashSet::new(),
+            let body = Some(Box::new(spec.characteristics.clone()));
+            let instructions = crate::types::proposed_event::TokenCreationInstructions {
+                tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
             };
-            match super::replacement::replace_event(state, proposed, events) {
-                super::replacement::ReplacementResult::Execute(event) => {
-                    super::effects::token::apply_create_token_after_replacement(
-                        state, event, events,
-                    );
-                    // CR 111.4 + CR 707.2a: Preset spawns must install catalog
-                    // `rules_text` abilities (SOS Pest attack-life trigger, etc.)
-                    // after linking the preset image ref. The apply path runs
-                    // `inject_catalog_token_abilities` during creation when
-                    // `token_image_ref` is already set; debug preset creation
-                    // deferred the ref until here, so inject + reindex now.
-                    if let Some(image_ref) = preset_image_ref {
-                        let created_ids = state.last_created_token_ids.clone();
-                        for token_id in created_ids {
-                            if let Some(obj) = state.objects.get_mut(&token_id) {
-                                obj.token_image_ref = Some(image_ref.clone());
-                            }
-                            super::effects::token::inject_catalog_token_abilities(state, token_id);
-                            super::trigger_index::reindex_object_triggers(state, token_id);
-                        }
-                    }
-                    // "Run ETB effects" unchecked: the token is still created
-                    // (with its replacement-window counters) but its ETB triggers
-                    // and the SBA pass are skipped — mirrors the raw placement of
-                    // `MoveToZone { simulate: false }`.
-                    if run_etb {
-                        super::triggers::process_triggers(state, events); // CR 603: Process triggers
-                        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
-                    }
-                }
-                super::replacement::ReplacementResult::Prevented => {}
-                super::replacement::ReplacementResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        super::replacement::replacement_choice_waiting_for(player, state);
-                }
-            }
+            let work = std::collections::VecDeque::from([
+                crate::types::game_state::TokenCreationWork::Proposed(
+                    crate::types::game_state::TokenCreationBatch {
+                        owner,
+                        spec: Box::new(spec),
+                        copy: None,
+                        instructions,
+                        enter_tapped: instructions.tapped,
+                        count,
+                        applied: HashSet::new(),
+                    },
+                ),
+            ]);
+            let creator = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(0), owner);
+            super::effects::token_copy::begin_creation(
+                state,
+                &creator,
+                work,
+                crate::types::ability::EffectKind::Token,
+                crate::types::game_state::TokenCreationCallerState::Debug {
+                    run_etb,
+                    preset: preset_image_ref,
+                    body,
+                },
+                events,
+            );
         }
 
         DebugAction::CreateTokenCopy {
@@ -717,10 +704,17 @@ pub fn apply_debug_action(
                 source_id,
                 owner,
             );
-            super::effects::token_copy::resolve(state, &ability, events)
-                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
-            super::triggers::process_triggers(state, events);
-            super::sba::check_state_based_actions(state, events);
+            super::effects::token_copy::begin_copy_creation(
+                state,
+                &ability,
+                crate::types::game_state::TokenCreationCallerState::Debug {
+                    run_etb: true,
+                    preset: None,
+                    body: None,
+                },
+                events,
+            )
+            .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
         }
     }
 
@@ -995,6 +989,8 @@ fn route_debug_token_to_battlefield(
     state.liminal_entries.insert(
         object_id,
         LiminalEntry {
+            creation_frame: None,
+            instructions: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(token),
             ),
@@ -1349,6 +1345,45 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
         )));
     }
     Ok(())
+}
+
+pub(crate) fn complete_token_creation(
+    state: &mut GameState,
+    result: &crate::types::ability::ForwardedResultContext,
+    preset: Option<crate::types::card::TokenImageRef>,
+    body: Option<&crate::types::proposed_event::TokenCharacteristics>,
+    run_etb: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    if let (Some(image_ref), Some(body)) = (preset, body) {
+        for member in &result.object_incarnations {
+            let matches = state.objects.get(&member.object_id).is_some_and(|object| {
+                crate::types::identifiers::ObjectIncarnationRef::from_object(object) == *member
+                    && object.zone == Zone::Battlefield
+                    && object.base_name == body.display_name
+                    && object.base_power == body.power
+                    && object.base_toughness == body.toughness
+                    && object.base_card_types.core_types == body.core_types
+                    && object.base_card_types.subtypes == body.subtypes
+                    && object.base_card_types.supertypes == body.supertypes
+                    && object.base_color == body.colors
+                    && object.base_keywords == body.keywords
+            });
+            if matches {
+                state
+                    .objects
+                    .get_mut(&member.object_id)
+                    .expect("matched current preset body")
+                    .token_image_ref = Some(image_ref.clone());
+                super::effects::token::inject_catalog_token_abilities(state, member.object_id);
+                super::trigger_index::reindex_object_triggers(state, member.object_id);
+            }
+        }
+    }
+    if run_etb {
+        super::triggers::process_triggers(state, events);
+        super::sba::check_state_based_actions(state, events);
+    }
 }
 
 #[cfg(test)]
@@ -2844,5 +2879,155 @@ mod tests {
                 .any(|t| t.definition.mode == TriggerMode::Drawn),
             "sanity: watcher carries a Drawn trigger"
         );
+    }
+    #[test]
+    fn standalone_debug_token_and_card_materialization_own_sync_and_paused_completion() {
+        use crate::game::effects::token_copy::tests::{
+            install_creation_fixture_replacements, CreationPauseCase,
+        };
+        for copy in [false, true] {
+            for pause in [
+                CreationPauseCase::Synchronous,
+                CreationPauseCase::Queued,
+                CreationPauseCase::Counter,
+                CreationPauseCase::ReloadQueued,
+                CreationPauseCase::ReloadCounter,
+            ] {
+                let mut state = sandbox_state();
+                install_creation_fixture_replacements(&mut state, pause);
+                let mut events = if copy {
+                    create_debug_cards(
+                        &mut state,
+                        DebugCardCreateRequest {
+                            actor: PlayerId(0),
+                            source: DebugCardEntrySource {
+                                face: CardFace {
+                                    name: "Debug complete body".into(),
+                                    power: Some(crate::types::ability::PtValue::Fixed(2)),
+                                    toughness: Some(crate::types::ability::PtValue::Fixed(3)),
+                                    card_type: crate::types::card_type::CardType {
+                                        core_types: vec![CoreType::Creature],
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                },
+                                back_face: None,
+                                outside_game_faces: Default::default(),
+                            },
+                            owner: PlayerId(0),
+                            zone: Zone::Battlefield,
+                            count: 1,
+                            attach_to: None,
+                            run_etb: true,
+                            nonlegendary: false,
+                            creation_kind: DebugCardCreationKind::Token,
+                        },
+                    )
+                    .unwrap()
+                    .events
+                } else {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::Debug(DebugAction::CreateToken {
+                            request: DebugTokenRequest::Custom {
+                                owner: PlayerId(0),
+                                characteristics: TokenCharacteristics {
+                                    display_name: "Debug complete body".into(),
+                                    power: Some(2),
+                                    toughness: Some(3),
+                                    loyalty: None,
+                                    core_types: vec![CoreType::Creature],
+                                    subtypes: vec![],
+                                    supertypes: vec![],
+                                    colors: vec![ManaColor::Blue],
+                                    keywords: vec![],
+                                },
+                                enter_with_counters: vec![],
+                            },
+                            count: 1,
+                            run_etb: true,
+                        }),
+                    )
+                    .unwrap()
+                    .events
+                };
+                let paused = !matches!(pause, CreationPauseCase::Synchronous);
+                assert_eq!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    paused
+                );
+                if matches!(
+                    pause,
+                    CreationPauseCase::ReloadQueued | CreationPauseCase::ReloadCounter
+                ) {
+                    state = serde_json::from_value::<PersistedGameState>(
+                        serde_json::to_value(
+                            crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap();
+                }
+                for _ in 0..60 {
+                    let action = match state.waiting_for {
+                        WaitingFor::ReplacementChoice { .. } => {
+                            GameAction::ChooseReplacement { index: 0 }
+                        }
+                        WaitingFor::ChooseOneOfBranch { .. } => {
+                            GameAction::ChooseBranch { index: 1 }
+                        }
+                        WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => break,
+                        ref other => panic!("debug creation completion: {other:?}"),
+                    };
+                    events.extend(
+                        crate::game::apply_as_current(&mut state, action)
+                            .unwrap()
+                            .events,
+                    );
+                }
+                let births = events
+                    .iter()
+                    .filter_map(|event| {
+                        if let GameEvent::TokenCreated { object_id, .. } = event {
+                            Some(*object_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    births.len(),
+                    if matches!(
+                        pause,
+                        CreationPauseCase::Queued | CreationPauseCase::ReloadQueued
+                    ) {
+                        2
+                    } else {
+                        1
+                    }
+                );
+                assert!(state.resolution_stack.is_empty());
+                for id in births {
+                    let object = &state.objects[&id];
+                    assert_eq!(object.zone, Zone::Battlefield);
+                    assert!(object.is_token);
+                    if matches!(
+                        pause,
+                        CreationPauseCase::Counter | CreationPauseCase::ReloadCounter
+                    ) {
+                        assert!(
+                            object
+                                .counters
+                                .get(&CounterType::Plus1Plus1)
+                                .copied()
+                                .unwrap_or(0)
+                                >= 3
+                        );
+                    }
+                }
+            }
+        }
     }
 }

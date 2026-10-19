@@ -662,6 +662,28 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<EffectResolutionResult>, EffectError> {
+    if super::is_named_revealed_reader(ability) {
+        let members = super::named_revealed_members(state, ability)?.to_vec();
+        let requests = members
+            .iter()
+            .map(|&pin| {
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    pin.object_id,
+                    Zone::Battlefield,
+                    ability.source_id,
+                )
+                .performed_by(ability.controller)
+                .expecting_origin(pin, Zone::Library)
+            })
+            .collect();
+        crate::game::zone_pipeline::move_objects_simultaneously(state, requests, events);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(None);
+    }
     let events_before = events.len();
     let (
         origin,

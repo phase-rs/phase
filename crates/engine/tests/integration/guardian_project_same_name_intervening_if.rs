@@ -201,6 +201,8 @@ fn create_token_and_count_draws(
 ) -> i64 {
     let mut events = Vec::new();
     let proposed = ProposedEvent::CreateToken {
+        creation_frame: None,
+        instructions: None,
         owner: P0,
         spec: Box::new(creature_token_spec(P0)),
         copy: None,

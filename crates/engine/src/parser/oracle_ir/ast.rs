@@ -2091,9 +2091,12 @@ pub(crate) enum ZoneCounterImperativeAst {
     /// or put another of those counters on it." The single target object is
     /// established by the preceding `TargetOnly` clause; this clause only records
     /// the operation set the controller may choose among at resolution. Lowers to
-    /// `Effect::ChooseCounterAdjustment` (which has no target slot of its own).
+    /// `Effect::ChooseCounterAdjustment`; only explicit recipients add target slots.
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
+        counters: crate::types::counter::CounterMatch,
+        count: QuantityExpr,
+        target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
@@ -3363,7 +3366,13 @@ pub(crate) enum ReflexiveModalParent {
     /// lowers it as it already does for every non-modal reflexive (Bone
     /// Rattler, Diregraf Horde). Lowering then attaches the modal as that
     /// chain's `WhenYouDo` sub instead of replacing it.
-    Mandatory,
+    Mandatory(Option<CounterRemovalConnector>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CounterRemovalConnector {
+    pub(crate) counters: crate::types::counter::CounterMatch,
+    pub(crate) source_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -408,6 +408,7 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }

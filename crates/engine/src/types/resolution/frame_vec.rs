@@ -53,6 +53,23 @@ use crate::types::game_state::PostReplacementFrameId;
 
 use super::ResolutionFrame;
 
+pub(super) enum FrameIdentity {
+    PostReplacement(PostReplacementFrameId),
+    TokenCreation(crate::types::identifiers::TokenCreationFrameId),
+}
+
+impl From<PostReplacementFrameId> for FrameIdentity {
+    fn from(id: PostReplacementFrameId) -> Self {
+        Self::PostReplacement(id)
+    }
+}
+
+impl From<crate::types::identifiers::TokenCreationFrameId> for FrameIdentity {
+    fn from(id: crate::types::identifiers::TokenCreationFrameId) -> Self {
+        Self::TokenCreation(id)
+    }
+}
+
 /// A position in a [`FrameVec`].
 ///
 /// The field is private to this module, so a `FrameSlot` can only come from one
@@ -177,11 +194,18 @@ impl FrameVec {
     /// Those two properties are pinned by
     /// `v2_reader_recovers_discard_allocator_and_rejects_duplicate_frame_ids`
     /// and `h6a_legacy_id_less_post_replacement_frames_restore_unstamped`.
-    pub(super) fn by_id(&self, id: PostReplacementFrameId) -> Option<FrameSlot> {
+    pub(super) fn by_id(&self, id: impl Into<FrameIdentity>) -> Option<FrameSlot> {
+        let id = id.into();
         self.frames
             .iter()
-            .position(|frame| {
-                matches!(frame, ResolutionFrame::PostReplacement(drains) if drains.frame_id() == Some(id))
+            .position(|frame| match (&id, frame) {
+                (FrameIdentity::PostReplacement(id), ResolutionFrame::PostReplacement(drains)) => {
+                    drains.frame_id() == Some(*id)
+                }
+                (FrameIdentity::TokenCreation(id), ResolutionFrame::CopyToken(pending)) => {
+                    pending.creation_id == Some(*id)
+                }
+                _ => false,
             })
             .map(FrameSlot)
     }

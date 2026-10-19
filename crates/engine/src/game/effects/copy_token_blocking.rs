@@ -52,46 +52,109 @@ pub fn resolve(
         .filter(|id| matches_target_filter(state, *id, &source_filter, &filter_ctx))
         .collect();
 
-    let mut all_created: Vec<ObjectId> = Vec::new();
-    for attacker_id in attacker_ids {
-        // CR 707.2: create one token copy of this specific attacker, delegating
-        // to the single-authority token-copy resolver so copiable values,
-        // predefined abilities, and ETB events are handled identically to every
-        // other copy-token effect.
-        let copy_effect = Effect::CopyTokenOf {
+    let mut attackers: std::collections::VecDeque<_> = attacker_ids
+        .into_iter()
+        .filter_map(|id| {
+            state
+                .objects
+                .get(&id)
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        })
+        .collect();
+    let (caller, work) = if let Some(current) = attackers.pop_front() {
+        let work = copy_work(state, ability, current, &owner)?;
+        (
+            crate::types::game_state::TokenCreationCallerState::Blocking {
+                current,
+                remaining: attackers,
+                owner,
+            },
+            work,
+        )
+    } else {
+        (
+            crate::types::game_state::TokenCreationCallerState::Plain,
+            std::collections::VecDeque::new(),
+        )
+    };
+    super::token_copy::begin_creation(
+        state,
+        ability,
+        work,
+        EffectKind::CopyTokenOf,
+        caller,
+        events,
+    );
+    Ok(())
+}
+
+pub(crate) fn copy_work(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    attacker: crate::types::identifiers::ObjectIncarnationRef,
+    owner: &TargetFilter,
+) -> Result<std::collections::VecDeque<crate::types::game_state::TokenCreationWork>, EffectError> {
+    if !state
+        .objects
+        .get(&attacker.object_id)
+        .is_some_and(|object| {
+            crate::types::identifiers::ObjectIncarnationRef::from_object(object) == attacker
+                && object.zone == Zone::Battlefield
+        })
+    {
+        return Ok(std::collections::VecDeque::new());
+    }
+    let copy = ResolvedAbility::new(
+        Effect::CopyTokenOf {
             target: TargetFilter::Any,
             owner: owner.clone(),
-            source_filter: Some(TargetFilter::SpecificObject { id: attacker_id }),
+            source_filter: Some(TargetFilter::SpecificObject {
+                id: attacker.object_id,
+            }),
             enters_attacking: false,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
             additional_modifications: vec![],
-        };
-        let copy_ability =
-            ResolvedAbility::new(copy_effect, vec![], ability.source_id, ability.controller);
-        crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
+        },
+        vec![],
+        ability.source_id,
+        ability.controller,
+    );
+    super::token_copy::prepare_copy_creation(state, &copy)
+}
 
-        // CR 506.3e + CR 509.1g: each fresh copy is put onto the battlefield
-        // blocking the attacker it copied. `last_created_token_ids` holds exactly
-        // this attacker's single copy at this point in the loop.
-        for token_id in state.last_created_token_ids.clone() {
-            combat::place_blocking(state, token_id, attacker_id);
-            all_created.push(token_id);
+pub(crate) fn complete_creation_segment(
+    state: &mut GameState,
+    attacker: crate::types::identifiers::ObjectIncarnationRef,
+    members: &[crate::types::identifiers::ObjectIncarnationRef],
+) {
+    if !state
+        .objects
+        .get(&attacker.object_id)
+        .is_some_and(|object| {
+            crate::types::identifiers::ObjectIncarnationRef::from_object(object) == attacker
+                && object.zone == Zone::Battlefield
+        })
+    {
+        return;
+    }
+    for member in members {
+        if state.objects.get(&member.object_id).is_some_and(|object| {
+            crate::types::identifiers::ObjectIncarnationRef::from_object(object) == *member
+                && object.zone == Zone::Battlefield
+                && object
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+                && !object
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Battle)
+        }) {
+            combat::place_blocking(state, member.object_id, attacker.object_id);
         }
     }
-
-    // CR 603.7c + CR 701.36a: republish the full created-token set so a composed
-    // "exile those tokens at end of combat" delayed trigger snapshots all copies
-    // via `TargetFilter::LastCreated` rather than just the last loop iteration's.
-    state.last_created_token_ids = all_created;
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::CopyTokenOf,
-        source_id: ability.source_id,
-        subject: None,
-    });
-    Ok(())
 }
 
 #[cfg(test)]
@@ -211,5 +274,105 @@ mod tests {
         let created: std::collections::HashSet<_> =
             state.last_created_token_ids.iter().copied().collect();
         assert_eq!(blockers, created, "every created copy is a blocker");
+    }
+    #[test]
+    fn copy_token_blocking_completion_synchronous() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::CopyTokenBlockingAttacker {
+                source_filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                ),
+                owner: TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::Synchronous,
+        );
+        assert_eq!(state.combat.as_ref().unwrap().blocker_assignments.len(), 2);
+        assert!(state.last_created_token_ids.iter().all(|id| state
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .contains_key(id)));
+    }
+    #[test]
+    fn copy_token_blocking_completion_queued_child() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::CopyTokenBlockingAttacker {
+                source_filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                ),
+                owner: TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::Queued,
+        );
+        assert_eq!(state.combat.as_ref().unwrap().blocker_assignments.len(), 2);
+        assert!(state.last_created_token_ids.iter().all(|id| state
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .contains_key(id)));
+    }
+    #[test]
+    fn copy_token_blocking_completion_counter_pause() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::CopyTokenBlockingAttacker {
+                source_filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                ),
+                owner: TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::Counter,
+        );
+        assert_eq!(state.combat.as_ref().unwrap().blocker_assignments.len(), 2);
+        assert!(state.last_created_token_ids.iter().all(|id| state
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .contains_key(id)));
+    }
+    #[test]
+    fn copy_token_blocking_completion_queued_child_current_reload() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::CopyTokenBlockingAttacker {
+                source_filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                ),
+                owner: TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
+        );
+        assert_eq!(state.combat.as_ref().unwrap().blocker_assignments.len(), 2);
+        assert!(state.last_created_token_ids.iter().all(|id| state
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .contains_key(id)));
+    }
+    #[test]
+    fn copy_token_blocking_completion_counter_current_reload() {
+        let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::CopyTokenBlockingAttacker {
+                source_filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                ),
+                owner: TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
+        );
+        assert_eq!(state.combat.as_ref().unwrap().blocker_assignments.len(), 2);
+        assert!(state.last_created_token_ids.iter().all(|id| state
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .contains_key(id)));
     }
 }

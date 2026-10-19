@@ -838,32 +838,53 @@ pub(crate) fn try_parse_cost_modification(
     // Detect dynamic "for each" count pattern
     // "for each artifact you control" → QuantityRef::ObjectCount
     let cost_tp = TextPair::new(text, lower);
-    let mut dynamic_count = if let Some((_, after_for_each)) = cost_tp.split_around("for each ") {
+    let mut dynamic_count = if let Some(((), after_for_each)) = nom_on_lower(text, lower, |i| {
+        value((), (take_until("for each "), tag("for each "))).parse(i)
+    }) {
         // Strip trailing period/punctuation
-        let count_text = after_for_each.original.trim_end_matches('.');
-        super::oracle_quantity::parse_for_each_clause(count_text)
-            .or_else(|| {
-                parse_cda_quantity(count_text).and_then(|expr| match expr {
-                    QuantityExpr::Ref { qty } => Some(qty),
-                    _ => None,
-                })
-            })
-            .or_else(|| super::oracle_quantity::parse_quantity_ref(count_text))
-            .or_else(|| {
-                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                if let Some(prefixed) = count_text.strip_prefix("the number of ") {
-                    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                    super::oracle_quantity::parse_quantity_ref(prefixed)
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                let (count_filter, _) = parse_type_phrase_folding(count_text);
-                Some(QuantityRef::ObjectCount {
-                    filter: count_filter,
-                })
-            })
+        let count_text = after_for_each.trim_end_matches('.');
+        let count_lower = after_for_each.trim().to_lowercase();
+        let count_body = terminated(
+            take_while1(|c| c != '.'),
+            (opt(tag::<_, _, OracleError<'_>>(".")), space0, eof),
+        )
+        .parse(count_lower.as_str())
+        .map_or(count_lower.as_str(), |(_, body)| body);
+        let parsed = match nom_quantity::parse_cast_spell_name_population(count_body) {
+            Ok(("", qty)) => Some(qty),
+            Err(nom::Err::Failure(_)) => return None,
+            _ => match nom_quantity::parse_repeated_object_population(count_body) {
+                Ok(("", qty)) => Some(qty),
+                Err(nom::Err::Failure(_)) => return None,
+                _ => match nom_quantity::parse_coordinated_card_population(count_body) {
+                    Ok(("", qty)) => Some(qty),
+                    Err(nom::Err::Failure(_)) => return None,
+                    _ => super::oracle_quantity::parse_for_each_clause(count_text)
+                        .or_else(|| {
+                            parse_cda_quantity(count_text).and_then(|expr| match expr {
+                                QuantityExpr::Ref { qty } => Some(qty),
+                                _ => None,
+                            })
+                        })
+                        .or_else(|| super::oracle_quantity::parse_quantity_ref(count_text))
+                        .or_else(|| {
+                            let (filter, remainder) = parse_type_phrase_folding(count_text);
+                            (remainder.trim().is_empty()
+                                && match &filter {
+                                    TargetFilter::Any => false,
+                                    TargetFilter::Typed(typed) => {
+                                        !typed.type_filters.is_empty()
+                                            || typed.controller.is_some()
+                                            || !typed.properties.is_empty()
+                                    }
+                                    _ => true,
+                                })
+                            .then_some(QuantityRef::ObjectCount { filter })
+                        }),
+                },
+            },
+        };
+        Some(parsed?)
     } else {
         None
     };

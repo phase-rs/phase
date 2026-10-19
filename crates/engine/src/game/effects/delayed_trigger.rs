@@ -303,6 +303,9 @@ pub fn resolve(
             .get(&occurrence)
             .and_then(|frame| frame.get(result_id))
             .ok_or_else(|| EffectError::MissingParam("settled return result".to_string()))?;
+        let records = records
+            .zone_changes()
+            .ok_or_else(|| EffectError::InvalidParam("return result kind".into()))?;
         if spec.recipient != crate::types::ability::ControllerRef::You {
             return Err(EffectError::InvalidParam(
                 "unsupported return recipient".to_string(),
@@ -474,7 +477,22 @@ pub fn resolve(
     let root_event_subject_anaphor = creation_time_provenance
         .then(|| super::effect_event_subject_anaphor(&delayed_ability.effect))
         .flatten();
-    let (snapshot_targets, target_pins) = if let Some(anaphor) = root_event_subject_anaphor {
+    let creation_result = resolved_chain_references_last_created(&delayed_ability).then(|| {
+        ability
+            .context
+            .forwarded_result_context
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::types::ability::ForwardedResultContext::from_object_ids(
+                    state,
+                    &state.last_created_token_ids,
+                )
+            })
+    });
+    let (snapshot_targets, target_pins) = if let Some(result) = &creation_result {
+        (result.targets.clone(), result.object_incarnations.clone())
+    } else if let Some(anaphor) = root_event_subject_anaphor {
         // CR 608.2k: An event-subject anaphor always reads the event context —
         // `TriggeringSource` the event's subject (the dying creature of a
         // ZoneChanged), `EventTarget` its object slot (the damaged creature of
@@ -597,8 +615,8 @@ pub fn resolve(
     // (Mirror March #5966) does not make every per-win delayed exile re-resolve
     // to only the final win's token at end-step. Must run while the effect still
     // reads `LastCreated` and before `targets` is consumed downstream.
-    if !snapshot_targets.is_empty() && effect_references_last_created(&delayed_ability.effect) {
-        rebind_last_created_to_parent_target(&mut delayed_ability.effect);
+    if let Some(result) = &creation_result {
+        freeze_created_result(&mut delayed_ability, result);
     }
 
     // CR 603.7a + CR 608.2c: the payload fires as its own root, where the creating chain's
@@ -607,6 +625,7 @@ pub fn resolve(
         crate::game::targeting::live_declared_players(state, ability);
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    delayed_ability.context.token_creation_parent = None;
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.
@@ -1062,6 +1081,64 @@ fn stamp_triggering_source_origins(effect: &mut Effect, expected: Zone) {
 /// definitions) looking for `TargetFilter::LastCreated` in a target position.
 /// Used by `resolve` to decide whether to snapshot `last_created_token_ids`
 /// into the delayed ability's `targets` at creation time.
+pub(crate) fn freeze_created_result(
+    ability: &mut ResolvedAbility,
+    result: &crate::types::ability::ForwardedResultContext,
+) {
+    // CR 603.7c + CR 400.7 + CR 701.21a: a frozen concrete subject keeps the
+    // original installing player's normal sacrifice authority and birth pins.
+    let filter = match result.targets.as_slice() {
+        [] => TargetFilter::None,
+        [TargetRef::Object(id)] => TargetFilter::SpecificObject { id: *id },
+        targets => TargetFilter::Or {
+            filters: targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(TargetFilter::SpecificObject { id: *id }),
+                    TargetRef::Player(_) => None,
+                })
+                .collect(),
+        },
+    };
+    match &mut ability.effect {
+        Effect::Sacrifice { target, count, .. } if matches!(target, TargetFilter::LastCreated) => {
+            *target = filter;
+            *count = QuantityExpr::Fixed {
+                value: i32::try_from(result.object_incarnations.len())
+                    .expect("creation count fits engine quantity"),
+            };
+            ability.set_unpinned_targets(result.targets.clone());
+            ability.target_incarnations = result.object_incarnations.clone();
+        }
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
+            if matches!(target, TargetFilter::LastCreated) =>
+        {
+            *target = filter;
+            ability.set_unpinned_targets(result.targets.clone());
+            ability.target_incarnations = result.object_incarnations.clone();
+        }
+        _ => {}
+    }
+    if let Some(next) = ability.sub_ability.as_mut() {
+        freeze_created_result(next, result);
+    }
+    if let Some(next) = ability.else_ability.as_mut() {
+        freeze_created_result(next, result);
+    }
+}
+
+fn resolved_chain_references_last_created(ability: &ResolvedAbility) -> bool {
+    effect_references_last_created(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(resolved_chain_references_last_created)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(resolved_chain_references_last_created)
+}
+
 fn effect_references_last_created(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
 }
@@ -6415,5 +6492,180 @@ mod tests {
             event_context_amount(),
             "the else branch's later instruction stays live"
         );
+    }
+    #[test]
+    fn legacy_installed_last_created_binds_saved_set_not_current_global_and_empty_stays_empty() {
+        for empty in [false, true] {
+            let (mut state, create, tokens) =
+                last_created_sacrifice_fixture(DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::End,
+                });
+            state.phase = Phase::PreCombatMain;
+            let mut events = Vec::new();
+            resolve(&mut state, &create, &mut events).unwrap();
+            let captured = state.delayed_triggers[0]
+                .ability
+                .target_incarnations
+                .clone();
+            let other = crate::game::zones::create_object(
+                &mut state,
+                CardId(333),
+                PlayerId(0),
+                "Foreign latest".into(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&other).unwrap().card_types.core_types =
+                vec![crate::types::card_type::CoreType::Creature];
+            // Explicit historical storage shape, with its saved selection.
+            if let Effect::Sacrifice { target, count, .. } =
+                &mut state.delayed_triggers[0].ability.effect
+            {
+                *target = TargetFilter::LastCreated;
+                *count = QuantityExpr::Fixed { value: 1 };
+            }
+            if empty {
+                state.delayed_triggers[0].ability.targets.clear();
+                state.delayed_triggers[0]
+                    .ability
+                    .target_incarnations
+                    .clear();
+            }
+            state.last_created_token_ids = vec![other];
+            let mut value = serde_json::to_value(&state).unwrap();
+            value["resolution_state_version"] = serde_json::json!(5);
+            let loaded: GameState = serde_json::from_value(value).unwrap();
+            let installed = &loaded.delayed_triggers[0].ability;
+            assert!(
+                matches!(
+                    &installed.effect,
+                    Effect::Sacrifice {
+                        target: TargetFilter::None,
+                        count: QuantityExpr::Fixed { value: 0 },
+                        ..
+                    }
+                ) == empty
+            );
+            if !empty {
+                assert_eq!(installed.target_incarnations, captured);
+                assert!(matches!(
+                    &installed.effect,
+                    Effect::Sacrifice {
+                        target: TargetFilter::Or { .. },
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    }
+                ));
+            }
+            let mut runner = crate::game::scenario::GameRunner::from_state(loaded);
+            for _ in 0..160 {
+                if !runner.state().stack.is_empty() {
+                    break;
+                }
+                runner
+                    .act(crate::types::actions::GameAction::PassPriority)
+                    .unwrap();
+            }
+            assert!(!runner.state().stack.is_empty());
+            runner.advance_until_stack_empty();
+            for id in tokens {
+                assert_eq!(runner.state().objects[&id].zone == Zone::Battlefield, empty);
+            }
+            assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
+        }
+    }
+
+    #[test]
+    fn delayed_cleanup_normal_apnap_stack_order_and_install_during_end_waits_next_end() {
+        // Typed timing/ordering isolation: no full Broken cast during End is claimed.
+        let (mut state, create, tokens) =
+            last_created_sacrifice_fixture(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::End,
+            });
+        state.phase = Phase::PreCombatMain;
+        let mut events = Vec::new();
+        resolve(&mut state, &create, &mut events).unwrap();
+        let p1 = crate::game::zones::create_object(
+            &mut state,
+            CardId(334),
+            PlayerId(1),
+            "P1 saved subject".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&p1).unwrap().card_types.core_types =
+            vec![crate::types::card_type::CoreType::Creature];
+        state.last_created_token_ids = vec![p1];
+        let mut second = create.clone();
+        second.controller = PlayerId(1);
+        second.source_id = ObjectId(335);
+        resolve(&mut state, &second, &mut events).unwrap();
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        for _ in 0..160 {
+            if runner.state().stack.len() == 2 {
+                break;
+            }
+            runner
+                .act(crate::types::actions::GameAction::PassPriority)
+                .unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 2);
+        assert_eq!(
+            runner.state().stack.front().unwrap().controller,
+            PlayerId(0)
+        );
+        assert_eq!(runner.state().stack.back().unwrap().controller, PlayerId(1));
+        runner.advance_until_stack_empty();
+        for id in tokens {
+            assert_ne!(runner.state().objects[&id].zone, Zone::Battlefield);
+        }
+        assert_ne!(runner.state().objects[&p1].zone, Zone::Battlefield);
+        let (mut state, create, tokens) =
+            last_created_sacrifice_fixture(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::End,
+            });
+        state.phase = Phase::End;
+        for player in [PlayerId(0), PlayerId(1)] {
+            for offset in 0..4 {
+                crate::game::zones::create_object(
+                    &mut state,
+                    CardId(400 + offset),
+                    player,
+                    "Library filler".into(),
+                    Zone::Library,
+                );
+            }
+        }
+        let installed_turn = state.turn_number;
+        resolve(&mut state, &create, &mut Vec::new()).unwrap();
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        assert!(runner.state().stack.is_empty());
+        for _ in 0..250 {
+            if !runner.state().stack.is_empty() {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                crate::types::game_state::WaitingFor::DeclareAttackers { .. } => {
+                    crate::types::actions::GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    }
+                }
+                crate::types::game_state::WaitingFor::DeclareBlockers { .. } => {
+                    crate::types::actions::GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    }
+                }
+                _ => crate::types::actions::GameAction::PassPriority,
+            };
+            runner.act(action).unwrap();
+        }
+        assert!(runner.state().turn_number > installed_turn);
+        assert_eq!(runner.state().phase, Phase::End);
+        assert!(!runner.state().stack.is_empty());
+        runner.advance_until_stack_empty();
+        for id in tokens {
+            assert_ne!(runner.state().objects[&id].zone, Zone::Battlefield);
+        }
+        assert!(runner.state().delayed_triggers.is_empty());
     }
 }

@@ -1162,7 +1162,13 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 153;
+/// 154: TargetFilter.CastingSpell is serialized inside full GameState.
+/// 155: exact token creation frames and private copy-source tails use resolution wire 7.
+/// 156: typed revealed results and exact queued original origins use resolution wire 8.
+/// 157: mandatory specified-kind/exact-recipient counter adjustment.
+/// 158: exact removal reflexives and private damage-source authority use resolution wire 9.
+/// 159: source-bound chosen-parity references in serialized static definitions.
+pub const PROTOCOL_VERSION: u32 = 159;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2419,12 +2425,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 153);
+        assert_eq!(PROTOCOL_VERSION, 159);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 152);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 158);
     }
 
     #[test]

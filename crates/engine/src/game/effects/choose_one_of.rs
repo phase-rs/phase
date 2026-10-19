@@ -194,6 +194,36 @@ pub(crate) fn resolve_branch(
         )));
     };
     let is_final_chooser = remaining_players.is_empty();
+    if let Some(binding) = &context.counter_removal_result {
+        let operation_matches = match branch.effect.as_ref() {
+            Effect::RemoveCounter {
+                counter_type: Some(kind),
+                target: crate::types::ability::TargetFilter::ParentTarget,
+                ..
+            }
+            | Effect::PutCounter {
+                counter_type: kind,
+                target: crate::types::ability::TargetFilter::ParentTarget,
+                ..
+            } => binding.counters.matches(kind),
+            _ => false,
+        };
+        let occurrences = parent_occurrences.occurrences();
+        let pin_matches = matches!(occurrences.as_slice(), [(TargetRef::Object(id), Some(pin))]
+            if Some(*pin) == binding.recipient && *id == pin.object_id);
+        if !operation_matches
+            || !pin_matches
+            || source_id != binding.source.reference.object_id
+            || !super::counter_removal_binding_is_valid(state, binding)
+            || !is_final_chooser
+            || branch.sub_ability.is_some()
+            || branch.else_ability.is_some()
+        {
+            return Err(EffectError::InvalidParam(
+                "counter-adjustment branch authority".into(),
+            ));
+        }
+    }
 
     if !is_final_chooser {
         state.push_choose_one_of(PendingChooseOneOf {
@@ -213,6 +243,9 @@ pub(crate) fn resolve_branch(
 
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
+    if matches!(resolved.effect, Effect::PutCounter { .. }) {
+        resolved.context.counter_removal_result = None;
+    }
     // CR 400.7: the branch inherits the parent's OCCURRENCES, pins included.
     resolved.replace_target_occurrences(parent_occurrences.occurrences());
     resolved.set_replacement_applied_recursive(replacement_applied);

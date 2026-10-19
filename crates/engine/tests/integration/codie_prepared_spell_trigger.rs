@@ -25,7 +25,7 @@ use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CountScope, Effect,
     FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition, TargetFilter,
-    TargetRef, TypedFilter, ZoneRef,
+    TargetRef, TypeFilter, TypedFilter, ZoneRef,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
@@ -2232,21 +2232,6 @@ const CRACKLING_DRAKE_ORACLE: &str = "Flying\nCrackling Drake's power is equal t
 /// Verbatim Oracle text of Ketramose, the New Dawn.
 const KETRAMOSE_ORACLE: &str = "Menace, lifelink, indestructible\nKetramose can't attack or block unless there are seven or more cards in exile.\nWhenever one or more cards are put into exile from graveyards and/or the battlefield during your turn, you draw a card and lose 1 life.";
 
-/// Whether `expr` reads a count of cards in exile.
-fn reads_exile_card_count(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref {
-            qty:
-                QuantityRef::ZoneCardCount {
-                    zone: ZoneRef::Exile,
-                    ..
-                },
-        } => true,
-        QuantityExpr::Sum { exprs } => exprs.iter().any(reads_exile_card_count),
-        _ => false,
-    }
-}
-
 fn power(runner: &mut GameRunner, id: ObjectId) -> Option<i32> {
     engine::game::layers::evaluate_layers(runner.state_mut());
     runner.state().objects[&id].power
@@ -2340,22 +2325,75 @@ fn exile_card_population_crackling_drake_ignores_the_retained_prepare_copy() {
     let mut board = build_drake_board(db());
     let drake = board.drake;
 
-    // Reach guards: the Drake's parsed CDA reads cards in exile, and the board
-    // holds exactly Bolt (P0's) and Opt (P1's) in exile.
-    let reads_exile = board.runner.state().objects[&drake]
+    // CR 108.3 + CR 109.2a: the CDA counts owned instant/sorcery cards in the
+    // two stated zones. Assert the complete population, including its card domain.
+    let mut powers = board.runner.state().objects[&drake]
         .static_definitions
         .as_slice()
         .iter()
+        .filter(|definition| {
+            definition.characteristic_defining && definition.affected == Some(TargetFilter::SelfRef)
+        })
         .flat_map(|definition| definition.modifications.iter())
-        .any(|modification| {
-            matches!(
-                modification,
-                ContinuousModification::SetDynamicPower { value } if reads_exile_card_count(value)
-            )
+        .filter_map(|modification| match modification {
+            ContinuousModification::SetDynamicPower { value } => Some(value),
+            _ => None,
         });
+    let actual_power = powers
+        .next()
+        .expect("Drake must have its SelfRef power CDA");
     assert!(
-        reads_exile,
-        "Crackling Drake must parse its power CDA over cards in exile"
+        powers.next().is_none(),
+        "Drake must have exactly one power CDA"
+    );
+    let typed =
+        |kind, properties| TargetFilter::Typed(TypedFilter::new(kind).properties(properties));
+    let expected_power = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(
+                                TypeFilter::Instant,
+                                vec![FilterProp::Owned {
+                                    controller: ControllerRef::You,
+                                }],
+                            ),
+                            typed(
+                                TypeFilter::Sorcery,
+                                vec![FilterProp::Owned {
+                                    controller: ControllerRef::You,
+                                }],
+                            ),
+                        ],
+                    },
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(
+                                TypeFilter::Card,
+                                vec![FilterProp::InZone { zone: Zone::Exile }],
+                            ),
+                            typed(
+                                TypeFilter::Card,
+                                vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    },
+                                    FilterProp::Owned {
+                                        controller: ControllerRef::You,
+                                    },
+                                ],
+                            ),
+                        ],
+                    },
+                ],
+            },
+        },
+    };
+    assert_eq!(
+        actual_power, &expected_power,
+        "Drake's CDA must retain both owned card types and both complete zones"
     );
     assert_eq!(
         exile_ids(board.runner.state()),

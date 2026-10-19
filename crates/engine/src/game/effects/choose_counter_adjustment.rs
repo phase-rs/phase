@@ -1,6 +1,5 @@
-//! CR 122.1 + CR 608.2d (Clockspinning): choose a kind of counter present on the
-//! single target permanent or suspended card, then add and/or remove one of that
-//! kind.
+//! CR 122.1 + CR 608.2d: mandatory counter adjustment for a specified kind
+//! or one kind currently present on a single exact recipient.
 //!
 //! The chosen counter KIND is decided at resolution from the kinds actually
 //! present on the target (a runtime fact), so the per-kind branch set must be
@@ -14,135 +13,236 @@
 //! This is the choose-ONE-kind sibling of the `repeat_for:
 //! DistinctCounterKindsAmong` for-EACH-kind loop (Bribe Taker / Quarry Hauler).
 
+use super::counters::{
+    preview_counter_addition, remove_counter_optional_is_infeasible, CounterAdditionPreview,
+};
+use crate::game::quantity::{
+    quantity_expr_uses_recipient, resolve_quantity_with_targets,
+    resolve_quantity_with_targets_and_recipient,
+};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, EffectError, EffectKind, PlayerFilter,
-    ResolvedAbility, TargetFilter, TargetRef,
+    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::counter::positive_counter_types;
+use crate::types::counter::{positive_counter_types, CounterMatch};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 
-/// CR 122.1 + CR 608.2d: resolve a `ChooseCounterAdjustment`.
-///
-/// The single target object is read from `ability.targets` (propagated from the
-/// parent `TargetOnly` clause), mirroring `Effect::ChooseOneOf`; this effect has
-/// no target slot of its own. The counter mutation operates directly on
-/// `state.objects.get_mut(&id)` through the existing counter resolvers, which are
-/// zone-agnostic, so a suspended card in exile is modified correctly (CR 122.1: a
-/// counter is a marker on any object regardless of zone; CR 702.62b: a suspended
-/// card lives in exile bearing a time counter).
+/// CR 608.2h: determine this instruction's amount using its original authority.
+/// CR 107.1b: calculated negative results are zero. Only an explicitly authored
+/// negative Fixed is the existing removal sentinel; preserve outer UpTo (CR 107.1c).
+fn bind_count(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    count: &QuantityExpr,
+    recipient: ObjectId,
+) -> QuantityExpr {
+    let (inner, up_to) = count.peel_up_to();
+    let value = match inner {
+        QuantityExpr::Fixed { value } if *value < 0 => *value,
+        _ => {
+            let value = if quantity_expr_uses_recipient(inner) {
+                resolve_quantity_with_targets_and_recipient(state, inner, ability, recipient)
+            } else {
+                resolve_quantity_with_targets(state, inner, ability)
+            };
+            value.max(0)
+        }
+    };
+    let bound = QuantityExpr::Fixed { value };
+    if up_to {
+        QuantityExpr::up_to(bound)
+    } else {
+        bound
+    }
+}
+
+/// CR 400.7 + CR 608.2b: select the original occurrence before filtering it.
+/// A missing/stale first object never selects a later object or a board scan.
+pub(super) fn recipient(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<ObjectIncarnationRef> {
+    if matches!(target, TargetFilter::SelfRef) {
+        let object = state.objects.get(&ability.source_id)?;
+        if !ability.self_ref_is_current(state)
+            || ability
+                .trigger_source
+                .as_ref()
+                .is_some_and(|source| object.zone != source.identity.expected_zone)
+        {
+            return None;
+        }
+        return Some(ObjectIncarnationRef::from_object(object));
+    }
+    // CR 608.2k + CR 400.7: an untargeted context reference names its own
+    // referent, even if the chain inherited an unrelated announced target.
+    // Event roles use the shared mutation reader to check the event's stamp;
+    // other context references use their ordinary filter/slot authority.
+    if target.is_context_ref() && !matches!(target, TargetFilter::ParentTarget) {
+        let ids = match target {
+            TargetFilter::TriggeringSource | TargetFilter::EventTarget => {
+                crate::game::targeting::resolve_event_referent_objects(
+                    state,
+                    target,
+                    ability.source_id,
+                )
+            }
+            _ => crate::game::targeting::resolved_object_ids_for_filter(state, ability, target),
+        };
+        let [id] = ids.as_slice() else {
+            return None;
+        };
+        return state.objects.get(id).map(ObjectIncarnationRef::from_object);
+    }
+    let (index, id) = ability
+        .targets
+        .iter()
+        .enumerate()
+        .find_map(|(index, target)| {
+            if let TargetRef::Object(id) = target {
+                Some((index, *id))
+            } else {
+                None
+            }
+        })?;
+    if !ability.target_occurrence_is_current(index, state)
+        || !ability.target_pin_is_current(id, state)
+    {
+        return None;
+    }
+    let object = state.objects.get(&id)?;
+    Some(
+        ability
+            .target_pin_at(index)
+            .unwrap_or_else(|| ObjectIncarnationRef::from_object(object)),
+    )
+}
+
+/// CR 122.1 + CR 608.2d: build possible mandatory operations, then delegate
+/// unchanged ordinary counter definitions to the existing public choice route.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (adjustment, count) = match &ability.effect {
-        Effect::ChooseCounterAdjustment { adjustment, count } => (*adjustment, count.clone()),
-        _ => {
-            return Err(EffectError::MissingParam(
-                "ChooseCounterAdjustment".to_string(),
-            ))
-        }
+    let Effect::ChooseCounterAdjustment {
+        adjustment,
+        counters,
+        count,
+        target,
+    } = &ability.effect
+    else {
+        return Err(EffectError::MissingParam("ChooseCounterAdjustment".into()));
     };
-
-    // Emit the resolution marker for any path that does nothing (no target, target
-    // gone, or no counters present) — CR 608.2d.
-    let no_op = |state: &mut GameState, events: &mut Vec<GameEvent>| {
-        let _ = state;
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ChooseCounterAdjustment,
-            source_id: ability.source_id,
-            subject: None,
-        });
-    };
-
-    // The single target object, supplied via the parent-target chain.
-    let Some(target_id) = ability.targets.iter().find_map(|t| match t {
-        TargetRef::Object(id) => Some(*id),
-        TargetRef::Player(_) => None,
-    }) else {
-        no_op(state, events);
-        return Ok(());
-    };
-
-    let Some(obj) = state.objects.get(&target_id) else {
-        no_op(state, events);
-        return Ok(());
-    };
-
-    // CR 608.2d: with no counters present there is no legal kind to choose, so the
-    // effect does nothing (Clockspinning Gatherer ruling: "if the chosen permanent
-    // or card has no counters, nothing happens"). Deterministic ordering by
-    // `as_str()` keeps branch order stable across HashMap iteration (mirrors the
-    // `DistinctCounterKindsAmong` ordering).
-    let mut kinds = positive_counter_types(&obj.counters);
-    kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-    if kinds.is_empty() {
-        no_op(state, events);
-        return Ok(());
-    }
-
-    // Build the flat per-kind branch set. For an `AddOrRemove` clause each kind
-    // contributes a remove branch then an add branch (matching the printed Oracle
-    // order "remove ... or put ...").
-    let mut branches: Vec<AbilityDefinition> = Vec::new();
-    for kind in kinds {
-        if adjustment.allows_remove() {
-            branches.push(AbilityDefinition {
-                description: Some(format!("remove a {} counter", kind.display_phrase())),
-                ..AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::RemoveCounter {
-                        counter_type: Some(kind.clone()),
-                        // CR 122.1: remove ONE of the chosen kind — `Fixed { 1 }`,
-                        // NOT the `-1` "remove all" sentinel.
-                        count: count.clone(),
-                        target: TargetFilter::ParentTarget,
-                    },
-                )
-            });
-        }
-        if adjustment.allows_add() {
-            branches.push(AbilityDefinition {
-                description: Some(format!("put a {} counter", kind.display_phrase())),
-                ..AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::PutCounter {
-                        counter_type: kind,
-                        count: count.clone(),
-                        target: TargetFilter::ParentTarget,
-                    },
-                )
-            });
-        }
-    }
-
-    // CR 608.2d: emit the `ChooseCounterAdjustment` resolution marker on the
-    // active (counters-present) path too, so downstream consumers keying on the
-    // EffectResolved kind see this effect regardless of whether the target had
-    // counters — matching the three no-op paths above. The delegated
-    // `choose_one_of::resolve` below additionally emits its own `ChooseOneOf`
-    // marker for the interactive sub-choice.
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseCounterAdjustment,
         source_id: ability.source_id,
         subject: None,
     });
-
-    // Delegate to the existing ChooseOneOf machinery. The parent target is
-    // forwarded as the sub-ability's targets so each chosen branch's
-    // `ParentTarget` resolves to the same object.
-    let sub = ResolvedAbility::new(
-        Effect::ChooseOneOf {
-            chooser: PlayerFilter::Controller,
-            branches,
-            kind: ChooseOneOfKind::Ordinary,
-        },
-        vec![TargetRef::Object(target_id)],
-        ability.source_id,
-        ability.controller,
-    );
-    super::choose_one_of::resolve(state, &sub, events)
+    let recipient = recipient(state, ability, target);
+    let result_binding =
+        super::begin_counter_removal_result(state, ability, recipient, counters.clone())?;
+    let Some(pin) = recipient else {
+        return Ok(());
+    };
+    let object = &state.objects[&pin.object_id];
+    let mut kinds = match counters {
+        CounterMatch::Any => positive_counter_types(&object.counters),
+        CounterMatch::OfType(kind) => vec![kind.clone()],
+    };
+    kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    let bound = bind_count(state, ability, count, pin.object_id);
+    let (inner, up_to) = bound.peel_up_to();
+    let QuantityExpr::Fixed { value } = inner else {
+        unreachable!("bound counter amount")
+    };
+    let mut branches = Vec::new();
+    // Clone context/attribution but leave the outer resolution chain its sole tail.
+    let mut delegated = ability.clone();
+    delegated.declares_return_result = None;
+    delegated.context.counter_removal_result = result_binding;
+    delegated.sub_ability = None;
+    delegated.else_ability = None;
+    delegated.replace_target_occurrences(vec![(TargetRef::Object(pin.object_id), Some(pin))]);
+    for kind in kinds {
+        if adjustment.allows_remove() {
+            let effect = Effect::RemoveCounter {
+                counter_type: Some(kind.clone()),
+                count: bound.clone(),
+                target: TargetFilter::ParentTarget,
+            };
+            let mut candidate = delegated.clone();
+            candidate.effect = effect.clone();
+            let zero = *value == 0
+                || (*value < 0 && object.counters.get(&kind).copied().unwrap_or(0) == 0);
+            if up_to || zero || !remove_counter_optional_is_infeasible(state, &candidate) {
+                let amount = if up_to {
+                    "any number of".into()
+                } else if *value < 0 {
+                    "all".into()
+                } else {
+                    value.to_string()
+                };
+                branches.push(AbilityDefinition {
+                    description: Some(format!(
+                        "remove {amount} {} counters",
+                        kind.display_phrase()
+                    )),
+                    ..AbilityDefinition::new(AbilityKind::Spell, effect)
+                });
+            }
+        }
+        if adjustment.allows_add() {
+            let preview = preview_counter_addition(
+                state,
+                ability.controller,
+                pin,
+                kind.clone(),
+                (*value).max(0) as u32,
+            );
+            let possible = match preview {
+                Some(
+                    CounterAdditionPreview::Applied { .. }
+                    | CounterAdditionPreview::Transformed { .. }
+                    | CounterAdditionPreview::ChoiceRequired { .. }
+                    | CounterAdditionPreview::Unsupported,
+                ) => true,
+                Some(prohibition @ CounterAdditionPreview::Prevented) => {
+                    !prohibition.is_prohibited()
+                }
+                None => false,
+            };
+            if possible {
+                branches.push(AbilityDefinition {
+                    description: Some(format!(
+                        "put {} {} counters",
+                        (*value).max(0),
+                        kind.display_phrase()
+                    )),
+                    ..AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::PutCounter {
+                            counter_type: kind,
+                            count: bound.clone(),
+                            target: TargetFilter::ParentTarget,
+                        },
+                    )
+                });
+            }
+        }
+    }
+    if branches.is_empty() {
+        return Ok(());
+    }
+    delegated.effect = Effect::ChooseOneOf {
+        kind: ChooseOneOfKind::Ordinary,
+        chooser: PlayerFilter::Controller,
+        branches,
+    };
+    super::choose_one_of::resolve(state, &delegated, events)
 }
 
 #[cfg(test)]
@@ -167,6 +267,8 @@ mod tests {
         ResolvedAbility::new(
             Effect::ChooseCounterAdjustment {
                 adjustment: CounterAdjustment::AddOrRemove,
+                counters: CounterMatch::Any,
+                target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
             },
             vec![TargetRef::Object(target)],
@@ -299,6 +401,8 @@ mod tests {
         let sub = ResolvedAbility::new(
             Effect::ChooseCounterAdjustment {
                 adjustment: CounterAdjustment::AddOrRemove,
+                counters: CounterMatch::Any,
+                target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
             },
             Vec::new(),
@@ -634,6 +738,233 @@ mod tests {
         assert!(
             !targets.contains(&TargetRef::Object(bare_exile)),
             "exiled card without Suspend must not be offered; got {targets:?}"
+        );
+    }
+
+    #[test]
+    fn quantity_binding_keeps_original_x_recipient_and_sentinel_authorities() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target".into(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient".into(),
+            Zone::Battlefield,
+        );
+        for (id, power) in [(source, 1), (target, 3), (recipient, 7)] {
+            state.objects.get_mut(&id).unwrap().power = Some(power);
+        }
+        let mut ability = adjust_ability(target, source);
+        ability.chosen_x = Some(3);
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        };
+        assert_eq!(
+            bind_count(
+                &state,
+                &ability,
+                &QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(x.clone())
+                },
+                recipient
+            ),
+            QuantityExpr::Fixed { value: 6 }
+        );
+        assert_eq!(
+            bind_count(&state, &ability, &QuantityExpr::up_to(x), recipient),
+            QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 })
+        );
+        for (scope, value) in [
+            (ObjectScope::Source, 1),
+            (ObjectScope::Target, 3),
+            (ObjectScope::Recipient, 7),
+        ] {
+            assert_eq!(
+                bind_count(
+                    &state,
+                    &ability,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Power { scope }
+                    },
+                    recipient
+                ),
+                QuantityExpr::Fixed { value }
+            );
+        }
+        state.objects.get_mut(&recipient).unwrap().power = Some(-1);
+        let negative = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets_and_recipient(&state, &negative, &ability, recipient),
+            -1,
+            "generic signed reader remains unchanged"
+        );
+        assert_eq!(
+            bind_count(&state, &ability, &negative, recipient),
+            QuantityExpr::Fixed { value: 0 }
+        );
+        assert_eq!(
+            bind_count(
+                &state,
+                &ability,
+                &QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Fixed { value: 2 }),
+                    offset: -3
+                },
+                recipient
+            ),
+            QuantityExpr::Fixed { value: 0 }
+        );
+        for explicit in [
+            QuantityExpr::Fixed { value: -1 },
+            QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
+        ] {
+            assert_eq!(bind_count(&state, &ability, &explicit, recipient), explicit);
+        }
+    }
+
+    #[test]
+    fn recipient_binding_keeps_source_and_original_first_occurrence_authorities() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Same Name".into(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Same Name".into(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Decoy".into(),
+            Zone::Battlefield,
+        );
+        let mut ability = adjust_ability(first, source);
+        let first_pin = ObjectIncarnationRef::from_object(&state.objects[&first]);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(first), Some(first_pin)),
+            (
+                TargetRef::Object(second),
+                Some(ObjectIncarnationRef::from_object(&state.objects[&second])),
+            ),
+        ]);
+        assert_eq!(
+            recipient(&state, &ability, &TargetFilter::SelfRef)
+                .unwrap()
+                .object_id,
+            source
+        );
+        assert_eq!(
+            recipient(&state, &ability, &TargetFilter::ParentTarget).unwrap(),
+            first_pin
+        );
+        let context_id = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Context referent".into(),
+            Zone::Battlefield,
+        );
+        let context_pin = ObjectIncarnationRef::from_object(&state.objects[&context_id]);
+        state.current_trigger_event = Some(GameEvent::PermanentTapped {
+            object_id: context_id,
+            caused_by: None,
+            incarnation: Some(context_pin.incarnation),
+        });
+        state.objects.get_mut(&source).unwrap().attached_to =
+            Some(crate::game::game_object::AttachTarget::Object(context_id));
+        state.last_created_token_ids = vec![context_id];
+        for target in [
+            TargetFilter::TriggeringSource,
+            TargetFilter::AttachedTo,
+            TargetFilter::SpecificObject { id: context_id },
+            TargetFilter::GrantingObject {
+                bound: Some(context_pin),
+            },
+            TargetFilter::LastCreated,
+        ] {
+            assert_eq!(
+                recipient(&state, &ability, &target),
+                Some(context_pin),
+                "the context authority must override unrelated inherited targets: {target:?}"
+            );
+        }
+        assert_eq!(
+            recipient(
+                &state,
+                &ability,
+                &TargetFilter::ParentTargetSlot { index: 1 }
+            ),
+            Some(ObjectIncarnationRef::from_object(&state.objects[&second]))
+        );
+        state.objects.get_mut(&context_id).unwrap().incarnation += 1;
+        assert!(
+            recipient(&state, &ability, &TargetFilter::TriggeringSource).is_none(),
+            "the event's stale incarnation must not be recaptured"
+        );
+        assert!(recipient(
+            &state,
+            &ability,
+            &TargetFilter::GrantingObject {
+                bound: Some(context_pin)
+            }
+        )
+        .is_none());
+        state.last_created_token_ids.push(second);
+        assert!(
+            recipient(&state, &ability, &TargetFilter::LastCreated).is_none(),
+            "a singular instruction cannot silently select one member of a context set"
+        );
+        state.current_trigger_event = None;
+        state.objects.get_mut(&source).unwrap().attached_to = None;
+        for target in [
+            TargetFilter::TriggeringSource,
+            TargetFilter::EventTarget,
+            TargetFilter::AttachedTo,
+        ] {
+            assert!(
+                recipient(&state, &ability, &target).is_none(),
+                "absent context cannot substitute an inherited target: {target:?}"
+            );
+        }
+        state.objects.get_mut(&first).unwrap().incarnation += 1;
+        assert!(
+            recipient(&state, &ability, &TargetFilter::ParentTarget).is_none(),
+            "later live target cannot replace stale first occurrence"
+        );
+        assert_eq!(
+            recipient(&state, &ability, &TargetFilter::SelfRef)
+                .unwrap()
+                .object_id,
+            source,
+            "inherited target never overrides source"
         );
     }
 }

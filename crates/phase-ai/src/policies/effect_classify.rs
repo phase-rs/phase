@@ -936,7 +936,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
 
         // CR 405.1: objects on the stack are spells and abilities, never
         // creature permanents — a counterspell does not target creatures.
-        TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => FilterDomain::STACK_OBJECT,
+        TargetFilter::StackAbility { .. } | TargetFilter::StackSpell | TargetFilter::CastingSpell => FilterDomain::STACK_OBJECT,
 
         // CR 120.1 + CR 614.1: a damage event's recipient may be a permanent or
         // a player, so these two reach both axes.

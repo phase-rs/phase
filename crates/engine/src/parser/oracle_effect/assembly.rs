@@ -343,6 +343,21 @@ impl Arena {
         id
     }
 
+    fn token_definition_index(&self, owner: ClauseId) -> Option<usize> {
+        let mut nodes = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.prov.origin == Some(owner));
+        let (index, _) = nodes.next()?;
+        if nodes.next().is_some() {
+            return None;
+        }
+        let id = NodeId(index as u32);
+        let root = self.live_root_index(id)?;
+        (self.id_at(root) == Some(id)).then_some(root)
+    }
+
     /// Return a MOVED def to top-level under its ORIGINAL `NodeId`.
     ///
     /// Identity tracks the def, not its position (U6-C2 ruling). A def that
@@ -1804,6 +1819,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::And { .. }
             | TargetFilter::StackAbility { .. }
             | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -1939,6 +1955,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::Typed(_)
             | TargetFilter::StackAbility { .. }
             | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::AttachedTo
             | TargetFilter::LastCreated
@@ -2121,6 +2138,185 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// Validate the stored relation; source adjacency never reselects its id here.
+fn valid_sought_cost_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {
+    let Some((id, spec)) = &reader.reads_return_result else {
+        return false;
+    };
+    let Some(reader_index) = ir
+        .clauses
+        .iter()
+        .position(|clause| std::ptr::eq(clause, reader))
+    else {
+        return false;
+    };
+    let mut producers = ir
+        .clauses
+        .iter()
+        .enumerate()
+        .filter(|(_, clause)| clause.id == *id);
+    let Some((producer_index, producer)) = producers.next() else {
+        return false;
+    };
+    if producers.next().is_some()
+        || producer_index >= reader_index
+        || producer.id >= reader.id
+        || !producer.sought_result_shell_is_empty()
+        || producer.repeat_for.is_some()
+        || producer.reads_return_result.is_some()
+        || !reader.sought_result_shell_is_empty()
+    {
+        return false;
+    }
+    let Effect::Seek { destination, .. } = &producer.parsed.effect else {
+        return false;
+    };
+    let Effect::ApplyPerpetual {
+        target: TargetFilter::None,
+        modification: crate::types::ability::PerpetualModification::ModifyCost { amount, mode },
+    } = &reader.parsed.effect
+    else {
+        return false;
+    };
+    let (repeat, difference, body) = super::lower::strip_for_each_prefix_with_difference(
+        reader.source.fragment().unwrap_or_default(),
+    );
+    let parameters = super::parse_sought_perpetual_cost(&body.to_lowercase())
+        .ok()
+        .map(|(_, parameters)| parameters);
+    parameters.as_ref() == Some(&(amount.clone(), *mode))
+        && repeat == reader.repeat_for
+        && difference.is_none()
+        && spec.destination == *destination
+        && spec.recipient == ControllerRef::You
+        && spec.noun
+            == TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                crate::types::ability::TypeFilter::Card,
+            ))
+}
+
+fn valid_all_revealed_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {
+    let Some((id, spec)) = &reader.reads_return_result else {
+        return false;
+    };
+    if reader.revealed_result_reader().as_ref() != Some(spec) {
+        return false;
+    }
+    let Some(reader_index) = ir
+        .clauses
+        .iter()
+        .position(|clause| std::ptr::eq(clause, reader))
+    else {
+        return false;
+    };
+    let mut producers = ir
+        .clauses
+        .iter()
+        .enumerate()
+        .filter(|(_, clause)| clause.id == *id);
+    let Some((index, producer)) = producers.next() else {
+        return false;
+    };
+    producers.next().is_none()
+        && index < reader_index
+        && index + 1 == reader_index
+        && producer.id < reader.id
+        && producer.revealed_result_producer()
+        && (producer.repeat_for.is_none() || index == 0)
+}
+
+#[cfg(test)]
+mod revealed_reader_assembly_tests {
+    use super::*;
+    #[test]
+    fn all_revealed_stored_owner_and_complete_reader_are_validated() {
+        let text = "Reveal the top card of your library. Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+        let ir =
+            super::super::parse_effect_chain_ir(text, AbilityKind::Spell, &mut Default::default());
+        assert_eq!(ir.clauses.len(), 3);
+        assert_eq!(
+            ir.clauses[2].reads_return_result.as_ref().unwrap().0,
+            ir.clauses[1].id
+        );
+        assert!(valid_all_revealed_reader(&ir, &ir.clauses[2]));
+        let positive = assemble_effect_chain(&ir);
+        let producer = positive.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            producer.declares_return_result,
+            Some(ReturnResultId(ir.clauses[1].id.0))
+        );
+        for fault in 0..13 {
+            let mut bad = ir.clone();
+            match fault {
+                0 => bad.clauses[2].reads_return_result = None,
+                1 => bad.clauses[2].reads_return_result.as_mut().unwrap().0 = ClauseId(999),
+                2 => bad.clauses[0].id = bad.clauses[1].id,
+                3 => bad.clauses[2].reads_return_result.as_mut().unwrap().0 = bad.clauses[2].id,
+                4 => bad.clauses[1].is_optional = true,
+                5 => {
+                    bad.clauses[1].parsed.effect = Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    }
+                }
+                6 => {
+                    bad.clauses[2].reads_return_result.as_mut().unwrap().1.noun = TargetFilter::Any
+                }
+                7 => bad.clauses[2].condition = None,
+                8 => {
+                    if let Effect::ChangeZone { destination, .. } =
+                        &mut bad.clauses[2].parsed.effect
+                    {
+                        *destination = Zone::Hand;
+                    }
+                }
+                9 => {
+                    bad.clauses[2]
+                        .reads_return_result
+                        .as_mut()
+                        .unwrap()
+                        .1
+                        .recipient = ControllerRef::You
+                }
+                10 => {
+                    bad.clauses[1].disposition = ClauseDisposition::Continue { continuation: None }
+                }
+                11 => {
+                    bad.clauses[1].disposition = ClauseDisposition::Absorb {
+                        rider: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                player: TargetFilter::Controller,
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                        )),
+                        kind: AbsorbKind::DieExile,
+                    }
+                }
+                12 => bad.clauses[2].reads_return_result.as_mut().unwrap().0 = bad.clauses[0].id,
+                _ => unreachable!(),
+            }
+            assert!(
+                !valid_all_revealed_reader(&bad, &bad.clauses[2]),
+                "fault {fault}"
+            );
+            let output = assemble_effect_chain(&bad);
+            let nodes: Vec<_> =
+                std::iter::successors(Some(&output), |node| node.sub_ability.as_deref()).collect();
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| matches!(*node.effect, Effect::Unimplemented { .. })),
+                "fault {fault}: {output:#?}"
+            );
+            assert!(nodes
+                .iter()
+                .all(|node| node.reads_return_result.is_none()
+                    && node.declares_return_result.is_none()));
+        }
+    }
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
@@ -2175,7 +2371,48 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // Apply the Continue clause's continuation to the defs built so far
                 // (formerly the absorbed `followup_continuation` path).
                 if let Some(continuation) = clause_ir.disposition.followup() {
-                    apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
+                    if let ContinuationAst::TokenSourcePowerToughness { power, toughness } =
+                        continuation
+                    {
+                        // CR 111.3 + CR 608.2c: the later definition completes
+                        // exactly its declared creation, never a nearby output.
+                        let selected = clause_ir
+                            .token_definition_owner
+                            .and_then(|owner| env.arena.token_definition_index(owner));
+                        let patched = selected.and_then(|index| defs.get_mut(index)).is_some_and(
+                            |definition| {
+                                if let Effect::Token {
+                                    power: old_power,
+                                    toughness: old_toughness,
+                                    ..
+                                } = definition.effect.as_mut()
+                                {
+                                    *old_power = power.clone();
+                                    *old_toughness = toughness.clone();
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                        );
+                        if !patched {
+                            defs.push(AbilityDefinition::new(
+                                kind,
+                                Effect::unimplemented(
+                                    "token_definition_owner",
+                                    clause_ir.source.fragment().unwrap_or_default(),
+                                ),
+                            ));
+                        }
+                    } else {
+                        apply_clause_continuation(
+                            &mut defs,
+                            continuation.clone(),
+                            kind,
+                            &env,
+                            clause_ir.source.fragment().unwrap_or_default(),
+                        );
+                    }
                     env.observe(&defs, None, NodeRole::ContinuationProduct);
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
@@ -2767,7 +3004,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 }
                 // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
                 if let Some(continuation) = intrinsic {
-                    apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
+                    apply_clause_continuation(
+                        &mut defs,
+                        continuation.clone(),
+                        kind,
+                        &env,
+                        clause_ir.source.fragment().unwrap_or_default(),
+                    );
                     env.observe(&defs, None, NodeRole::ContinuationProduct);
                 }
                 true
@@ -2916,7 +3159,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // Non-absorbed, non-special followup continuation — apply it to the
         // previous defs before building this clause's def (`Emit.followup`).
         if let Some(continuation) = clause_ir.disposition.followup() {
-            apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
+            apply_clause_continuation(
+                &mut defs,
+                continuation.clone(),
+                kind,
+                &env,
+                clause_ir.source.fragment().unwrap_or_default(),
+            );
             env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
@@ -2926,8 +3175,57 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // effect, so it travels the ordinary def-construction path (boundary
         // link, condition, provenance) rather than a bespoke emit.
         let clause_effect = unabsorbed_rider_gap.unwrap_or_else(|| clause_ir.parsed.effect.clone());
+        let invalid_sought_reader = matches!(&clause_effect, Effect::ApplyPerpetual {
+            target, modification: crate::types::ability::PerpetualModification::ModifyCost { .. }
+        } if (*target == TargetFilter::None || clause_ir.reads_return_result.is_some())
+            && !valid_sought_cost_reader(ir, clause_ir));
+        let universal_source =
+            super::is_all_revealed_result_consumer(clause_ir.source.fragment().unwrap_or_default());
+        let invalid_revealed_reader = universal_source && !valid_all_revealed_reader(ir, clause_ir);
+        let clause_effect = if invalid_revealed_reader {
+            Effect::unimplemented(
+                "all_revealed_result_consumer",
+                clause_ir.source.fragment().unwrap_or_default(),
+            )
+        } else if invalid_sought_reader {
+            Effect::unimplemented(
+                "sought_cost_antecedent",
+                clause_ir.source.fragment().unwrap_or_default(),
+            )
+        } else {
+            clause_effect
+        };
         let is_target_only = matches!(clause_effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_effect);
+        if let Some(owner) = clause_ir.declares_instruction_result {
+            // CR 608.2c: declarations are source-addressed and cannot be borrowed
+            // by a duplicate, foreign, or wrong-shaped instruction.
+            let valid = owner == clause_ir.id
+                && ir
+                    .clauses
+                    .iter()
+                    .filter(|clause| clause.id == owner)
+                    .count()
+                    == 1
+                && matches!(&clause_ir.parsed.effect,
+                    Effect::ChooseCounterAdjustment { adjustment, .. } if adjustment.allows_remove())
+                || owner == clause_ir.id
+                    && ir
+                        .clauses
+                        .iter()
+                        .filter(|clause| clause.id == owner)
+                        .count()
+                        == 1
+                    && matches!(&clause_ir.parsed.effect, Effect::RemoveCounter { .. });
+            if valid {
+                def.declares_return_result = Some(ReturnResultId(owner.0));
+            } else {
+                def.effect = Box::new(Effect::unimplemented(
+                    "instruction_result_declaration",
+                    clause_ir.source.fragment().unwrap_or_default(),
+                ));
+            }
+        }
         def.declares_chosen_group = clause_ir
             .declares_chosen_clause
             .map(|id| ChosenGroupId(id.0))
@@ -2939,12 +3237,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .reads_return_result
                 .as_ref()
                 .is_some_and(|(id, _)| *id == clause_ir.id)
+                && (!matches!(reader.parsed.effect, Effect::ApplyPerpetual { modification: crate::types::ability::PerpetualModification::ModifyCost { .. }, .. }) || valid_sought_cost_reader(ir, reader))
+                && (!super::is_all_revealed_result_consumer(reader.source.fragment().unwrap_or_default()) || valid_all_revealed_reader(ir, reader))
         }) {
             def.declares_return_result = Some(ReturnResultId(clause_ir.id.0));
         }
         def.reads_return_result = clause_ir
             .reads_return_result
             .as_ref()
+            .filter(|_| !invalid_sought_reader && !invalid_revealed_reader)
             .map(|(id, spec)| (ReturnResultId(id.0), spec.clone()));
         // CR 702.26a: Preserve clause provenance on parent-target tap riders so
         // host-bound phase-in rewrites can match the exact printed phrase without
@@ -3681,7 +3982,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
 
         // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger
         // and bind direct follow-up ParentTarget references to the affected set.
-        if !current_defs.is_empty() {
+        if !current_defs.is_empty() && clause_ir.reads_return_result.is_none() {
             let source_text_lower = clause_ir
                 .source
                 .fragment()
@@ -3945,7 +4246,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // Apply intrinsic continuation after extending defs with current clause's
         // defs (`Emit.intrinsic`).
         if let Some(continuation) = clause_ir.disposition.intrinsic() {
-            apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
+            apply_clause_continuation(
+                &mut defs,
+                continuation.clone(),
+                kind,
+                &env,
+                clause_ir.source.fragment().unwrap_or_default(),
+            );
             env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
@@ -6157,5 +6464,169 @@ mod arena_tests {
             "Destroy target creature with flying and all Equipment attached to that creature.",
         );
         assert!(has_gap, "the attachment relation must fail closed");
+    }
+}
+
+#[cfg(test)]
+mod token_owner_tests {
+    use super::*;
+    use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+    use crate::types::ability::PtValue;
+
+    #[test]
+    fn token_pt_owner_diagonal() {
+        let text = "Create a 1/2 green Bear creature token. Create a 3/4 red Goblin creature token. Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+        let mut ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let owner = ir.clauses[0].id;
+        let definition = ir.clauses.last_mut().unwrap();
+        definition.token_definition_owner = Some(owner);
+        definition.disposition = ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::TokenSourcePowerToughness {
+                power: PtValue::Fixed(7),
+                toughness: PtValue::Fixed(8),
+            }),
+        };
+        let def = assemble_effect_chain(&ir);
+        assert!(matches!(
+            *def.effect,
+            Effect::Token {
+                power: PtValue::Fixed(7),
+                toughness: PtValue::Fixed(8),
+                ..
+            }
+        ));
+        assert!(matches!(
+            *def.sub_ability.as_ref().unwrap().effect,
+            Effect::Token {
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(4),
+                ..
+            }
+        ));
+        for owner in [None, Some(ClauseId(999))] {
+            ir.clauses.last_mut().unwrap().token_definition_owner = owner;
+            let def = assemble_effect_chain(&ir);
+            assert!(std::iter::successors(Some(&def), |d| d.sub_ability.as_deref()).any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { description, .. } if description == ir.clauses.last().unwrap().source.fragment().unwrap())));
+        }
+        // A real owner id with the wrong output shape must not select the other Token.
+        ir.clauses[0].parsed = crate::parser::oracle_ir::ast::parsed_clause(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        });
+        let owner = ir.clauses[0].id;
+        ir.clauses.last_mut().unwrap().token_definition_owner = Some(owner);
+        let def = assemble_effect_chain(&ir);
+        assert!(
+            std::iter::successors(Some(&def), |d| d.sub_ability.as_deref())
+                .any(|d| matches!(*d.effect, Effect::Unimplemented { .. }))
+        );
+    }
+    #[test]
+    fn token_owner_rejects_absorbed_duplicate_and_missing_identity() {
+        let mut arena = Arena::default();
+        let first = arena.push_new(Some(ClauseId(1)), NodeRole::Primary, DefWitness(1));
+        arena.push_new(Some(ClauseId(2)), NodeRole::Primary, DefWitness(2));
+        assert_eq!(arena.token_definition_index(ClauseId(1)), Some(0));
+        assert_eq!(arena.token_definition_index(ClauseId(99)), None);
+        let parent = arena.id_at(1).unwrap();
+        arena.nodes[first.0 as usize].status = NodeStatus::Absorbed { into: parent };
+        arena.order.remove(0);
+        assert_eq!(
+            arena.live_root_index(first),
+            Some(0),
+            "the containing live root exists"
+        );
+        assert_eq!(
+            arena.token_definition_index(ClauseId(1)),
+            None,
+            "containing root is not the exact Token identity"
+        );
+        arena.push_new(Some(ClauseId(2)), NodeRole::Primary, DefWitness(3));
+        assert_eq!(
+            arena.token_definition_index(ClauseId(2)),
+            None,
+            "duplicate origin is ambiguous"
+        );
+    }
+    #[test]
+    fn token_definition_selects_creator_past_non_token_output_and_rejects_duplicate_origin() {
+        let text = "Create a 1/2 green Bear creature token. Create a 3/4 red Goblin creature token. Draw a card. Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+        let mut ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let owner = ir.clauses[0].id;
+        let last = ir.clauses.last_mut().unwrap();
+        last.token_definition_owner = Some(owner);
+        last.disposition = ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::TokenSourcePowerToughness {
+                power: PtValue::Fixed(7),
+                toughness: PtValue::Fixed(8),
+            }),
+        };
+        let output = assemble_effect_chain(&ir);
+        assert!(matches!(
+            *output.effect,
+            Effect::Token {
+                power: PtValue::Fixed(7),
+                toughness: PtValue::Fixed(8),
+                ..
+            }
+        ));
+        assert!(std::iter::successors(Some(&output), |definition| definition
+            .sub_ability
+            .as_deref())
+        .any(|definition| matches!(*definition.effect, Effect::Draw { .. })));
+        ir.clauses[1].id = owner;
+        let output = assemble_effect_chain(&ir);
+        assert!(std::iter::successors(Some(&output), |definition| definition
+            .sub_ability
+            .as_deref())
+        .any(|definition| definition.effect.unimplemented_description()
+            == ir.clauses.last().unwrap().source.fragment()));
+    }
+    #[test]
+    fn exact_token_definition_owner_does_not_become_the_delayed_cleanup_consumer() {
+        let text="Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let owner = ir
+            .clauses
+            .iter()
+            .find_map(|clause| clause.token_definition_owner)
+            .expect("separate definition has exact creation ClauseId");
+        assert!(ir.clauses.iter().any(|clause| clause.id == owner));
+        assert_ne!(ir.clauses.last().unwrap().id, owner);
+        let output = assemble_effect_chain(&ir);
+        let nodes = std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| matches!(*node.effect, Effect::Token { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            *nodes.last().unwrap().effect,
+            Effect::CreateDelayedTrigger { .. }
+        ));
+        let mut missing = ir.clone();
+        for clause in &mut missing.clauses {
+            clause.token_definition_owner = None;
+        }
+        let output = assemble_effect_chain(&missing);
+        assert!(
+            std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+                .any(|node| node.effect.unimplemented_description().is_some())
+        );
+        let mut duplicated = ir.clone();
+        let owner_index = duplicated
+            .clauses
+            .iter()
+            .position(|clause| clause.id == owner)
+            .unwrap();
+        duplicated.clauses[owner_index + 1].id = owner;
+        let output = assemble_effect_chain(&duplicated);
+        assert!(
+            std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+                .any(|node| node.effect.unimplemented_description().is_some())
+        );
     }
 }

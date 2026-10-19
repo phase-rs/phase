@@ -1826,6 +1826,428 @@ pub(crate) fn find_refused_loyalty_grant_sentence(static_line: &str) -> Option<S
     None
 }
 
+/// A complete predicate publishes no modification until every top-level clause
+/// has an owner. Quoted bodies and protection riders keep their own grammar.
+pub(crate) fn parse_complete_continuous_modifications(
+    text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (predicate, protection_rider) =
+        if let Some((first, rider)) = tp.split_around_outside_quotes(". ") {
+            complete_protection_rider(rider.original)?;
+            (first, true)
+        } else {
+            (tp, false)
+        };
+    let (predicate, where_x, remaining) = complete_static_where_x(predicate)?;
+    let (mut modifications, verb) =
+        complete_modification_clause(predicate.original, where_x, ContinuousVerb::Grant)?;
+    if let Some(remaining) = remaining {
+        modifications.extend(complete_modification_clause(remaining, where_x, verb)?.0);
+    }
+    if protection_rider
+        && !modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(_)
+                }
+            )
+        })
+    {
+        return None;
+    }
+    Some(modifications)
+}
+
+fn complete_static_where_x<'a>(
+    tp: TextPair<'a>,
+) -> Option<(TextPair<'a>, Option<&'a str>, Option<&'a str>)> {
+    fn marker(input: &str) -> OracleResult<'_, &str> {
+        alt((tag(", where x is "), tag(" where x is "))).parse(input)
+    }
+    // The inner classifier owns quoted where-X clauses. Only an unquoted
+    // binding belongs to this predicate. The quantity grammar owns its span;
+    // any remaining clause must have a complete modification owner as well.
+    let (rest, _) = many0(alt((
+        recognize(nom::sequence::delimited(
+            tag::<_, _, OracleError<'_>>("\""),
+            take_until("\""),
+            tag("\""),
+        )),
+        recognize(preceded(not(marker), nom::character::complete::anychar)),
+    )))
+    .parse(tp.lower)
+    .ok()?;
+    if rest.is_empty() {
+        return Some((tp, None, None));
+    }
+    let (expression, _) = marker(rest).ok()?;
+    let expression = tp
+        .slice(tp.len() - expression.len(), tp.len())
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    let (remaining, _) = super::oracle_nom::quantity::parse_quantity
+        .parse(expression.lower)
+        .ok()?;
+    let expression_end = expression.len() - remaining.len();
+    let remaining = if remaining.trim().is_empty() {
+        None
+    } else {
+        let (tail, _) = alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(" and "),
+            tag(", "),
+        ))
+        .parse(remaining)
+        .ok()?;
+        Some(
+            expression
+                .slice(expression.len() - tail.len(), expression.len())
+                .original,
+        )
+    };
+    let predicate = tp
+        .slice(0, tp.len() - rest.len())
+        .trim_end_matches(',')
+        .trim_end();
+    Some((
+        predicate,
+        Some(expression.slice(0, expression_end).original),
+        remaining,
+    ))
+}
+
+fn complete_protection_rider(text: &str) -> Option<crate::types::ability::ProtectionDoesNotRemove> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    let (object, _) = alt((
+        tag::<_, _, OracleError<'_>>("this effect doesn't remove "),
+        tag("this effect does not remove "),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    parse_does_not_remove_object(object)
+}
+
+#[derive(Clone, Copy)]
+enum ContinuousVerb {
+    Pump,
+    Grant,
+    Remove,
+}
+
+fn complete_modification_clause(
+    text: &str,
+    where_x: Option<&str>,
+    inherited_verb: ContinuousVerb,
+) -> Option<(Vec<ContinuousModification>, ContinuousVerb)> {
+    let text = text.trim().trim_end_matches('.').trim();
+    if text.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (body, verb) = match alt((
+        value(
+            ContinuousVerb::Pump,
+            alt((tag::<_, _, OracleError<'_>>("gets "), tag("get "))),
+        ),
+        value(
+            ContinuousVerb::Grant,
+            alt((tag("gains "), tag("gain "), tag("has "), tag("have "))),
+        ),
+        value(ContinuousVerb::Remove, alt((tag("loses "), tag("lose ")))),
+    ))
+    .parse(lower.as_str())
+    {
+        Ok((rest, verb)) => (&text[text.len() - rest.len()..], verb),
+        Err(_) => (text, inherited_verb),
+    };
+    // These existing owners expose a complete nom production. Reuse their
+    // ordinary lowering only after that production owns the entire clause.
+    let complete_loss = all_consuming(parse_loss_enumeration)
+        .parse(lower.as_str())
+        .ok()
+        .is_some_and(|(_, members)| !members.contains(&LossMember::CardTypes));
+    let complete_supertype = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("is "),
+        nom_target::parse_supertype_word,
+    ))
+    .parse(lower.as_str())
+    .is_ok();
+    let complete_type_set = all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("is "), tag("are "))),
+        tag("every creature type"),
+    ))
+    .parse(lower.as_str())
+    .is_ok();
+    let complete_combat =
+        all_consuming(super::evasion::parse_assigns_damage_from_toughness_predicate)
+            .parse(lower.as_str())
+            .is_ok();
+    let complete_chosen = all_consuming(parse_last_chosen_characteristic_list)
+        .parse(lower.as_str())
+        .is_ok();
+    if complete_loss
+        || complete_supertype
+        || complete_type_set
+        || complete_combat
+        || complete_chosen
+        || parse_grant_all_abilities_clause(&lower).is_some()
+    {
+        let modifications = parse_continuous_modifications(text);
+        return (!modifications.is_empty()).then_some((modifications, verb));
+    }
+    let mut keyword_mods = Vec::new();
+    let mut keyword_complete = true;
+    let parts = complete_keyword_list_parts(body).unwrap_or_default();
+    for part in &parts {
+        if matches!(verb, ContinuousVerb::Remove) {
+            // Only bare keyword legs inherit this removal verb. Explicit
+            // transitions are owned by the transactional connector below.
+            if let Some(keyword) = map_keyword_complete(part) {
+                keyword_mods.push(ContinuousModification::RemoveKeyword { keyword });
+            } else {
+                keyword_complete = false;
+                break;
+            }
+        } else {
+            let part_lower = part.to_lowercase();
+            let part = nom_tag_lower(part, &part_lower, "has ")
+                .or_else(|| nom_tag_lower(part, &part_lower, "have "))
+                .or_else(|| nom_tag_lower(part, &part_lower, "gains "))
+                .or_else(|| nom_tag_lower(part, &part_lower, "gain "))
+                .unwrap_or(part);
+            if push_grant_clause_modifications_with_policy(
+                &mut keyword_mods,
+                part,
+                where_x,
+                super::oracle_keyword::KeywordRemainderPolicy::RequireAllConsuming,
+            )
+            .is_none()
+            {
+                keyword_complete = false;
+                break;
+            }
+        }
+    }
+    // The legacy list helper intentionally removes dangling punctuation for its
+    // hosts. A complete predicate may not use that recovery to admit a tail.
+    let dangling = alt((tag::<_, _, OracleError<'_>>("and"), tag("or")))
+        .parse(parts.last().map_or("", |p| p.as_ref()))
+        .is_ok();
+    if keyword_complete
+        && !keyword_mods.is_empty()
+        && !dangling
+        && text.trim_end().chars().last() != Some(',')
+    {
+        // allow-noncombinator: terminal punctuation validation, not dispatch.
+        return Some((keyword_mods, verb));
+    }
+    if let Ok((_, inner)) = all_consuming(nom::sequence::delimited(
+        tag::<_, _, OracleError<'_>>("\""),
+        take_until("\""),
+        tag("\""),
+    ))
+    .parse(body)
+    {
+        let mods = classify_quoted_inner(inner);
+        return (!mods.is_empty()).then_some((mods, verb));
+    }
+    if matches!(verb, ContinuousVerb::Pump) {
+        // CR 613.4c: "an additional" qualifies this additive pump, while the
+        // base-P/T numeric production retains its separate grammar contract.
+        let body_lower = body.to_lowercase();
+        let body = nom_tag_lower(body, &body_lower, "an additional ").unwrap_or(body);
+        if let Ok((rest, (power, toughness))) = parse_pt_mod_with_remainder(body) {
+            if rest.trim().is_empty() {
+                return Some((
+                    vec![
+                        ContinuousModification::AddPower { value: power },
+                        ContinuousModification::AddToughness { value: toughness },
+                    ],
+                    verb,
+                ));
+            }
+            if let Some(quantity_text) = nom_tag_lower(rest, &rest.to_lowercase(), " for each ") {
+                if let Some(quantity) =
+                    super::oracle_quantity::parse_for_each_clause_expr_deferred(quantity_text)
+                {
+                    let mut mods = Vec::new();
+                    push_dynamic_pt_modifications(&mut mods, power, toughness, quantity);
+                    return (!mods.is_empty()).then_some((mods, verb));
+                }
+            }
+        }
+        if all_consuming((
+            super::anthem::parse_base_pt_side,
+            tag::<_, _, OracleError<'_>>("/"),
+            super::anthem::parse_base_pt_side,
+        ))
+        .parse(body.to_lowercase().as_str())
+        .is_ok()
+        {
+            return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x)
+                .map(|modifications| (modifications, verb));
+        }
+    }
+    // CR 613.4b: setting only one base stat preserves the other axis. The
+    // shared numeric owner must consume the whole value before publication.
+    if let Ok((_, BasePtSide::Fixed { value })) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("base power "),
+        super::anthem::parse_base_pt_side,
+    ))
+    .parse(body.to_lowercase().as_str())
+    {
+        return Some((vec![ContinuousModification::SetPower { value }], verb));
+    }
+    if let Ok((_, BasePtSide::Fixed { value })) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("base toughness "),
+        super::anthem::parse_base_pt_side,
+    ))
+    .parse(body.to_lowercase().as_str())
+    {
+        return Some((vec![ContinuousModification::SetToughness { value }], verb));
+    }
+    // The pair owner also consumes both values completely, including an X
+    // pair whose expression is owned by the where-X clause.
+    if let Ok((_, (power, _, toughness))) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("base power and toughness "),
+        (
+            super::anthem::parse_base_pt_side,
+            tag("/"),
+            super::anthem::parse_base_pt_side,
+        ),
+    ))
+    .parse(body.to_lowercase().as_str())
+    {
+        return match (power, toughness) {
+            (BasePtSide::Fixed { value: power }, BasePtSide::Fixed { value: toughness }) => Some((
+                vec![
+                    ContinuousModification::SetPower { value: power },
+                    ContinuousModification::SetToughness { value: toughness },
+                ],
+                verb,
+            )),
+            (power, toughness) => {
+                let quantity = resolve_base_pt_x_ref(where_x)?;
+                Some((
+                    vec![
+                        ContinuousModification::SetPowerDynamic {
+                            value: base_pt_side_to_expr(power, &quantity),
+                        },
+                        ContinuousModification::SetToughnessDynamic {
+                            value: base_pt_side_to_expr(toughness, &quantity),
+                        },
+                    ],
+                    verb,
+                ))
+            }
+        };
+    }
+    if let Some(modification) = parse_all_land_types_modification(text) {
+        return Some((vec![modification], verb));
+    }
+    // Restriction parsing already requires its complete clause.
+    if let Some(modes) = parse_restriction_modes(text) {
+        let mods: Vec<_> = modes
+            .into_iter()
+            .filter(static_mode_needs_grant_propagation)
+            .map(|mode| ContinuousModification::AddStaticMode { mode })
+            .collect();
+        if !mods.is_empty() {
+            return Some((mods, verb));
+        }
+    }
+    // A type companion ends at its modeled additive suffix. The type grammar
+    // must own every word before that suffix, as well as the complete suffix.
+    if let Some(type_body) = nom_tag_tp(&tp, "are ").or_else(|| nom_tag_tp(&tp, "is ")) {
+        if let Some((types, suffix)) = type_body.split_around_outside_quotes(" in addition to ") {
+            if all_consuming((
+                alt((tag::<_, _, OracleError<'_>>("its "), tag("their "))),
+                tag("other "),
+                alt((tag("creature types"), tag("land types"), tag("types"))),
+            ))
+            .parse(suffix.lower)
+            .is_ok()
+            {
+                let (filter, remainder) = parse_type_phrase_folding(types.original);
+                if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
+                    return parse_additive_type_clause_modifications(text)
+                        .map(|modifications| (modifications, verb));
+                }
+            }
+        }
+    }
+    // Try every OUTSIDE-QUOTE connector transactionally. A failed split leaves
+    // the original predicate intact, including all intervening semantic text.
+    let mut scan = tp;
+    loop {
+        let (_, prefix) = recognize(many0(alt((
+            recognize(nom::sequence::delimited(
+                tag::<_, _, OracleError<'_>>("\""),
+                take_until("\""),
+                tag("\""),
+            )),
+            recognize(preceded(
+                not(alt((tag(", and "), tag(" and "), tag(", ")))),
+                nom::character::complete::anychar,
+            )),
+        ))))
+        .parse(scan.lower)
+        .ok()?;
+        let connector_input = &scan.lower[prefix.len()..];
+        let (after, _) = alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(" and "),
+            tag(", "),
+        ))
+        .parse(connector_input)
+        .ok()?;
+        let offset = tp.lower.len() - connector_input.len();
+        let right_offset = tp.lower.len() - after.len();
+        let left = tp.original[..offset].trim();
+        let right = tp.original[right_offset..].trim();
+        // CR 613.1f: a bare keyword keeps the preceding explicit operation.
+        // Carry the left transaction's final verb into the right transaction;
+        // publish neither vector if the complete right clause is unsupported.
+        if let Some((mut first, left_verb)) =
+            complete_modification_clause(left, where_x, inherited_verb)
+        {
+            if let Some((last, final_verb)) =
+                complete_modification_clause(right, where_x, left_verb)
+            {
+                first.extend(last);
+                return Some((first, final_verb));
+            }
+        }
+        scan = tp.slice(right_offset, tp.len());
+    }
+}
+
+fn complete_keyword_list_parts(text: &str) -> Option<Vec<Cow<'_, str>>> {
+    fn separator(input: &str) -> OracleResult<'_, &str> {
+        alt((tag(", and/or "), tag(", and "), tag(" and "), tag(", "))).parse(input)
+    }
+    fn part(input: &str) -> OracleResult<'_, &str> {
+        recognize(nom::multi::many1(preceded(
+            not(separator),
+            nom::character::complete::anychar,
+        )))
+        .parse(input)
+    }
+    let (_, parts) = all_consuming(separated_list1(separator, part))
+        .parse(text.trim())
+        .ok()?;
+    let parts: Vec<_> = parts.into_iter().map(str::trim).collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    Some(super::oracle_keyword::expand_protection_parts(&parts))
+}
+
 /// CR 613.4c + CR 702: In a granted-keyword "where X is its `<P/T/mana value>`"
 /// clause, "its" refers to the RECIPIENT of the grant — the creature that has the
 /// keyword — not the grant's source object. `parse_quantity_ref_complete` maps a
@@ -1869,18 +2291,37 @@ pub(crate) fn push_grant_clause_modifications(
     part: &str,
     where_x_expression: Option<&str>,
 ) {
-    // CR 702.16n / 702.16p: a keyword-grant clause reaching this fn is a single
-    // BARE (unquoted) keyword token — granted activated/triggered abilities are
-    // quoted and stripped to a separate path (strip_quoted_segments at :645 +
-    // parse_quoted_ability_modifications at :798) before extract_keyword_clause
-    // runs, so any ". " here can only introduce a trailing rider sentence
-    // (e.g. Benevolent Blessing's SBA-exemption "This effect doesn't remove ...").
-    // Drop it so the keyword sentence reaches map_keyword clean; the rider itself
-    // is recovered onto the hosting `StaticDefinition` via
-    // `parse_protection_does_not_remove` (CR 702.16n/p).
+    let _ = push_grant_clause_modifications_with_policy(
+        modifications,
+        part,
+        where_x_expression,
+        super::oracle_keyword::KeywordRemainderPolicy::DiscardRemainder,
+    );
+}
+
+pub(crate) fn push_grant_clause_modifications_with_policy(
+    modifications: &mut Vec<ContinuousModification>,
+    part: &str,
+    where_x_expression: Option<&str>,
+    policy: super::oracle_keyword::KeywordRemainderPolicy,
+) -> Option<()> {
+    // CR 702.16n / CR 702.16p: complete admission permits only a modeled
+    // protection exemption after the keyword sentence. Deliberately permissive
+    // host-owned grants retain their existing remainder policy; the complete
+    // predicate never treats that policy as a consumption proof.
     let part =
         match super::oracle_nom::bridge::split_once_on_lower(part, &part.to_lowercase(), ". ") {
-            Some((first, _)) => first,
+            Some((first, rider)) => {
+                if matches!(
+                    policy,
+                    super::oracle_keyword::KeywordRemainderPolicy::RequireAllConsuming
+                ) && (complete_protection_rider(rider).is_none()
+                    || !matches!(map_keyword_complete(first), Some(Keyword::Protection(_))))
+                {
+                    return None;
+                }
+                first
+            }
             None => part,
         };
 
@@ -1906,10 +2347,10 @@ pub(crate) fn push_grant_clause_modifications(
 
     // CR 702: Check for dynamic "keyword X" with "where X is [qty]"
     if let Some(where_expr) = where_x_expression {
-        if let Ok((_, kw_name)) = terminated(
+        if let Ok((_, kw_name)) = all_consuming(terminated(
             alpha1::<_, OracleError<'_>>,
             preceded(space1, tag_no_case("x")),
-        )
+        ))
         .parse(part_lower.as_str())
         {
             if let Some(kind) = crate::types::keywords::DynamicKeywordKind::from_name(kw_name) {
@@ -1922,7 +2363,7 @@ pub(crate) fn push_grant_clause_modifications(
                             qty: rebind_source_scope_to_recipient(qty_ref),
                         },
                     });
-                    return;
+                    return Some(());
                 }
             }
         }
@@ -1943,18 +2384,18 @@ pub(crate) fn push_grant_clause_modifications(
     // Walking Sponge). Checked before `map_keyword` so the anaphor is never
     // mis-classified as an unknown keyword. Builds for the whole "gain the
     // chosen keyword(s)" class.
-    if alt((
+    if all_consuming(alt((
         tag::<_, _, OracleError<'_>>("that ability"),
         tag("each of the chosen abilities"),
         tag("the chosen abilities"),
         tag("the chosen ability"),
         tag("the chosen keyword"),
-    ))
+    )))
     .parse(part_lower.as_str())
     .is_ok()
     {
         modifications.push(ContinuousModification::AddChosenKeyword);
-        return;
+        return Some(());
     }
 
     // CR 702.6a: bare "equip {N}" in a keyword list ("has indestructible and
@@ -1965,13 +2406,20 @@ pub(crate) fn push_grant_clause_modifications(
             modifications.push(ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             });
-            return;
+            return Some(());
         }
     }
 
-    if let Some(kw) = map_keyword(part_trimmed) {
+    if let Some(kw) = match policy {
+        super::oracle_keyword::KeywordRemainderPolicy::DiscardRemainder => {
+            map_keyword(part_trimmed)
+        }
+        super::oracle_keyword::KeywordRemainderPolicy::RequireAllConsuming => {
+            map_keyword_complete(part_trimmed)
+        }
+    } {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-        return;
+        return Some(());
     }
 
     // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
@@ -1979,23 +2427,31 @@ pub(crate) fn push_grant_clause_modifications(
     // existing targeting checks apply the correct controller scope, rather than a
     // scope-less rule static.
     if let Some(scope) =
-        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
+        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str()).filter(|_| {
+            matches!(
+                policy,
+                super::oracle_keyword::KeywordRemainderPolicy::DiscardRemainder
+            )
+        })
     {
         let keyword = match scope {
             crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
             crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
         };
         modifications.push(ContinuousModification::AddKeyword { keyword });
-        return;
+        return Some(());
     }
 
     if let Some(modes) = parse_restriction_modes(part_lower.as_str()) {
+        let before = modifications.len();
         for mode in modes {
             if static_mode_needs_grant_propagation(&mode) {
                 modifications.push(ContinuousModification::AddStaticMode { mode });
             }
         }
+        return (modifications.len() > before).then_some(());
     }
+    None
 }
 
 /// Extract quoted ability text from Oracle text and parse each into a typed AbilityDefinition.

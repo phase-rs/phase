@@ -1526,6 +1526,8 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
+                creation_frame: None,
+                instructions: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
                 name: "First liminal".to_string(),
                 source_id: ObjectId(11),
@@ -1546,6 +1548,8 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
+                creation_frame: None,
+                instructions: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
                 name: "Second liminal".to_string(),
                 source_id: ObjectId(22),
@@ -2328,7 +2332,7 @@ fn copy_target_choice_purpose_round_trips_and_still_defaults_to_become_copy() {
         source_id: ObjectId(7),
         valid_targets: vec![ObjectId(9), ObjectId(8)],
         max_mana_value: None,
-        purpose: CopyTargetPurpose::CopyTokenSource,
+        purpose: CopyTargetPurpose::CopyTokenSource { continuation: None },
     };
     let value = waiting_value(&waiting);
     assert_eq!(value["data"]["purpose"]["type"], "CopyTokenSource");

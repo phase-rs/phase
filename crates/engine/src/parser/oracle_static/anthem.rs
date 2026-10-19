@@ -402,9 +402,14 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
     if let Some(def) = parse_leading_condition_peel(&tp) {
         return Some(def);
     }
+    if nom_tag_tp(&tp, "during your turn, ").is_some()
+        || nom_tag_tp(&tp, "during turns other than yours, ").is_some()
+    {
+        return None;
+    }
 
     // Additive-type clauses do not use any of the get/has/have/lose verbs that
-    // `find_continuous_predicate_start` scans for. They split on "are"/"is"
+    // the shared subject/predicate scanner recognizes. They split on "are"/"is"
     // instead and may embed a " have " inside a granted-ability quote that
     // would otherwise confuse the verb scanner. Route them to their own
     // extractor before falling through to the general predicate parser.
@@ -412,48 +417,66 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
         return Some(def);
     }
 
-    let subject_end = find_continuous_predicate_start(tp.lower)?;
-    let subject = tp.original[..subject_end].trim();
-    let predicate = tp.original[subject_end + 1..].trim();
-    if parse_rule_static_predicate(predicate).is_some() {
-        return None;
-    }
-    let affected = parse_continuous_subject_filter(subject)?;
-
-    // CR 613.4c / CR 611.3a: Route "for each" and "as long as" predicates through
-    // parse_continuous_gets_has which handles dynamic P/T and condition splitting.
-    let pred_lower = predicate.to_lowercase();
-    if nom_primitives::scan_contains(&pred_lower, "for each")
-        || nom_primitives::scan_contains(&pred_lower, "as long as")
-    {
-        return parse_continuous_gets_has(predicate, affected, text);
-    }
-
-    // CR 604.1: Strip suffix turn conditions from the ORIGINAL-case predicate
-    // (not `pred_lower`) — "has first strike during your turn" → "has first
-    // strike" + DuringYourTurn. The condition phrase is lowercase in the original
-    // too, so `strip_suffix_turn_condition` still matches, and the retained
-    // predicate keeps its printed case: a granted ability's serialized,
-    // user-visible `description` must read "{T}: Add {G}.", not "{t}: add {g}."
-    // (issue #5599, Brightcap Badger).
-    let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(predicate);
-
-    let modifications = parse_continuous_modifications(&effective_predicate);
-    if !modifications.is_empty() {
-        let mut def = with_protection_does_not_remove(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(modifications)
-                .description(text.to_string()),
-            text,
-        );
-        if let Some(cond) = suffix_condition {
-            def.condition = Some(cond);
+    parse_continuous_subject_predicate(&tp, |subject, predicate| {
+        if parse_rule_static_predicate(predicate).is_some() {
+            return None;
         }
-        return Some(def);
-    }
+        let affected = parse_continuous_subject_filter(subject)?;
+        parse_complete_continuous_predicate(predicate, affected, text)
+    })
+    .or_else(|| {
+        parse_continuous_subject_predicate(&tp, |subject, predicate| {
+            if parse_rule_static_predicate(predicate).is_some() {
+                return None;
+            }
+            let affected = parse_continuous_subject_filter(subject)?;
+            Some(continuous_predicate_residual(affected, text))
+        })
+    })
+}
 
-    None
+pub(crate) fn parse_complete_continuous_predicate(
+    predicate: &str,
+    affected: TargetFilter,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let lower = predicate.to_lowercase();
+    let tp = TextPair::new(predicate, &lower);
+    for (marker, negative) in [(" as long as ", false), (" unless ", true)] {
+        if let Some((body, gate)) = tp.split_around_outside_quotes(marker) {
+            let condition = parse_affected_scoped_static_condition(
+                gate.original.trim().trim_end_matches('.'),
+                Some(&affected),
+            )?;
+            let mut def =
+                parse_complete_continuous_predicate(body.original, affected, description)?;
+            let condition = if negative {
+                StaticCondition::Not {
+                    condition: Box::new(condition),
+                }
+            } else {
+                condition
+            };
+            def.condition = Some(match def.condition.take() {
+                Some(existing) => StaticCondition::And {
+                    conditions: vec![existing, condition],
+                },
+                None => condition,
+            });
+            return Some(def);
+        }
+    }
+    let (body, condition) = strip_suffix_turn_condition(predicate);
+    let modifications = super::keyword_grant::parse_complete_continuous_modifications(&body)?;
+    let mut def = with_protection_does_not_remove(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(description.to_string()),
+        description,
+    );
+    def.condition = condition;
+    Some(def)
 }
 
 /// CR 205.1 / CR 205.3a: Top-level dispatcher for additive-type-only statics
@@ -1123,27 +1146,11 @@ pub(crate) fn parse_continuous_gets_has(
                 let mut modifications = Vec::new();
                 push_dynamic_pt_modifications(&mut modifications, p, t, quantity);
                 if !modifications.is_empty() {
-                    // Check for trailing "and has [keyword]" after the for-each clause
-                    // e.g., "gets +1/+0 for each Mountain you control and has first strike"
-                    if let Some(keyword_text) = extract_keyword_clause(description) {
-                        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
-                            push_grant_clause_modifications(
-                                &mut modifications,
-                                part.as_ref(),
-                                None,
-                            );
-                        }
-                    }
-                    // CR 205.1b + CR 604.1: also recover a trailing type-addition
-                    // ("and is an Assassin in addition to its other types",
-                    // Reaper's Scythe) or a trailing quoted-ability grant ("and has
-                    // \"{T}, Sacrifice a creature: ...\"", Rakdos Riteknife) after the
-                    // dynamic pump — the keyword path above only recovers trailing
-                    // keywords. Both scanners no-op when their pattern is absent.
-                    if let Some(type_mods) = parse_additive_type_clause_modifications(description) {
-                        modifications.extend(type_mods);
-                    }
-                    modifications.extend(parse_quoted_ability_modifications(description));
+                    // The complete predicate owns every keyword, quote, type and
+                    // dynamic companion transactionally; no secondary scan may
+                    // publish a surviving primary while dropping a failed tail.
+                    modifications =
+                        super::keyword_grant::parse_complete_continuous_modifications(text)?;
                     return Some(with_protection_does_not_remove(
                         StaticDefinition::continuous()
                             .affected(affected)

@@ -2698,6 +2698,45 @@ impl GameObject {
         }
     }
 
+    /// CR 201.2a + CR 709.4a: all live names, with unnamed/concealed objects
+    /// contributing no name. A split card outside the stack has both names.
+    pub fn effective_names(&self) -> Vec<String> {
+        if self.face_down {
+            return Vec::new();
+        }
+        self.names_with_other_half(self.split_half_to_combine())
+    }
+
+    /// CR 406.3a + CR 708.4 + CR 709.3b: selected spell characteristics,
+    /// independent of the card's retained origin zone or concealed-exile flag.
+    pub fn spell_names_for(
+        &self,
+        variant: crate::types::game_state::CastingVariant,
+    ) -> Vec<String> {
+        if variant == crate::types::game_state::CastingVariant::FaceDown {
+            return Vec::new();
+        }
+        // Concealment can coexist with a printed alternative face. The selected
+        // variant determines the cast; already-blanked characteristics have no name.
+        self.names_with_other_half(
+            self.fused_split_half_for(variant == crate::types::game_state::CastingVariant::Fuse),
+        )
+    }
+
+    fn names_with_other_half(&self, other: Option<&BackFaceData>) -> Vec<String> {
+        let mut names = Vec::new();
+        for name in std::iter::once(self.name.as_str()).chain(other.map(|half| half.name.as_str()))
+        {
+            if !name.is_empty() {
+                let name = name.to_lowercase();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
     /// The other Split half to combine when this object is being cast as a FUSED
     /// split spell (CR 702.102b). `None` for non-fused casts and non-split objects,
     /// so callers combine both halves ONLY for a fused spell. Distinct from
@@ -2772,37 +2811,6 @@ impl GameObject {
                 .collect(),
             None => self.color.clone(),
         }
-    }
-
-    /// CR 708.4 + CR 702.37c / CR 702.168b: Whether the SPELL this object
-    /// represents is being cast FACE DOWN — a morph/megamorph/disguise card put
-    /// on the stack as a blank 2/2 creature spell for {3} — as opposed to merely
-    /// carrying `face_down = true`.
-    ///
-    /// Those differ, and the difference is why this must not read raw
-    /// `face_down`: CR 702.143a exiles a foretold card "from their hand face
-    /// down" and then lets its owner cast it — hideaway and other exile/library
-    /// concealment work the same way — so `face_down` is set while the card
-    /// waits in exile, yet nothing grants that cast the CR 708.4 permission to
-    /// be turned face down, and the spell goes on the stack face up. The
-    /// discriminator is
-    /// `face_down && back_face.is_some()`: `continue_cast_face_down` is the only
-    /// path that presents a spell with a blanked object, because it turns the
-    /// object face down through `apply_face_down_entry_profile`, which stashes
-    /// the real card in `back_face` (CR 708.2 copiable-value blank). A
-    /// foretold/hideaway object keeps `back_face = None` — its characteristics
-    /// are intact in exile, it is not blanked — and a DFC / adventure / transform
-    /// object carries `back_face` with `face_down = false`, so neither side
-    /// reads `true` here. Manifest and cloak objects are face-down permanents put
-    /// onto the battlefield by effects, never cast, so they never reach a spell
-    /// seam at all.
-    ///
-    /// Single authority for that question: the restricted-mana payment seam
-    /// (`build_spell_meta` → `SpellMeta::is_face_down`, CR 106.6) and the
-    /// spell-filter projection (`spell_cast_record_from_object_for`) both ask
-    /// here rather than each re-deriving it.
-    pub fn spell_is_cast_face_down(&self) -> bool {
-        self.face_down && self.back_face.is_some()
     }
 
     /// CR 702.102b + CR 709.4d: Restore the combined card types and colors of
@@ -5791,5 +5799,92 @@ mod tests {
         entering.prepared_copy_source = Some(ObjectId(77));
         entering.reset_for_battlefield_exit();
         assert_eq!(entering.prepared_copy_source, None);
+    }
+}
+
+#[cfg(test)]
+mod casting_name_set_tests {
+    use super::*;
+    use crate::types::game_state::CastingVariant;
+
+    #[test]
+    fn cast_names_project_selected_split_and_concealed_characteristics() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Alpha".into(),
+            Zone::Graveyard,
+        );
+        object.back_face = Some(BackFaceData {
+            name: "Beta".into(),
+            layout_kind: Some(LayoutKind::Split),
+            ..Default::default()
+        });
+        assert_eq!(object.effective_names(), vec!["alpha", "beta"]);
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Normal),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Fuse),
+            vec!["alpha", "beta"]
+        );
+        object.zone = Zone::Stack;
+        assert_eq!(object.effective_names(), vec!["alpha"]);
+        object.fused_split_spell = true;
+        assert_eq!(object.effective_names(), vec!["alpha", "beta"]);
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Normal),
+            vec!["alpha"]
+        );
+        object.back_face = None;
+        object.face_down = true;
+        object.zone = Zone::Exile;
+        assert!(object.effective_names().is_empty());
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Foretell),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Normal),
+            vec!["alpha"]
+        );
+        // Natural alternative-face metadata survives concealment. CR 406.3a
+        // makes these selected casts face up, regardless of that stored face.
+        for layout in [LayoutKind::Split, LayoutKind::Modal, LayoutKind::Adventure] {
+            object.back_face = Some(BackFaceData {
+                name: "Beta".into(),
+                layout_kind: Some(layout),
+                ..Default::default()
+            });
+            assert!(object.effective_names().is_empty());
+            for variant in [CastingVariant::Normal, CastingVariant::Foretell] {
+                assert_eq!(object.spell_names_for(variant), vec!["alpha"]);
+            }
+            assert!(object.spell_names_for(CastingVariant::FaceDown).is_empty());
+        }
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Adventure),
+            vec!["alpha"]
+        );
+        object.back_face.as_mut().unwrap().layout_kind = Some(LayoutKind::Split);
+        assert_eq!(
+            object.spell_names_for(CastingVariant::Fuse),
+            vec!["alpha", "beta"]
+        );
+        assert!(object.spell_names_for(CastingVariant::FaceDown).is_empty());
+        object.back_face = None;
+        object.name.clear();
+        assert!(object.spell_names_for(CastingVariant::Normal).is_empty());
+        object.face_down = false;
+        assert!(object.effective_names().is_empty());
+        object.name = "ÉCHO".into();
+        object.back_face = Some(BackFaceData {
+            name: "écho".into(),
+            layout_kind: Some(LayoutKind::Split),
+            ..Default::default()
+        });
+        assert_eq!(object.effective_names(), vec!["écho"]);
     }
 }

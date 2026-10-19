@@ -20,6 +20,7 @@ const HIDDEN_CARD_NAME: &str = "Hidden Card";
 /// The engine retains it for the active loop, while clients need only the
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
+    ability.context.counter_removal_result = None;
     ability.context.parent_target_iteration_members = None;
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         redact_parent_target_iteration_members(sub_ability);
@@ -49,6 +50,18 @@ fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
 /// `state`.
 pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameState {
     let mut projected = state.clone();
+    if let Some(pending) = projected.pending_replacement.as_mut() {
+        pending.damage_source_context = None;
+        if let crate::types::proposed_event::ProposedEvent::RemoveCounter {
+            result_binding, ..
+        } = &mut pending.proposed
+        {
+            *result_binding = None;
+        }
+    }
+    if let WaitingFor::ChooseOneOfBranch { context, .. } = &mut projected.waiting_for {
+        context.counter_removal_result = None;
+    }
     redact_paid_cast_cleanup_authority(&mut projected.waiting_for);
     let object_redactions: Vec<_> = state
         .objects
@@ -1498,8 +1511,20 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // resolution can resume after the branch selection. Like every other
     // resolved continuation, that carrier can contain private object IDs and
     // last-known information; clients need only the branch presentation.
-    if let WaitingFor::ChooseOneOfBranch { continuation, .. } = &mut filtered.waiting_for {
-        *continuation = None;
+    match &mut filtered.waiting_for {
+        WaitingFor::ChooseOneOfBranch {
+            continuation,
+            context,
+            ..
+        } => {
+            *continuation = None;
+            context.counter_removal_result = None;
+        }
+        WaitingFor::CopyTargetChoice {
+            purpose: crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation },
+            ..
+        } => *continuation = None,
+        _ => {}
     }
     // The provenance journal contains exact source identities, restrictions,
     // and cost-recipient relationships. It is server authority and must not
@@ -1577,6 +1602,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // submit no replacement action and must not receive its private source IDs.
     if !replacement_choice_authorized {
         filtered.pending_replacement = None;
+    }
+    if let Some(pending) = filtered.pending_replacement.as_mut() {
+        pending.damage_source_context = None;
+        if let crate::types::proposed_event::ProposedEvent::RemoveCounter {
+            result_binding, ..
+        } = &mut pending.proposed
+        {
+            *result_binding = None;
+        }
     }
 
     filtered.active_library_searches.retain(|_, search| {
@@ -3965,6 +3999,7 @@ fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    ability.context.counter_removal_result = None;
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
     }
@@ -4102,6 +4137,8 @@ fn redact_mana_choice_context_payment(
 /// `PendingManaAbility`, `ManaAbilityResume`, `CostResume`, `CollectEvidenceResume` or
 /// `ManaChoiceContext` must be listed here or in `pending_cast_mut`; the compiler does not
 /// enforce it.
+// CopyTokenSource's entire private resolved tail, like ChooseOneOf's tail,
+// was removed by filter_state_for_scope before this payment-only traversal.
 fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet<ObjectId>) {
     use crate::types::game_state::{CollectEvidenceResume, CostResume};
     // Every casting prompt that holds a `PendingCast` (including a `PayCost` spell resume
@@ -7645,6 +7682,8 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
+                creation_frame: None,
+                instructions: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(
                         crate::game::game_object::GameObject::new(
@@ -14583,5 +14622,370 @@ mod tests {
             shared > 0,
             "redacting one object must not copy every other object"
         );
+    }
+
+    fn produced_current_copy_source_prompt() -> (GameState, ObjectId) {
+        // Engine seam fixture: real parsed Esix plus a parsed creation and its
+        // real replacement answer. Full public producer proofs live in integration.
+        let mut state = GameState::new_two_player(901);
+        let esix = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Esix, Fractal Bloom".into(),
+            Zone::Battlefield,
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text("Flying\nThe first time you would create one or more tokens during each of your turns, you may instead choose a creature other than Esix and create that many tokens that are copies of that creature.", "Esix, Fractal Bloom", &["Flying".into()], &["Creature".into()], &["Fractal".into()]);
+        {
+            let object = state.objects.get_mut(&esix).unwrap();
+            object.base_card_types.core_types = vec![CoreType::Creature];
+            object.card_types = object.base_card_types.clone();
+            object.base_power = Some(4);
+            object.base_toughness = Some(4);
+            object.power = Some(4);
+            object.toughness = Some(4);
+            object.base_replacement_definitions = std::sync::Arc::new(parsed.replacements.clone());
+            object.replacement_definitions = parsed.replacements.into();
+        }
+        let chosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Distinct chosen creature".into(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&chosen).unwrap();
+            object.base_card_types.core_types = vec![CoreType::Creature];
+            object.card_types = object.base_card_types.clone();
+            object.base_power = Some(3);
+            object.base_toughness = Some(5);
+            object.power = Some(3);
+            object.toughness = Some(5);
+        }
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Creation seam".into(),
+            Zone::Stack,
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text("Create two 1/1 red Warrior creature tokens. Sacrifice them at the beginning of the next end step.", "Creation seam", &[], &["Instant".into()], &[]);
+        let ability = crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            source,
+            PlayerId(0),
+        );
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .unwrap();
+        let WaitingFor::CopyTargetChoice {
+            purpose:
+                crate::types::ability::CopyTargetPurpose::CopyTokenSource {
+                    continuation: Some(tail),
+                },
+            valid_targets,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("actual current copy prompt: {:?}", state.waiting_for);
+        };
+        assert!(valid_targets.contains(&chosen));
+        let parent = tail
+            .context
+            .token_creation_parent
+            .expect("actual selected event");
+        assert_eq!(parent.substitution_count, 2);
+        assert!(state
+            .resolution_stack
+            .token_creation(parent.frame)
+            .is_some());
+        (state, chosen)
+    }
+
+    #[test]
+    fn copy_source_prompt_redacts_saved_tail_for_every_viewer() {
+        let (state, chosen) = produced_current_copy_source_prompt();
+        let authoritative = state.waiting_for.clone();
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let filtered = match viewer {
+                Some(viewer) => filter_state_for_viewer(&state, viewer),
+                None => filter_state_for_unseated_viewer(&state),
+            };
+            let WaitingFor::CopyTargetChoice {
+                player,
+                source_id,
+                valid_targets,
+                max_mana_value,
+                purpose,
+            } = &filtered.waiting_for
+            else {
+                panic!("public legal prompt retained");
+            };
+            assert_eq!(*player, PlayerId(0));
+            assert!(valid_targets.contains(&chosen));
+            assert!(matches!(
+                purpose,
+                crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation: None }
+            ));
+            let WaitingFor::CopyTargetChoice {
+                player: original_player,
+                source_id: original_source,
+                valid_targets: original_targets,
+                max_mana_value: original_mv,
+                ..
+            } = &authoritative
+            else {
+                unreachable!();
+            };
+            assert_eq!(
+                (player, source_id, valid_targets, max_mana_value),
+                (
+                    original_player,
+                    original_source,
+                    original_targets,
+                    original_mv
+                )
+            );
+            let json = serde_json::to_value(&filtered.waiting_for).unwrap();
+            assert!(json["data"]["purpose"].get("continuation").is_none());
+        }
+        assert_eq!(state.waiting_for, authoritative);
+    }
+
+    #[test]
+    fn copy_source_private_context_is_omitted_from_client_envelopes() {
+        let (mut state, chosen) = produced_current_copy_source_prompt();
+        let hidden = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(1),
+            "Hidden identity".into(),
+            Zone::Hand,
+        );
+        // Labelled carrier/storage isolation, not a claim that ordinary Esix
+        // necessarily captures a hidden card. The whole subtree is private.
+        let WaitingFor::CopyTargetChoice {
+            purpose:
+                crate::types::ability::CopyTargetPurpose::CopyTokenSource {
+                    continuation: Some(tail),
+                },
+            ..
+        } = &mut state.waiting_for
+        else {
+            unreachable!();
+        };
+        tail.description = Some("PRIVATE_COPY_TAIL_SENTINEL".into());
+        tail.context.chain_root_targets = vec![crate::types::ability::TargetRef::Object(hidden)];
+        let original = state.waiting_for.clone();
+        assert!(serde_json::to_string(&state)
+            .unwrap()
+            .contains("PRIVATE_COPY_TAIL_SENTINEL"));
+        assert!(serde_json::to_string(&state.clone())
+            .unwrap()
+            .contains("PRIVATE_COPY_TAIL_SENTINEL"));
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let filtered = match viewer {
+                Some(viewer) => filter_state_for_viewer(&state, viewer),
+                None => filter_state_for_unseated_viewer(&state),
+            };
+            for envelope in [
+                serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+                    &state, viewer,
+                ))
+                .unwrap(),
+                serde_json::to_value(
+                    crate::game::derived_views::ClientGameStateRef::wrap_filtered(
+                        &state, &filtered, viewer,
+                    ),
+                )
+                .unwrap(),
+            ] {
+                assert!(!envelope.to_string().contains("PRIVATE_COPY_TAIL_SENTINEL"));
+                let prompt = &envelope["state"]["waiting_for"]["data"];
+                assert_eq!(prompt["purpose"]["type"], "CopyTokenSource");
+                assert!(prompt["purpose"].get("continuation").is_none());
+                assert!(prompt["valid_targets"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::to_value(chosen).unwrap()));
+                assert!(
+                    serde_json::from_value::<crate::types::game_state::PersistedGameState>(
+                        envelope["state"].clone()
+                    )
+                    .is_err(),
+                    "marked display wire cannot restore trusted authority"
+                );
+            }
+        }
+        assert_eq!(state.waiting_for, original);
+    }
+
+    #[test]
+    fn copy_source_trusted_roundtrip_keeps_authority_and_resumes() {
+        let (state, chosen) = produced_current_copy_source_prompt();
+        for loaded in [
+            state.clone(),
+            serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).unwrap(),
+            serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+            serde_json::from_value::<crate::types::game_state::TrustedGameStateEnvelope>(
+                serde_json::to_value(crate::types::game_state::TrustedGameStateEnvelope::capture(
+                    state.clone(),
+                ))
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        ] {
+            assert_eq!(loaded.waiting_for, state.waiting_for);
+            let mut loaded = loaded;
+            crate::game::engine::apply_as_current(
+                &mut loaded,
+                GameAction::ChooseTarget {
+                    target: Some(crate::types::ability::TargetRef::Object(chosen)),
+                },
+            )
+            .unwrap();
+            assert_eq!(loaded.last_created_token_ids.len(), 2);
+            for id in &loaded.last_created_token_ids {
+                assert_eq!(loaded.objects[id].name, "Distinct chosen creature");
+                assert_eq!(
+                    (
+                        loaded.objects[id].base_power,
+                        loaded.objects[id].base_toughness
+                    ),
+                    (Some(3), Some(5))
+                );
+            }
+            assert_eq!(
+                loaded
+                    .delayed_triggers
+                    .iter()
+                    .filter(|trigger| matches!(trigger.ability.effect, Effect::Sacrifice { .. }))
+                    .count(),
+                1
+            );
+            assert!(loaded.resolution_stack.is_empty());
+        }
+        for fault in 0..5 {
+            let mut bad = state.clone();
+            let WaitingFor::CopyTargetChoice {
+                purpose:
+                    crate::types::ability::CopyTargetPurpose::CopyTokenSource {
+                        continuation: Some(tail),
+                    },
+                ..
+            } = &mut bad.waiting_for
+            else {
+                unreachable!()
+            };
+            match fault {
+                0 => {
+                    tail.context.token_creation_parent.as_mut().unwrap().frame =
+                        crate::types::identifiers::TokenCreationFrameId(u64::MAX)
+                }
+                1 => {
+                    tail.context
+                        .token_creation_parent
+                        .as_mut()
+                        .unwrap()
+                        .substitution_count += 1
+                }
+                2 => tail.source_id = chosen,
+                3 => tail.controller = PlayerId(1),
+                _ => tail.replacement_applied.clear(),
+            };
+            assert!(
+                serde_json::from_value::<GameState>(serde_json::to_value(&bad).unwrap()).is_err(),
+                "saved prompt malformed authority {fault}"
+            );
+        }
+        let mut malformed = serde_json::to_value(&state).unwrap();
+        malformed["waiting_for"]["data"]["purpose"]
+            .as_object_mut()
+            .unwrap()
+            .remove("continuation");
+        assert!(serde_json::from_value::<GameState>(malformed).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sought_result_privacy_tests {
+    use super::*;
+    #[test]
+    fn sought_result_pause_is_private_and_trusted_reloadable() {
+        let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let mut state = runner.state().clone();
+        // Labelled sentinel isolation inside an ACTUAL populated private result.
+        let records = state
+            .return_result_frames
+            .values_mut()
+            .flat_map(|frame| frame.values_mut())
+            .filter_map(|result| result.zone_changes_mut())
+            .find(|records| !records.is_empty())
+            .unwrap();
+        records[0].name = "PRIVATE_SOUGHT_RESULT_SENTINEL".into();
+        let original = serde_json::to_string(&state).unwrap();
+        assert!(original.contains("PRIVATE_SOUGHT_RESULT_SENTINEL"));
+        assert!(!state.resolution_stack.is_empty());
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let filtered = viewer.map_or_else(
+                || filter_state_for_unseated_viewer(&state),
+                |viewer| filter_state_for_viewer(&state, viewer),
+            );
+            assert!(filtered.return_result_frames.is_empty());
+            assert!(filtered.active_return_result_occurrence.is_none());
+            assert_eq!(filtered.next_return_result_occurrence_id, 1);
+            assert!(filtered.resolution_stack.is_empty());
+            assert!(matches!(
+                filtered.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            for value in [
+                serde_json::to_value(&filtered).unwrap(),
+                serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+                    &state, viewer,
+                ))
+                .unwrap(),
+                serde_json::to_value(
+                    crate::game::derived_views::ClientGameStateRef::wrap_filtered(
+                        &state, &filtered, viewer,
+                    ),
+                )
+                .unwrap(),
+            ] {
+                assert!(!value.to_string().contains("PRIVATE_SOUGHT_RESULT_SENTINEL"));
+            }
+        }
+        assert_eq!(
+            serde_json::to_string(&state).unwrap(),
+            original,
+            "projection never mutates trusted authority"
+        );
+        let loaded: crate::types::game_state::PersistedGameState = serde_json::from_slice(
+            &serde_json::to_vec(&crate::types::game_state::PersistedGameState::capture(
+                state,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut runner =
+            crate::game::scenario::GameRunner::from_state(loaded.into_game_state().unwrap());
+        crate::game::effects::seek::tests::finish_sought_pause(&mut runner, &cards);
     }
 }

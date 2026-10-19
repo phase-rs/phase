@@ -122,11 +122,10 @@ pub(crate) struct OracleUnitId {
 
 /// How precisely a span locates its unit.
 ///
-/// A span is always *true* — it always contains its unit — but it is not always
-/// *card-absolute*. A consumer that renders a position (Plan 02's per-unit
-/// diagnostics) must be able to tell the difference: printing a chain-local byte
-/// offset as a card position is a precise-looking wrong answer, which is worse
-/// than an admittedly coarse one.
+/// Precision is relative to the producer's buffer. Document item anchors use
+/// normalized physical lines; audit diagnostics independently compute spans in
+/// raw `OracleDocIr::source_text`; clauses use their local chain buffer.
+/// A renderer must know that buffer before treating bytes as raw-card positions.
 ///
 /// Typed rather than a `bool` per CLAUDE.md: a future `LineOnly` precision (line
 /// known, byte range not) is an enum value, not a second flag.
@@ -134,7 +133,7 @@ pub(crate) struct OracleUnitId {
 // qualifier this enum's own docs call orthogonal to containment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SpanPrecision {
-    /// The span is the unit's exact byte/line extent. Safe to render.
+    /// Exact byte/line extent in the producer's buffer, not necessarily raw Oracle.
     Exact,
     /// The span's byte range is exact **within the effect chain** it was parsed
     /// from, but NOT card-absolute: it is an offset into a single
@@ -143,20 +142,19 @@ pub enum SpanPrecision {
     /// allocator is seeded over the chain text because the document allocator is
     /// not yet threaded through `ParseContext` (same wall `AbilityIr` documents).
     ///
-    /// It is HONEST, not fabricated: the offset is truthful relative to the
-    /// chain, and the verbatim `fragment` is retained so a later
-    /// allocator-threading unit can upgrade it to a card-absolute
-    /// `SpanPrecision::Exact` by adding the chain's base offset — or, if
-    /// preprocessing was not offset-linear, by re-locating the fragment in the
-    /// card text. A renderer must NOT print `first_line`/`start_byte` as a
-    /// card-absolute position.
+    /// The fragment is verbatim to the supplied chunk, which may already be
+    /// normalized or derived. Derived chunks can retain a zero-width local
+    /// anchor when they cannot be located in the chain. A future raw mapping
+    /// would need to account for these transformations; adding a base offset
+    /// alone cannot establish raw-card geometry.
     ///
     /// U5 DEBT — upgrades to `Exact` when the allocator is threaded.
     ChainRelative,
 }
 
-/// Position of a unit within the original Oracle text, plus how precisely that
-/// position is known (`precision`).
+/// Position of a unit in its producer's source buffer, with its precision.
+/// Normalized item anchors, local clauses and raw audit spans have distinct
+/// backing buffers even when their precision values coincide.
 ///
 /// Byte ranges are required (not just line ranges) so two clauses on one
 /// physical line remain distinguishable. `ordinal_within_span` disambiguates
@@ -178,11 +176,10 @@ pub enum SpanPrecision {
 /// exactly — not a clause within it. No producer mints a sub-line ITEM span:
 /// `DocEmitter::exact_span` hands every item on a line the whole line's byte range
 /// (`byte_range(line)`), so two clauses on one physical line are addressed by the same
-/// bytes and are distinguished only by `ordinal_within_span`. `audit_units` therefore
-/// groups them into ONE unit, and both share one `unit_span` — the line-granularity
-/// ceiling `feature.rs` documents. A renderer must not present a `unit_span` as a
-/// *clause* position. When the recognizer bring-up gives items real sub-line spans, the
-/// units subdivide on their own and this narrows with no change here.
+/// bytes and are distinguished only by `ordinal_within_span`. `audit_units` groups
+/// them by physical starting line and recomputes the raw unit's byte range through
+/// the next item start. That raw range is not copied from normalized item bytes.
+/// A renderer must not present a `unit_span` as a *clause* position.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct OracleSourceSpan {
     pub first_line: usize,
@@ -236,14 +233,13 @@ impl OracleSourceSpan {
         }
     }
 
-    /// True when this span's bounds locate the unit exactly **card-absolutely**.
-    /// A position renderer must consult this before printing a line number or
-    /// byte offset as a card position. `ChainRelative` is deliberately NOT exact:
-    /// its offsets are truthful only within a single chain.
+    /// True when this span uses the producer's exact extent rather than a
+    /// chain-local anchor. The producer's backing buffer must still be known;
+    /// this predicate alone cannot establish a raw-card position.
     ///
     /// The fragment-precision guard now consults the widened `carries_fragment`
     /// (which admits `ChainRelative`), so this exact-only accessor has no
-    /// production caller in M1 — it is retained solely as the card-absolute
+    /// production caller in M1 — it is retained solely as the exact/local
     /// distinction the precision-tier tests assert on, hence `#[cfg(test)]`
     /// rather than a dead-code allow.
     #[cfg(test)]
@@ -253,8 +249,8 @@ impl OracleSourceSpan {
 
     /// True when this precision tier is allowed to carry a verbatim `fragment`.
     ///
-    /// Both live tiers — `Exact` (card-absolute) and `ChainRelative` (chain-local
-    /// but honest) — address a concrete byte range and therefore have a real
+    /// Both live tiers — `Exact` (producer-buffer) and `ChainRelative` (chain-local
+    /// anchor) — carry a real
     /// verbatim fragment, so this is currently true for every span. That is not a
     /// tautology to be collapsed into `true`: it is the single authority the
     /// fail-closed `check_fragment_precision` guard consults, and because the
@@ -284,13 +280,14 @@ impl OracleSourceSpan {
     }
 }
 
-/// A unit's identity, its source position, and — when that position is exact —
-/// the verbatim fragment it covers.
+/// A unit's identity, its source position, and its producer-buffer fragment.
+/// Both live precision tiers carry fragments. An item's normalized physical
+/// head-line fragment does not describe the extent of a collected ability body.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct OracleUnitSource {
     id: OracleUnitId,
     span: OracleSourceSpan,
-    /// The verbatim Oracle text this unit covers — present exactly when
+    /// The verbatim producer-buffer text for this unit — present exactly when
     /// `span.precision.carries_fragment()`, which today is every tier.
     ///
     /// A tier that cannot locate the unit must NOT report a fragment: handing a
@@ -315,7 +312,7 @@ impl OracleUnitSource {
         &self.span
     }
 
-    /// `Some` iff the span is `Exact`. See the field docs.
+    /// `Some` for both `Exact` and `ChainRelative`. See the field docs.
     #[allow(dead_code)] // consumed by Plan 02's per-unit diagnostics.
     pub(crate) fn fragment(&self) -> Option<&str> {
         self.fragment.as_deref()
@@ -673,7 +670,8 @@ impl PrintedTriggerIndex {
 pub(crate) struct OracleDocIr {
     /// Parsed items in Oracle source order.
     pub(crate) items: Vec<OracleItemIr>,
-    /// Original Oracle text (provenance).
+    /// Byte-exact original Oracle text, including reminders and physical newlines.
+    /// Item byte spans index normalized parser lines instead of this buffer.
     pub(crate) source_text: String,
     /// Card name for self-reference context.
     pub(crate) card_name: String,
@@ -720,7 +718,7 @@ pub(crate) enum DocBuilderError {
         item: OracleItemId,
         child: OracleSourceSpan,
     },
-    /// A unit carries a fragment without an `Exact` span, or vice versa.
+    /// Fragment presence disagrees with the span's `carries_fragment` tier.
     FragmentPrecisionMismatch {
         unit: OracleUnitId,
         precision: SpanPrecision,

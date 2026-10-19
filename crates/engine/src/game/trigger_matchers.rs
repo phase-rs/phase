@@ -905,6 +905,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::Owner => false,
         TargetFilter::Any
         | TargetFilter::SelfRef

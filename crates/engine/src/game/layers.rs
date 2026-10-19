@@ -4631,6 +4631,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -27733,6 +27734,7 @@ mod tests {
             &mut state,
             ZoneMoveRequest {
                 object_id: source,
+                expected_origin: None,
                 to: Zone::Graveyard,
                 cause: ZoneChangeCause::Effect { source },
                 mods: EntryMods::default(),
@@ -27797,6 +27799,7 @@ mod tests {
             &mut state,
             ZoneMoveRequest {
                 object_id: original_source,
+                expected_origin: None,
                 to: Zone::Graveyard,
                 cause: ZoneChangeCause::Effect {
                     source: original_source,

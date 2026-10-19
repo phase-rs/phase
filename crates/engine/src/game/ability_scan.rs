@@ -2249,8 +2249,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::DraftFromSpellbook { .. } => Axes::NONE,
         Effect::ChooseCounterAdjustment {
             adjustment: _,
+            counters: _,
             count,
-        } => scan_quantity_expr(count, mode),
+            target,
+        } => scan_quantity_expr(count, mode).or(scan_target_filter(target, target_ctx, mode)),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             scan_effect(replacement_effect, mode)
         }
@@ -3217,6 +3219,15 @@ fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes {
 
 fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
     match x {
+        // Immutable occurrence/member storage; conservatively reject projected
+        // freedom without claiming that the triggering object is read live.
+        AbilityCondition::CounterRemovedThisWay {
+            result: _,
+            counters: _,
+        } => Axes {
+            event: false,
+            ..Axes::CONSERVATIVE
+        },
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
         | AbilityCondition::TriggerEventTargetExploitedBySource => Axes {
             event: true,
@@ -3640,7 +3651,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             }
             acc
         }
-        TargetFilter::StackSpell => Axes::NONE,
+        TargetFilter::StackSpell | TargetFilter::CastingSpell => Axes::NONE,
         TargetFilter::SpecificObject { id: _ } => Axes::NONE,
         TargetFilter::SpecificPlayer { id: _ } => Axes::NONE,
         TargetFilter::Neighbor { direction: _ } => Axes::NONE,
@@ -4860,6 +4871,13 @@ fn typed_filter_axes(tf: &TypedFilter, mode: ScanMode) -> Axes {
 /// (analysis/resource.rs): a field is projected iff that fn clears it.
 fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
     match x {
+        // All alternatives read board/source characteristics, never projected
+        // player resources. Keep the parameter exhaustive for future additions.
+        FilterProp::ManaValueParity { parity } => match parity {
+            crate::types::ability::ParitySource::Fixed(_)
+            | crate::types::ability::ParitySource::LastNamedChoice
+            | crate::types::ability::ParitySource::SourceChosen => Axes::NONE,
+        },
         // --- board / object / printed-characteristic leaves: no player resource.
         // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
         FilterProp::Token
@@ -4883,7 +4901,6 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::HasKeywordKind { .. }
         | FilterProp::WithoutKeyword { .. }
         | FilterProp::WithoutKeywordKind { .. }
-        | FilterProp::ManaValueParity { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
@@ -7628,6 +7645,135 @@ fn effect_census_role(e: &Effect) -> CensusRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u15_parsed_external_filter_scan_axes() {
+        use crate::types::ability::{Parity, ParitySource};
+        let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Ashling's Prerogative",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert!(parsed.parse_warnings.is_empty());
+        assert_eq!(parsed.replacements.len(), 2);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(parsed.abilities.is_empty());
+        assert!(parsed
+            .replacements
+            .iter()
+            .any(
+                |definition| definition.valid_card == Some(TargetFilter::SelfRef)
+                    && definition
+                        .execute
+                        .as_deref()
+                        .is_some_and(|ability| matches!(
+                            ability.effect.as_ref(),
+                            crate::types::ability::Effect::Choose {
+                                choice_type: crate::types::ability::ChoiceType::OddOrEven,
+                                persist: true,
+                                ..
+                            }
+                        ))
+            ));
+        assert_eq!(
+            parsed.statics[0].modifications,
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Haste,
+            }]
+        );
+        let original = parsed
+            .replacements
+            .iter()
+            .find_map(|def| {
+                def.valid_card
+                    .as_ref()
+                    .filter(|filter| **filter != TargetFilter::SelfRef)
+            })
+            .unwrap();
+        assert!(
+            matches!(original, TargetFilter::Typed(tf) if tf.type_filters == [crate::types::ability::TypeFilter::Creature] && tf.controller.is_none() && matches!(tf.properties.as_slice(), [FilterProp::Not { prop }] if matches!(prop.as_ref(), FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+        );
+        for parity in [
+            ParitySource::SourceChosen,
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+        ] {
+            let mut filter = original.clone();
+            let mut leaves = 0;
+            let mut complete = true;
+            crate::game::filter::rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: value @ ParitySource::SourceChosen,
+                    } = prop
+                    {
+                        *value = parity;
+                        leaves += 1;
+                    }
+                },
+                &mut complete,
+            );
+            assert!(complete);
+            assert_eq!(leaves, 1);
+            for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+                for context in [
+                    FilterReadContext::SnapshotOrEvent,
+                    FilterReadContext::LiveBoardCensus,
+                ] {
+                    let axes = scan_target_filter(&filter, context, mode);
+                    assert!(axes.event);
+                    assert_eq!(
+                        axes.sibling,
+                        context == FilterReadContext::LiveBoardCensus
+                            || matches!(mode, ScanMode::Conservative)
+                    );
+                    assert!(!axes.projected);
+                    assert_eq!(axes.history, HistoryReads::NONE);
+                }
+                let TargetFilter::Typed(tf) = &filter else {
+                    unreachable!()
+                };
+                let FilterProp::Not { prop } = &tf.properties[0] else {
+                    unreachable!()
+                };
+                for prop in [&tf.properties[0], prop.as_ref()] {
+                    let axes = scan_filter_prop(prop, mode);
+                    assert!(!axes.event && !axes.sibling && !axes.projected);
+                    assert_eq!(axes.history, HistoryReads::NONE);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn u14_parity_has_no_projected_player_resource_axes() {
+        use crate::types::ability::{Parity, ParitySource};
+        for parity in [
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+            ParitySource::SourceChosen,
+        ] {
+            for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+                let prop = FilterProp::ManaValueParity { parity };
+                let axes = scan_filter_prop(&prop, mode);
+                assert!(!axes.event && !axes.sibling && !axes.projected);
+                let nested = scan_filter_prop(
+                    &FilterProp::AnyOf {
+                        props: vec![FilterProp::Not {
+                            prop: Box::new(prop),
+                        }],
+                    },
+                    mode,
+                );
+                assert!(!nested.event && !nested.sibling && !nested.projected);
+            }
+        }
+    }
     use crate::types::ability::{
         AbilityKind, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
         CombatHistoryScope, Comparator, CostDerivation, DamageKindFilter, DelayedTriggerLifetime,
@@ -11475,5 +11621,156 @@ mod tests {
                 .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
         );
         assert_eq!(history("Aang, Swift Savior", 0), HistoryReads::ALL);
+    }
+}
+
+#[cfg(test)]
+mod sought_reader_scan_tests {
+    use super::*;
+    #[test]
+    fn game_preserve_named_membership_remains_conservative() {
+        let parsed = crate::parser::parse_oracle_text("At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Game Preserve", &[], &["Enchantment".into()], &[]);
+        let root = parsed.triggers[0].execute.as_deref().unwrap();
+        let reader = root.sub_ability.as_deref().unwrap();
+        assert!(reader.reads_return_result.is_some());
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            reader,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(ability_definition_reads_sibling_mutable(root));
+        assert!(ability_uses_event_context(&resolved));
+        assert!(ability_reads_sibling_mutable(&resolved));
+        assert!(ability_reads_projected_resource(&resolved));
+        assert!(crate::game::resolution_prompt::chain_offers_choice(
+            &resolved
+        ));
+    }
+    #[test]
+    fn sought_parsed_chain_retains_dynamic_result_and_color_reads() {
+        let parsed = crate::parser::parse_oracle_text(
+            r#"Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain "This spell costs {1} less to cast.""#,
+            "Circadian Struggle",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let root = &parsed.abilities[0];
+        let grant = root.sub_ability.as_deref().unwrap();
+        assert!(grant.reads_return_result.is_some());
+        assert!(ability_definition_reads_sibling_mutable(root));
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            grant,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(ability_uses_event_context(&resolved));
+        assert!(ability_reads_sibling_mutable(&resolved));
+        assert!(ability_reads_projected_resource(&resolved));
+        let plain = crate::types::ability::ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(!ability_uses_event_context(&plain));
+    }
+
+    #[test]
+    fn mandatory_adjustment_scans_its_dynamic_recipient_and_count_diagonally() {
+        let effect = |target, count| Effect::ChooseCounterAdjustment {
+            adjustment: crate::types::ability::CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("charge".into()),
+            ),
+            count,
+            target,
+        };
+        for target in [TargetFilter::SelfRef, TargetFilter::ParentTarget] {
+            let e = effect(target, QuantityExpr::Fixed { value: 1 });
+            assert_eq!(
+                effect_target_ctx(&e, ScanMode::LoopFirewall),
+                FilterReadContext::SnapshotOrEvent
+            );
+            let def = AbilityDefinition::new(crate::types::ability::AbilityKind::Spell, e);
+            let resolved = crate::game::ability_utils::build_resolved_from_def(
+                &def,
+                crate::types::identifiers::ObjectId(1),
+                crate::types::player::PlayerId(0),
+            );
+            assert!(crate::game::resolution_prompt::chain_offers_choice(
+                &resolved
+            ));
+        }
+        let plain = scan_effect(
+            &effect(TargetFilter::SelfRef, QuantityExpr::Fixed { value: 1 }),
+            ScanMode::Conservative,
+        );
+        let dynamic = scan_effect(
+            &effect(
+                TargetFilter::CostPaidObject,
+                QuantityExpr::Fixed { value: 1 },
+            ),
+            ScanMode::Conservative,
+        );
+        assert!(!plain.event);
+        assert!(
+            dynamic.event,
+            "recipient payload cannot disappear behind leaf classification"
+        );
+        let quantity = scan_effect(
+            &effect(
+                TargetFilter::SelfRef,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            ),
+            ScanMode::Conservative,
+        );
+        assert!(quantity.event);
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_condition_scan_tests {
+    use super::*;
+    #[test]
+    fn u13_bound_counter_condition_is_dynamic_without_a_live_event_object_read() {
+        let condition = AbilityCondition::CounterRemovedThisWay {
+            result: crate::types::ability::ReturnResultId(1),
+            counters: crate::types::counter::CounterMatch::Any,
+        };
+        for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+            let axes = scan_ability_condition(&condition, mode);
+            assert!(!axes.event);
+            assert!(axes.sibling);
+            assert!(axes.projected);
+        }
+        let plain = scan_ability_condition(&AbilityCondition::WhenYouDo, ScanMode::Conservative);
+        assert!(!plain.event);
+        let quantity = scan_quantity_expr(
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            ScanMode::Conservative,
+        );
+        assert!(quantity.event);
+        let parsed = crate::parser::parse_oracle_text("When this creature enters, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• You gain 1 life.\n• You gain 2 life.", "Synthetic counter classifier", &[], &["Creature".into()], &[]);
+        assert!(parsed.statics.is_empty());
+        let producer = parsed.triggers[0].execute.as_deref().unwrap();
+        assert!(producer.condition.is_none());
+        let reader = producer.sub_ability.as_deref().unwrap();
+        assert!(reader
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .is_some());
+        assert!(reader.declares_return_result.is_none());
     }
 }

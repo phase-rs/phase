@@ -1,5 +1,114 @@
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
+
+#[cfg(test)]
+mod prior_controller_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::TargetDamageSourceBinding;
+
+    #[test]
+    fn prior_controller_selected_occurrence_live_lki_returned_and_missing() {
+        let mut scenario = GameScenario::new();
+        let b = scenario.add_creature(P1, "Selected B", 2, 8).id();
+        let c = scenario.add_creature(P0, "Readable later C", 2, 8).id();
+        let mut state = scenario.build().state().clone();
+        let old = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let lki = state.objects[&b].snapshot_public_characteristics();
+        let mut reader = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![
+                TargetRef::Player(P0),
+                TargetRef::Object(b),
+                TargetRef::Object(b),
+                TargetRef::Object(c),
+            ],
+            ObjectId(999),
+            P0,
+        );
+        reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+        reader.target_pins = vec![
+            None,
+            Some(old),
+            Some(ObjectIncarnationRef::of(b, old.incarnation + 1)),
+            Some(ObjectIncarnationRef::from_object(&state.objects[&c])),
+        ];
+        assert_eq!(selected_parent_target_incarnation(&reader), Some(old));
+        assert_eq!(parent_target_controller(&reader, &state), Some(P1));
+        state.objects.get_mut(&b).unwrap().controller = P0;
+        assert_eq!(
+            parent_target_controller(&reader, &state),
+            Some(P0),
+            "current controller, not announcement snapshot"
+        );
+        state
+            .lki_by_incarnation
+            .entry(b)
+            .or_default()
+            .insert(old.incarnation, lki);
+        let returned = state.objects.get_mut(&b).unwrap();
+        returned.incarnation += 1;
+        returned.controller = P0;
+        assert_eq!(
+            parent_target_controller(&reader, &state),
+            Some(P1),
+            "old incarnation's LKI beats returned row and owner"
+        );
+        state.lki_by_incarnation.remove(&b);
+        assert_eq!(
+            parent_target_controller(&reader, &state),
+            None,
+            "cannot skip unreadable B to readable C"
+        );
+        reader.target_pins[1] = None;
+        assert_eq!(
+            parent_target_controller(&reader, &state),
+            None,
+            "missing modern pin cannot become a bare-id read"
+        );
+        reader.context.target_damage_source = Some(TargetDamageSourceBinding::Illegal);
+        assert_eq!(parent_target_controller(&reader, &state), None);
+        reader.context.target_damage_source = Some(TargetDamageSourceBinding::Bound);
+        assert_eq!(
+            selected_parent_target_incarnation(&reader),
+            None,
+            "bound first player is not another object"
+        );
+        reader.context.target_damage_source = None;
+        reader.target_reads = TargetReadOrigin::OwnAnnouncement;
+        assert_eq!(
+            parent_target_controller(&reader, &state),
+            Some(P0),
+            "legacy player-first controller reader is unchanged"
+        );
+    }
+
+    #[test]
+    fn prior_controller_current_reader_serde_retains_positional_pins() {
+        let mut scenario = GameScenario::new();
+        let b = scenario.add_creature(P1, "B", 2, 8).id();
+        let state = scenario.build().state().clone();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let mut reader = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(b)],
+            ObjectId(999),
+            P0,
+        );
+        reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+        reader.target_pins = vec![Some(pin)];
+        let restored: ResolvedAbility =
+            serde_json::from_value(serde_json::to_value(&reader).unwrap()).unwrap();
+        assert_eq!(selected_parent_target_incarnation(&restored), Some(pin));
+        assert_eq!(parent_target_controller(&restored, &state), Some(P1));
+    }
+}
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenTargetSlots,
@@ -853,8 +962,8 @@ pub(crate) fn last_known_permanent_controller(state: &GameState, id: ObjectId) -
 /// CR 400.7 + CR 608.2h: the controller of one specific incarnation of `id`:
 /// the live permanent's controller while that incarnation is still on the
 /// battlefield, else the incarnation-keyed last known information captured as
-/// it left. `None` when neither exists (the caller falls back to the bare-id
-/// authority, `last_known_permanent_controller`).
+/// it left. `None` when neither exists. Legacy callers may then use the
+/// bare-id reader; marked prior-announcement readers must fail closed.
 pub(crate) fn incarnation_controller(
     state: &GameState,
     id: ObjectId,
@@ -881,8 +990,16 @@ pub(crate) fn incarnation_controller(
 /// "its controller" / "that creature's controller" relative to a previously
 /// chosen target. Returns the player target directly, or the controller of an
 /// object target (CR 109.4 — controller of an object), in target-list order.
-/// Returns `None` if the ability has no targets.
+/// Marked prior-announcement reads require that selected occurrence's pin;
+/// unmarked reads retain the legacy player/object/context ladder.
 pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
+    // CR 608.2b + CR 608.2h + CR 400.7: select once, then read exactly
+    // that occurrence's live battlefield incarnation or versioned LKI.
+    // Missing modern authority never enters the legacy fallback ladder.
+    if ability.target_reads == TargetReadOrigin::ParentAnnouncement {
+        let selected = selected_parent_target_incarnation(ability)?;
+        return incarnation_controller(state, selected.object_id, selected.incarnation);
+    }
     if let Some(player) = ability.targets.iter().find_map(|t| match t {
         // CR 608.2h (issue #1582): If the parent target has left the
         // battlefield — e.g. a token Recoil bounced to hand, which then ceases
@@ -938,6 +1055,17 @@ pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Opti
         .effect_context_object
         .as_ref()
         .map(|snapshot| snapshot.lki.owner)
+}
+
+/// CR 608.2c + CR 400.7: controller and exclusion consume the same selected
+/// positional occurrence; a later readable target cannot replace it.
+pub(crate) fn selected_parent_target_incarnation(
+    ability: &ResolvedAbility,
+) -> Option<ObjectIncarnationRef> {
+    let (position, id) = crate::game::quantity::selected_target_object_occurrence(ability)?;
+    ability
+        .target_pin_at(position)
+        .filter(|pin| pin.object_id == id)
 }
 
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {
@@ -6909,9 +7037,9 @@ fn sub_ability_inherits_parent_creature_target_only(
     ) {
         return false;
     }
-    effect_needs_target_creature_quantity_slot(&sub.effect)
-        && (effect_player_filter_is_parent_target_anaphor(&sub.effect)
-            || sub.target_reads == TargetReadOrigin::ParentAnnouncement)
+    sub.target_reads == TargetReadOrigin::ParentAnnouncement
+        || (effect_needs_target_creature_quantity_slot(&sub.effect)
+            && effect_player_filter_is_parent_target_anaphor(&sub.effect))
 }
 
 /// CR 115.1 + CR 115.10a + CR 608.2c: A one-sided-fight `DealDamage` ("Target

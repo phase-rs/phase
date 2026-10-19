@@ -41,6 +41,11 @@ pub struct LogicalZoneChangeGroupId(pub u64);
 #[serde(transparent)]
 pub struct DiscardFrameId(pub u64);
 
+/// Identity of one resident token-creation instruction, independent of its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TokenCreationFrameId(pub u64);
+
 /// CR 500.8 + CR 500.9 + CR 500.10: monotonic identity of one scheduled extra
 /// phase or step, minted when an effect schedules it. Two scheduled units can
 /// share an anchor and a phase; this is what tells them apart. `0` is never

@@ -719,7 +719,13 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 135 as const;
+// 136: full-game 154 adds the exact cast-time TargetFilter.CastingSpell reference.
+// 137: full-game 155 carries exact creation frames and resolution wire 7.
+// 138: full-game 156 carries revealed membership and exact queued origins (resolution wire 8).
+// 139: full-game 157 requires specified-kind/exact-recipient counter adjustment.
+// 140: full-game 158 carries exact removal/source authority (resolution wire 9).
+// 141: full-game 159 carries source-bound chosen parity.
+export const WIRE_PROTOCOL_VERSION = 141 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

@@ -29,9 +29,8 @@
 //!   `Effect::ForceAttack`, whose `required_defender` context ref has no
 //!   "the opponent" resolution and would fall back to the controller — is the
 //!   reason Encore needs a dedicated resolver.
-//! - **Haste is baked into the copy** via `extra_keywords` (CR 707.2, the
-//!   Twinflame "…except it has haste" channel), so each token has haste from
-//!   the moment it is created.
+//! - **Haste is a later grant** (CR 611.2a), with no stated duration. It
+//!   applies to every replacement-result member and is not copiable (CR 707.2).
 //! - **Sacrifice at the next end step**, composed as a one-shot delayed trigger
 //!   (CR 603.7d) over the exact token IDs created here, rather than Myriad's
 //!   end-of-combat exile.
@@ -60,88 +59,326 @@ pub fn resolve(
         return Err(EffectError::MissingParam("Encore".to_string()));
     }
 
-    // CR 702.141a + CR 102.1: "for each opponent" — every other player who is
-    // an opponent of the activating player at resolution.
-    let opponents = players::opponents(state, ability.controller);
-    let mut created = Vec::new();
+    let mut opponents: std::collections::VecDeque<_> =
+        players::opponents(state, ability.controller).into();
+    let (caller, work) = if let Some(current) = opponents.pop_front() {
+        (
+            crate::types::game_state::TokenCreationCallerState::Encore {
+                current,
+                remaining: opponents,
+            },
+            copy_work(state, ability)?,
+        )
+    } else {
+        (
+            crate::types::game_state::TokenCreationCallerState::Plain,
+            std::collections::VecDeque::new(),
+        )
+    };
+    super::token_copy::begin_creation(state, ability, work, EffectKind::Encore, caller, events);
+    Ok(())
+}
 
-    for opponent in opponents {
-        // CR 707.2: Create a token that's a copy of the exiled source card
-        // (`SelfRef`), under the activating player's control (`Controller`).
-        // CR 702.141a: "The tokens gain haste" — granted as a copy exception via
-        // `extra_keywords`, so each token has haste from creation.
-        let copy_effect = Effect::CopyTokenOf {
-            target: TargetFilter::SelfRef,
-            owner: TargetFilter::Controller,
-            source_filter: None,
-            enters_attacking: false,
-            tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
-            extra_keywords: vec![Keyword::Haste],
-            additional_modifications: vec![],
-        };
-        let copy_ability =
-            crate::game::effects::token_copy::own_source_copy_ability(copy_effect, ability);
-        crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
+pub(crate) fn copy_work(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> Result<std::collections::VecDeque<crate::types::game_state::TokenCreationWork>, EffectError> {
+    let effect = Effect::CopyTokenOf {
+        target: TargetFilter::SelfRef,
+        owner: TargetFilter::Controller,
+        source_filter: None,
+        enters_attacking: false,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        extra_keywords: vec![],
+        additional_modifications: vec![],
+    };
+    super::token_copy::prepare_copy_creation(
+        state,
+        &super::token_copy::own_source_copy_ability(effect, ability),
+    )
+}
 
-        // CR 702.141a + CR 508.1d: each token created for this opponent "attacks
-        // that opponent this turn if able." Bind a `MustAttackDefender` requirement
-        // to the freshly-created token(s) for the rest of the turn.
-        for token_id in state.last_created_token_ids.clone() {
-            state.add_transient_continuous_effect(
-                ability.source_id,
-                ability.controller,
+pub(crate) fn complete_creation_segment(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    opponent: crate::types::player::PlayerId,
+    members: &[crate::types::identifiers::ObjectIncarnationRef],
+) {
+    for member in members {
+        if !state.objects.get(&member.object_id).is_some_and(|object| {
+            crate::types::identifiers::ObjectIncarnationRef::from_object(object) == *member
+                && object.zone == crate::types::zones::Zone::Battlefield
+        }) {
+            continue;
+        }
+        // CR 702.141a + CR 611.2a: the later haste grant has no duration.
+        // CR 514.2: only the separate “this turn” attack requirement expires.
+        for (duration, modification) in [
+            (
+                Duration::Permanent,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                },
+            ),
+            (
                 Duration::UntilEndOfTurn,
-                TargetFilter::SpecificObject { id: token_id },
-                vec![ContinuousModification::AddStaticMode {
-                    // CR 611.2: snapshot the specific opponent at resolution.
+                ContinuousModification::AddStaticMode {
                     mode: StaticMode::MustAttackDefender {
                         defender: RequiredDefender::Fixed { player: opponent },
                     },
-                }],
+                },
+            ),
+        ] {
+            state.add_transient_continuous_effect_with_bindings(
+                ability.source_id,
+                ability.controller,
+                duration,
+                TargetFilter::SpecificObject {
+                    id: member.object_id,
+                },
+                vec![modification],
                 None,
+                crate::types::game_state::TransientContinuousEffectBindings {
+                    affected_recipient: Some(*member),
+                    ..Default::default()
+                },
             );
-            created.push(token_id);
         }
     }
+}
 
-    // CR 702.141a + CR 603.7d + CR 513.2: "Sacrifice them at the beginning of the
-    // next end step." A one-shot delayed trigger that sacrifices exactly the
-    // tokens created above (bound as explicit object targets, so no player
-    // choice is involved — the `Effect::Sacrifice` resolver sacrifices each
-    // targeted permanent directly).
-    if !created.is_empty() {
-        let sacrifice = ResolvedAbility::new(
-            Effect::Sacrifice {
-                target: TargetFilter::Any,
-                count: QuantityExpr::Fixed {
-                    value: created.len() as i32,
-                },
-                min_count: 0,
-            },
-            created.iter().copied().map(TargetRef::Object).collect(),
-            ability.source_id,
-            ability.controller,
+pub(crate) fn complete_creation(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    result: &crate::types::ability::ForwardedResultContext,
+    events: &mut Vec<GameEvent>,
+) {
+    if result.object_incarnations.is_empty() {
+        return;
+    }
+    let mut sacrifice = ResolvedAbility::new(
+        Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+        vec![],
+        ability.source_id,
+        ability.controller,
+    );
+    super::delayed_trigger::freeze_created_result(&mut sacrifice, result);
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            ability: Box::new(sacrifice),
+            controller: ability.controller,
+            source_id: ability.source_id,
+            one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        },
+        events,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encore_completion_synchronous() {
+        let (mut state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Encore,
+            super::super::token_copy::tests::CreationPauseCase::Synchronous,
         );
-        crate::game::triggers::install_delayed_trigger(
-            state,
-            DelayedTrigger {
-                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-                ability: Box::new(sacrifice),
-                controller: ability.controller,
-                source_id: ability.source_id,
-                one_shot: true,
-                kind: DelayedTriggerKind::Ordinary,
-                provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
-            },
-            events,
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].ability.target_incarnations.len(),
+            state.last_created_token_ids.len()
+        );
+        crate::game::layers::flush_layers(&mut state);
+        for id in &state.last_created_token_ids {
+            assert!(state.objects[id]
+                .keywords
+                .contains(&crate::types::keywords::Keyword::Haste));
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Encore,
+                        ..
+                    }
+                ))
+                .count(),
+            1
         );
     }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::Encore,
-        source_id: ability.source_id,
-        subject: None,
-    });
-    Ok(())
+    #[test]
+    fn encore_completion_queued_child() {
+        let (mut state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Encore,
+            super::super::token_copy::tests::CreationPauseCase::Queued,
+        );
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].ability.target_incarnations.len(),
+            state.last_created_token_ids.len()
+        );
+        crate::game::layers::flush_layers(&mut state);
+        for id in &state.last_created_token_ids {
+            assert!(state.objects[id]
+                .keywords
+                .contains(&crate::types::keywords::Keyword::Haste));
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Encore,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn encore_completion_counter_pause() {
+        let (mut state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Encore,
+            super::super::token_copy::tests::CreationPauseCase::Counter,
+        );
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].ability.target_incarnations.len(),
+            state.last_created_token_ids.len()
+        );
+        crate::game::layers::flush_layers(&mut state);
+        for id in &state.last_created_token_ids {
+            assert!(state.objects[id]
+                .keywords
+                .contains(&crate::types::keywords::Keyword::Haste));
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Encore,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn encore_completion_queued_child_current_reload() {
+        let (mut state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Encore,
+            super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
+        );
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].ability.target_incarnations.len(),
+            state.last_created_token_ids.len()
+        );
+        crate::game::layers::flush_layers(&mut state);
+        for id in &state.last_created_token_ids {
+            assert!(state.objects[id]
+                .keywords
+                .contains(&crate::types::keywords::Keyword::Haste));
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Encore,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn encore_completion_counter_current_reload() {
+        let (mut state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Encore,
+            super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
+        );
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].ability.target_incarnations.len(),
+            state.last_created_token_ids.len()
+        );
+        crate::game::layers::flush_layers(&mut state);
+        for id in &state.last_created_token_ids {
+            assert!(state.objects[id]
+                .keywords
+                .contains(&crate::types::keywords::Keyword::Haste));
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Encore,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn encore_haste_and_attack_grants_follow_birth_incarnation_not_reused_storage_id() {
+        let (mut state, _events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Encore,
+            super::super::token_copy::tests::CreationPauseCase::Synchronous,
+        );
+        let births = state.delayed_triggers[0]
+            .ability
+            .target_incarnations
+            .clone();
+        assert_eq!(births.len(), 2);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(births.iter().all(|member| state.objects[&member.object_id]
+            .keywords
+            .contains(&Keyword::Haste)));
+        // Labelled epoch isolation; a real token blink/no-return is public in
+        // Broken's Cloudshift sister, and actual Encore cleanup is public too.
+        state
+            .objects
+            .get_mut(&births[0].object_id)
+            .unwrap()
+            .bump_incarnation();
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(!state.objects[&births[0].object_id]
+            .keywords
+            .contains(&Keyword::Haste));
+        assert!(state.objects[&births[1].object_id]
+            .keywords
+            .contains(&Keyword::Haste));
+        assert!(!crate::game::combat::creature_must_attack(
+            &state,
+            births[0].object_id
+        ));
+        assert!(crate::game::combat::creature_must_attack(
+            &state,
+            births[1].object_id
+        ));
+    }
 }

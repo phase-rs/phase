@@ -1,9 +1,7 @@
 use crate::game::effects::counters::{
     add_counter_with_replacement, stash_pending_counter_post_actions,
 };
-use crate::game::effects::token::apply_create_token_after_replacement;
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     CostPaidObjectSnapshot, Effect, EffectError, EffectKind, ResolvedAbility,
 };
@@ -13,7 +11,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec};
+use crate::types::proposed_event::{EtbTapState, TokenCharacteristics, TokenSpec};
 use std::collections::HashSet;
 
 /// CR 701.47a: Amass [subtype] N.
@@ -51,14 +49,13 @@ pub fn resolve(
     // CR 701.47a: Find an existing Army creature on the controller's battlefield.
     let army_id = find_army(state, controller);
 
-    let Some(target_id) = (if let Some(id) = army_id {
-        Some(id)
-    } else {
-        create_army_token(state, controller, &subtype, n, ability, events)
-    }) else {
+    let Some(target_id) = army_id else {
+        create_army_token(state, controller, &subtype, n, ability, events);
         return Ok(());
     };
-    continue_amass_on_army(state, controller, target_id, &subtype, n, ability, events);
+    continue_amass_on_army(
+        state, controller, target_id, &subtype, n, ability, None, events,
+    );
 
     Ok(())
 }
@@ -79,19 +76,35 @@ fn find_army(state: &GameState, controller: crate::types::player::PlayerId) -> O
         .min_by_key(|id| id.0) // deterministic: lowest ObjectId
 }
 
+pub(crate) fn creation_required(state: &GameState, ability: &ResolvedAbility) -> bool {
+    let Effect::Amass { player, .. } = &ability.effect else {
+        return false;
+    };
+    super::resolve_player_for_context_ref(state, ability, player)
+        .is_some_and(|controller| find_army(state, controller).is_none())
+}
+
 pub(crate) fn continue_amass_after_token_creation(
     state: &mut GameState,
     controller: crate::types::player::PlayerId,
     subtype: &str,
     count: u32,
     ability: &ResolvedAbility,
+    creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let Some(object_id) = find_army(state, controller) else {
         return true;
     };
     continue_amass_on_army(
-        state, controller, object_id, subtype, count, ability, events,
+        state,
+        controller,
+        object_id,
+        subtype,
+        count,
+        ability,
+        creation_frame,
+        events,
     )
 }
 
@@ -102,6 +115,7 @@ pub(crate) fn continue_amass_on_army(
     subtype: &str,
     count: u32,
     ability: &ResolvedAbility,
+    creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     // CR 701.47a + CR 614.16: Counter replacement choices interrupt the amass
@@ -121,6 +135,7 @@ pub(crate) fn continue_amass_on_army(
             EffectKind::Amass,
             ability.source_id,
             vec![PendingCounterPostAction::FinalizeAmass {
+                creation_frame,
                 object_id,
                 subtype: subtype.to_string(),
                 ability: Box::new(ability.clone()),
@@ -129,7 +144,7 @@ pub(crate) fn continue_amass_on_army(
         return false;
     }
 
-    finalize_amass(state, object_id, subtype, ability, events);
+    finalize_amass(state, object_id, subtype, ability, creation_frame, events);
     true
 }
 
@@ -138,6 +153,7 @@ pub(crate) fn finalize_amass(
     object_id: ObjectId,
     subtype: &str,
     ability: &ResolvedAbility,
+    creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 701.47a: If the chosen Army isn't a [subtype], it becomes a [subtype]
@@ -162,7 +178,19 @@ pub(crate) fn finalize_amass(
     // CR 701.47c + CR 608.2c: Chained reflexive continuations may have been
     // stashed before a replacement choice finished. Stamp them with the final
     // post-replacement Army snapshot before they resume.
-    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+    if let Some(id) = creation_frame {
+        if let Some(continuation) = state
+            .resolution_stack
+            .token_creation_mut(id)
+            .expect("exact amass creation owner")
+            .continuation
+            .as_mut()
+        {
+            continuation
+                .chain
+                .set_amassed_army_object_recursive(snapshot.clone());
+        }
+    } else if let Some(frame) = state.active_ability_continuation_frame_mut() {
         frame
             .pending
             .chain
@@ -196,7 +224,7 @@ fn create_army_token(
     count: u32,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Option<ObjectId> {
+) {
     let name = format!("{subtype} Army");
     let spec = TokenSpec {
         characteristics: TokenCharacteristics {
@@ -221,39 +249,34 @@ fn create_army_token(
         controller: ability.controller,
     };
 
-    let proposed = ProposedEvent::CreateToken {
-        owner: controller,
-        spec: Box::new(spec),
-        copy: None,
-        enter_tapped: EtbTapState::Unspecified,
-        count: 1,
-        applied: HashSet::new(),
+    let instructions = crate::types::proposed_event::TokenCreationInstructions {
+        tapped: EtbTapState::Unspecified,
+        enters_attacking: false,
     };
-
-    // CR 614.16 + CR 701.47a: Token-creation replacement effects apply to the
-    // Army token an amass instruction creates.
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            apply_create_token_after_replacement(state, event, events);
-            find_army(state, controller)
-        }
-        ReplacementResult::Prevented => None,
-        ReplacementResult::NeedsChoice(player) => {
-            stash_pending_counter_post_actions(
-                state,
-                EffectKind::Amass,
-                ability.source_id,
-                vec![PendingCounterPostAction::ContinueAmassAfterTokenCreation {
-                    controller,
-                    subtype: subtype.to_string(),
-                    count,
-                    ability: Box::new(ability.clone()),
-                }],
-            );
-            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-            None
-        }
-    }
+    let work =
+        std::collections::VecDeque::from([crate::types::game_state::TokenCreationWork::Proposed(
+            crate::types::game_state::TokenCreationBatch {
+                owner: controller,
+                spec: Box::new(spec),
+                copy: None,
+                instructions,
+                enter_tapped: instructions.tapped,
+                count: 1,
+                applied: HashSet::new(),
+            },
+        )]);
+    super::token_copy::begin_creation(
+        state,
+        ability,
+        work,
+        EffectKind::Amass,
+        crate::types::game_state::TokenCreationCallerState::Amass {
+            controller,
+            subtype: subtype.to_string(),
+            count,
+        },
+        events,
+    );
 }
 
 #[cfg(test)]
@@ -569,5 +592,219 @@ mod tests {
             Some(crate::game::game_object::AttachTarget::Object(existing_army)),
             "Goblin Plate Mail must attach to the EXISTING Army amass touched, not a phantom new one"
         );
+    }
+    #[test]
+    fn amass_completion_synchronous() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Amass {
+                subtype: "Zombie".into(),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                player: crate::types::ability::TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::Synchronous,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ArmyAmassed { .. }))
+                .count(),
+            1
+        );
+        assert!(state.objects.values().any(|object| object
+            .card_types
+            .subtypes
+            .contains(&"Army".into())
+            && object
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn amass_completion_queued_child() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Amass {
+                subtype: "Zombie".into(),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                player: crate::types::ability::TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::Queued,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ArmyAmassed { .. }))
+                .count(),
+            1
+        );
+        assert!(state.objects.values().any(|object| object
+            .card_types
+            .subtypes
+            .contains(&"Army".into())
+            && object
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn amass_completion_counter_pause() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Amass {
+                subtype: "Zombie".into(),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                player: crate::types::ability::TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::Counter,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ArmyAmassed { .. }))
+                .count(),
+            1
+        );
+        assert!(state.objects.values().any(|object| object
+            .card_types
+            .subtypes
+            .contains(&"Army".into())
+            && object
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn amass_completion_queued_child_current_reload() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Amass {
+                subtype: "Zombie".into(),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                player: crate::types::ability::TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ArmyAmassed { .. }))
+                .count(),
+            1
+        );
+        assert!(state.objects.values().any(|object| object
+            .card_types
+            .subtypes
+            .contains(&"Army".into())
+            && object
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn amass_completion_counter_current_reload() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Amass {
+                subtype: "Zombie".into(),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                player: crate::types::ability::TargetFilter::Controller,
+            },
+            super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ArmyAmassed { .. }))
+                .count(),
+            1
+        );
+        assert!(state.objects.values().any(|object| object
+            .card_types
+            .subtypes
+            .contains(&"Army".into())
+            && object
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                >= 2));
+    }
+    #[test]
+    fn new_army_private_tail_keeps_final_amassed_snapshot_through_counter_reload() {
+        for counter in [false, true] {
+            let mut state = GameState::new_two_player(998);
+            if counter {
+                super::super::token_copy::tests::install_creation_fixture_replacements(
+                    &mut state,
+                    super::super::token_copy::tests::CreationPauseCase::Counter,
+                );
+            }
+            let mut ability = make_amass_ability("Zombie", QuantityExpr::Fixed { value: 2 });
+            ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::AmassedArmy,
+                        },
+                    },
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
+                vec![],
+                ability.source_id,
+                ability.controller,
+            )));
+            let life = state.players[0].life;
+            let mut events = Vec::new();
+            super::super::resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+            if counter {
+                assert!(matches!(
+                    state.waiting_for,
+                    crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+                ));
+                assert_eq!(state.players[0].life, life);
+                state = serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_game_state();
+            }
+            for _ in 0..30 {
+                if state.resolution_stack.is_empty() {
+                    break;
+                }
+                events.extend(
+                    crate::game::apply_as_current(
+                        &mut state,
+                        crate::types::actions::GameAction::ChooseReplacement { index: 0 },
+                    )
+                    .unwrap()
+                    .events,
+                );
+            }
+            assert!(state.resolution_stack.is_empty());
+            let army = state
+                .objects
+                .values()
+                .find(|object| {
+                    object.is_token && object.card_types.subtypes.contains(&"Army".into())
+                })
+                .unwrap();
+            assert_eq!(army.power, Some(if counter { 8 } else { 2 }));
+            assert_eq!(state.players[0].life, life + army.power.unwrap());
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::ArmyAmassed { .. }))
+                    .count(),
+                1
+            );
+        }
     }
 }

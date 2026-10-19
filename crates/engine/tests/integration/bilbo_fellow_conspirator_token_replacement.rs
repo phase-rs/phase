@@ -73,6 +73,8 @@ fn artifact_token_spec(subtype: &str, controller: PlayerId) -> TokenSpec {
 
 fn create_token_batch(runner: &mut GameRunner, owner: PlayerId, subtype: &str, count: u32) {
     let proposed = ProposedEvent::CreateToken {
+        creation_frame: None,
+        instructions: None,
         owner,
         spec: Box::new(artifact_token_spec(subtype, owner)),
         copy: None,

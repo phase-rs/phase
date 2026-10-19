@@ -1915,3 +1915,22 @@ fn the_census_resolver_keys_on_cfg_scope_and_on_the_literal_from_field() {
         "arm 1b positive control: the real zones.rs must parse cleanly under the same allow-set"
     );
 }
+
+#[test]
+fn creation_result_members_are_admitted_at_the_committed_entry_authority() {
+    // Structural guard paired with the actual entry/counter/Aura public tests;
+    // this does not claim a source scan proves a successful token entry.
+    let source = include_str!("../../src/game/effects/token.rs");
+    let start = source
+        .find("pub(crate) fn push_committed_token_entry_events(")
+        .unwrap();
+    let body = &source[start..];
+    let end = body
+        .find("pub(crate) fn record_last_created_token(")
+        .unwrap_or(body.len());
+    let authority = &body[..end];
+    assert!(authority.contains("record_and_emit_entry_from_no_zone"));
+    assert!(authority.contains("admit_token_creation"));
+    assert!(authority.contains("creation_frame"));
+    assert!(authority.contains("ObjectIncarnationRef::from_object"));
+}

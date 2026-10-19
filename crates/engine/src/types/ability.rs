@@ -1830,6 +1830,10 @@ pub enum ParitySource {
     /// CR 608.2c: Reads the most recent odd/even named choice made earlier in
     /// the same resolving instruction sequence.
     LastNamedChoice,
+    /// CR 607.2d + CR 607.5a: Reads the linked odd/even choice stored on this
+    /// source incarnation; an undefined choice contributes no match.
+    /// RUNTIME: implemented by the shared mana-value parity filter evaluator.
+    SourceChosen,
 }
 
 /// A branch in a d20/d6/d4 result table (CR 706.2).
@@ -8246,6 +8250,9 @@ pub enum TargetFilter {
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
     StackSpell,
+    /// CR 601.2a + CR 601.2f: the exact spell currently being cost-modified.
+    /// Available only through an explicit cast-time filter context.
+    CastingSpell,
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
@@ -19248,34 +19255,24 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 122.1 + CR 608.2d (Clockspinning): The controller chooses one kind of
-    /// counter currently on the single target permanent or suspended card, then
-    /// — per `adjustment` — adds and/or removes `count` of that chosen kind. The
-    /// counter kind is chosen at resolution from the kinds actually present on
-    /// the target (CR 122.1 + CR 702.62b: a counter is a marker that can sit on
-    /// a card outside the battlefield, so a suspended card's time counters are
-    /// eligible).
-    ///
-    /// This effect has NO cast-time target slot of its own: the single target is
-    /// supplied by the parent `TargetOnly` clause through the propagated
-    /// `ability.targets` chain, exactly like `Effect::ChooseOneOf`. It is
-    /// therefore registered in the slot-less (`None`) groups of `target_filter`,
-    /// `count_expr`, and `count_expr_mut` alongside `ChooseOneOf`, and carries no
-    /// `target` field.
-    ///
-    /// CR 608.2d: a player can't choose an impossible option, so if the target
-    /// bears no counters there is no kind to choose and the effect does nothing
-    /// (Clockspinning Gatherer ruling: "if the chosen permanent or card has no
-    /// counters, nothing happens"). Resolution builds a flat `Effect::ChooseOneOf`
-    /// of concrete `PutCounter`/`RemoveCounter` branches (one per present kind ×
-    /// allowed operation), so the counter change dispatches onto the existing
-    /// counter resolvers and reuses the whole `ChooseOneOfBranch` interactive
-    /// surface. This is the choose-ONE-kind sibling of the
-    /// `repeat_for: DistinctCounterKindsAmong` for-EACH-kind loop.
+    /// CR 122.1 + CR 608.2d: choose a mandatory counter operation on one recipient.
+    /// `Any` first chooses one kind currently present; `OfType` specifies the
+    /// kind even when absent. Context recipients create no announced target slot.
+    /// Resolution binds the count and delegates ordinary counter branches.
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
+        #[serde(
+            default = "default_counter_match_any",
+            skip_serializing_if = "is_counter_match_any"
+        )]
+        counters: CounterMatch,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(
+            default = "default_target_filter_parent",
+            skip_serializing_if = "is_counter_adjustment_parent"
+        )]
+        target: TargetFilter,
     },
     /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
     /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
@@ -22158,6 +22155,17 @@ fn default_target_filter_exiled_by_source() -> TargetFilter {
     TargetFilter::ExiledBySource
 }
 
+// Legacy adjustment payloads choose one present kind (CR 122.1).
+fn default_counter_match_any() -> CounterMatch {
+    CounterMatch::Any
+}
+fn is_counter_match_any(value: &CounterMatch) -> bool {
+    matches!(value, CounterMatch::Any)
+}
+fn is_counter_adjustment_parent(value: &TargetFilter) -> bool {
+    matches!(value, TargetFilter::ParentTarget)
+}
+
 /// CR 608.2c: default for continuation effects whose target is inherited from
 /// the parent ability (e.g. `Effect::HideawayConceal`).
 fn default_target_filter_parent() -> TargetFilter {
@@ -22946,6 +22954,7 @@ impl TargetFilter {
         matches!(
             self,
             TargetFilter::None
+                | TargetFilter::CastingSpell
                 | TargetFilter::SelfRef
                 | TargetFilter::SourceOrPaired
                 | TargetFilter::Controller
@@ -23227,9 +23236,9 @@ impl TargetFilter {
             // instead of defaulting to the battlefield when the filter is (or
             // contains, via `And`) a stack-spell reference (Secret Arcade's
             // "permanent spells you control").
-            TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => {
-                Some(crate::types::zones::Zone::Stack)
-            }
+            TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::StackAbility { .. } => Some(crate::types::zones::Zone::Stack),
             _ => None,
         }
     }
@@ -24008,6 +24017,7 @@ impl Effect {
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
             | Effect::RemoveCounter { target, .. }
+            | Effect::ChooseCounterAdjustment { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -24524,11 +24534,6 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            // CR 122.1 + CR 608.2d: ChooseCounterAdjustment is slot-less like
-            // ChooseOneOf — its single target arrives via the propagated
-            // `ability.targets` chain, not a cast-time slot, so it must NOT be
-            // surfaced by `collect_target_slots`.
-            | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
@@ -24651,6 +24656,7 @@ impl Effect {
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
             | Effect::RemoveCounter { target, .. }
+            | Effect::ChooseCounterAdjustment { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -24986,7 +24992,6 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
@@ -26940,9 +26945,9 @@ impl Effect {
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
-            // CR 122.1: parent count is forwarded verbatim into the per-kind
-            // PutCounter/RemoveCounter branches, whose own `count` is resolved at
-            // the branch level by `resolve_branch`; never resolved generically here.
+            // CR 608.2h: the adjustment resolver binds the count against the
+            // original resolving ability before constructing counter branches;
+            // generic scalar accessors leave that instruction-specific binding to it.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
@@ -27209,9 +27214,9 @@ impl Effect {
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
-            // CR 122.1: parent count is forwarded verbatim into the per-kind
-            // PutCounter/RemoveCounter branches, whose own `count` is resolved at
-            // the branch level by `resolve_branch`; never resolved generically here.
+            // CR 608.2h: the adjustment resolver binds the count against the
+            // original resolving ability before constructing counter branches;
+            // generic scalar accessors leave that instruction-specific binding to it.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
@@ -28541,11 +28546,16 @@ impl ChosenGroupId {
     }
 }
 
-/// Identity of one return instruction in a parsed ability chain.
+/// Identity of one instruction result in a parsed ability chain.
+/// The historical wire name covers zone changes and completed revealed membership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReturnResultId(pub u32);
 
-/// The prior-object predicate and final destination read by a delayed effect.
+/// Printed relation to a zone-result producer. Delayed return consumers apply
+/// the noun/destination/recipient predicate; digital Seek grants consume that
+/// producer's completed moved cards, including redirected arrivals. Revealed
+/// readers use Library/ParentTargetOwner to name the whole owner-entry set;
+/// the noun supplies only the universal predicate, never a subset to move.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReturnResultReadSpec {
     pub noun: TargetFilter,
@@ -29198,6 +29208,8 @@ pub enum TargetReadOrigin {
     /// instruction announced (Conformer Shuriken: "tap target creature defending
     /// player controls. If that creature has greater power than this creature,
     /// put … equal to the difference"). This instruction announces no target.
+    /// Controller/exclusion filters share that same selected occurrence and
+    /// its pin ("each other creature that player controls").
     ParentAnnouncement,
 }
 
@@ -29835,6 +29847,12 @@ pub enum AbilityCondition {
     /// The runtime materializer consumes this root condition on the trigger clone
     /// so the reflexive ability cannot recreate itself.
     WhenYouDo,
+    /// CR 603.12 + CR 122.1: actual matching removals by this exact instruction
+    /// in the creating resolution, rather than any earlier counter event.
+    CounterRemovedThisWay {
+        result: ReturnResultId,
+        counters: crate::types::counter::CounterMatch,
+    },
     /// CR 601.2a + CR 707.10: "if [this spell] was cast from [zone]" — sub_ability
     /// executes only if the spell was cast. `zone: None` = cast from any origin;
     /// `Some(z)` = cast specifically from zone `z`. Evaluated against
@@ -30434,7 +30452,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::CounterRemovedThisWay { .. } => false,
         }
     }
 
@@ -30515,7 +30534,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => None,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::CounterRemovedThisWay { .. } => None,
         }
     }
 
@@ -30529,6 +30549,36 @@ impl AbilityCondition {
         match self {
             AbilityCondition::And { conditions } => conditions.iter().any(is_zone_change),
             condition => is_zone_change(condition),
+        }
+    }
+
+    /// The root action-event member used only when creating a reflexive.
+    pub(crate) fn counter_removal_event(
+        &self,
+    ) -> Option<(ReturnResultId, &crate::types::counter::CounterMatch)> {
+        match self {
+            Self::CounterRemovedThisWay { result, counters } => Some((*result, counters)),
+            Self::And { conditions } => conditions.iter().find_map(|condition| match condition {
+                Self::CounterRemovedThisWay { result, counters } => Some((*result, counters)),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Condition-held exact references participate in occurrence ownership just
+    /// like the existing explicit named-result reader field.
+    pub(crate) fn references_counter_result(&self, result: Option<ReturnResultId>) -> bool {
+        match self {
+            Self::CounterRemovedThisWay { result: id, .. } => {
+                result.is_none_or(|result| result == *id)
+            }
+            Self::And { conditions } | Self::Or { conditions } => conditions
+                .iter()
+                .any(|condition| condition.references_counter_result(result)),
+            Self::Not { condition } => condition.references_counter_result(result),
+            Self::ConditionInstead { inner } => inner.references_counter_result(result),
+            _ => false,
         }
     }
 
@@ -30670,7 +30720,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::CounterRemovedThisWay { .. } => false,
         }
     }
 
@@ -31007,6 +31058,12 @@ pub struct PendingForwardedZoneResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// Private authority owned by one concrete counter-removal producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_removal_result: Option<crate::types::game_state::CounterRemovalResultBinding>,
+    /// Present only while an accepted token substitution resolves its own creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.
@@ -35152,7 +35209,7 @@ pub struct LatchedCopiableSnapshot {
 /// copy effect on the Aura's enchanted host instead. `CopyTokenSource` (Esix,
 /// Fractal Bloom) uses the chosen permanent as the copy SOURCE for a token-creation
 /// substitution, transforming nothing and latching nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum CopyTargetPurpose {
     /// CR 707.2: the entering object (the clone) becomes a copy of the chosen
@@ -35168,7 +35225,10 @@ pub enum CopyTargetPurpose {
     /// token-creation substitution — the replacement creates that many tokens
     /// that are copies of it (Esix, Fractal Bloom). Unlike `BecomeCopy`, nothing
     /// is transformed; unlike `PersistChosenAttribute`, nothing is latched.
-    CopyTokenSource,
+    CopyTokenSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<Box<ResolvedAbility>>,
+    },
 }
 
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
@@ -39113,6 +39173,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u14_parity_current_and_legacy_tags() {
+        for (value, json) in [
+            (
+                ParitySource::Fixed(Parity::Even),
+                r#"{"type":"Fixed","value":"Even"}"#,
+            ),
+            (
+                ParitySource::LastNamedChoice,
+                r#"{"type":"LastNamedChoice"}"#,
+            ),
+            (ParitySource::SourceChosen, r#"{"type":"SourceChosen"}"#),
+        ] {
+            assert_eq!(serde_json::from_str::<ParitySource>(json).unwrap(), value);
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::from_str::<serde_json::Value>(json).unwrap()
+            );
+        }
+        assert!(serde_json::from_str::<ParitySource>(r#"{"type":"UnknownParity"}"#).is_err());
+    }
     use crate::types::events::GameEvent;
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;
@@ -46768,5 +46850,156 @@ mod chain_description_backfill_tests {
                 .as_deref(),
             Some("tap"),
         );
+    }
+}
+
+#[cfg(test)]
+mod sought_result_serde_tests {
+    use super::*;
+    #[test]
+    fn revealed_result_metadata_roundtrips_and_threads_existing_constructors() {
+        let parsed = crate::parser::parse_oracle_text("At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Game Preserve", &[], &["Enchantment".into()], &[]);
+        let definition = parsed.triggers[0].execute.as_deref().unwrap();
+        assert!(definition.declares_return_result.is_some());
+        let restored: AbilityDefinition =
+            serde_json::from_str(&serde_json::to_string(definition).unwrap()).unwrap();
+        assert_eq!(&restored, definition);
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            &restored,
+            crate::types::identifiers::ObjectId(9),
+            crate::types::player::PlayerId(0),
+        );
+        let reader = resolved.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            resolved.declares_return_result,
+            reader.reads_return_result.as_ref().map(|(id, _)| *id)
+        );
+        let roundtrip: ResolvedAbility =
+            serde_json::from_value(serde_json::to_value(&resolved).unwrap()).unwrap();
+        assert_eq!(roundtrip, resolved);
+        let swapped = crate::game::ability_utils::apply_instead_swap(&resolved, reader);
+        assert_eq!(swapped.reads_return_result, reader.reads_return_result);
+    }
+    #[test]
+    fn sought_result_populated_existing_shape_roundtrips_and_converts() {
+        let text =
+            "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Synthetic result codec",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let definition = &parsed.abilities[0];
+        assert!(definition.declares_return_result.is_some());
+        assert_eq!(
+            definition
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .reads_return_result
+                .as_ref()
+                .unwrap()
+                .0,
+            definition.declares_return_result.unwrap()
+        );
+        let restored: AbilityDefinition =
+            serde_json::from_slice(&serde_json::to_vec(definition).unwrap()).unwrap();
+        assert_eq!(&restored, definition);
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            &restored,
+            crate::types::identifiers::ObjectId(99),
+            crate::types::player::PlayerId(0),
+        );
+        assert_eq!(
+            resolved.declares_return_result,
+            definition.declares_return_result
+        );
+        assert_eq!(
+            resolved.sub_ability.as_ref().unwrap().reads_return_result,
+            definition.sub_ability.as_ref().unwrap().reads_return_result
+        );
+        let restored: ResolvedAbility =
+            serde_json::from_slice(&serde_json::to_vec(&resolved).unwrap()).unwrap();
+        assert_eq!(restored.reads_return_result, resolved.reads_return_result);
+        assert_eq!(
+            restored.sub_ability.as_ref().unwrap().reads_return_result,
+            resolved.sub_ability.as_ref().unwrap().reads_return_result
+        );
+        let swapped = crate::game::ability_utils::apply_instead_swap(
+            &resolved,
+            resolved.sub_ability.as_ref().unwrap(),
+        );
+        assert_eq!(
+            swapped.reads_return_result,
+            resolved.sub_ability.as_ref().unwrap().reads_return_result
+        );
+        let plain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let mut historical = serde_json::to_value(plain).unwrap();
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("reads_return_result");
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("declares_return_result");
+        let legacy: AbilityDefinition = serde_json::from_value(historical).unwrap();
+        assert!(legacy.reads_return_result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod mandatory_counter_adjustment_serde_tests {
+    use super::*;
+    #[test]
+    fn current_and_legacy_adjustment_defaults_accessors_and_count_ownership() {
+        let mut legacy: Effect = serde_json::from_value(
+            serde_json::json!({"type":"ChooseCounterAdjustment","adjustment":"AddOrRemove"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            &legacy,
+            Effect::ChooseCounterAdjustment {
+                counters: CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+        let omitted = serde_json::to_value(&legacy).unwrap();
+        assert!(omitted.get("counters").is_none());
+        assert!(omitted.get("target").is_none());
+        *legacy.target_filter_mut().unwrap() = TargetFilter::SelfRef;
+        assert_eq!(legacy.target_filter(), Some(&TargetFilter::SelfRef));
+        assert!(legacy.count_expr().is_none());
+        assert!(legacy.count_expr_mut().is_none());
+        let current = Effect::ChooseCounterAdjustment {
+            adjustment: CounterAdjustment::AddOrRemove,
+            counters: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                "charge".into(),
+            )),
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::SelfRef,
+        };
+        assert_eq!(
+            serde_json::from_str::<Effect>(&serde_json::to_string(&current).unwrap()).unwrap(),
+            current
+        );
+        for invalid in [
+            serde_json::json!({"type":"Unknown"}),
+            serde_json::json!({"type":"OfType","data":42}),
+        ] {
+            let mut raw = serde_json::to_value(&current).unwrap();
+            raw["counters"] = invalid;
+            assert!(serde_json::from_value::<Effect>(raw).is_err());
+        }
     }
 }

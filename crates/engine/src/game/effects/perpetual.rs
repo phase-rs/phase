@@ -20,6 +20,79 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
 
+/// Digital Seek's exact result is bound before repeat children allocate their
+/// own occurrence frames. CR 608.2c + CR 608.2h: the separate grant's quantity
+/// is evaluated once when that instruction begins, after delivery completes.
+pub(crate) fn prepare_sought_cost_grant(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<Option<ResolvedAbility>, EffectError> {
+    if !matches!(
+        &ability.effect,
+        Effect::ApplyPerpetual {
+            modification: crate::types::ability::PerpetualModification::ModifyCost { .. },
+            ..
+        }
+    ) {
+        return Ok(None);
+    }
+    let Some((result_id, _)) = &ability.reads_return_result else {
+        return Ok(None);
+    };
+    let occurrence = state
+        .active_return_result_occurrence
+        .ok_or_else(|| EffectError::MissingParam("seek result occurrence".to_string()))?;
+    let records = state
+        .return_result_frames
+        .get(&occurrence)
+        .and_then(|frame| frame.get(result_id))
+        .ok_or_else(|| EffectError::MissingParam("settled seek result".to_string()))?;
+    let records = records
+        .zone_changes()
+        .ok_or_else(|| EffectError::InvalidParam("seek result kind".into()))?;
+    // Terminal records belong to this instruction's completed logical batch.
+    // A redirected arrival is still a sought card; a no-move has no record.
+    let mut ids: Vec<_> = records.iter().map(|record| record.object_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut prepared = ability.clone();
+    let Effect::ApplyPerpetual { target, .. } = &mut prepared.effect else {
+        unreachable!()
+    };
+    *target = match ids.as_slice() {
+        [] => TargetFilter::None,
+        [id] => TargetFilter::SpecificObject { id: *id },
+        _ => TargetFilter::Or {
+            filters: ids
+                .into_iter()
+                .map(|id| TargetFilter::SpecificObject { id })
+                .collect(),
+        },
+    };
+    if let Some(quantity) = &ability.repeat_for {
+        prepared.repeat_for = Some(crate::types::ability::QuantityExpr::Fixed {
+            value: crate::game::quantity::resolve_quantity_with_targets(state, quantity, ability)
+                .max(0),
+        });
+    }
+    // Only this instruction is prepared. Descendants and inherited target
+    // occurrences retain their own authority, including independent tails.
+    prepared.reads_return_result = None;
+    Ok(Some(prepared))
+}
+
+fn concrete_recipients(target: &TargetFilter) -> Option<Vec<crate::types::identifiers::ObjectId>> {
+    match target {
+        TargetFilter::None => Some(Vec::new()),
+        TargetFilter::SpecificObject { id } => Some(vec![*id]),
+        TargetFilter::Or { filters } => filters.iter().try_fold(Vec::new(), |mut ids, filter| {
+            ids.extend(concrete_recipients(filter)?);
+            Some(ids)
+        }),
+        _ => None,
+    }
+}
+
 /// CR 702.184a/702.122/702.171: object referent for Stationed/VehicleCrewed/Saddled
 /// trigger anaphora while a triggered ability is resolving.
 fn parent_object_from_trigger_event(
@@ -70,6 +143,13 @@ fn perpetual_target_object_ids(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<crate::types::identifiers::ObjectId> {
+    // Digital exact-set authority wins even when empty (CR 609.3). Neither
+    // event context nor inherited targets can replace this instruction's cards.
+    if let Some(mut ids) = concrete_recipients(target) {
+        ids.sort_unstable();
+        ids.dedup();
+        return ids;
+    }
     // CR 702.184a/702.122/702.171: Stationed/VehicleCrewed/Saddled anaphora
     // binds before propagated chain targets — a stale source-only fallback in
     // `ability.targets` must not beat the live trigger event.
@@ -1680,5 +1760,237 @@ mod tests {
         assert_eq!(obj.toughness, Some(4));
         assert!(obj.has_keyword(&Keyword::Flying));
         assert!(obj.perpetual_mods.contains(&modification));
+    }
+}
+
+#[cfg(test)]
+mod sought_exact_recipient_tests {
+    use super::*;
+    use crate::types::ability::{
+        ControllerRef, QuantityExpr, ReturnResultId, ReturnResultReadSpec, TargetRef, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+    #[test]
+    fn sought_grant_preparation_is_frozen_before_repeat_children() {
+        let (runner, _, source) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let mut state = runner.state().clone();
+        let (occurrence, result_id, records) = state
+            .return_result_frames
+            .iter()
+            .find_map(|(occurrence, frame)| {
+                frame
+                    .iter()
+                    .find(|(_, records)| {
+                        records
+                            .zone_changes()
+                            .is_some_and(|records| !records.is_empty())
+                    })
+                    .map(|(id, records)| (*occurrence, *id, records.clone()))
+            })
+            .unwrap();
+        let recipient = records.zone_changes().unwrap()[0].object_id;
+        let text = "For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+        let full = format!("Seek two cards. {text}");
+        let parsed = crate::parser::parse_oracle_text(
+            &full,
+            "Synthetic freeze isolation",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let mut ability = crate::game::ability_utils::build_resolved_from_def(
+            parsed.abilities[0].sub_ability.as_deref().unwrap(),
+            source,
+            PlayerId(0),
+        );
+        ability.reads_return_result.as_mut().unwrap().0 = result_id;
+        ability.targets = vec![TargetRef::Object(source)];
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(tail.clone()));
+        state.active_return_result_occurrence = Some(occurrence);
+        state.last_created_token_ids = vec![source];
+        let decoy_set = crate::types::identifiers::TrackedSetId(999);
+        state.tracked_object_sets.insert(decoy_set, vec![source]);
+        state.chain_tracked_set_id = Some(decoy_set);
+        state.current_trigger_event = Some(GameEvent::VehicleCrewed {
+            vehicle_id: source,
+            creatures: vec![source],
+        });
+        let prepared = prepare_sought_cost_grant(&state, &ability)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
+        assert_eq!(prepared.targets, ability.targets);
+        assert_eq!(prepared.sub_ability.as_ref().unwrap().targets, tail.targets);
+        assert!(prepared.reads_return_result.is_none());
+        assert!(
+            ability.reads_return_result.is_some(),
+            "shared definition unchanged"
+        );
+        // A repeat child's empty frame and a changed color census cannot
+        // retarget or recount the prepared current node.
+        let child = crate::types::game_state::ReturnResultOccurrenceId(
+            state.next_return_result_occurrence_id,
+        );
+        state.next_return_result_occurrence_id += 1;
+        state
+            .return_result_frames
+            .insert(child, std::collections::BTreeMap::new());
+        state.active_return_result_occurrence = Some(child);
+        for object in state.objects.values_mut() {
+            object.color.clear();
+            object.base_color.clear();
+        }
+        assert_eq!(
+            perpetual_target_object_ids(
+                &state,
+                &prepared,
+                match &prepared.effect {
+                    Effect::ApplyPerpetual { target, .. } => target,
+                    _ => unreachable!(),
+                }
+            ),
+            vec![recipient]
+        );
+        assert_eq!(prepared.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
+        assert!(
+            prepare_sought_cost_grant(&state, &ability).is_err(),
+            "missing canonical authority never recovers latest"
+        );
+        state.active_return_result_occurrence = Some(occurrence);
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::ZoneChanges(Vec::new()),
+            );
+        let empty = prepare_sought_cost_grant(&state, &ability)
+            .unwrap()
+            .unwrap();
+        let Effect::ApplyPerpetual { target, .. } = &empty.effect else {
+            unreachable!()
+        };
+        assert_eq!(*target, TargetFilter::None);
+        assert!(perpetual_target_object_ids(&state, &empty, target).is_empty());
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::RevealedCards(
+                    crate::types::game_state::RevealedInstructionResult {
+                        revealed_cards: Vec::new(),
+                    },
+                ),
+            );
+        assert!(
+            prepare_sought_cost_grant(&state, &ability).is_err(),
+            "wrong-kind empty is not a settled empty zone result"
+        );
+        assert_eq!(
+            concrete_recipients(&TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: recipient },
+                    TargetFilter::ParentTarget
+                ]
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn jev_seek_result_does_not_change_returned_this_way_count() {
+        let (runner, _, source) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let mut state = runner.state().clone();
+        let (occurrence, _, records) = state
+            .return_result_frames
+            .iter()
+            .find_map(|(occurrence, frame)| {
+                frame
+                    .iter()
+                    .find(|(_, records)| {
+                        records
+                            .zone_changes()
+                            .is_some_and(|records| !records.is_empty())
+                    })
+                    .map(|(id, records)| (*occurrence, *id, records.clone()))
+            })
+            .unwrap();
+        let mut hand = records.zone_changes().unwrap()[0].clone();
+        hand.core_types = vec![crate::types::card_type::CoreType::Creature];
+        hand.to_zone = Zone::Hand;
+        hand.arrival.owner = PlayerId(0);
+        let mut redirect = hand.clone();
+        redirect.to_zone = Zone::Exile;
+        let mut foreign = hand.clone();
+        foreign.arrival.owner = PlayerId(1);
+        let result_id = ReturnResultId(900);
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::ZoneChanges(vec![
+                    hand, redirect, foreign,
+                ]),
+            );
+        state.active_return_result_occurrence = Some(occurrence);
+        let parsed = crate::parser::parse_oracle_text("Choose target creature you own. Return each chosen creature to your hand. At the beginning of the next upkeep, create a 4/4 white Bird Soldier creature token with flying for each creature returned to your hand this way.", "Labelled Eagles instruction excerpt", &[], &["Instant".into()], &[]);
+        let reader = std::iter::successors(Some(&parsed.abilities[0]), |node| {
+            node.sub_ability.as_deref()
+        })
+        .find(|node| node.reads_return_result.is_some())
+        .unwrap();
+        let mut delayed =
+            crate::game::ability_utils::build_resolved_from_def(reader, source, PlayerId(0));
+        delayed.reads_return_result = Some((
+            result_id,
+            ReturnResultReadSpec {
+                noun: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                destination: Zone::Hand,
+                recipient: ControllerRef::You,
+            },
+        ));
+        super::super::delayed_trigger::resolve(&mut state, &delayed, &mut Vec::new()).unwrap();
+        assert!(matches!(
+            state.delayed_triggers.last().unwrap().ability.effect,
+            Effect::Token {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        // A Seek reader on the other key independently retains all completed
+        // moved cards; it does not acquire the old delayed-return predicate.
+        assert!(state.return_result_frames[&occurrence].len() >= 2);
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(
+                result_id,
+                crate::types::game_state::InstructionResult::RevealedCards(
+                    crate::types::game_state::RevealedInstructionResult {
+                        revealed_cards: Vec::new(),
+                    },
+                ),
+            );
+        assert!(
+            super::super::delayed_trigger::resolve(&mut state, &delayed, &mut Vec::new()).is_err(),
+            "revealed members cannot become returned-card records"
+        );
     }
 }

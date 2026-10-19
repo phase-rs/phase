@@ -983,6 +983,76 @@ fn map_layout_str(s: &str) -> Option<LayoutKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u14_source_parity_loader_routes() {
+        use crate::types::ability::{
+            ChoiceType, ContinuousModification, Effect, FilterProp, ParitySource,
+        };
+        let oracle = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
+        let raw = serde_json::json!({"data": {"Parity Standard": [{"name":"Parity Standard", "colors":[], "colorIdentity":[], "layout":"normal", "type":"Enchantment", "types":["Enchantment"], "manaValue":0, "identifiers":{}, "text":oracle}]}});
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let raw_db = CardDatabase::from_mtgjson(file.path()).unwrap();
+        let export =
+            raw_db.export_subset_json(&std::collections::BTreeSet::from(
+                ["Parity Standard".into()],
+            ));
+        let assert_face = |db: &CardDatabase| {
+            let face = db.get_face_by_name("Parity Standard").unwrap();
+            assert_eq!(face.oracle_text.as_deref(), Some(oracle));
+            assert!(face
+                .replacements
+                .iter()
+                .any(|d| d.execute.as_deref().is_some_and(|a| matches!(
+                    a.effect.as_ref(),
+                    Effect::Choose {
+                        choice_type: ChoiceType::OddOrEven,
+                        persist: true,
+                        ..
+                    }
+                ))));
+            assert!(face
+                .static_abilities
+                .iter()
+                .any(|s| s.affected.as_ref().is_some_and(|f| {
+                    crate::game::filter::filter_contains_filter_prop(f, &|p| {
+                        matches!(
+                            p,
+                            FilterProp::ManaValueParity {
+                                parity: ParitySource::SourceChosen
+                            }
+                        )
+                    })
+                }) && s
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste
+                    })));
+        };
+        assert_face(&raw_db);
+        assert_face(&CardDatabase::from_export_reader(export.as_bytes()).unwrap());
+        assert_face(&CardDatabase::from_json_str(&export).unwrap());
+        for tag in [
+            serde_json::json!({"type":"Fixed","value":"Even"}),
+            serde_json::json!({"type":"LastNamedChoice"}),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(&export).unwrap();
+            value["parity standard"]["static_abilities"][0]["affected"]["properties"][0]
+                ["parity"] = tag.clone();
+            let db = CardDatabase::from_json_str(&value.to_string()).unwrap();
+            let json =
+                serde_json::to_value(db.get_face_by_name("Parity Standard").unwrap()).unwrap();
+            assert_eq!(
+                json["static_abilities"][0]["affected"]["properties"][0]["parity"],
+                tag
+            );
+        }
+        let mut wrong: serde_json::Value = serde_json::from_str(&export).unwrap();
+        wrong["parity standard"]["static_abilities"][0]["affected"]["properties"][0]["parity"] =
+            serde_json::json!({"type":"UnknownParity"});
+        assert!(CardDatabase::from_json_str(&wrong.to_string()).is_err());
+    }
     use crate::types::ability::{
         AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
     };

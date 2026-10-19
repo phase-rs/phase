@@ -752,6 +752,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             format!("{tag_prefix}{kind_word}{controller_suffix} on stack")
         }
         TargetFilter::StackSpell => "spell on stack".into(),
+        TargetFilter::CastingSpell => "spell being cast".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
@@ -951,6 +952,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     }
                     crate::types::ability::ParitySource::LastNamedChoice => {
                         "chosen odd/even mana value".to_string()
+                    }
+                    crate::types::ability::ParitySource::SourceChosen => {
+                        "source-chosen odd/even mana value".to_string()
                     }
                 };
                 parts.push(label);
@@ -3152,6 +3156,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             d.push(("token".into(), desc));
         }
+        Effect::ChooseCounterAdjustment { adjustment, counters, count, target } => {
+            d.push(("adjustment".into(), format!("{adjustment:?}")));
+            d.push(("counters".into(), format!("{counters:?}")));
+            d.push(("count".into(), fmt_quantity(count)));
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::PutCounter {
             counter_type,
             count,
@@ -4427,7 +4437,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::EachPlayerCopyChosen { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::ChooseCounterAdjustment { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize => {}
     }
@@ -4653,6 +4662,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             CoinFlipResult::Lost => "you lost the flip".into(),
         },
         AbilityCondition::WhenYouDo => "when you do".into(),
+        AbilityCondition::CounterRemovedThisWay { result, counters } => {
+            format!("counter removed by instruction {result:?} ({counters:?})")
+        }
         AbilityCondition::WasCast { zone } => match zone {
             Some(z) => format!("cast from {}", fmt_zone(z)),
             None => "was cast".into(),
@@ -10126,6 +10138,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
+        AbilityCondition::CounterRemovedThisWay { .. } => ("CounterRemovedThisWay", Handled),
         // ponytail: coverage tag key intentionally stays "CastFromZone" (decoupled
         // from the renamed variant) to keep coverage-data byte-stable across the
         // BB-FU4 WasCast rename — the string is a report key, not the variant name.
@@ -13831,6 +13844,88 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn u15_parsed_external_filter_labels_and_complete_coverage() {
+        use crate::types::ability::{FilterProp, Parity, ParitySource, TargetFilter};
+        let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+        let face = counter_rider_face("Ashling's Prerogative", text, &[], &["Enchantment"]);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.replacements.len(), 2);
+        assert_eq!(face.static_abilities.len(), 1);
+        assert!(face.parse_warnings.is_empty());
+        assert!(super::card_face_gaps(&face).is_empty());
+        let original = face
+            .replacements
+            .iter()
+            .find_map(|def| {
+                def.valid_card
+                    .as_ref()
+                    .filter(|filter| **filter != TargetFilter::SelfRef)
+            })
+            .unwrap();
+        assert!(
+            matches!(original, TargetFilter::Typed(tf) if matches!(tf.properties.as_slice(), [FilterProp::Not { prop }] if matches!(prop.as_ref(), FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+        );
+        let mut labels = Vec::new();
+        for parity in [
+            ParitySource::SourceChosen,
+            ParitySource::LastNamedChoice,
+            ParitySource::Fixed(Parity::Even),
+        ] {
+            let mut filter = original.clone();
+            let mut count = 0;
+            let mut complete = true;
+            crate::game::filter::rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: value @ ParitySource::SourceChosen,
+                    } = prop
+                    {
+                        *value = parity;
+                        count += 1;
+                    }
+                },
+                &mut complete,
+            );
+            assert!(complete);
+            assert_eq!(count, 1);
+            let TargetFilter::Typed(typed) = filter else {
+                unreachable!()
+            };
+            let label = super::fmt_typed_filter(&typed);
+            assert!(label.contains("not "));
+            labels.push(label);
+        }
+        assert!(labels[0].contains("source-chosen"));
+        assert_ne!(labels[0], labels[1]);
+        assert_ne!(labels[1], labels[2]);
+        assert!(labels[2].contains("even"));
+        let malformed = counter_rider_face(
+            "Synthetic malformed",
+            "Each creature without mana value of the chosen qualityness enters tapped.",
+            &[],
+            &["Enchantment"],
+        );
+        assert!(!super::card_face_gaps(&malformed).is_empty());
+    }
+
+    #[test]
+    fn u14_parity_formatter_distinguishes_authorities() {
+        use crate::types::ability::{FilterProp, Parity, ParitySource, TypedFilter};
+        let label = |parity| {
+            super::fmt_typed_filter(
+                &TypedFilter::creature().properties(vec![FilterProp::ManaValueParity { parity }]),
+            )
+        };
+        assert!(label(ParitySource::SourceChosen).contains("source-chosen"));
+        assert_ne!(
+            label(ParitySource::SourceChosen),
+            label(ParitySource::LastNamedChoice)
+        );
+        assert!(label(ParitySource::Fixed(Parity::Even)).contains("even"));
+    }
     /// Fixture shared by the replacement-payload stranding tests: an unbound
     /// delayed tracked-set return nested in an `AddTargetReplacement` execute
     /// body — the minimal carrier for the shape CodeRabbit's Major flagged as
@@ -23283,5 +23378,22 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             items.is_empty(),
             "modeled tree must emit no unsupported item"
         );
+    }
+
+    #[test]
+    fn mandatory_adjustment_details_report_all_parameter_axes() {
+        let effect = Effect::ChooseCounterAdjustment {
+            adjustment: crate::types::ability::CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("charge".into()),
+            ),
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::SelfRef,
+        };
+        let details = effect_details(&effect);
+        for key in ["adjustment", "counters", "count", "target"] {
+            assert!(details.iter().any(|(k, _)| k == key));
+        }
+        assert!(details.iter().any(|(_, value)| value.contains("charge")));
     }
 }

@@ -1,0 +1,183 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 159,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure."
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": {
+              "ModifyCost": {
+                "mode": "Reduce",
+                "amount": {
+                  "type": "Cost",
+                  "shards": [],
+                  "generic": 1
+                },
+                "spell_filter": null,
+                "dynamic_count": {
+                  "type": "ObjectCount",
+                  "filter": {
+                    "type": "And",
+                    "filters": [
+                      {
+                        "type": "Typed",
+                        "type_filters": [
+                          "Card"
+                        ],
+                        "controller": null,
+                        "properties": [
+                          {
+                            "type": "Owned",
+                            "controller": "You"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "Or",
+                        "filters": [
+                          {
+                            "type": "Typed",
+                            "type_filters": [
+                              "Card"
+                            ],
+                            "controller": null,
+                            "properties": [
+                              {
+                                "type": "InZone",
+                                "zone": "Exile"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "Typed",
+                            "type_filters": [
+                              "Card"
+                            ],
+                            "controller": null,
+                            "properties": [
+                              {
+                                "type": "InZone",
+                                "zone": "Graveyard"
+                              },
+                              {
+                                "type": "Owned",
+                                "controller": "You"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "Or",
+                        "filters": [
+                          {
+                            "type": "Typed",
+                            "type_filters": [
+                              "Instant"
+                            ],
+                            "controller": null,
+                            "properties": []
+                          },
+                          {
+                            "type": "Typed",
+                            "type_filters": [
+                              "Sorcery"
+                            ],
+                            "controller": null,
+                            "properties": []
+                          },
+                          {
+                            "type": "Typed",
+                            "type_filters": [
+                              "Card"
+                            ],
+                            "controller": null,
+                            "properties": [
+                              {
+                                "type": "HasAdventure"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [
+              "Hand",
+              "Stack",
+              "Command",
+              "Graveyard",
+              "Exile",
+              "Library"
+            ],
+            "characteristic_defining": false,
+            "description": "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure."
+          },
+          "source_text": "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 160,
+          "end_byte": 284,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Ward {4} (Whenever ~ becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)"
+      },
+      "node": {
+        "Keyword": {
+          "Ward": {
+            "type": "Mana",
+            "data": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 4
+            }
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)",
+  "card_name": "Sailors' Bane"
+}

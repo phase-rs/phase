@@ -563,6 +563,12 @@ impl ResolutionFrame {
     /// the concrete `WaitingFor` variant by the structural API.
     pub const fn gate(&self) -> FrameGate {
         match self {
+            Self::CopyToken(PendingCopyTokenResolution {
+                creation_id: Some(_),
+                pending: Some(crate::types::game_state::TokenCreationPending::CallerSelection),
+                caller: crate::types::game_state::TokenCreationCallerState::Populate { .. },
+                ..
+            }) => FrameGate::DirectChoice(DirectChoiceGate::Populate),
             Self::RepeatedOptionalPayment(RepeatedOptionalPaymentFrame {
                 pending: Some(_),
                 ..
@@ -640,6 +646,7 @@ pub enum FrameGate {
 /// A concrete prompt that a direct-choice frame is permitted to consume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirectChoiceGate {
+    Populate,
     RepeatedOptionalPayment,
     OptionalEffect,
     CoinFlipKeep,
@@ -653,16 +660,20 @@ impl DirectChoiceGate {
     const fn matches(self, waiting_for: &WaitingFor) -> bool {
         matches!(
             (self, waiting_for),
-            (
-                Self::RepeatedOptionalPayment,
-                WaitingFor::OptionalEffectChoice { .. }
-            ) | (
-                Self::RepeatedOptionalPayment,
-                WaitingFor::OpponentMayChoice { .. }
-            ) | (
-                Self::OptionalEffect,
-                WaitingFor::OptionalEffectChoice { .. }
-            ) | (Self::OptionalEffect, WaitingFor::OpponentMayChoice { .. })
+            (Self::Populate, WaitingFor::PopulateChoice { .. })
+                | (
+                    Self::RepeatedOptionalPayment,
+                    WaitingFor::OptionalEffectChoice { .. }
+                )
+                | (
+                    Self::RepeatedOptionalPayment,
+                    WaitingFor::OpponentMayChoice { .. }
+                )
+                | (
+                    Self::OptionalEffect,
+                    WaitingFor::OptionalEffectChoice { .. }
+                )
+                | (Self::OptionalEffect, WaitingFor::OpponentMayChoice { .. })
                 | (
                     Self::OptionalEffect,
                     WaitingFor::ResolutionOptionalPaymentChoice { .. }
@@ -768,6 +779,8 @@ pub enum ParkedFramePlacement {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionStack {
     frames: FrameVec,
+    #[serde(default)]
+    last_token_creation_frame_id: u64,
     /// The monotonic draw-frame allocator survives an abandoned MultiDraw
     /// frame, so a stale captured ID cannot alias a later instruction.
     #[serde(default)]
@@ -966,6 +979,16 @@ impl ResolutionStack {
     /// any recovery — and it does not provide uniqueness against unstamped
     /// frames, which are `None` and unaddressable by type.
     fn recover_post_replacement_frame_id_allocator(&mut self) {
+        self.last_token_creation_frame_id = self
+            .frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::CopyToken(pending) => pending.creation_id.map(|id| id.0),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .max(self.last_token_creation_frame_id);
         let last_frame_id = self
             .frames
             .iter()
@@ -1785,6 +1808,81 @@ impl ResolutionStack {
             Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
             Some(_) | None => None,
         }
+    }
+
+    pub(crate) fn token_creation(
+        &self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+    ) -> Option<&PendingCopyTokenResolution> {
+        match self.frames.get(self.frames.by_id(id)?)? {
+            ResolutionFrame::CopyToken(pending) => Some(pending),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn token_creation_mut(
+        &mut self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+    ) -> Option<&mut PendingCopyTokenResolution> {
+        let slot = self.frames.by_id(id)?;
+        match self.frames.get_mut(slot)? {
+            ResolutionFrame::CopyToken(pending) => Some(pending),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn install_token_creation(
+        &mut self,
+        mut pending: PendingCopyTokenResolution,
+    ) -> crate::types::identifiers::TokenCreationFrameId {
+        self.last_token_creation_frame_id = self
+            .last_token_creation_frame_id
+            .checked_add(1)
+            .expect("token creation frame identity exhausted");
+        let id = crate::types::identifiers::TokenCreationFrameId(self.last_token_creation_frame_id);
+        pending.creation_id = Some(id);
+        self.push_copy_token(pending);
+        id
+    }
+
+    pub(crate) fn bind_each_player_creation_child(
+        &mut self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+    ) {
+        let top = self.frames.top().expect("installed creation child");
+        assert!(
+            matches!(self.frames.get(top), Some(ResolutionFrame::CopyToken(pending)) if pending.creation_id == Some(id))
+        );
+        let parent = self
+            .frames
+            .below(top)
+            .expect("creation child has an EachPlayer parent");
+        let Some(ResolutionFrame::EachPlayerCopyChosen(pending)) = self.frames.get_mut(parent)
+        else {
+            panic!("creation child must be adjacent to its EachPlayer parent");
+        };
+        assert!(pending.copy_status.is_none());
+        pending.copy_status = Some(crate::types::game_state::TokenCreationCopyStatus::Pending(
+            id,
+        ));
+    }
+
+    pub(crate) fn admit_token_creation(
+        &mut self,
+        id: crate::types::identifiers::TokenCreationFrameId,
+        member: crate::types::identifiers::ObjectIncarnationRef,
+    ) -> Result<(), String> {
+        let pending = self
+            .token_creation_mut(id)
+            .ok_or_else(|| format!("unknown token creation frame {}", id.0))?;
+        if pending.created_incarnations.contains(&member) {
+            return Err(format!(
+                "duplicate token creation member {}:{}",
+                member.object_id.0, member.incarnation
+            ));
+        }
+        pending.created_incarnations.push(member);
+        Ok(())
     }
 
     /// Consume exactly the active CopyToken owner after its remaining batches
@@ -3622,6 +3720,45 @@ impl ResolutionStack {
 
     /// Validate stack-local structural and prompt coherence invariants.
     pub fn validate(&self, waiting_for: &WaitingFor) -> Result<(), ResolutionStackError> {
+        if let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            purpose: crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation },
+            ..
+        } = waiting_for
+        {
+            let invalid = match continuation {
+                Some(tail) => {
+                    let drain = match self.last() {
+                        Some(ResolutionFrame::PostReplacement(drains)) => drains.resident(),
+                        _ => None,
+                    };
+                    match (tail.context.token_creation_parent, drain) {
+                        (Some(parent), Some(drain)) if drain.token_creation_parent == Some(parent)
+                            && matches!(drain.status, crate::types::game_state::DrainStatus::Paused)
+                            && drain.source == Some(*source_id) && drain.controller.unwrap_or(*player) == *player
+                            && tail.source_id == *source_id && tail.controller == *player && tail.replacement_applied == drain.applied
+                            && self.token_creation(parent.frame).is_some_and(|owner| owner.pending == Some(crate::types::game_state::TokenCreationPending::Substitution)) => false,
+                        _ => true,
+                    }
+                }
+                None => self.frames.iter().any(|frame| match frame {
+                    ResolutionFrame::CopyToken(owner) => owner.creation_id.is_some(),
+                    ResolutionFrame::PostReplacement(drains) => drains
+                        .resident()
+                        .is_some_and(|drain| drain.token_creation_parent.is_some()),
+                    _ => false,
+                }),
+            };
+            if invalid {
+                return Err(ResolutionStackError::InvalidPayload {
+                    frame: FrameKind::PostReplacement,
+                    message:
+                        "copy source prompt has missing, foreign or stale saved creation authority"
+                            .into(),
+                });
+            }
+        }
         let multi_draw_count = self
             .frames
             .iter()
@@ -3635,10 +3772,98 @@ impl ResolutionStack {
         }
         let has_multi_draw = multi_draw_count == 1;
         let mut discard_ids = HashSet::new();
+        let mut token_creation_ids = HashSet::new();
         let mut post_replacement_ids = HashSet::new();
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
+            if let ResolutionFrame::EachPlayerCopyChosen(parent) = frame {
+                let invalid = match &parent.copy_status {
+                    Some(crate::types::game_state::TokenCreationCopyStatus::Pending(id)) => parent.stage != crate::types::game_state::CopyChosenStage::AwaitingCopy || self.token_creation(*id)
+                        .is_none_or(|child| !matches!(child.caller, crate::types::game_state::TokenCreationCallerState::EachPlayerCopyChosen)),
+                    Some(crate::types::game_state::TokenCreationCopyStatus::Completed(result)) => result.object_incarnations.iter().collect::<HashSet<_>>().len() != result.object_incarnations.len(),
+                    None => false,
+                };
+                if invalid {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::EachPlayerCopyChosen,
+                        message:
+                            "EachPlayer copy status has missing or mismatched exact child/result"
+                                .into(),
+                    });
+                }
+            }
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                if let Some(parent) = drains
+                    .resident()
+                    .and_then(|drain| drain.token_creation_parent)
+                {
+                    if !token_creation_ids.contains(&parent.frame) {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::PostReplacement,
+                            message: "substitution drain has a foreign creation parent".into(),
+                        });
+                    }
+                }
+            }
+            if let ResolutionFrame::CopyToken(pending) = frame {
+                if let Some(id) = pending.creation_id {
+                    let invalid = if id.0 == 0 || !token_creation_ids.insert(id) {
+                        Some("duplicate or zero token creation frame id")
+                    } else if id.0 > self.last_token_creation_frame_id {
+                        Some("token creation allocator is behind its resident owner")
+                    } else if !pending.remaining.is_empty() {
+                        Some("current token creation also contains legacy copy work")
+                    } else if matches!(pending.pending, Some(crate::types::game_state::TokenCreationPending::Replacement)) != pending.replacement_queue_tail.is_some() {
+                        Some("creation replacement lacks its pending queue boundary")
+                    } else if pending
+                        .replacement_queue_tail
+                        .is_some_and(|tail| tail > pending.work.len())
+                    {
+                        Some("creation replacement queue boundary exceeds remaining work")
+                    } else if pending.segment_start > pending.created_incarnations.len() {
+                        Some("token creation segment exceeds its result")
+                    } else if matches!(pending.caller,crate::types::game_state::TokenCreationCallerState::EachPlayerCopyChosen) && !index.checked_sub(1).and_then(|parent|self.frames.iter().nth(parent)).is_some_and(|frame|matches!(frame,ResolutionFrame::EachPlayerCopyChosen(parent) if parent.copy_status==Some(crate::types::game_state::TokenCreationCopyStatus::Pending(id)))) {
+                        Some("current EachPlayer creation lacks its adjacent exact pending parent")
+                    } else if pending.creator.is_none() {
+                        Some("current token creation is missing its creator")
+                    } else if pending
+                        .result_parent
+                        .is_some_and(|parent| !token_creation_ids.contains(&parent) || parent == id || self.token_creation(parent).is_none_or(|owner| owner.pending != Some(crate::types::game_state::TokenCreationPending::Substitution)))
+                    {
+                        Some("token substitution parent is not an earlier resident creation")
+                    } else if pending
+                        .created_incarnations
+                        .iter()
+                        .collect::<HashSet<_>>()
+                        .len()
+                        != pending.created_incarnations.len()
+                    {
+                        Some("duplicate token birth incarnation in creation result")
+                    } else {
+                        None
+                    };
+                    if let Some(message) = invalid {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::CopyToken,
+                            message: message.into(),
+                        });
+                    }
+                } else if !pending.work.is_empty()
+                    || pending.pending.is_some()
+                    || pending.replacement_queue_tail.is_some()
+                    || pending.result_parent.is_some()
+                    || !pending.created_incarnations.is_empty()
+                    || pending.creator.is_some()
+                    || pending.continuation.is_some()
+                {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::CopyToken,
+                        message: "id-less legacy copy frame contains current creation metadata"
+                            .into(),
+                    });
+                }
+            }
             if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
                 direct_choice_count += 1;
                 if index + 1 != self.frames.len() {
@@ -3803,7 +4028,10 @@ impl ResolutionStack {
 /// every draw frame to carry its result owner explicitly, including `null`.
 /// Version 5 adds the simultaneous-draw dealer to the draw frame.
 /// Version 6 retains deferred Clash bottom choices until the final answer.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
+/// Version 7 carries exact creation owners, queued work, and saved copy tails.
+/// Version 8 distinguishes revealed membership and preserves original queued origins.
+/// Version 9 carries exact counter-removal receipts and event-owned damage source authority.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4168,6 +4396,361 @@ fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Re
 /// and the typed-frame branch deserializes the field straight back into
 /// `ResolutionStack`.
 /// The move below is a rename, not a reinterpretation.
+fn visit_instruction_batches_mut(
+    value: &mut Value,
+    mut visit: impl FnMut(&mut Value) -> Result<(), String>,
+) -> Result<(), String> {
+    for carrier in ["resolution_stack", "resolution_frames"] {
+        if let Some(frames) = value
+            .get_mut(carrier)
+            .and_then(|stack| stack.get_mut("frames"))
+            .and_then(Value::as_array_mut)
+        {
+            for frame in frames {
+                if frame.get("type").and_then(Value::as_str) == Some("BatchDelivery") {
+                    if let Some(batch) = frame.get_mut("data") {
+                        visit(batch)?;
+                    }
+                }
+            }
+        }
+    }
+    for carrier in ["pending_batch_deliveries", "pending_mill_deliveries"] {
+        if let Some(batch) = value.get_mut(carrier).filter(|batch| !batch.is_null()) {
+            visit(batch)?;
+        }
+    }
+    Ok(())
+}
+
+fn has_current_instruction_result_markers(value: &Value) -> bool {
+    let revealed = value
+        .get("return_result_frames")
+        .and_then(Value::as_object)
+        .is_some_and(|frames| {
+            frames
+                .values()
+                .filter_map(Value::as_object)
+                .flat_map(|frame| frame.values())
+                .any(Value::is_object)
+        });
+    let mut origins = false;
+    let _ = visit_instruction_batches_mut(&mut value.clone(), |batch| {
+        origins |= batch
+            .get("requests")
+            .and_then(Value::as_array)
+            .is_some_and(|requests| {
+                requests
+                    .iter()
+                    .any(|request| request.get("expected_origin").is_some())
+            });
+        Ok(())
+    });
+    revealed || origins
+}
+
+/// Explicit pre-v8 compatibility: reuse only a direct owner's already captured
+/// exact own-source authority. Ordinary/mixed/other-source damage stays ordinary.
+fn migrate_legacy_exact_damage_source(value: &mut Value) -> Result<(), String> {
+    let Some(pending) = value
+        .get("pending_replacement")
+        .filter(|pending| !pending.is_null())
+    else {
+        return Ok(());
+    };
+    if pending
+        .get("damage_source_context")
+        .is_some_and(|context| !context.is_null())
+    {
+        return Ok(());
+    }
+    let Some(proposed) = pending.get("proposed") else {
+        return Ok(());
+    };
+    let proposed: ProposedEvent =
+        serde_json::from_value(proposed.clone()).map_err(|error| error.to_string())?;
+    let ProposedEvent::Damage { source_id, .. } = proposed else {
+        return Ok(());
+    };
+    let Some(owner) = value
+        .get("resolving_stack_entry")
+        .filter(|owner| !owner.is_null())
+    else {
+        return Ok(());
+    };
+    let owner: crate::types::game_state::StackEntry =
+        serde_json::from_value(owner.clone()).map_err(|error| error.to_string())?;
+    let Some(ability) = owner.ability() else {
+        return Ok(());
+    };
+    if !matches!(
+        ability.effect,
+        crate::types::ability::Effect::DealDamage {
+            damage_source: None,
+            ..
+        }
+    ) || ability.source_id != source_id
+        || ability.sub_ability.is_some()
+        || ability.else_ability.is_some()
+    {
+        return Ok(());
+    }
+    let Some(source) = &ability.trigger_source else {
+        return Ok(());
+    };
+    if source.identity.reference.object_id != source_id
+        || ability.source_incarnation != Some(source.identity.reference.incarnation)
+    {
+        return Ok(());
+    }
+    let source = serde_json::to_value(source).map_err(|error| error.to_string())?;
+    value
+        .get_mut("pending_replacement")
+        .and_then(Value::as_object_mut)
+        .expect("checked legacy pending replacement remains an object")
+        .insert("damage_source_context".into(), source);
+    Ok(())
+}
+
+fn validate_current_instruction_batches(value: &Value) -> Result<(), String> {
+    visit_instruction_batches_mut(&mut value.clone(), |batch| {
+        let remaining = batch
+            .get("remaining")
+            .and_then(Value::as_array)
+            .ok_or("current batch has no remaining members")?;
+        let requests = batch.get("requests").and_then(Value::as_array);
+        if requests.map_or(0, Vec::len) != remaining.len() {
+            return Err("current batch is missing exact queued requests".into());
+        }
+        if let Some(requests) = requests {
+            for (request, member) in requests.iter().zip(remaining) {
+                if request.get("object_id") != Some(member)
+                    || request.get("expected_origin").is_none()
+                {
+                    return Err("current batch request identity/origin is missing".into());
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod revealed_result_legacy_tests {
+    use super::*;
+    use crate::game::scenario::GameRunner;
+    use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+    use crate::types::zones::Zone;
+
+    fn current_writers_preserve_undrained_sought_batch(state: GameState, cards: &[ObjectId]) {
+        let pending = state.active_batch_delivery().unwrap();
+        assert!(
+            !pending.remaining.is_empty(),
+            "reach: a genuine undelivered tail"
+        );
+        assert_eq!(pending.requests.len(), pending.remaining.len());
+        for (request, member) in pending.requests.iter().zip(&pending.remaining) {
+            assert_eq!(request.object_id, *member);
+            assert_eq!(request.expected_origin, None);
+        }
+        assert_eq!(
+            state.players[0].life, 20,
+            "the independent tail has not run"
+        );
+        for card in cards {
+            assert_eq!(state.objects[card].zone, Zone::Library);
+            assert!(state.objects[card].perpetual_mods.is_empty());
+        }
+
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone()))).unwrap();
+        let trusted =
+            serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap();
+        let persisted_trusted =
+            serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap();
+        for saved in [&wire, &raw, &trusted, &persisted_trusted] {
+            let payload = saved.get("state").unwrap_or(saved);
+            assert_eq!(
+                payload["resolution_state_version"],
+                RESOLUTION_STATE_WIRE_VERSION
+            );
+            validate_current_instruction_batches(payload).unwrap();
+        }
+        // Every writer runs before any legal action drains the admitted legacy
+        // queue. Reloading these current saves is the regression discriminator.
+        let reloaded = [
+            serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap()
+                .into_game_state(),
+            serde_json::from_value::<PersistedGameState>(raw)
+                .unwrap()
+                .into_game_state()
+                .unwrap(),
+            serde_json::from_value::<TrustedGameStateEnvelope>(trusted)
+                .unwrap()
+                .into_game_state(),
+            serde_json::from_value::<PersistedGameState>(persisted_trusted)
+                .unwrap()
+                .into_game_state()
+                .unwrap(),
+        ];
+        for loaded in reloaded {
+            assert_eq!(loaded.active_batch_delivery(), Some(pending));
+            assert_eq!(loaded.return_result_frames, state.return_result_frames);
+            let mut runner = GameRunner::from_state(loaded);
+            // Normal legal replacement actions must settle both redirected Seek
+            // members before the +7 tail and the bound one-grant consumer.
+            crate::game::effects::seek::tests::finish_sought_pause(&mut runner, cards);
+            assert_eq!(runner.state().players[0].life, 27);
+            assert!(runner.state().active_batch_delivery().is_none());
+            assert!(runner.state().return_result_frames.is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_zone_results_and_unpinned_queues_keep_their_real_consumers() {
+        let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        for version in 2..=7 {
+            let mut legacy = wire.clone();
+            legacy["resolution_state_version"] = Value::from(version);
+            visit_instruction_batches_mut(&mut legacy, |batch| {
+                if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                    for request in requests {
+                        request.as_object_mut().unwrap().remove("expected_origin");
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+            let restored: ResolutionStateWire = serde_json::from_value(legacy).unwrap();
+            let restored = restored.into_game_state();
+            assert!(restored
+                .return_result_frames
+                .values()
+                .flat_map(|frame| frame.values())
+                .all(|result| result.zone_changes().is_some()));
+            current_writers_preserve_undrained_sought_batch(restored, &cards);
+        }
+        // The full-request current twin must retain the same legal consumers.
+        current_writers_preserve_undrained_sought_batch(runner.state().clone(), &cards);
+    }
+
+    #[test]
+    fn legacy_remaining_only_batches_survive_current_writers_before_resume() {
+        let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let state = runner.state();
+        let pending = state.active_batch_delivery().unwrap();
+        assert!(!pending.remaining.is_empty());
+        assert_eq!(pending.remaining.len(), pending.requests.len());
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        let mut malformed_current = wire.clone();
+        visit_instruction_batches_mut(&mut malformed_current, |batch| {
+            batch.as_object_mut().unwrap().remove("requests");
+            Ok(())
+        })
+        .unwrap();
+        assert!(serde_json::from_value::<ResolutionStateWire>(malformed_current.clone()).is_err());
+        assert!(serde_json::from_value::<PersistedGameState>(malformed_current).is_err());
+        let mut legacy_payloads = Vec::new();
+        for version in 2..=7 {
+            let mut legacy = wire.clone();
+            legacy["resolution_state_version"] = Value::from(version);
+            legacy_payloads.push(legacy);
+        }
+        // Flatten this ordinary public pause through the historical v1 carrier
+        // fields, retaining its real continuation and replacement authority.
+        let mut v1 = wire.clone();
+        v1.as_object_mut().unwrap().remove("resolution_frames");
+        v1["resolution_state_version"] = Value::from(1);
+        for frame in state.resolution_stack.iter() {
+            match frame {
+                ResolutionFrame::AbilityContinuation(frame) => {
+                    assert!(v1.get("pending_continuation").is_none());
+                    v1["pending_continuation"] = serde_json::to_value(&frame.pending).unwrap();
+                    v1["pending_choose_zone_trigger_context"] =
+                        serde_json::to_value(&frame.choose_zone_trigger_context).unwrap();
+                }
+                ResolutionFrame::BatchDelivery(batch) => {
+                    assert!(v1.get("pending_batch_deliveries").is_none());
+                    v1["pending_batch_deliveries"] = serde_json::to_value(batch).unwrap();
+                }
+                ResolutionFrame::PostReplacement(drains) => {
+                    assert!(v1.get("post_replacement_drains").is_none());
+                    v1["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
+                }
+                ResolutionFrame::SpellResolution(spell) => {
+                    assert!(v1.get("pending_spell_resolution").is_none());
+                    v1["pending_spell_resolution"] = serde_json::to_value(spell).unwrap();
+                }
+                other => panic!("unexpected frame in ordinary sought pause: {other:?}"),
+            }
+        }
+        assert!(v1.get("pending_batch_deliveries").is_some());
+        let mut alias = v1.clone();
+        alias["pending_mill_deliveries"] = alias
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_batch_deliveries")
+            .unwrap();
+        for legacy in [v1, alias] {
+            let mut full_requests = legacy.clone();
+            visit_instruction_batches_mut(&mut full_requests, |batch| {
+                for request in batch["requests"].as_array_mut().unwrap() {
+                    request.as_object_mut().unwrap().remove("expected_origin");
+                }
+                Ok(())
+            })
+            .unwrap();
+            let restored = serde_json::from_value::<ResolutionStateWire>(full_requests)
+                .unwrap()
+                .into_game_state();
+            current_writers_preserve_undrained_sought_batch(restored, &cards);
+            legacy_payloads.push(legacy);
+        }
+
+        for legacy in legacy_payloads {
+            for empty_array in [false, true] {
+                let mut legacy = legacy.clone();
+                let mut visited = 0;
+                visit_instruction_batches_mut(&mut legacy, |batch| {
+                    assert!(!batch["remaining"].as_array().unwrap().is_empty());
+                    visited += 1;
+                    batch.as_object_mut().unwrap().remove("requests");
+                    if empty_array {
+                        batch["requests"] = Value::Array(Vec::new());
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(visited, 1, "reach: exactly one nonempty legacy batch");
+                let restored = serde_json::from_value::<ResolutionStateWire>(legacy)
+                    .unwrap()
+                    .into_game_state();
+                current_writers_preserve_undrained_sought_batch(restored, &cards);
+            }
+        }
+
+        // Unversioned historical runtime-stack ingress selects the existing
+        // typed legacy compatibility route before the same current writers.
+        let mut raw = serde_json::to_value(state).unwrap();
+        visit_instruction_batches_mut(&mut raw, |batch| {
+            batch.as_object_mut().unwrap().remove("requests");
+            Ok(())
+        })
+        .unwrap();
+        let restored = serde_json::from_value::<PersistedGameState>(raw)
+            .unwrap()
+            .into_game_state()
+            .unwrap();
+        current_writers_preserve_undrained_sought_batch(restored, &cards);
+    }
+}
+
 pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), String> {
     reject_wire_projection_marker(value)?;
     let object = value
@@ -4176,6 +4759,8 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
     if object.contains_key("resolution_state_version") {
         return Ok(());
     }
+    let current_instruction_result = has_current_instruction_result_markers(value);
+    let object = value.as_object_mut().expect("checked object");
     let unversioned_stack_has_delivery_owner = object
         .get("resolution_stack")
         .map(has_draw_sequence_delivery_owner)
@@ -4257,7 +4842,9 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             object.insert("resolution_frames".to_string(), frames);
             object.insert(
                 "resolution_state_version".to_string(),
-                Value::from(if unversioned_stack_has_delivery_owner {
+                Value::from(if current_instruction_result {
+                    RESOLUTION_STATE_WIRE_VERSION
+                } else if unversioned_stack_has_delivery_owner {
                     LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
                 } else {
                     LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION
@@ -4267,7 +4854,11 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
         None => {
             object.insert(
                 "resolution_state_version".to_string(),
-                Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION),
+                Value::from(if current_instruction_result {
+                    RESOLUTION_STATE_WIRE_VERSION
+                } else {
+                    LEGACY_RESOLUTION_STATE_WIRE_VERSION
+                }),
             );
         }
     }
@@ -4355,7 +4946,7 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4, 5 and 6 use the same frame
+    /// 2 and 3 share the typed-frame reader; versions 4 through 9 use the same frame
     /// layout with an explicit draw-result-owner presence check, and a version-4
     /// draw frame simply has no dealer.
     fn from_value(mut value: Value) -> Result<Self, String> {
@@ -4380,15 +4971,52 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | 5 | RESOLUTION_STATE_WIRE_VERSION => {
-                GameStateDecodeMode::ResolutionWireV4
-            }
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+            | 5
+            | 6
+            | 7
+            | 8
+            | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, 6, 7, 8, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
+        if version < 8 {
+            let mut legacy_authority = value.clone();
+            visit_instruction_batches_mut(&mut legacy_authority, |batch| {
+                if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                    for request in requests {
+                        if request.get("expected_origin").is_some_and(Value::is_null) {
+                            request.as_object_mut().unwrap().remove("expected_origin");
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            if has_current_instruction_result_markers(&legacy_authority) {
+                return Err(
+                    "legacy resolution state cannot declare revealed-result/origin authority"
+                        .into(),
+                );
+            }
+            visit_instruction_batches_mut(&mut value, |batch| {
+                if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                    for request in requests {
+                        if let Some(request) = request.as_object_mut() {
+                            request.insert("expected_origin".into(), Value::Null);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        } else {
+            validate_current_instruction_batches(&value)?;
+        }
+        if version < 9 {
+            migrate_legacy_exact_damage_source(&mut value)?;
+        }
         if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
         }
@@ -4631,6 +5259,13 @@ impl ResolutionStateWire {
                 }
                 let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
+                if version < RESOLUTION_STATE_WIRE_VERSION {
+                    for frame in frames.frames.iter_mut() {
+                        if let ResolutionFrame::BatchDelivery(batch) = frame {
+                            crate::game::zone_pipeline::normalize_legacy_batch_requests(batch);
+                        }
+                    }
+                }
                 frames.recover_draw_sequence_allocator();
                 frames.recover_discard_allocator();
                 frames.recover_post_replacement_frame_id_allocator();
@@ -4865,6 +5500,8 @@ fn has_removed_batched_repeated_optional_payment(value: &Value) -> bool {
 /// non-serializable and are checked only structurally at this boundary.
 #[cfg(debug_assertions)]
 pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
+    crate::types::game_state::validate_token_creation_authorities(state)
+        .unwrap_or_else(|error| panic!("token creation authority must validate: {error}"));
     let frames = canonicalize_legacy_resolution_state(state)
         .unwrap_or_else(|error| panic!("resolution state must canonicalize: {error}"));
     frames
@@ -4979,7 +5616,10 @@ impl LegacyBatchDeliveryWire {
     }
 
     fn into_frame(self) -> Option<PendingBatchDeliveries> {
-        self.pending_batch_deliveries
+        self.pending_batch_deliveries.map(|mut batch| {
+            crate::game::zone_pipeline::normalize_legacy_batch_requests(&mut batch);
+            batch
+        })
     }
 }
 
@@ -5347,6 +5987,7 @@ impl LegacyReplacementTailsWire {
             if let Some(continuation) = continuation {
                 self.post_replacement_drains.install(
                     PostReplacementDrain {
+                        token_creation_parent: None,
                         status: DrainStatus::Ready(continuation),
                         source: self.post_replacement_source,
                         applied: self.post_replacement_applied,
@@ -6245,6 +6886,25 @@ mod tests {
         v1["pending_batch_deliveries"] =
             serde_json::to_value(pending).expect("legacy batch delivery serializes");
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        visit_instruction_batches_mut(&mut v1, |batch| {
+            if let Some(requests) = batch.get_mut("requests").and_then(Value::as_array_mut) {
+                for request in requests {
+                    request.as_object_mut().unwrap().remove("expected_origin");
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut alias = v1.clone();
+        let batch = alias
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_batch_deliveries")
+            .unwrap();
+        alias["pending_mill_deliveries"] = batch;
+        let alias: ResolutionStateWire = serde_json::from_value(alias)
+            .expect("v1 mill alias remains an ordinary unpinned batch");
+        assert!(alias.game_state().active_batch_delivery().is_some());
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 batch delivery fixture converts through the wire")
@@ -7008,8 +7668,8 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 6);
+    fn resolution_wire_contract_pins_v9_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 9);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
@@ -7620,6 +8280,7 @@ mod tests {
         let counter_removals = resume_priority_fixture(restore_v1_counter_removals_fixture(
             counter_removals,
             PendingCounterRemovalQueue {
+                result_binding: None,
                 remaining: Vec::new(),
                 effect_kind: EffectKind::RemoveCounter,
                 source_ability_id: ObjectId(115),
@@ -7685,6 +8346,16 @@ mod tests {
         let mut copy_token = restore_v1_copy_token_fixture(
             GameState::new_two_player(121),
             PendingCopyTokenResolution {
+                creation_id: None,
+                result_parent: None,
+                work: std::collections::VecDeque::new(),
+                pending: None,
+                replacement_queue_tail: None,
+                created_incarnations: Vec::new(),
+                creator: None,
+                continuation: None,
+                caller: crate::types::game_state::TokenCreationCallerState::Plain,
+                segment_start: 0,
                 created_ids: Vec::new(),
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
@@ -7703,6 +8374,7 @@ mod tests {
     fn v1_nested_each_player_copy_and_counter_fixture_preserves_child_order() {
         let state = GameState::new_two_player(122);
         let each_player = PendingEachPlayerCopyChosen {
+            copy_status: None,
             stage: CopyChosenStage::AwaitingCopy,
             player: PlayerId(0),
             chosen: Vec::new(),
@@ -7719,6 +8391,16 @@ mod tests {
             trigger_event: None,
         };
         let copy_token = PendingCopyTokenResolution {
+            creation_id: None,
+            result_parent: None,
+            work: std::collections::VecDeque::new(),
+            pending: None,
+            replacement_queue_tail: None,
+            created_incarnations: Vec::new(),
+            creator: None,
+            continuation: None,
+            caller: crate::types::game_state::TokenCreationCallerState::Plain,
+            segment_start: 0,
             created_ids: Vec::new(),
             remaining: VecDeque::new(),
             effect_kind: EffectKind::CopyTokenOf,
@@ -7779,6 +8461,7 @@ mod tests {
         let mut each_player_copy = restore_v1_each_player_copy_chosen_fixture(
             GameState::new_two_player(130),
             PendingEachPlayerCopyChosen {
+                copy_status: None,
                 stage: CopyChosenStage::AwaitingCounters,
                 player: PlayerId(0),
                 chosen: Vec::new(),
@@ -8615,6 +9298,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_source_context: None,
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
                 source: None,
@@ -9052,6 +9736,6 @@ mod tests {
         let error = serde_json::from_value::<ResolutionStateWire>(future)
             .expect_err("an unknown version is refused")
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, 5, or 6"), "{error}");
+        assert!(error.contains("1, 2, 3, 4, 5, 6, 7, 8, or 9"), "{error}");
     }
 }

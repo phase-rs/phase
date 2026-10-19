@@ -2322,6 +2322,7 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 }
             }
         }
+        TargetFilter::CastingSpell => None,
         TargetFilter::StackSpell => {
             let event = event?;
             // CR 601.2i + CR 603.2: On a spell-cast trigger, "that spell" /
@@ -4640,6 +4641,7 @@ mod tests {
         // drain but whose prevented-event context is still readable (CR 615.5).
         state.install_post_replacement_drain(
             PostReplacementDrain {
+                token_creation_parent: None,
                 status: DrainStatus::Dispatching,
                 source: None,
                 applied: HashSet::new(),
@@ -4687,6 +4689,7 @@ mod tests {
         // `Dispatching` for the same reason as the sibling test above.
         state.install_post_replacement_drain(
             PostReplacementDrain {
+                token_creation_parent: None,
                 status: DrainStatus::Dispatching,
                 source: None,
                 applied: HashSet::new(),

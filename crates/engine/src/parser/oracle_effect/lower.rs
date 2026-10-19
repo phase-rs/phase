@@ -4228,6 +4228,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::Typed(..)
             | TargetFilter::StackAbility { .. }
             | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -4325,6 +4326,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::Typed(..)
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -11056,6 +11058,35 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
 
 fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
     let clause = clause.trim_start().trim_end_matches('.').trim_end();
+    match nom_quantity::parse_coordinated_card_population(clause.lower) {
+        Ok(_) => return clause,
+        Err(nom::Err::Failure(_)) => {
+            // CR 608.2c: a coordinated population keeps its whole predicate.
+            // Only a proven independent instruction can end its operand.
+            let mut remaining = clause.lower;
+            while let Ok((_, (prefix, tail))) = nom_primitives::split_once_on(remaining, ",") {
+                let end = clause.len() - remaining.len() + prefix.len();
+                let candidate = clause.slice(0, end).trim_end();
+                let tail = tail.trim_start();
+                let (instruction, _) =
+                    opt(alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))))
+                        .parse(tail)
+                        .expect("optional connector");
+                if nom_quantity::parse_coordinated_card_population(candidate.lower).is_ok()
+                    && crate::parser::oracle_target::parse_relative_card_continuation_head(
+                        instruction,
+                    )
+                    .is_err()
+                    && super::sequence::starts_clause_text_or_conjugated(instruction)
+                {
+                    return candidate;
+                }
+                remaining = tail;
+            }
+            return clause;
+        }
+        Err(nom::Err::Error(_) | nom::Err::Incomplete(_)) => {}
+    }
     // CR 613.4c: a "+X/+Y" pump binds each axis to its own quantity via
     // "<X quantity>, and Y is <Y quantity>" (Aspect of Wolf). The "and Y is …"
     // is a continuation of the SAME binding, not a new instruction, so keep the
@@ -15025,6 +15056,44 @@ mod tests {
     }
 
     #[test]
+    fn coordinated_where_x_operand_is_complete() {
+        for introduction in ["", "the number of ", "the total number of "] {
+            let head = format!("{introduction}cards you own in exile and in your graveyard");
+            for tail in [
+                "that are instant cards, are sorcery cards, and/or have an Adventure",
+                "that are instant cards, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+                "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or",
+                "that are instant cards, are sorcery cards, and/or have an Adventure,",
+            ] {
+                let operand = format!("{head} {tail}");
+                let text = format!("draw X cards, where X is {operand}.");
+                let lower = text.to_lowercase();
+                assert_eq!(strip_trailing_where_x(TextPair::new(&text, &lower)).1.as_deref(), Some(operand.as_str()));
+            }
+            let operand = format!(
+                "{head} that are instant cards, are sorcery cards, and/or have an Adventure"
+            );
+            for following in [
+                ", draw a card.",
+                ", and draw a card.",
+                ", then draw a card.",
+                ". Draw a card.",
+            ] {
+                let text = format!("draw X cards, where X is {operand}{following}");
+                let lower = text.to_lowercase();
+                assert_eq!(
+                    strip_trailing_where_x(TextPair::new(&text, &lower))
+                        .1
+                        .as_deref(),
+                    Some(operand.as_str())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn where_x_comparator_bounds_preserve_variable_x() {
         for expression in [
             "less than or equal to the amount of life you gained",
@@ -17111,5 +17180,57 @@ mod dq_d_player_set_lift_tests {
             body,
             "create a 2/2 black Zombie creature token unless they sacrifice a creature."
         );
+    }
+    #[test]
+    fn nested_attack_creation_keeps_inner_cleanup_and_end_combat_sibling_boundaries() {
+        for (text,end) in [("Whenever you attack this turn, create two 1/1 red Warrior creature tokens that are tapped and attacking. Sacrifice them at the beginning of the next end step.",crate::types::phase::Phase::End),("Create a colorless Construct artifact creature token named Twin that's attacking. Its power is equal to this creature's power and its toughness is equal to this creature's toughness. Sacrifice the token at end of combat.",crate::types::phase::Phase::EndCombat)] {
+            let chain=super::super::parse_effect_chain(text,AbilityKind::Spell);
+            fn has_cleanup(def:&AbilityDefinition,end:crate::types::phase::Phase)->bool {match def.effect.as_ref() {Effect::CreateDelayedTrigger {condition,effect,..}=>{if matches!(condition,crate::types::ability::DelayedTriggerCondition::AtNextPhase {phase} if *phase==end)&&matches!(effect.effect.as_ref(),Effect::Sacrifice {..}) {return true;}if has_cleanup(effect,end){return true;}},_=>{}}def.sub_ability.as_deref().is_some_and(|sub|has_cleanup(sub,end))}
+            assert!(has_cleanup(&chain,end),"full nested payload retains ordinary delayed sacrifice: {chain:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod jev_seek_binder_tests {
+    use super::*;
+    use crate::types::zones::EtbTapState;
+
+    #[test]
+    fn jev_existing_where_x_binder_rewrites_seek_filter_and_count() {
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        };
+        let mut effect = Effect::Seek {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: x.clone(),
+            }])),
+            count: x,
+            from_top: Some(10),
+            destination: Zone::Battlefield,
+            enter_tapped: EtbTapState::Tapped,
+        };
+        let expression = "the number of colors among permanents you control";
+        apply_where_x_effect_expression(&mut effect, Some(expression));
+        let expected = parse_where_x_quantity_expression(expression).unwrap();
+        let Effect::Seek {
+            filter: TargetFilter::Typed(typed),
+            count,
+            from_top,
+            destination,
+            enter_tapped,
+        } = effect
+        else {
+            panic!("Seek preserved")
+        };
+        assert_eq!(count, expected);
+        assert!(typed.properties.contains(&FilterProp::Cmc {
+            comparator: Comparator::LE,
+            value: expected
+        }));
+        assert_eq!(from_top, Some(10));
+        assert_eq!(destination, Zone::Battlefield);
+        assert_eq!(enter_tapped, EtbTapState::Tapped);
     }
 }

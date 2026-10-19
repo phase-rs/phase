@@ -36,6 +36,15 @@ pub fn resolve(
     };
 
     let count = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+    let result_key = ability
+        .declares_return_result
+        .map(|result_id| {
+            state
+                .active_return_result_occurrence
+                .map(|occurrence_id| (occurrence_id, result_id))
+                .ok_or_else(|| EffectError::MissingParam("seek result occurrence".to_string()))
+        })
+        .transpose()?;
 
     let player = state
         .players
@@ -54,6 +63,11 @@ pub fn resolve(
         .collect();
 
     if matching.is_empty() || count == 0 {
+        // Digital Seek: a completed empty instruction is a fresh exact result,
+        // never permission to recover another producer's cards.
+        if let Some((occurrence_id, result_id)) = result_key {
+            super::publish_return_result(state, occurrence_id, result_id, Vec::new())?;
+        }
         // "Fail to find" — resolve immediately
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Seek,
@@ -92,14 +106,23 @@ pub fn resolve(
         .collect();
 
     // CR 616.1: a `Moved` redirect (or, for a battlefield entry, an as-enters
-    // choice) can surface a player choice mid-batch. `move_objects_simultaneously`
+    // choice) can surface a player choice mid-batch. The completion below
+    // publishes the named result only after the entire logical group settles,
+    // both synchronously and across repeated pauses. No delivered prefix is a result.
     // parks `state.waiting_for` and stashes the undelivered tail in
     // the active `BatchDelivery` frame; bail before emitting `EffectResolved` so
     // the surfaced prompt is not clobbered and no later pick overwrites the
     // parked replacement. The resume path
     // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
+    let completion = result_key.map(|(occurrence_id, result_id)| {
+        crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+            occurrence_id,
+            result_id,
+            settled_records: None,
+        }
+    });
     if matches!(
-        zone_pipeline::move_objects_simultaneously(state, reqs, events),
+        zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events),
         BatchMoveResult::NeedsChoice
     ) {
         return Ok(());
@@ -115,7 +138,7 @@ pub fn resolve(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -126,6 +149,124 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// Ordinary shared fixture: real public cast reaches a second producer's
+    /// first replacement pause, with a prior named result already populated.
+    pub(crate) fn sought_pause_fixture(
+    ) -> (crate::game::scenario::GameRunner, Vec<ObjectId>, ObjectId) {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        let text = "Seek an artifact card. Those cards perpetually gain \"This spell costs {1} less to cast.\". Seek two creature cards and put them into your graveyard. You gain 7 life. Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Labelled sought pause",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+        assert_eq!(
+            std::iter::successors(Some(&parsed.abilities[0]), |node| node
+                .sub_ability
+                .as_deref())
+            .filter(|node| node.reads_return_result.is_some())
+            .count(),
+            2
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        scenario.add_enchantment_from_oracle(P0, "Rest in Peace", "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.").with_mana_cost("{1}{W}".parse().unwrap());
+        scenario
+            .add_enchantment_from_oracle(P0, "Black reference", "")
+            .with_color(vec![crate::types::mana::ManaColor::Black]);
+        scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.").with_mana_cost("{2}{B}{B}".parse().unwrap());
+        let prior = scenario
+            .add_spell_to_library_top(P0, "Private prior artifact", false)
+            .as_artifact()
+            .id();
+        let cards = (0..2)
+            .map(|index| {
+                scenario
+                    .add_spell_to_library_top(P0, &format!("Second sought member {index}"), false)
+                    .as_creature()
+                    .id()
+            })
+            .collect::<Vec<_>>();
+        let source = scenario
+            .add_spell_to_hand_from_oracle(P0, "Labelled sought pause", true, text)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(1))
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(source).resolve();
+        assert_eq!(runner.state().objects[&prior].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&prior].perpetual_mods.len(), 1);
+        assert!(matches!(
+            runner.state().waiting_for,
+            crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(runner
+            .state()
+            .return_result_frames
+            .values()
+            .any(|frame| frame.values().any(|records| records
+                .zone_changes()
+                .is_some_and(|records| !records.is_empty()))));
+        (runner, cards, source)
+    }
+
+    pub(crate) fn finish_sought_pause(
+        runner: &mut crate::game::scenario::GameRunner,
+        cards: &[ObjectId],
+    ) {
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        let life = runner.state().players[0].life;
+        let mut prompts = 0;
+        for _ in 0..50 {
+            let action = match runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => {
+                    prompts += 1;
+                    assert_eq!(runner.state().players[0].life, life);
+                    for card in cards {
+                        assert!(runner.state().objects[card].perpetual_mods.is_empty());
+                    }
+                    crate::ai_support::legal_actions(runner.state())
+                        .into_iter()
+                        .find(|action| matches!(action, GameAction::ChooseReplacement { index: 0 }))
+                        .unwrap()
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                ref other => panic!("{other:?}"),
+            };
+            runner.act(action).unwrap();
+        }
+        assert!(prompts >= 1);
+        assert_eq!(runner.state().players[0].life, life + 7);
+        for card in cards {
+            assert_eq!(runner.state().objects[card].zone, Zone::Exile);
+            assert_eq!(runner.state().objects[card].perpetual_mods.len(), 1);
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    #[test]
+    fn sought_completed_result_waits_for_first_and_final_member() {
+        let (mut runner, cards, _) = sought_pause_fixture();
+        finish_sought_pause(&mut runner, &cards);
+    }
 
     fn make_seek_ability(filter: TargetFilter, count: u32) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -543,5 +684,77 @@ mod tests {
         let obj = state.objects.get(&bear).unwrap();
         assert_eq!(obj.zone, Zone::Battlefield);
         assert!(obj.tapped);
+    }
+}
+
+#[cfg(test)]
+mod jev_dynamic_seek_seam_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{
+        CardTypeSetSource, ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::mana::ManaColor;
+    use crate::types::zones::{EtbTapState, Zone};
+
+    #[test]
+    fn jev_dynamic_seek_count_is_frozen_and_top_window_is_preserved() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_enchantment_from_oracle(P0, "White", "")
+            .with_color(vec![ManaColor::White])
+            .id();
+        let outside = scenario
+            .add_spell_to_library_top(P0, "Outside window", false)
+            .as_enchantment()
+            .with_color(vec![ManaColor::White, ManaColor::Green])
+            .id();
+        let inside = scenario
+            .add_spell_to_library_top(P0, "Inside window", false)
+            .as_enchantment()
+            .with_color(vec![ManaColor::White, ManaColor::Blue])
+            .id();
+        let mut runner = scenario.build();
+        let ability = ResolvedAbility::new(
+            Effect::Seek {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctColorsAmong {
+                        source: CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Permanent)
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                },
+                from_top: Some(1),
+                destination: Zone::Battlefield,
+                enter_tapped: EtbTapState::Tapped,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        let mut events = Vec::new();
+        resolve(runner.state_mut(), &ability, &mut events).unwrap();
+        assert_eq!(runner.state().objects[&inside].zone, Zone::Battlefield);
+        assert!(runner.state().objects[&inside].tapped);
+        assert_eq!(runner.state().objects[&outside].zone, Zone::Library);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        from: Some(Zone::Library),
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
     }
 }

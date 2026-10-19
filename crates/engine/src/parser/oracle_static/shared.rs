@@ -3873,7 +3873,7 @@ fn is_self_ref_combat_subject(subject: &str) -> bool {
         || SELF_REF_PARSE_ONLY_PHRASES.contains(&subject)
 }
 
-fn lower_subslice_to_original<'a>(tp: &'a TextPair<'a>, lower_sub: &str) -> Option<&'a str> {
+fn lower_subslice_to_original<'a>(tp: &TextPair<'a>, lower_sub: &str) -> Option<&'a str> {
     let start = lower_sub.as_ptr() as usize - tp.lower.as_ptr() as usize;
     tp.original.get(start..start + lower_sub.len())
 }
@@ -4472,13 +4472,52 @@ pub(crate) fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> 
     })
 }
 
-pub(crate) fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
-    [
-        " gets ", " get ", " gains ", " gain ", " has ", " have ", " loses ", " lose ",
-    ]
-    .into_iter()
-    .filter_map(|marker| lower.find(marker))
-    .min()
+/// CR 608.2c + CR 611.3a: a relative clause belongs to the affected subject,
+/// rather than becoming a predicate merely because it contains a grant verb.
+pub(crate) fn parse_continuous_subject_predicate<'a, T>(
+    tp: &TextPair<'a>,
+    mut parse_pair: impl FnMut(&'a str, &'a str) -> Option<T>,
+) -> Option<T> {
+    nom_primitives::scan_at_word_boundaries(tp.lower, |candidate| {
+        let (_, _) = alt((
+            tag("gets "),
+            tag("get "),
+            tag("gains "),
+            tag("gain "),
+            tag("has "),
+            tag("have "),
+            tag("loses "),
+            tag("lose "),
+        ))
+        .parse(candidate)?;
+        let predicate = lower_subslice_to_original(tp, candidate).ok_or_else(|| {
+            nom::Err::Error(OracleError::new(candidate, nom::error::ErrorKind::Fail))
+        })?;
+        let subject_len = predicate.as_ptr() as usize - tp.original.as_ptr() as usize;
+        let subject = tp.original[..subject_len].trim();
+        let parsed = (!subject.is_empty())
+            .then(|| parse_pair(subject, predicate.trim()))
+            .flatten()
+            .ok_or_else(|| {
+                nom::Err::Error(OracleError::new(candidate, nom::error::ErrorKind::Fail))
+            })?;
+        Ok((candidate, parsed))
+    })
+}
+
+pub(crate) fn continuous_predicate_residual(
+    affected: TargetFilter,
+    source: &str,
+) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(vec![ContinuousModification::GrantAbility {
+            definition: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                crate::types::ability::Effect::unimplemented("static_structure", source),
+            )),
+        }])
+        .description(source.to_string())
 }
 
 /// CR 108.3 + CR 109.4: Strip a leading negated-ownership qualifier ("but don't
@@ -4516,18 +4555,21 @@ pub(crate) fn strip_negated_ownership_qualifier(after_prefix: &str) -> Option<(F
 pub(crate) fn parse_qualified_creatures_you_control_suffix<'a>(
     subject_prefix: &str,
     after_prefix: &'a str,
-    after_prefix_lower: &str,
+    after_prefix_lower: &'a str,
 ) -> Option<(TargetFilter, &'a str)> {
-    let subject_end = find_continuous_predicate_start(after_prefix_lower)?;
-    let qualifier = after_prefix[..subject_end].trim();
-    if qualifier.is_empty() {
-        return None;
-    }
-
-    let subject = format!("{subject_prefix} {qualifier}");
-    let filter = parse_continuous_subject_filter(&subject)?;
-    let predicate_text = after_prefix[subject_end + 1..].trim_start();
-    Some((filter, predicate_text))
+    parse_continuous_subject_predicate(
+        &TextPair::new(after_prefix, after_prefix_lower),
+        |qualifier, predicate| {
+            let subject = format!("{subject_prefix} {qualifier}");
+            let filter = parse_continuous_subject_filter(&subject)?;
+            super::anthem::parse_complete_continuous_predicate(
+                predicate,
+                filter.clone(),
+                predicate,
+            )?;
+            Some((filter, predicate))
+        },
+    )
 }
 
 /// CR 611.3a: Split an Oxford-comma / "and" / "or" / "and/or" subject list into

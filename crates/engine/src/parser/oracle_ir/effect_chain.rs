@@ -117,6 +117,62 @@ pub(crate) enum PlayerScopeRewrite {
 }
 
 impl EffectChainIr {
+    /// CR 603.12 + CR 608.2c: name only the terminal printed producer. Earlier
+    /// instructions, another paragraph, and mode-local instructions cannot lend
+    /// this connector an antecedent.
+    pub(crate) fn bind_counter_removal(
+        &mut self,
+        event: &crate::types::counter::CounterMatch,
+    ) -> Option<ClauseId> {
+        let terminal = self.clauses.last()?;
+        let id = terminal.id;
+        if self.clauses.iter().filter(|clause| clause.id == id).count() != 1
+            || terminal.declares_instruction_result.is_some()
+            || terminal.reads_return_result.is_some()
+            || terminal.condition.is_some()
+            || terminal.is_optional
+            || terminal.player_scope.is_some()
+            || terminal.repeat_for.is_some()
+            || terminal.multi_target.is_some()
+            || terminal.opponent_may_scope.is_some()
+            || terminal.unless_pay.is_some()
+            || terminal.delayed_condition.is_some()
+            || terminal.prefix_delayed_condition.is_some()
+            || self.repeat_until.is_some()
+        {
+            return None;
+        }
+        let (producer, target) = match &terminal.parsed.effect {
+            Effect::ChooseCounterAdjustment {
+                adjustment,
+                counters,
+                target,
+                ..
+            } if adjustment.allows_remove() => (counters.clone(), target),
+            Effect::RemoveCounter {
+                counter_type,
+                target,
+                ..
+            } => (
+                counter_type.clone().map_or(
+                    crate::types::counter::CounterMatch::Any,
+                    crate::types::counter::CounterMatch::OfType,
+                ),
+                target,
+            ),
+            _ => return None,
+        };
+        if !matches!(
+            target,
+            TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::Typed(_)
+        ) || !matches!(event, crate::types::counter::CounterMatch::Any) && event != &producer
+        {
+            return None;
+        }
+        self.clauses.last_mut()?.declares_instruction_result = Some(id);
+        Some(id)
+    }
+
     /// Build a one-clause chain while retaining every field represented by
     /// `ParsedEffectClause` plus the clause-level player iteration scope.
     ///
@@ -456,7 +512,10 @@ pub(crate) struct DieResultBranchIr {
 /// "lower the chain, then finalize it, then anchor it, then apply the shell".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct AbilityIr {
-    /// The verbatim text this ability was parsed from.
+    /// Verbatim to the supplied chain-parser buffer, which may already be
+    /// normalized, reminder-stripped and joined from prepared effect lines with
+    /// spaces. This is the complete semantic body, not raw document bytes or the
+    /// normalized document item's physical head-line anchor.
     ///
     /// **Not an `OracleUnitSource`, on purpose.** `OracleUnitSource`'s fields are
     /// private and its only constructor is `UnitAllocator::allocate_with_span`,
@@ -513,7 +572,9 @@ pub(crate) struct ModalModeIr {
 pub(crate) enum AbilityRootTransform {
     /// CR 601.2b: stamp the announced-X floor from this printed ability.
     SetMinXValue(u32),
-    /// Preserve the complete printed source text for this multi-line ability.
+    /// Preserve the complete prepared normalized description, including newline
+    /// joins between collected lines. Reminders have already been stripped;
+    /// byte-exact original Oracle remains in the document's source_text.
     SetDescription(String),
     /// CR 614.6 + CR 614.15: replace an unbindable self-replacement's final
     /// lowered root with the explicit honest-failure floor.
@@ -883,6 +944,9 @@ pub(crate) struct ClauseIr {
     /// The parsed effect clause (effect, duration, sub_ability from parse_effect_clause).
     /// Chain-local identity, assigned in source order by [`ClauseIrBuilder`].
     pub(crate) id: ClauseId,
+    /// CR 608.2c: this exact instruction publishes its own typed result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) declares_instruction_result: Option<ClauseId>,
     /// One choose instruction and its mutually exclusive instead branch share this id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) declares_chosen_clause: Option<ClauseId>,
@@ -890,15 +954,21 @@ pub(crate) struct ClauseIr {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_chosen_clause: Option<ClauseId>,
     /// CR 115.1 + CR 608.2c: where this clause's `ObjectScope::Target` reads take
-    /// their object from. Written only by the comparative "that creature" gate
-    /// after it proves the immediately preceding clause announced the object.
+    /// their object from. Comparative gates and token definitions write it
+    /// after proving the immediately preceding clause announced the object.
     #[serde(skip_serializing_if = "TargetReadOrigin::is_own")]
     pub(crate) target_reads: TargetReadOrigin,
-    /// The prior return instruction whose actual results a delayed clause names.
+    /// CR 111.3 + CR 608.2c: exact creation completed by this defining sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_definition_owner: Option<ClauseId>,
+    /// The exact prior zone instruction whose settled results this clause names.
+    /// Returns retain their delayed noun/destination predicate; Seek cost grants
+    /// consume the completed cards independently of their actual destination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_return_result: Option<(ClauseId, ReturnResultReadSpec)>,
-    /// Honest chain-relative source (`SpanPrecision::ChainRelative`): exact byte
-    /// range within this chain + verbatim fragment. Replaces the former
+    /// Chain-local source (`SpanPrecision::ChainRelative`) and complete chunk
+    /// fragment. The chunk may already be normalized/derived; `locate` retains
+    /// a zero-width cursor anchor if it is absent from the chain. Replaces the former
     /// unaddressed `source_text` string (Plan 01 §5, line 341). Upgrades to a
     /// card-absolute `OracleUnitSource` in the allocator-threading unit; the
     /// verbatim fragment is retained so that upgrade can re-locate it.
@@ -1015,6 +1085,133 @@ pub(crate) struct ClauseIr {
 }
 
 impl ClauseIr {
+    pub(crate) fn revealed_result_producer(&self) -> bool {
+        let Some(source) = self.source.fragment() else {
+            return false;
+        };
+        let Some(count) =
+            crate::parser::oracle_effect::sequence::fixed_revealed_producer_count(source)
+        else {
+            return false;
+        };
+        if !matches!(&self.parsed.effect, Effect::RevealTop { count: actual, .. } if *actual == count)
+            && !matches!(&self.parsed.effect, Effect::Dig { count: QuantityExpr::Fixed { value }, .. } if i64::from(*value) == i64::from(count))
+        {
+            return false;
+        }
+        let source_ir = crate::parser::oracle_effect::parse_effect_chain_ir(
+            source,
+            AbilityKind::Spell,
+            &mut Default::default(),
+        );
+        let [printed] = source_ir.clauses.as_slice() else {
+            return false;
+        };
+        if printed.parsed.effect != self.parsed.effect || printed.player_scope != self.player_scope
+        {
+            return false;
+        }
+        let mut shell = self.clone();
+        shell.player_scope = None;
+        shell.sought_result_shell_is_empty()
+            && self.where_x_expression.is_none()
+            && self.reads_return_result.is_none()
+            && matches!(
+                &self.parsed.effect,
+                Effect::RevealTop {
+                    player: TargetFilter::Controller | TargetFilter::ScopedPlayer,
+                    ..
+                } | Effect::Dig {
+                    player: TargetFilter::Controller | TargetFilter::ScopedPlayer,
+                    count: crate::types::ability::QuantityExpr::Fixed { .. },
+                    keep_count: None,
+                    keep_count_expr: None,
+                    destination: None,
+                    rest_destination: None,
+                    rest_split_top_count: None,
+                    rest_order: crate::types::ability::DigRestOrder::Preserve,
+                    filter: TargetFilter::Any,
+                    reveal: true,
+                    up_to: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    source: crate::types::ability::DigSource::Library
+                }
+            )
+    }
+
+    pub(crate) fn revealed_result_reader(&self) -> Option<ReturnResultReadSpec> {
+        let (condition, noun, body) =
+            crate::parser::oracle_effect::conditions::parse_all_revealed_condition(
+                self.source.fragment()?,
+                &mut Default::default(),
+            )?;
+        let effect = crate::parser::oracle_effect::sequence::parse_all_revealed_move(body)?;
+        let mut shell = self.clone();
+        shell.condition = None;
+        if !shell.sought_result_shell_is_empty()
+            || self.repeat_for.is_some()
+            || self.where_x_expression.is_some()
+            || self.condition.as_ref() != Some(&condition)
+            || self.parsed.effect != effect
+        {
+            return None;
+        }
+        Some(ReturnResultReadSpec {
+            noun,
+            destination: Zone::Library,
+            recipient: ControllerRef::ParentTargetOwner,
+        })
+    }
+    /// Empty structural shell shared by the producer, corridor and reader proof.
+    pub(crate) fn sought_result_shell_is_empty(&self) -> bool {
+        matches!(
+            self.disposition,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None
+            }
+        ) && matches!(self.placement, ClausePlacement::Sibling)
+            && self.condition.is_none()
+            && self.parsed.condition.is_none()
+            && !self.is_optional
+            && !self.parsed.optional
+            && self.unless_pay.is_none()
+            && self.parsed.unless_pay.is_none()
+            && self.parsed.sub_ability.is_none()
+            && self.parsed.duration.is_none()
+            && self.parsed.distribute.is_none()
+            && self.parsed.multi_target.is_none()
+            && self.parsed.unlowered_guard.is_none()
+            && self.opponent_may_scope.is_none()
+            && self.accepting_player_bindings.is_empty()
+            && self.player_scope.is_none()
+            && self.starting_with.is_none()
+            && self.delayed_condition.is_none()
+            && self.prefix_delayed_condition.is_none()
+            && self.multi_target.is_none()
+            && self.target_selection_mode == TargetSelectionMode::Chosen
+            && self.target_chooser.is_none()
+            && self.declared_target_choice_timing.is_none()
+            && self.printed_color_choice.is_none()
+            && self.declared_player_group.is_none()
+            && self.declares_chosen_clause.is_none()
+            && self.reads_chosen_clause.is_none()
+            && self.token_definition_owner.is_none()
+            && self.target_reads == TargetReadOrigin::OwnAnnouncement
+    }
+
+    fn is_transparent_sought_corridor(&self) -> bool {
+        self.sought_result_shell_is_empty()
+            && self.repeat_for.is_none()
+            && self.where_x_expression.is_none()
+            && self.reads_return_result.is_none()
+            && matches!(&self.parsed.effect,
+                Effect::GainLife { amount: QuantityExpr::Fixed { value }, player: TargetFilter::Controller }
+                if *value >= 0 && crate::parser::oracle_effect::sought_corridor_life_amount(
+                    self.source.fragment().unwrap_or_default()) == Some(QuantityExpr::Fixed { value: *value }))
+    }
+
     /// Turn this clause, in place, into an honest parser gap
     /// (`Effect::unimplemented(name, <printed fragment>)`) that carries NO
     /// executable metadata — exactly what [`ClauseIrBuilder::clause`] +
@@ -1031,9 +1228,11 @@ impl ClauseIr {
         let fragment = self.source.fragment().unwrap_or_default().to_string();
         let ClauseIr {
             id: _,
+            declares_instruction_result,
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads,
+            token_definition_owner,
             reads_return_result,
             source: _,
             disposition,
@@ -1060,9 +1259,11 @@ impl ClauseIr {
             placement,
             _sealed: _,
         } = self;
+        *declares_instruction_result = None;
         *declares_chosen_clause = None;
         *reads_chosen_clause = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
+        *token_definition_owner = None;
         *reads_return_result = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,
@@ -1246,6 +1447,7 @@ impl ClauseIrBuilder {
             parsed,
             boundary,
             disposition,
+            token_definition_owner: None,
             condition: None,
             is_optional: false,
             opponent_may_scope: None,
@@ -1317,7 +1519,100 @@ impl ClauseIrBuilder {
     /// source-order `ClauseId` + `ChainRelative` span (re-locating its fragment in
     /// THIS chain), preserving all content. Keeps single-construction — still
     /// routes through [`ClauseIrBuilder::clause`] + [`ClauseDraft::push`].
-    pub(crate) fn absorb_clause(&mut self, c: ClauseIr) {
+    pub(crate) fn absorb_clauses(&mut self, mut clauses: Vec<ClauseIr>) {
+        // Relocate the complete batch before minting any member: ids are local
+        // to a chain, so an outer id with the same integer is unrelated.
+        let relocation: Vec<_> = clauses
+            .iter()
+            .enumerate()
+            .map(|(offset, c)| (c.id, ClauseId(self.next_clause_id + offset as u32)))
+            .collect();
+        let counter_producers: Vec<_> = clauses
+            .iter()
+            .filter(|clause| clause.declares_instruction_result == Some(clause.id))
+            .map(|clause| clause.id)
+            .collect();
+        for (offset, clause) in clauses.iter_mut().enumerate() {
+            if clause.condition.as_mut().is_some_and(|condition| {
+                !relocate_counter_condition(condition, &relocation, &counter_producers, offset)
+            }) {
+                clause.replace_with_gap("counter_result_relocation");
+            }
+            if let Some(owner) = clause.declares_instruction_result {
+                if owner == clause.id {
+                    clause.declares_instruction_result = Some(relocation[offset].1);
+                } else {
+                    clause.replace_with_gap("instruction_result_declaration_relocation");
+                }
+            }
+            if clause.revealed_result_reader().is_some() && clause.reads_return_result.is_none() {
+                clause.replace_with_gap("all_revealed_result_relocation");
+            }
+            if let Some((owner, _)) = clause
+                .reads_return_result
+                .as_ref()
+                .filter(|_| clause.revealed_result_reader().is_some())
+            {
+                let candidates: Vec<_> = relocation
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (old, _))| old == owner)
+                    .collect();
+                if let [(producer, (_, new))] = candidates.as_slice() {
+                    if *producer < offset {
+                        clause.reads_return_result.as_mut().unwrap().0 = *new;
+                    } else {
+                        clause.replace_with_gap("all_revealed_result_relocation");
+                    }
+                } else {
+                    clause.replace_with_gap("all_revealed_result_relocation");
+                }
+            }
+            if let Some((owner, _)) =
+                clause.reads_return_result.as_ref().filter(|_| {
+                    matches!(
+                        clause.parsed.effect,
+                        Effect::ApplyPerpetual {
+                            modification:
+                                crate::types::ability::PerpetualModification::ModifyCost { .. },
+                            ..
+                        }
+                    )
+                })
+            {
+                let candidates: Vec<_> = relocation
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (old, _))| old == owner)
+                    .collect();
+                if !matches!(candidates.as_slice(), [(producer, _)] if *producer < offset) {
+                    clause.replace_with_gap("sought_cost_relocation");
+                }
+            }
+
+            if let Some(owner) = clause.token_definition_owner {
+                let mut matches = relocation
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (old, _))| *old == owner);
+                let mapped = matches.next().filter(|(producer, _)| *producer < offset);
+                if let Some((_, (_, new))) = mapped.filter(|_| matches.next().is_none()) {
+                    clause.token_definition_owner = Some(*new);
+                } else {
+                    clause.replace_with_gap("token_definition_owner_relocation");
+                }
+            }
+        }
+        for clause in clauses {
+            self.absorb_clause(clause);
+        }
+    }
+
+    fn absorb_clause(&mut self, c: ClauseIr) {
+        let instruction_declaration = c.declares_instruction_result;
+        let revealed_relation = c
+            .revealed_result_reader()
+            .and(c.reads_return_result.clone());
         // CR 608.2c: `placement` is deliberately NOT propagated. Every field below is
         // an intrinsic property of the clause; `placement` is a RELATIONAL verdict
         // about one position in one chain's delayed-payload placement registry, and a
@@ -1332,6 +1627,7 @@ impl ClauseIrBuilder {
             c.boundary,
             c.disposition,
         )
+        .token_definition_owner(c.token_definition_owner)
         .condition(c.condition)
         .is_optional(c.is_optional)
         .opponent_may_scope(c.opponent_may_scope)
@@ -1351,13 +1647,162 @@ impl ClauseIrBuilder {
         .declared_player_group(c.declared_player_group)
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
+            absorbed.declares_instruction_result = instruction_declaration;
             absorbed.target_reads = c.target_reads;
+            if let Some(relation) = revealed_relation {
+                absorbed.reads_return_result = Some(relation);
+            }
+        }
+    }
+
+    fn bind_all_revealed_reader(&mut self) {
+        let Some(reader) = self.clauses.last() else {
+            return;
+        };
+        let Some(spec) = reader.revealed_result_reader() else {
+            return;
+        };
+        let producer = self.clauses.iter().rev().nth(1).filter(|producer| {
+            producer.revealed_result_producer()
+                && producer.repeat_for.is_none()
+                && producer.id < reader.id
+                && self
+                    .repeated_process_end
+                    .is_none_or(|end| producer.id >= end)
+        });
+        let relation = producer.map(|producer| (producer.id, spec));
+        let reader = self.clauses.last_mut().unwrap();
+        if let Some(relation) = relation {
+            reader.reads_return_result = Some(relation);
+        } else {
+            reader.replace_with_gap("all_revealed_result_consumer");
+        }
+    }
+
+    /// CR 608.2c: prove a printed result relation before replacing the leaf.
+    fn bind_sought_cost_reader(&mut self) {
+        let Some(reader) = self.clauses.last() else {
+            return;
+        };
+        if matches!(&reader.parsed.effect, Effect::Unimplemented { name, .. }
+            if name == "sought_cost_antecedent" || name == "sought_cost_relocation")
+        {
+            return;
+        }
+        let (repeat, difference, body) =
+            crate::parser::oracle_effect::lower::strip_for_each_prefix_with_difference(
+                reader.source.fragment().unwrap_or_default(),
+            );
+        let Ok((_, (amount, mode))) =
+            crate::parser::oracle_effect::parse_sought_perpetual_cost(&body.to_lowercase())
+        else {
+            return;
+        };
+        let mut prior = self.clauses.iter().rev().skip(1);
+        // allow-noncombinator: iterator over addressed clauses, not string dispatch.
+        let producer = prior.find(|clause| !clause.is_transparent_sought_corridor());
+        let selected = producer
+            .filter(|producer| {
+                reader.sought_result_shell_is_empty()
+                    && producer.sought_result_shell_is_empty()
+                    && reader.repeat_for == repeat
+                    && difference.is_none()
+                    && reader.where_x_expression.is_none()
+                    && producer.repeat_for.is_none()
+                    && producer.reads_return_result.is_none()
+                    && matches!(producer.parsed.effect, Effect::Seek { .. })
+                    && self
+                        .repeated_process_end
+                        .is_none_or(|boundary| producer.id >= boundary)
+                    && producer.id < reader.id
+            })
+            .map(|producer| {
+                let Effect::Seek { destination, .. } = producer.parsed.effect else {
+                    unreachable!()
+                };
+                (
+                    producer.id,
+                    ReturnResultReadSpec {
+                        noun: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                            crate::types::ability::TypeFilter::Card,
+                        )),
+                        destination,
+                        recipient: ControllerRef::You,
+                    },
+                )
+            });
+        if let Some(selected) = selected {
+            let reader = self.clauses.last_mut().expect("reader exists");
+            reader.parsed.effect = Effect::ApplyPerpetual {
+                target: TargetFilter::None,
+                modification: crate::types::ability::PerpetualModification::ModifyCost {
+                    amount,
+                    mode,
+                },
+            };
+            reader.reads_return_result = Some(selected);
+        } else {
+            // Existing conjure/chosen `they` has its own typed authority. A
+            // barrier after an attempted Seek must never fall back to it.
+            let independently_bound =
+                producer.is_some_and(|producer| match &reader.parsed.effect {
+                    Effect::ApplyPerpetual {
+                        target: TargetFilter::LastCreated,
+                        ..
+                    } => matches!(producer.parsed.effect, Effect::Conjure { .. }),
+                    Effect::ApplyPerpetual {
+                        target: TargetFilter::ParentTarget,
+                        ..
+                    } => matches!(
+                        producer.parsed.effect,
+                        Effect::ChooseFromZone { .. } | Effect::TargetOnly { .. }
+                    ),
+                    _ => false,
+                });
+            let reader = self.clauses.last_mut().expect("reader exists");
+            if !independently_bound {
+                reader.replace_with_gap("sought_cost_antecedent");
+            }
         }
     }
 
     /// Consume the builder, yielding the source-ordered clause list.
     pub(crate) fn finish(self) -> Vec<ClauseIr> {
         self.clauses
+    }
+}
+
+fn relocate_counter_condition(
+    condition: &mut AbilityCondition,
+    relocation: &[(ClauseId, ClauseId)],
+    producers: &[ClauseId],
+    reader: usize,
+) -> bool {
+    match condition {
+        AbilityCondition::CounterRemovedThisWay { result, .. } => {
+            let owner = ClauseId(result.0);
+            let mut matches = relocation
+                .iter()
+                .enumerate()
+                .filter(|(_, (old, _))| *old == owner);
+            let Some((position, (_, new))) = matches.next() else {
+                return false;
+            };
+            // allow-noncombinator: typed ClauseId set membership, not text dispatch.
+            if position >= reader || matches.next().is_some() || !producers.contains(&owner) {
+                return false;
+            }
+            result.0 = new.0;
+            true
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
+            .iter_mut()
+            .all(|condition| relocate_counter_condition(condition, relocation, producers, reader)),
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            relocate_counter_condition(condition, relocation, producers, reader)
+        }
+        _ => true,
     }
 }
 
@@ -1371,6 +1816,7 @@ pub(crate) struct ClauseDraft<'a> {
     parsed: ParsedEffectClause,
     boundary: Option<ClauseBoundary>,
     disposition: ClauseDisposition,
+    token_definition_owner: Option<ClauseId>,
     condition: Option<AbilityCondition>,
     is_optional: bool,
     opponent_may_scope: Option<OpponentMayScope>,
@@ -1392,6 +1838,10 @@ pub(crate) struct ClauseDraft<'a> {
 }
 
 impl ClauseDraft<'_> {
+    pub(crate) fn token_definition_owner(mut self, owner: Option<ClauseId>) -> Self {
+        self.token_definition_owner = owner;
+        self
+    }
     pub(crate) fn condition(mut self, v: Option<AbilityCondition>) -> Self {
         self.condition = v;
         self
@@ -1701,9 +2151,11 @@ impl ClauseDraft<'_> {
         self.builder.next_clause_id += 1;
         self.builder.clauses.push(ClauseIr {
             id,
+            declares_instruction_result: None,
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads: TargetReadOrigin::OwnAnnouncement,
+            token_definition_owner: self.token_definition_owner,
             reads_return_result,
             source,
             disposition: self.disposition,
@@ -1732,6 +2184,8 @@ impl ClauseDraft<'_> {
             placement: self.placement,
             _sealed: (),
         });
+        self.builder.bind_sought_cost_reader();
+        self.builder.bind_all_revealed_reader();
     }
 }
 
@@ -1740,6 +2194,70 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::types::ability::{Duration, Effect};
+
+    #[test]
+    fn all_revealed_relation_remints_and_stops_at_boundaries() {
+        use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+        let text = "Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2);
+        assert_eq!(
+            ir.clauses[1].reads_return_result.as_ref().unwrap().0,
+            ir.clauses[0].id
+        );
+        let mut outer = ClauseIrBuilder::new(text);
+        let prefix = parse_effect_chain_ir(
+            "You gain 1 life.",
+            AbilityKind::Spell,
+            &mut Default::default(),
+        );
+        outer.absorb_clauses(prefix.clauses);
+        outer.absorb_clauses(ir.clauses.clone());
+        let relocated = outer.finish();
+        assert_eq!(
+            relocated[2].reads_return_result.as_ref().unwrap().0,
+            relocated[1].id
+        );
+        assert_ne!(relocated[1].id, ir.clauses[0].id);
+        for fault in 0..4 {
+            let mut bad = ir.clauses.clone();
+            match fault {
+                0 => bad[1].reads_return_result = None,
+                1 => bad[1].reads_return_result.as_mut().unwrap().0 = ClauseId(999),
+                2 => bad[1].reads_return_result.as_mut().unwrap().0 = bad[1].id,
+                3 => bad[1].id = bad[0].id,
+                _ => unreachable!(),
+            }
+            let mut builder = ClauseIrBuilder::new(text);
+            builder.absorb_clauses(bad);
+            let relocated = builder.finish();
+            assert!(
+                matches!(relocated[1].parsed.effect, Effect::Unimplemented { .. }),
+                "fault {fault}"
+            );
+            assert!(relocated[1].reads_return_result.is_none());
+        }
+        let mut gap = ir.clauses[1].clone();
+        gap.replace_with_gap("hostile reset");
+        assert!(gap.reads_return_result.is_none());
+        for barrier in [
+            "You gain 1 life.",
+            "You may gain 1 life.",
+            "Do something unsupported.",
+            "Repeat this process one more time.",
+        ] {
+            let text = format!("Each player reveals the top card of their library. {barrier} If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.");
+            let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut Default::default());
+            assert!(matches!(
+                ir.clauses[0].parsed.effect,
+                Effect::RevealTop { .. } | Effect::Dig { .. }
+            ));
+            assert!(
+                ir.clauses.last().unwrap().reads_return_result.is_none(),
+                "{barrier}: {ir:#?}"
+            );
+        }
+    }
 
     #[test]
     fn chosen_return_ir_links_the_matching_producer_past_an_unrelated_return() {
@@ -2369,5 +2887,289 @@ mod tests {
         assert_eq!(clause.player_scope, Some(PlayerFilter::All));
         assert_eq!(clause.parsed.duration, Some(Duration::Permanent));
         assert!(clause.parsed.sub_ability.is_some());
+    }
+}
+
+#[cfg(test)]
+mod token_definition_tests {
+    use super::*;
+    use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+
+    #[test]
+    fn token_definition_default_reset_clone_and_batch_remint() {
+        let text = "Create a 1/2 green Bear creature token. Create a colorless Construct artifact creature token named Twin. Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let definition = ir.clauses.last().unwrap();
+        let owner = definition
+            .token_definition_owner
+            .expect("source definition owner");
+        assert_eq!(owner, ir.clauses[1].id);
+        assert_eq!(definition.clone().token_definition_owner, Some(owner));
+        assert!(serde_json::to_value(&ir.clauses[0])
+            .unwrap()
+            .get("token_definition_owner")
+            .is_none());
+        assert!(serde_json::to_value(definition)
+            .unwrap()
+            .get("token_definition_owner")
+            .is_some());
+        let mut gap = definition.clone();
+        gap.replace_with_gap("unit gap");
+        assert_eq!(gap.token_definition_owner, None);
+        assert_eq!(gap.target_reads, TargetReadOrigin::OwnAnnouncement);
+        let mut outer = ClauseIrBuilder::new(text);
+        outer.absorb_clauses(ir.clauses[..2].to_vec());
+        // Outer id1 collides numerically with the nested creator's old id1.
+        outer.absorb_clauses(ir.clauses.clone());
+        let clauses = outer.finish();
+        assert_eq!(
+            clauses.last().unwrap().token_definition_owner,
+            Some(clauses[3].id)
+        );
+        assert_ne!(
+            clauses.last().unwrap().token_definition_owner,
+            Some(clauses[1].id)
+        );
+        let mut parent_read = ir.clauses.clone();
+        parent_read[1].target_reads = TargetReadOrigin::ParentAnnouncement;
+        let mut nested = ClauseIrBuilder::new(text);
+        nested.absorb_clauses(parent_read);
+        assert_eq!(
+            nested.finish()[1].target_reads,
+            TargetReadOrigin::ParentAnnouncement
+        );
+        let mut malformed = ir.clauses;
+        malformed.last_mut().unwrap().token_definition_owner = Some(ClauseId(999));
+        let mut outer = ClauseIrBuilder::new(text);
+        outer.absorb_clauses(malformed);
+        let clauses = outer.finish();
+        assert_eq!(clauses.last().unwrap().token_definition_owner, None);
+        assert!(matches!(
+            clauses.last().unwrap().parsed.effect,
+            Effect::Unimplemented { .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod sought_cost_tests {
+    use super::*;
+    use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+    const GRANT: &str = "Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    fn parse(text: &str) -> EffectChainIr {
+        parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default())
+    }
+    #[test]
+    fn jev_sought_cost_reader_binds_named_clause() {
+        let text = format!("Seek a creature card. Seek an artifact card. {GRANT}");
+        let ir = parse(&text);
+        assert_eq!(ir.clauses.len(), 3, "{ir:#?}");
+        assert_eq!(
+            ir.clauses[2]
+                .reads_return_result
+                .as_ref()
+                .map(|(id, _)| *id),
+            Some(ir.clauses[1].id)
+        );
+        let mut changed = ir.clone();
+        changed.clauses[2].reads_return_result.as_mut().unwrap().0 = ir.clauses[0].id;
+        let lowered = crate::parser::oracle_effect::assembly::assemble_effect_chain(&changed);
+        assert_eq!(
+            lowered.declares_return_result,
+            Some(crate::types::ability::ReturnResultId(ir.clauses[0].id.0))
+        );
+        let grant = lowered
+            .sub_ability
+            .as_deref()
+            .unwrap()
+            .sub_ability
+            .as_deref()
+            .unwrap();
+        assert_eq!(
+            grant.reads_return_result.as_ref().unwrap().0,
+            lowered.declares_return_result.unwrap()
+        );
+        // Clone/reset/remint retain identity only inside the relocated batch.
+        let mut gap = ir.clauses[2].clone();
+        gap.replace_with_gap("isolation");
+        assert!(gap.reads_return_result.is_none());
+        let mut outer = ClauseIrBuilder::new(&text);
+        outer.absorb_clauses(ir.clauses[..1].to_vec());
+        outer.absorb_clauses(ir.clauses.clone());
+        let relocated = outer.finish();
+        assert_eq!(
+            relocated[3].reads_return_result.as_ref().unwrap().0,
+            relocated[2].id
+        );
+        let mut isolated = ClauseIrBuilder::new(&text);
+        isolated.absorb_clauses(ir.clauses[..1].to_vec());
+        isolated.absorb_clauses(ir.clauses[2..].to_vec());
+        let isolated = isolated.finish();
+        assert!(isolated[1].reads_return_result.is_none());
+        assert!(matches!(
+            isolated[1].parsed.effect,
+            Effect::Unimplemented { .. }
+        ));
+    }
+    #[test]
+    fn sought_corridor_proves_complete_source_and_empty_typed_shells() {
+        for corridor in [
+            "",
+            "You gain 7 life. ",
+            "You gain 0 life. You gain 23 life. ",
+        ] {
+            let ir = parse(&format!("Seek two cards. {corridor}{GRANT}"));
+            assert!(
+                ir.clauses.last().unwrap().reads_return_result.is_some(),
+                "{ir:#?}"
+            );
+        }
+        for barrier in [
+            "Draw a card.",
+            "Conjure a card named Divination into your hand.",
+            "You may gain 2 life.",
+            "You gain life equal to your life total.",
+            "You gain 2 life for each creature you control.",
+        ] {
+            let ir = parse(&format!("Seek two cards. {barrier} {GRANT}"));
+            assert!(matches!(ir.clauses[0].parsed.effect, Effect::Seek { .. }));
+            assert!(
+                ir.clauses.last().unwrap().reads_return_result.is_none(),
+                "{ir:#?}"
+            );
+            assert!(
+                matches!(
+                    ir.clauses.last().unwrap().parsed.effect,
+                    Effect::Unimplemented { .. }
+                ),
+                "{ir:#?}"
+            );
+        }
+        let ir = parse(&format!("Seek two cards. You gain 7 life. {GRANT}"));
+        let mut mismatch = ir.clauses.clone();
+        mismatch[1].parsed.effect = Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 8 },
+            player: TargetFilter::Controller,
+        };
+        let mut builder = ClauseIrBuilder::new("isolation");
+        builder.absorb_clauses(mismatch);
+        assert!(builder
+            .finish()
+            .last()
+            .unwrap()
+            .reads_return_result
+            .is_none());
+        // Typed isolation: dispositions with no owner must be barriers even
+        // when they lower to no sibling or carry an otherwise innocent effect.
+        for disposition in [
+            ClauseDisposition::Continue { continuation: None },
+            ClauseDisposition::Absorb {
+                rider: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 7 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+                kind: AbsorbKind::DieExile,
+            },
+        ] {
+            let mut clauses = ir.clauses.clone();
+            clauses[1].disposition = disposition;
+            let mut builder = ClauseIrBuilder::new("isolation");
+            builder.absorb_clauses(clauses);
+            assert!(builder
+                .finish()
+                .last()
+                .unwrap()
+                .reads_return_result
+                .is_none());
+        }
+    }
+    #[test]
+    fn sought_lowering_rejects_missing_dangling_duplicate_later_shape_and_spec() {
+        let ir = parse(&format!("Seek two cards. {GRANT}"));
+        assert!(ir.clauses[1].reads_return_result.is_some());
+        for mutation in 0..7 {
+            let mut malformed = ir.clone();
+            match mutation {
+                0 => malformed.clauses[1].reads_return_result = None,
+                1 => malformed.clauses[1].reads_return_result.as_mut().unwrap().0 = ClauseId(999),
+                2 => {
+                    malformed.clauses[0].parsed.effect = Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        player: TargetFilter::Controller,
+                    }
+                }
+                3 => {
+                    malformed.clauses[1]
+                        .reads_return_result
+                        .as_mut()
+                        .unwrap()
+                        .1
+                        .destination = Zone::Exile
+                }
+                4 => {
+                    malformed.clauses[1]
+                        .reads_return_result
+                        .as_mut()
+                        .unwrap()
+                        .1
+                        .recipient = ControllerRef::Opponent
+                }
+                5 => malformed.clauses.push(malformed.clauses[0].clone()),
+                6 => malformed.clauses.swap(0, 1),
+                _ => unreachable!(),
+            }
+            let lowered = crate::parser::oracle_effect::assembly::assemble_effect_chain(&malformed);
+            assert!(
+                std::iter::successors(Some(&lowered), |node| node.sub_ability.as_deref())
+                    .any(|node| matches!(*node.effect, Effect::Unimplemented { .. })),
+                "mutation {mutation}: {lowered:#?}"
+            );
+        }
+    }
+    #[test]
+    fn sought_admission_does_not_erase_guarded_or_compound_shells() {
+        let ir = parse(&format!("Seek two cards. {GRANT}"));
+        assert!(ir.clauses[1].reads_return_result.is_some());
+        for slot in [0, 1] {
+            for mutation in 0..9 {
+                let mut clauses = ir.clauses.clone();
+                let clause = &mut clauses[slot];
+                match mutation {
+                    0 => clause.is_optional = true,
+                    1 => clause.parsed.optional = true,
+                    2 => clause.parsed.duration = Some(Duration::UntilEndOfTurn),
+                    3 => clause.player_scope = Some(PlayerFilter::All),
+                    4 => clause.target_chooser = Some(TargetFilter::Controller),
+                    5 => clause.token_definition_owner = Some(ClauseId(0)),
+                    6 => clause.reads_chosen_clause = Some(ClauseId(0)),
+                    7 => clause.placement = ClausePlacement::NestedInDelayedPayload,
+                    8 => {
+                        clause.parsed.sub_ability = Some(Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                player: TargetFilter::Controller,
+                            },
+                        )))
+                    }
+                    _ => unreachable!(),
+                }
+                // Isolation on the existing assembler catches mutated shells;
+                // remint deliberately resets relational placement, so it is
+                // not the test entry for malformed already-built IR.
+                let mut malformed = ir.clone();
+                malformed.clauses = clauses;
+                let lowered =
+                    crate::parser::oracle_effect::assembly::assemble_effect_chain(&malformed);
+                assert!(
+                    std::iter::successors(Some(&lowered), |node| node.sub_ability.as_deref())
+                        .any(|node| matches!(*node.effect, Effect::Unimplemented { .. })),
+                    "slot {slot}, mutation {mutation}: {lowered:#?}"
+                );
+            }
+        }
     }
 }

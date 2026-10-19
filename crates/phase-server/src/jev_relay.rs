@@ -928,24 +928,50 @@ mod tests {
         relay.abort();
         mock.abort();
 
-        // Sibling: nothing listening → 502, not 504.
-        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+        // Sibling: a reached upstream sends invalid HTTP, a non-timeout failure.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind");
-        let addr = closed.local_addr().expect("local addr");
-        drop(closed);
-        let dead = Url::parse(&format!("http://{addr}/v1/systemone")).expect("url");
-        let context = context_for(relay_config(dead));
+            .expect("bind invalid HTTP upstream");
+        let addr = listener.local_addr().expect("local addr");
+        let invalid_http = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept relay connection");
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).await.expect("read relay request");
+            assert!(read > 0, "the relay must send request bytes");
+            stream
+                .write_all(b"not-http\r\n\r\n")
+                .await
+                .expect("write invalid HTTP");
+            stream
+                .shutdown()
+                .await
+                .expect("close invalid HTTP upstream");
+            read
+        });
+        let upstream = Url::parse(&format!("http://{addr}/v1/systemone")).expect("url");
+        let context = context_for(relay_config(upstream));
         let (url, relay) = spawn_relay(context.clone()).await;
         let (status, _, text) =
             post_simple(&url, envelope(serde_json::json!({ "model": "jev" })), &[]).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(text, UNREACHABLE_BODY);
+        assert!(!text.contains(TEST_KEY));
+        let read = tokio::time::timeout(Duration::from_secs(2), invalid_http)
+            .await
+            .expect("invalid HTTP upstream must finish")
+            .expect("invalid HTTP upstream task must succeed");
+        assert!(read > 0, "the joined upstream received the relay request");
         assert_eq!(
             context
                 .metrics
                 .jev_relay_count(JevRelayStatus::UpstreamUnreachable),
             1
+        );
+        assert_eq!(
+            context
+                .metrics
+                .jev_relay_count(JevRelayStatus::UpstreamTimeout),
+            0
         );
         relay.abort();
     }

@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_on_attack_declaration_record,
+    matches_target_filter, matches_target_filter_in_population,
+    matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
     matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
     shared_quality_characteristic_reads, spell_record_matches_filter,
@@ -79,7 +80,7 @@ pub struct QuantityContext {
     /// ~"). `None` outside cast-time cost-modifier resolution. A
     /// [`QuantityRef::SharedCardTypes`] read without this authority fails closed
     /// to zero rather than treating the static source as the grammatical subject.
-    pub spell: Option<ObjectId>,
+    pub spell: Option<super::filter::CastSpellContext>,
     /// CR 121.2a + CR 614.1a: The amount carried by the proposed event a
     /// replacement condition is being evaluated against — the draw count a
     /// count-form antecedent ("would draw two or more cards") compares. Set
@@ -312,6 +313,12 @@ fn characteristic_view_for_object(
     object_id: ObjectId,
 ) -> Option<CharacteristicView<'_>> {
     match state.objects.get(&object_id) {
+        // CR 608.2h: a current battlefield noncreature has live colors even
+        // though it has no power/toughness. Earlier incarnations' LKI is not
+        // the characteristic authority for this permanent.
+        Some(object) if object.zone == Zone::Battlefield => {
+            Some(CharacteristicView::Object(object))
+        }
         Some(object) if object.power.is_none() && object.toughness.is_none() => state
             .lki_cache
             .get(&object_id)
@@ -1702,12 +1709,29 @@ pub fn resolve_quantity_with_spell(
     source_id: ObjectId,
     spell_id: ObjectId,
 ) -> i32 {
+    resolve_quantity_with_casting_spell(
+        state,
+        expr,
+        controller,
+        source_id,
+        super::filter::CastSpellContext::for_spell(state, spell_id),
+    )
+}
+
+/// Resolve against an explicitly selected cast without inferring any source/target authority.
+pub fn resolve_quantity_with_casting_spell(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    spell: super::filter::CastSpellContext,
+) -> i32 {
     resolve_quantity_with_ctx(
         state,
         expr,
         controller,
         QuantityContext {
-            spell: Some(spell_id),
+            spell: Some(spell),
             ..QuantityContext::new(source_id)
         },
     )
@@ -4190,7 +4214,10 @@ fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
         recipient: None,
         scoped_player: ability.scoped_player,
         damage_source: None,
-        event_amount: None,
+        event_amount: ability
+            .context
+            .token_creation_parent
+            .map(|parent| u32_to_i32_saturating(parent.substitution_count)),
         spell: None,
         granting_object: None,
     }
@@ -4544,11 +4571,16 @@ fn filter_names_cards(filter: &TargetFilter) -> bool {
 /// exile is a copy of a card, not a card — CR 108.2 + CR 109.1), else every
 /// object there.
 fn zone_population_ids(state: &GameState, zone: Zone, filter: &TargetFilter) -> Vec<ObjectId> {
-    if filter_names_cards(filter) {
+    let ids = if filter_names_cards(filter) {
         crate::game::targeting::zone_card_ids(state, zone)
     } else {
         crate::game::targeting::zone_object_ids(state, zone)
-    }
+    };
+    // CR 601.2a: an announced spell is resident only on Stack, even while
+    // casting retains its physical origin for permission and cancellation.
+    ids.into_iter()
+        .filter(|id| zone == Zone::Stack || !super::casting::is_spell_being_cast(state, *id))
+        .collect()
 }
 
 fn filter_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
@@ -4686,8 +4718,10 @@ fn target_filter_matches_population_semantics(
         // candidate universe is already established by its surrounding
         // conjunction. Negate the predicate directly on this candidate rather
         // than giving the inner filter a new battlefield-default population.
-        TargetFilter::Not { .. } => matches_target_filter(state, id, filter, filter_ctx),
-        _ => matches_target_filter(state, id, filter, filter_ctx),
+        TargetFilter::Not { .. } => {
+            matches_target_filter_in_population(state, id, filter, filter_ctx)
+        }
+        _ => matches_target_filter_in_population(state, id, filter, filter_ctx),
     }
 }
 
@@ -4722,7 +4756,7 @@ fn filter_population_anchor_ids(
         // manufacture results outside the domain the effect actually named.
         TargetFilter::TrackedSetFiltered { id, .. } => tracked_set_object_ids(state, *id)
             .into_iter()
-            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .filter(|id| matches_target_filter_in_population(state, *id, filter, filter_ctx))
             .collect(),
         TargetFilter::Not { .. } | TargetFilter::Or { .. } | TargetFilter::And { .. } => {
             return None;
@@ -4830,7 +4864,7 @@ fn matching_object_ids_in_filter_universe(
     if let TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } = filter {
         return tracked_set_object_ids(state, *id)
             .into_iter()
-            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .filter(|id| matches_target_filter_in_population(state, *id, filter, filter_ctx))
             .collect();
     }
 
@@ -4921,7 +4955,9 @@ pub(crate) fn object_count_matching_candidate_ids(
     let mut seen = HashSet::new();
     let mut ids: Vec<ObjectId> = candidate_ids
         .into_iter()
-        .filter(|id| seen.insert(*id) && matches_target_filter(state, *id, filter, filter_ctx))
+        .filter(|id| {
+            seen.insert(*id) && matches_target_filter_in_population(state, *id, filter, filter_ctx)
+        })
         .collect();
     // Drop the triggering object for an "other than" filter (Valakut's "five
     // other Mountains" — the newly-entered Mountain matches the per-object filter
@@ -4981,6 +5017,41 @@ fn resolve_ref(
     chosen_x: Option<u32>,
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    if let Some(reader) =
+        ability.filter(|reader| crate::game::effects::is_named_revealed_reader(reader))
+    {
+        match qty {
+            QuantityRef::TrackedSetSize => {
+                return crate::game::effects::named_revealed_members(state, reader)
+                    .map(|members| usize_to_i32_saturating(members.len()))
+                    .unwrap_or(0)
+            }
+            QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by: None,
+            } => {
+                let context = crate::game::filter::FilterContext::from_ability(reader);
+                return crate::game::effects::named_revealed_members(state, reader)
+                    .map(|members| {
+                        usize_to_i32_saturating(
+                            members
+                                .iter()
+                                .filter(|pin| {
+                                    crate::game::filter::matches_target_filter(
+                                        state,
+                                        pin.object_id,
+                                        filter,
+                                        &context,
+                                    )
+                                })
+                                .count(),
+                        )
+                    })
+                    .unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
     let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
@@ -5018,6 +5089,7 @@ fn resolve_ref(
         }
     };
     filter_ctx.recipient_id = ctx.recipient;
+    filter_ctx.casting_spell = ctx.spell;
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         // CR 402: hand size for the scoped player(s).
@@ -5795,7 +5867,7 @@ fn resolve_ref(
                 return 0;
             };
             let subject_types: HashSet<CoreType> =
-                characteristic_view_for_object(state, subject_id)
+                characteristic_view_for_object(state, subject_id.object_id)
                     .map(|view| view.core_types().to_vec())
                     .unwrap_or_default()
                     .into_iter()
@@ -8581,6 +8653,29 @@ where
     })
 }
 
+/// Select one stored object occurrence for characteristic/controller/exclusion
+/// reads, preserving damage-source binding precedence and positional pins.
+/// This does not revalidate a target after another instruction moved it.
+pub(crate) fn selected_target_object_occurrence(
+    ability: &ResolvedAbility,
+) -> Option<(usize, ObjectId)> {
+    match ability.context.target_damage_source {
+        Some(TargetDamageSourceBinding::Illegal) => None,
+        Some(TargetDamageSourceBinding::Bound) => match ability.targets.first() {
+            Some(TargetRef::Object(id)) => Some((0, *id)),
+            _ => None,
+        },
+        None => ability
+            .targets
+            .iter()
+            .enumerate()
+            .find_map(|(index, target)| match target {
+                TargetRef::Object(id) => Some((index, *id)),
+                _ => None,
+            }),
+    }
+}
+
 fn resolve_object_pt<F, G>(
     state: &GameState,
     scope: ObjectScope,
@@ -8662,6 +8757,26 @@ where
                 }
                 _ => 0,
             },
+            None if ability.is_some_and(|a| {
+                a.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement
+            }) =>
+            {
+                // CR 608.2h + CR 400.7j: read exactly the announced incarnation,
+                // live in its expected zone or from its departure information.
+                ability
+                    .and_then(|a| {
+                        selected_target_object_occurrence(a).and_then(|(index, id)| {
+                            read_object_pt_by_id_for_incarnation(
+                                state,
+                                id,
+                                a.target_pin_at(index).map(|pin| pin.incarnation),
+                                &obj_extract,
+                                &lki_extract,
+                            )
+                        })
+                    })
+                    .unwrap_or(0)
+            }
             None => targets
                 .iter()
                 .find_map(|t| match t {
@@ -10324,6 +10439,160 @@ mod tests {
 
     use super::*;
     use crate::game::zones::create_object;
+
+    #[test]
+    fn coordinated_population_runtime() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::card::LayoutKind;
+
+        for populated in [false, true] {
+            let mut scenario = GameScenario::new();
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Count source", "")
+                .id();
+            let mut adventures = Vec::new();
+            if populated {
+                let overlap = scenario
+                    .add_spell_to_exile(P0, "Instant Adventure", true)
+                    .id();
+                scenario.add_spell_to_graveyard(P0, "Sorcery member", false);
+                let permanent = scenario
+                    .add_creature_to_graveyard(P0, "Adventure permanent", 1, 1)
+                    .id();
+                adventures.extend([overlap, permanent]);
+                scenario.add_spell_to_exile(P1, "Foreign exile", true);
+                scenario.add_spell_to_graveyard(P1, "Opponent graveyard", false);
+                scenario.add_creature_to_graveyard(P0, "Ordinary permanent", 1, 1);
+                scenario.add_spell_to_hand(P0, "Wrong zone instant", true);
+            }
+            let mut runner = scenario.build();
+            for id in adventures {
+                let object = runner.state_mut().objects.get_mut(&id).unwrap();
+                object.controller = P1;
+                object.back_face = Some(BackFaceData {
+                    name: "Adventure alternative".into(),
+                    layout_kind: Some(LayoutKind::Adventure),
+                    ..Default::default()
+                });
+            }
+            for (phrase, expected) in [
+                ("card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an adventure", 3),
+                ("card you own in your graveyard and in exile that's an instant card or a sorcery card or a card that has an adventure", 3),
+                ("card you own in exile and in your graveyard and in exile that's an instant card or an instant card or a sorcery card or a card that has an adventure", 3),
+                ("instant and sorcery cards you own in exile and in your graveyard", 2),
+                ("cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an adventure", 3),
+            ] {
+                let (rest, qty) = crate::parser::oracle_nom::quantity::parse_coordinated_card_population(phrase).unwrap();
+                assert_eq!(rest, "");
+                // CR 108.3 + CR 109.2a + CR 715.2c: owner, zones, and the whole
+                // predicate intersect; overlapping types/zones count each card once.
+                assert_eq!(resolve_quantity(runner.state(), &QuantityExpr::Ref { qty }, P0, source), if populated { expected } else { 0 }, "{phrase}");
+            }
+            // Evaluate actual changed quantities from full printed sources,
+            // without claiming their unrelated abilities are covered here.
+            let cases: [(&str, &[&str], &str, i32); 7] = [
+                ("Sailors' Bane", &["Creature"], "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)", 3),
+                ("Candlekeep Inspiration", &["Sorcery"], "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.", 3),
+                ("Beacon Bolt", &["Sorcery"], "Beacon Bolt deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\nJump-start (You may cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile this card.)", 2),
+                ("Crackling Drake", &["Creature"], "Flying\nCrackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\nWhen this creature enters, draw a card.", 2),
+                ("Huskburster Swarm", &["Creature"], "This spell costs {1} less to cast for each creature card you own in exile and in your graveyard.\nMenace, deathtouch", 2),
+                ("Ral, Izzet Viceroy", &["Planeswalker"], "[+1]: Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.\n[−3]: Ral deals damage to target creature equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\n[−8]: You get an emblem with \"Whenever you cast an instant or sorcery spell, this emblem deals 4 damage to any target and you draw two cards.\"", 2),
+                ("Serpentine Curve", &["Sorcery"], "Create a 0/0 green and blue Fractal creature token. Put X +1/+1 counters on it, where X is one plus the total number of instant and sorcery cards you own in exile and in your graveyard.", 3),
+            ];
+            for (name, types, oracle, expected) in cases {
+                let parsed = crate::parser::parse_oracle_text(
+                    oracle,
+                    name,
+                    &[],
+                    &types.iter().map(|s| (*s).into()).collect::<Vec<_>>(),
+                    &[],
+                );
+                let mut quantities = Vec::new();
+                for definition in &parsed.statics {
+                    if let crate::types::statics::StaticMode::ModifyCost {
+                        dynamic_count: Some(qty),
+                        ..
+                    } = &definition.mode
+                    {
+                        quantities.push(QuantityExpr::Ref { qty: qty.clone() });
+                    }
+                    for modification in &definition.modifications {
+                        if let crate::types::ability::ContinuousModification::SetDynamicPower {
+                            value,
+                        } = modification
+                        {
+                            quantities.push(value.clone());
+                        }
+                    }
+                }
+                for ability in &parsed.abilities {
+                    match ability.effect.as_ref() {
+                        Effect::DealDamage { amount, .. } => quantities.push(amount.clone()),
+                        Effect::Token {
+                            enter_with_counters,
+                            ..
+                        } => quantities.extend(enter_with_counters.iter().map(|(_, q)| q.clone())),
+                        Effect::GenericEffect {
+                            static_abilities, ..
+                        } => {
+                            for definition in static_abilities {
+                                for modification in &definition.modifications {
+                                    if let crate::types::ability::ContinuousModification::SetPowerDynamic { value } | crate::types::ability::ContinuousModification::SetToughnessDynamic { value } = modification { quantities.push(value.clone()); }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    quantities.len(),
+                    if name == "Candlekeep Inspiration" {
+                        2
+                    } else {
+                        1
+                    },
+                    "actual changed subtree: {name}"
+                );
+                for quantity in quantities {
+                    let empty = i32::from(name == "Serpentine Curve");
+                    assert_eq!(
+                        resolve_quantity(runner.state(), &quantity, P0, source),
+                        if populated { expected } else { empty },
+                        "{name}: {quantity:?}"
+                    );
+                }
+            }
+            // Synthetic introduction witnesses use the same public Sorcery
+            // consumer and hostile board; the printed Oracle above stays exact.
+            for introduction in ["", "the total number of "] {
+                let oracle = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {introduction}cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.");
+                let parsed = crate::parser::parse_oracle_text(
+                    &oracle,
+                    "Synthetic count introduction",
+                    &[],
+                    &["Sorcery".into()],
+                    &[],
+                );
+                let Effect::GenericEffect {
+                    static_abilities, ..
+                } = parsed.abilities[0].effect.as_ref()
+                else {
+                    panic!("full source base P/T");
+                };
+                let mut values = 0;
+                for definition in static_abilities {
+                    for modification in &definition.modifications {
+                        if let crate::types::ability::ContinuousModification::SetPowerDynamic { value } | crate::types::ability::ContinuousModification::SetToughnessDynamic { value } = modification {
+                        assert_eq!(resolve_quantity(runner.state(), value, P0, source), if populated { 3 } else { 0 }, "{introduction}");
+                        values += 1;
+                    }
+                    }
+                }
+                assert_eq!(values, 2);
+            }
+        }
+    }
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
         ChoiceValue, ChooseOneOfKind, Comparator, ControllerRef, CountScope, DamageChannel,
@@ -26195,5 +26464,283 @@ mod exile_card_population_tests {
             },
             1,
         );
+    }
+}
+
+#[cfg(test)]
+mod token_target_occurrence_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::TargetReadOrigin;
+
+    #[test]
+    fn token_parent_pt_uses_same_index_pin_and_versioned_lki() {
+        let mut scenario = GameScenario::new();
+        let id = scenario.add_creature(P1, "Selected incarnation", 7, 8).id();
+        let mut state = scenario.build().state().clone();
+        let old = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        let departure = state.objects[&id].snapshot_public_characteristics();
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![
+                TargetRef::Player(P0),
+                TargetRef::Object(id),
+                TargetRef::Object(id),
+            ],
+            ObjectId(999),
+            P0,
+        );
+        ability.target_reads = TargetReadOrigin::ParentAnnouncement;
+        ability.target_pins = vec![
+            None,
+            Some(old),
+            Some(ObjectIncarnationRef {
+                object_id: id,
+                incarnation: old.incarnation + 1,
+            }),
+        ];
+        assert_eq!(selected_target_object_occurrence(&ability), Some((1, id)));
+        let read = |state: &GameState, ability: &ResolvedAbility| {
+            (
+                resolve_quantity_with_targets(
+                    state,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    ability,
+                ),
+                resolve_quantity_with_targets(
+                    state,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    ability,
+                ),
+            )
+        };
+        let mut stale = departure.clone();
+        stale.power = Some(1);
+        stale.toughness = Some(2);
+        state.lki_cache.insert(id, stale);
+        assert_eq!(
+            read(&state, &ability),
+            (7, 8),
+            "matching live pin beats stale LKI"
+        );
+        state
+            .lki_by_incarnation
+            .entry(id)
+            .or_default()
+            .insert(old.incarnation, departure.clone());
+        let returned = state.objects.get_mut(&id).unwrap();
+        returned.incarnation += 1;
+        returned.power = Some(17);
+        returned.toughness = Some(19);
+        let new_departure = returned.snapshot_public_characteristics();
+        state.lki_cache.insert(id, new_departure.clone());
+        state
+            .lki_by_incarnation
+            .entry(id)
+            .or_default()
+            .insert(old.incarnation + 1, new_departure);
+        // CR 400.7 + CR 608.2h: neither the returned incarnation nor its newer
+        // id-cache entry replaces the selected occurrence's 7/8 departure.
+        assert_eq!(read(&state, &ability), (7, 8));
+        ability.target_pins[1] = Some(ObjectIncarnationRef {
+            object_id: id,
+            incarnation: old.incarnation + 1,
+        });
+        assert_eq!(read(&state, &ability), (17, 19));
+        ability.target_pins.clear();
+        assert_eq!(
+            read(&state, &ability),
+            (17, 19),
+            "legacy unpinned live reader"
+        );
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert_eq!(read(&state, &ability), (17, 19), "legacy id-cache fallback");
+        ability.targets.clear();
+        ability.target_pins.clear();
+        assert_eq!(selected_target_object_occurrence(&ability), None);
+        assert_eq!(read(&state, &ability), (0, 0));
+    }
+
+    #[test]
+    fn token_parent_occurrence_preserves_damage_source_precedence() {
+        let mut scenario = GameScenario::new();
+        let selected = scenario.add_creature(P1, "Normal selected", 7, 8).id();
+        let bound = scenario.add_creature(P1, "Damage bound", 17, 19).id();
+        let state = scenario.build().state().clone();
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(P0), TargetRef::Object(selected)],
+            ObjectId(99),
+            P0,
+        );
+        ability.target_reads = TargetReadOrigin::ParentAnnouncement;
+        let power = |ability: &ResolvedAbility| {
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                ability,
+            )
+        };
+        assert_eq!(
+            selected_target_object_occurrence(&ability),
+            Some((1, selected))
+        );
+        assert_eq!(power(&ability), 7);
+        ability.context.target_damage_source = Some(TargetDamageSourceBinding::Bound);
+        assert_eq!(
+            selected_target_object_occurrence(&ability),
+            None,
+            "Bound only reads position zero"
+        );
+        assert_eq!(power(&ability), 0);
+        ability.targets[0] = TargetRef::Object(bound);
+        assert_eq!(
+            selected_target_object_occurrence(&ability),
+            Some((0, bound))
+        );
+        assert_eq!(power(&ability), 17);
+        ability.context.target_damage_source = Some(TargetDamageSourceBinding::Illegal);
+        assert_eq!(selected_target_object_occurrence(&ability), None);
+        assert_eq!(power(&ability), 0);
+    }
+}
+
+#[cfg(test)]
+mod jev_color_population_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::game_state::SpellCastRecord;
+    use crate::types::identifiers::CardId;
+
+    fn colors(source: CardTypeSetSource) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { source },
+        }
+    }
+
+    #[test]
+    fn jev_color_population_reading_axes() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Current noncreature".into(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types = vec![CoreType::Enchantment];
+            object.color = vec![ManaColor::White];
+        }
+        let mut old = state.objects[&id].snapshot_public_characteristics();
+        old.colors = vec![ManaColor::Blue];
+        old.power = Some(7);
+        old.toughness = Some(9);
+        state.lki_cache.insert(id, old.clone());
+        // CR 608.2h: absent P/T does not make a battlefield object's colors historical.
+        let current = colors(CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+            ),
+        });
+        assert_eq!(resolve_quantity(&state, &current, PlayerId(0), id), 1);
+        assert_eq!(
+            characteristic_view_for_object(&state, id).unwrap().colors(),
+            &[ManaColor::White]
+        );
+        assert_eq!(state.lki_cache[&id].colors, vec![ManaColor::Blue]);
+
+        // Off-battlefield and absent-object compatibility keeps the existing LKI route.
+        let off = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Departed creature".into(),
+            Zone::Graveyard,
+        );
+        state.lki_cache.insert(off, old.clone());
+        assert_eq!(
+            characteristic_view_for_object(&state, off)
+                .unwrap()
+                .property_value(ObjectProperty::Power),
+            Some(7)
+        );
+        assert_eq!(
+            characteristic_view_for_object(&state, off)
+                .unwrap()
+                .colors(),
+            &[ManaColor::Blue]
+        );
+        state.objects.remove(&off);
+        assert_eq!(
+            characteristic_view_for_object(&state, off)
+                .unwrap()
+                .property_value(ObjectProperty::Toughness),
+            Some(9)
+        );
+
+        // Historical event/cast channels must disagree with the live object.
+        let mut attack = state.objects[&id].snapshot_for_attack_declaration(id);
+        attack.lki.colors = vec![ManaColor::Red, ManaColor::Green];
+        state.current_trigger_events = vec![GameEvent::AttackersDeclared {
+            attacker_ids: vec![id],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![attack],
+        }];
+        let attacks = colors(CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+        });
+        assert_eq!(resolve_quantity(&state, &attacks, PlayerId(0), id), 2);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![SpellCastRecord {
+                colors: vec![ManaColor::White, ManaColor::Green],
+                core_types: vec![CoreType::Instant],
+                ..Default::default()
+            }]),
+        );
+        let casts = CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter: None,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &colors(casts.clone()), PlayerId(0), id),
+            2
+        );
+        let union = colors(
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+                    ),
+                },
+                casts,
+            ])
+            .unwrap(),
+        );
+        // CR 105.1: First Family's union counts white once across both populations.
+        assert_eq!(resolve_quantity(&state, &union, PlayerId(0), id), 2);
     }
 }

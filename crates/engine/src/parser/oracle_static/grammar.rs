@@ -462,12 +462,16 @@ pub(crate) fn with_keyword_companion(
     if matches!(primary.mode, StaticMode::Continuous) {
         return vec![primary];
     }
-    let mut companion_mods = Vec::new();
-    if let Some(keyword_text) = extract_keyword_clause(predicate) {
-        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
-            push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+    let companion_mods = if let Some(keyword_text) = extract_keyword_clause(predicate) {
+        match super::keyword_grant::parse_complete_continuous_modifications(&format!(
+            "has {keyword_text}"
+        )) {
+            Some(modifications) => modifications,
+            None => return vec![continuous_predicate_residual(affected.clone(), description)],
         }
-    }
+    } else {
+        Vec::new()
+    };
     if companion_mods.is_empty() {
         return vec![primary];
     }
@@ -1587,9 +1591,12 @@ pub(crate) fn base_pt_side_to_expr(side: BasePtSide, x_ref: &QuantityRef) -> Qua
 /// When a "where X is …" expression is present, parse it via the nom quantity grammar.
 pub(crate) fn resolve_base_pt_x_ref(where_x_expression: Option<&str>) -> Option<QuantityRef> {
     if let Some(expr) = where_x_expression {
-        return super::oracle_nom::quantity::parse_quantity_ref_complete(expr)
-            .ok()
-            .map(|(_, qty)| qty);
+        return crate::parser::oracle_nom::bridge::nom_on_lower(
+            expr,
+            &expr.to_lowercase(),
+            super::oracle_nom::quantity::parse_quantity_ref_complete,
+        )
+        .map(|(qty, _)| qty);
     }
     // CR 107.3m: In a spell-cast context, X refers to the value paid for {X}.
     Some(QuantityRef::CostXPaid)
@@ -1924,29 +1931,27 @@ pub(crate) fn strip_trailing_keyword_clause(clause: &str) -> &str {
 
 pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
     let lower = text.to_lowercase();
-
-    for needle in [
-        " and gains ",
-        " and gain ",
-        " and has ",
-        " and have ",
-        " gains ",
-        " gain ",
-        " has ",
-        " have ",
-    ] {
-        if let Some(pos) = lower.find(needle) {
-            return Some(&text[pos + needle.len()..]);
+    let tp = TextPair::new(text, &lower);
+    let body = nom_primitives::scan_at_word_boundaries(lower.as_str(), |candidate| {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gains "),
+            tag("gain "),
+            tag("has "),
+            tag("have "),
+        ))
+        .parse(candidate)?;
+        let offset = lower.len() - candidate.len();
+        if text[..offset].chars().filter(|c| *c == '"').count() % 2 != 0 {
+            return Err(nom::Err::Error(OracleError::new(
+                candidate,
+                nom::error::ErrorKind::Fail,
+            )));
         }
-    }
-
-    for prefix in ["gains ", "gain ", "has ", "have "] {
-        if nom_tag_lower(&lower, &lower, prefix).is_some() {
-            return Some(&text[prefix.len()..]);
-        }
-    }
-
-    None
+        Ok((rest, tp.slice(lower.len() - rest.len(), lower.len())))
+    })?;
+    // Return the entire suffix: the complete companion owner must consume
+    // every following clause before it can publish either definition.
+    Some(body.original.trim())
 }
 
 /// Extract the keyword text from "lose [keyword]" / "loses [keyword]" clauses.
@@ -2101,6 +2106,28 @@ pub(crate) fn map_keyword(text: &str) -> Option<Keyword> {
         Ok(kw) => Some(kw),
         Err(_) => None, // Infallible, but satisfy the compiler
     }
+}
+
+/// Complete continuous predicates share the router's remainder-preserving core.
+pub(crate) fn map_keyword_complete(text: &str) -> Option<Keyword> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    map_self_cost_graveyard_keyword(&lower)
+        .or_else(|| {
+            all_consuming(value(
+                Keyword::Changeling,
+                tag::<_, _, OracleError<'_>>("all creature types"),
+            ))
+            .parse(lower.as_str())
+            .ok()
+            .map(|(_, kw)| kw)
+        })
+        .or_else(|| {
+            all_consuming(parse_basic_landwalk_qualifier)
+                .parse(lower.as_str())
+                .ok()
+                .map(|(_, land)| Keyword::Landwalk(land.to_string()))
+        })
+        .or_else(|| super::oracle_keyword::parse_router_keyword_fragment(&lower))
 }
 
 pub(crate) fn parse_landwalk_keyword(text: &str) -> Option<Keyword> {

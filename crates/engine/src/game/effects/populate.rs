@@ -33,28 +33,21 @@ pub fn resolve(
         })
         .collect();
 
-    match valid_tokens.len() {
-        // CR 701.36b: No creature tokens → no-op.
-        0 => {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::Populate,
-                source_id: ability.source_id,
-                subject: None,
-            });
-        }
-        // Exactly one → auto-select, no player choice needed.
-        1 => {
-            create_token_copy(state, valid_tokens[0], ability, events)?;
-        }
-        // Multiple → player chooses which token to copy.
-        _ => {
-            state.waiting_for = WaitingFor::PopulateChoice {
-                player: ability.controller,
-                source_id: ability.source_id,
-                valid_tokens,
-            };
-        }
-    }
+    let work = if let [selected] = valid_tokens.as_slice() {
+        copy_work(state, *selected, ability)?
+    } else {
+        std::collections::VecDeque::new()
+    };
+    super::token_copy::begin_creation(
+        state,
+        ability,
+        work,
+        EffectKind::Populate,
+        crate::types::game_state::TokenCreationCallerState::Populate {
+            eligible: valid_tokens,
+        },
+        events,
+    );
 
     Ok(())
 }
@@ -67,6 +60,25 @@ pub fn create_token_copy(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let work = copy_work(state, token_to_copy, ability)?;
+    super::token_copy::begin_creation(
+        state,
+        ability,
+        work,
+        EffectKind::Populate,
+        crate::types::game_state::TokenCreationCallerState::Populate {
+            eligible: vec![token_to_copy],
+        },
+        events,
+    );
+    Ok(())
+}
+
+fn copy_work(
+    state: &mut GameState,
+    token_to_copy: ObjectId,
+    ability: &ResolvedAbility,
+) -> Result<std::collections::VecDeque<crate::types::game_state::TokenCreationWork>, EffectError> {
     // CR 707.2: Build a synthetic CopyTokenOf ability targeting the selected token.
     let copy_ability = ResolvedAbility::new(
         Effect::CopyTokenOf {
@@ -85,15 +97,60 @@ pub fn create_token_copy(
         ability.source_id,
         ability.controller,
     );
-    super::token_copy::resolve(state, &copy_ability, events)?;
+    super::token_copy::prepare_copy_creation(state, &copy_ability)
+}
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::Populate,
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
+pub(crate) fn answer_current_selection(
+    state: &mut GameState,
+    selected: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<crate::types::game_state::TokenCreationProgress>, EffectError> {
+    let Some((id, creator, eligible)) = state.active_copy_token().and_then(|pending| {
+        if pending.pending != Some(crate::types::game_state::TokenCreationPending::CallerSelection)
+        {
+            return None;
+        }
+        let crate::types::game_state::TokenCreationCallerState::Populate { eligible } =
+            &pending.caller
+        else {
+            return None;
+        };
+        Some((
+            pending.creation_id?,
+            pending.creator.as_deref()?.clone(),
+            eligible.clone(),
+        ))
+    }) else {
+        return Ok(None);
+    };
+    if !eligible.contains(&selected) {
+        return Err(EffectError::InvalidParam(
+            "Populate selection is outside its own instruction".into(),
+        ));
+    }
+    let work = if state.objects.get(&selected).is_some_and(|object| {
+        object.zone == crate::types::zones::Zone::Battlefield
+            && object.controller == creator.controller
+            && object.is_token
+            && object.card_types.core_types.contains(&CoreType::Creature)
+    }) {
+        copy_work(state, selected, &creator)?
+    } else {
+        std::collections::VecDeque::new()
+    };
+    let pending = state
+        .resolution_stack
+        .token_creation_mut(id)
+        .expect("selected Populate owner");
+    pending.pending = None;
+    pending.caller = crate::types::game_state::TokenCreationCallerState::Populate {
+        eligible: vec![selected],
+    };
+    pending.work = work;
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    Ok(Some(super::token_copy::drive_creation(state, id, events)))
 }
 
 #[cfg(test)]
@@ -276,5 +333,257 @@ mod tests {
             vec![TargetRef::Object(populated_id)],
             "later token creations must not retarget the snapshotted delayed trigger"
         );
+    }
+    #[test]
+    fn populate_completion_synchronous() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Populate,
+            super::super::token_copy::tests::CreationPauseCase::Synchronous,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Populate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn populate_completion_queued_child() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Populate,
+            super::super::token_copy::tests::CreationPauseCase::Queued,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Populate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn populate_completion_counter_pause() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Populate,
+            super::super::token_copy::tests::CreationPauseCase::Counter,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Populate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn populate_completion_queued_child_current_reload() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Populate,
+            super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Populate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn populate_completion_counter_current_reload() {
+        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+            Effect::Populate,
+            super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Populate,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn populate_zero_and_departed_selected_choice_complete_owned_tail_once() {
+        for departed in [false, true] {
+            let mut state = GameState::new_two_player(995);
+            let source = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Populate source".into(),
+                Zone::Battlefield,
+            );
+            let mut ability = ResolvedAbility::new(Effect::Populate, vec![], source, PlayerId(0));
+            ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )));
+            let life = state.players[0].life;
+            let mut events = Vec::new();
+            if departed {
+                let first = setup_creature_token(&mut state, PlayerId(0), "First token");
+                let second = setup_creature_token(&mut state, PlayerId(0), "Second token");
+                super::super::resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::PopulateChoice { .. }
+                ));
+                assert_eq!(state.players[0].life, life);
+                let waiting = state.waiting_for.clone();
+                assert!(crate::game::apply_as_current(
+                    &mut state,
+                    crate::types::actions::GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(source))
+                    }
+                )
+                .is_err());
+                assert_eq!(state.waiting_for, waiting);
+                // Labelled saved-choice disappearance isolation. No fake token return.
+                state.objects.get_mut(&first).unwrap().zone = Zone::Exile;
+                state.battlefield.retain(|id| *id != first);
+                state.exile.push_back(first);
+                state = serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_game_state();
+                events.extend(
+                    crate::game::apply_as_current(
+                        &mut state,
+                        crate::types::actions::GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(first)),
+                        },
+                    )
+                    .unwrap()
+                    .events,
+                );
+                assert_eq!(state.objects[&second].zone, Zone::Battlefield);
+            } else {
+                super::super::resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+            }
+            assert!(state.resolution_stack.is_empty());
+            assert_eq!(state.players[0].life, life + 1);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::Populate,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+        }
     }
 }

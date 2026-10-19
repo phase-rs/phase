@@ -5,6 +5,46 @@
 //! both layers so structural drift and assembly bugs are independently caught.
 
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
+
+#[test]
+fn jev_full_ashling() {
+    use crate::parser::oracle_ir::doc::OracleNodeIr;
+    use crate::types::ability::{FilterProp, ParitySource, TargetFilter};
+    let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+    let mut doc = parse_oracle_ir(
+        text,
+        "Ashling's Prerogative",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 3);
+    let OracleNodeIr::Replacement(reader) = &doc.items[2].node else {
+        panic!("complete external reader: {doc:#?}")
+    };
+    assert!(
+        matches!(&reader.definition.valid_card, Some(TargetFilter::Typed(tf))
+        if tf.controller.is_none() && matches!(tf.properties.as_slice(),
+            [FilterProp::Not { prop }] if matches!(prop.as_ref(),
+                FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+    );
+    insta::assert_json_snapshot!("jev_full_ashling_ir", doc);
+    let lowered = lower_oracle_ir(&mut doc);
+    assert_eq!(lowered.replacements.len(), 2);
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered.abilities.is_empty());
+    insta::assert_json_snapshot!("jev_full_ashling_lowered", lowered);
+}
+
+#[test]
+fn jev_source_parity_static() {
+    let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
+    let mut doc = parse_oracle_ir(text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+    insta::assert_json_snapshot!("jev_source_parity_static_ir", doc);
+    let lowered = lower_oracle_ir(&mut doc);
+    insta::assert_json_snapshot!("jev_source_parity_static_lowered", lowered);
+}
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
 use crate::parser::oracle_ir::trace::OuterRoute;
@@ -17,6 +57,766 @@ use crate::types::ability::{
 };
 use crate::types::game_state::DistributionUnit;
 use crate::types::mana::{ManaCost, ManaCostShard};
+
+#[test]
+fn ordinary_reveal_scalar_two_layers() {
+    for (head, count, scope) in [
+        (
+            "Each player reveals the top card of their library",
+            1,
+            Some(crate::types::ability::PlayerFilter::All),
+        ),
+        (
+            "Each player reveals the top two cards of their library",
+            2,
+            Some(crate::types::ability::PlayerFilter::All),
+        ),
+        ("Reveal the top card of your library", 1, None),
+    ] {
+        let text = format!("{head}. You gain life equal to the number of cards revealed this way.");
+        let mut ir = parse_oracle_ir(&text, "Synthetic aggregate", &[], &["Instant".into()], &[]);
+        assert_eq!(ir.source_text, text);
+        let OracleNodeIr::Spell(spell) = &ir.items[0].node else {
+            panic!("{ir:#?}")
+        };
+        assert_eq!(spell.body.clauses.len(), 2);
+        let reveal = &spell.body.clauses[0];
+        assert_eq!(reveal.source.fragment(), Some(head));
+        assert_eq!(reveal.player_scope, scope);
+        match &reveal.parsed.effect {
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value },
+                reveal,
+                keep_count,
+                ..
+            } => {
+                assert_eq!(*value, count as i32);
+                assert!(*reveal);
+                assert_eq!(*keep_count, None, "no selection continuation");
+            }
+            Effect::RevealTop { count: actual, .. } => assert_eq!(*actual, count),
+            other => panic!("not a bare reveal: {other:?}"),
+        }
+        assert!(matches!(
+            spell.body.clauses[1].parsed.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                },
+                ..
+            }
+        ));
+        let lowered = lower_oracle_ir(&mut ir);
+        assert!(lowered.parse_warnings.is_empty(), "{lowered:#?}");
+        let head = &lowered.abilities[0];
+        assert!(matches!(*head.effect, Effect::RevealTop { count: n, .. } if n == count));
+        assert_eq!(head.player_scope, scope);
+        let tail = head.sub_ability.as_deref().unwrap();
+        assert_eq!(tail.player_scope, None);
+        assert!(matches!(
+            *tail.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                }
+            }
+        ));
+        if count == 1 && scope.is_some() {
+            insta::assert_yaml_snapshot!("jev_ordinary_reveal_scalar_ir", ir);
+            insta::assert_yaml_snapshot!("jev_ordinary_reveal_scalar_lowered", lowered);
+        }
+    }
+    let full = "At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    let mut ir = parse_oracle_ir(full, "Game Preserve", &[], &["Enchantment".into()], &[]);
+    assert_eq!(ir.source_text, full);
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!("{ir:#?}")
+    };
+    let Some(crate::parser::oracle_ir::trigger::TriggerBody::EffectChain(chain)) = &trigger.body
+    else {
+        panic!("{trigger:#?}")
+    };
+    assert_eq!(chain.clauses.len(), 2);
+    assert_eq!(
+        chain.clauses[0].player_scope,
+        Some(crate::types::ability::PlayerFilter::All)
+    );
+    assert!(matches!(
+        chain.clauses[0].parsed.effect,
+        Effect::Dig { reveal: true, .. } | Effect::RevealTop { .. }
+    ));
+    assert_eq!(
+        chain.clauses[1]
+            .reads_return_result
+            .as_ref()
+            .map(|(id, _)| *id),
+        Some(chain.clauses[0].id)
+    );
+    assert!(matches!(
+        chain.clauses[1].parsed.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::None,
+            origin: Some(crate::types::zones::Zone::Library),
+            destination: crate::types::zones::Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(chain.clauses[1].condition.is_some());
+    let lowered = lower_oracle_ir(&mut ir);
+    let reveal = lowered.triggers[0].execute.as_deref().unwrap();
+    assert!(matches!(*reveal.effect, Effect::RevealTop { .. }));
+    let reader = reveal.sub_ability.as_deref().unwrap();
+    assert_eq!(
+        reader.reads_return_result.as_ref().map(|(id, _)| *id),
+        reveal.declares_return_result
+    );
+    assert!(reveal.declares_return_result.is_some());
+    assert!(matches!(
+        *reader.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::None,
+            origin: Some(crate::types::zones::Zone::Library),
+            destination: crate::types::zones::Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(lowered.parse_warnings.is_empty(), "{lowered:#?}");
+    insta::assert_yaml_snapshot!("jev_game_preserve_ir", ir);
+    insta::assert_yaml_snapshot!("jev_game_preserve_lowered", lowered);
+}
+
+const OUTER_ORDINARY_SPIRIT: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.";
+const OUTER_WHITE_SUN: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This token can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)";
+const OUTER_WHITE_SEMANTIC: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures.";
+const OUTER_WHITE_NORMALIZED: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)";
+const OUTER_CIRCADIAN_BODY: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+const OUTER_CIRCADIAN_SEEK: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control";
+const OUTER_CIRCADIAN_GRANT: &str = "For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+
+fn assert_collected_source_contract(
+    ir: &OracleDocIr,
+    raw: &str,
+    normalized: &str,
+    semantic_body: &str,
+) {
+    assert_eq!(ir.source_text, raw);
+    assert_eq!(ir.items.len(), 1, "one collected root: {ir:#?}");
+    let item = &ir.items[0];
+    let head = normalized.lines().next().unwrap();
+    let span = item.source.span();
+    assert_eq!(
+        span.precision,
+        crate::parser::oracle_ir::doc::SpanPrecision::Exact
+    );
+    assert_eq!(
+        (
+            span.first_line,
+            span.last_line,
+            span.start_byte,
+            span.end_byte
+        ),
+        (0, 0, 0, head.len())
+    );
+    assert_eq!(item.source.fragment(), Some(head));
+    assert_eq!(&normalized[span.start_byte..span.end_byte], head);
+    let OracleNodeIr::Spell(body) = &item.node else {
+        panic!("{ir:#?}")
+    };
+    assert_eq!(body.source_text, semantic_body);
+    assert!(!body.body.clauses.is_empty());
+    for clause in &body.body.clauses {
+        assert_eq!(
+            clause.source.span().precision,
+            crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+        );
+        assert!(clause
+            .source
+            .fragment()
+            .is_some_and(|fragment| !fragment.is_empty()));
+    }
+    let units = super::feature::audit_units(&ir.items, &ir.source_text);
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].text, raw);
+    assert_eq!(units[0].span.start_byte, 0);
+    assert_eq!(units[0].span.end_byte, raw.len());
+    assert_eq!(units[0].span.last_line, raw.lines().count() - 1);
+    assert_eq!(&raw[units[0].span.start_byte..units[0].span.end_byte], raw);
+    assert_eq!(units[0].item_ids(), vec![item.id]);
+}
+
+fn assert_complete_clause_fragment(ir: &OracleDocIr, expected: &str) {
+    let OracleNodeIr::Spell(body) = &ir.items[0].node else {
+        panic!("{ir:#?}")
+    };
+    // Clause delimiters may own the final period; every other byte is required.
+    assert!(
+        body.body.clauses.iter().any(|clause| clause
+            .source
+            .fragment()
+            .is_some_and(|fragment| fragment.contains(expected))),
+        "missing complete fragment {expected:?}: {body:#?}"
+    );
+}
+
+fn assert_outer_token_owner(ir: &OracleDocIr) {
+    let spells: Vec<_> = ir
+        .items
+        .iter()
+        .filter_map(|item| match &item.node {
+            OracleNodeIr::Spell(spell) => Some(spell),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spells.len(), 1, "{ir:#?}");
+    let clauses = &spells[0].body.clauses;
+    let creator = clauses
+        .iter()
+        .find(|c| matches!(c.parsed.effect, Effect::Token { .. }))
+        .expect("exact creator");
+    let definition = clauses
+        .iter()
+        .find(|c| c.token_definition_owner.is_some())
+        .expect("defining clause");
+    assert_eq!(definition.token_definition_owner, Some(creator.id));
+    assert!(definition.source.fragment().is_some_and(|fragment| fragment.trim_end_matches('.') == "Its power is equal to that creature's power and its toughness is equal to that creature's toughness"));
+    assert_eq!(
+        creator.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+}
+
+fn assert_outer_spirit_lowered(lowered: &ParsedAbilities, targets: usize) {
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(lowered.statics.is_empty());
+    assert!(lowered.parse_warnings.is_empty());
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    let chain: Vec<_> =
+        std::iter::successors(Some(&lowered.abilities[0]), |d| d.sub_ability.as_deref()).collect();
+    assert_eq!(
+        chain
+            .iter()
+            .filter(
+                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+            )
+            .count(),
+        targets
+    );
+    assert!(chain.iter().any(|d| matches!(
+        *d.effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    )));
+    let tokens: Vec<_> = chain
+        .iter()
+        .filter(|d| matches!(*d.effect, Effect::Token { .. }))
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(
+        tokens[0].target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    let Effect::Token {
+        power, toughness, ..
+    } = tokens[0].effect.as_ref()
+    else {
+        unreachable!()
+    };
+    // CR 111.3 + CR 115.10a: one printed target supplies two separate values.
+    assert_eq!(
+        power,
+        &crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        })
+    );
+    assert_eq!(
+        toughness,
+        &crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        })
+    );
+}
+
+#[test]
+fn jev_outer_scope_broken() {
+    let text = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.";
+    let (ir, lowered) = parse_two_layer(text, "Broken Visage", &["Instant"], &[]);
+    assert_collected_source_contract(&ir, text, text, text);
+    assert_complete_clause_fragment(
+        &ir,
+        "Sacrifice the token at the beginning of the next end step",
+    );
+    assert_outer_token_owner(&ir);
+    assert!(lowered.statics.is_empty());
+    assert_eq!(lowered.abilities[0].description.as_deref(), Some(text));
+    assert_outer_spirit_lowered(&lowered, 1);
+    let cleanup = lowered.abilities[0]
+        .sub_ability
+        .as_deref()
+        .unwrap()
+        .sub_ability
+        .as_deref()
+        .unwrap();
+    assert!(
+        matches!(cleanup.effect.as_ref(), Effect::CreateDelayedTrigger { effect, .. } if matches!(effect.effect.as_ref(), Effect::Sacrifice { target: TargetFilter::LastCreated, .. }))
+    );
+    insta::assert_json_snapshot!("jev_outer_scope_broken_ir", &ir);
+    insta::assert_json_snapshot!("jev_outer_scope_broken_lowered", &lowered);
+}
+
+#[test]
+fn jev_outer_scope_circadian() {
+    let text = "Vivid — Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    let (ir, lowered) = parse_two_layer(text, "Circadian Struggle", &["Instant"], &[]);
+    assert_eq!(ir.source_text, text);
+    assert_eq!(ir.items.len(), 1);
+    assert_eq!(ir.items[0].source.fragment(), Some(text));
+    let OracleNodeIr::Spell(body) = &ir.items[0].node else {
+        panic!("{ir:#?}")
+    };
+    assert_eq!(body.source_text, OUTER_CIRCADIAN_BODY);
+    assert_collected_source_contract(&ir, text, text, OUTER_CIRCADIAN_BODY);
+    assert_complete_clause_fragment(&ir, OUTER_CIRCADIAN_SEEK);
+    assert_complete_clause_fragment(&ir, OUTER_CIRCADIAN_GRANT);
+    assert!(lowered.statics.is_empty());
+    assert_eq!(lowered.abilities.len(), 1);
+    assert_eq!(lowered.abilities[0].description.as_deref(), Some(text));
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    let gaps: Vec<_> =
+        std::iter::successors(Some(&lowered.abilities[0]), |d| d.sub_ability.as_deref())
+            .filter_map(|d| match d.effect.as_ref() {
+                Effect::Unimplemented { description, .. } => description.as_deref(),
+                _ => None,
+            })
+            .collect();
+    assert!(matches!(
+        lowered.abilities[0].effect.as_ref(),
+        Effect::Seek {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::DistinctColorsAmong { .. }
+            },
+            ..
+        }
+    ));
+    assert!(gaps.is_empty());
+    let grant = lowered.abilities[0].sub_ability.as_deref().unwrap();
+    assert!(grant.reads_return_result.is_some());
+    assert_eq!(
+        grant.reads_return_result.as_ref().map(|(id, _)| *id),
+        lowered.abilities[0].declares_return_result
+    );
+    assert!(matches!(
+        grant.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { .. }
+        })
+    ));
+    insta::assert_json_snapshot!("jev_outer_scope_circadian_ir", &ir);
+    insta::assert_json_snapshot!("jev_outer_scope_circadian_lowered", &lowered);
+}
+
+#[test]
+fn jev_seek_public_ir_binding_and_coverage() {
+    // SHAPE: the stored clause expression is the only input to ordinary lowering;
+    // integration::jev_seek_perpetual exercises its public runtime consumer.
+    let text = format!("Vivid — {OUTER_CIRCADIAN_BODY}");
+    let mut ir = parse_oracle_ir(&text, "Circadian Struggle", &[], &["Instant".into()], &[]);
+    assert_collected_source_contract(&ir, &text, &text, OUTER_CIRCADIAN_BODY);
+    let OracleNodeIr::Spell(body) = &ir.items[0].node else {
+        panic!("{ir:#?}")
+    };
+    let seek = &body.body.clauses[0];
+    let seek_id = crate::parser::oracle_ir::effect_chain::ClauseId(0);
+    assert_eq!(seek.id, seek_id);
+    assert_eq!(
+        seek.source.fragment().unwrap().trim_end_matches('.'),
+        OUTER_CIRCADIAN_SEEK
+    );
+    assert_eq!(
+        seek.where_x_expression.as_deref(),
+        Some("the number of colors among permanents you control")
+    );
+    assert!(
+        matches!(seek.parsed.effect, Effect::Seek { count: QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } }, .. } if name == "X")
+    );
+    assert!(body
+        .body
+        .clauses
+        .iter()
+        .skip(1)
+        .all(|clause| clause.id != seek_id));
+    let lowered = lower_oracle_ir(&mut ir);
+    let Effect::Seek {
+        filter: TargetFilter::Typed(typed),
+        count,
+        ..
+    } = lowered.abilities[0].effect.as_ref()
+    else {
+        panic!("{lowered:#?}")
+    };
+    let QuantityExpr::Ref {
+        qty:
+            QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::Objects { filter: population },
+            },
+    } = count
+    else {
+        panic!("{count:#?}")
+    };
+    assert!(typed.properties.iter().any(|prop| matches!(prop, FilterProp::SharesQuality { reference: Some(reference), .. } if reference.as_ref() == population)));
+    let gaps: Vec<_> = std::iter::successors(Some(&lowered.abilities[0]), |node| {
+        node.sub_ability.as_deref()
+    })
+    .filter_map(|node| node.effect.unimplemented_description())
+    .collect();
+    assert!(gaps.is_empty());
+
+    // Change only the binding on the named clause. Raw/prepared/source text still
+    // says colors, so a text rescan instead of ClauseIr consumption fails this.
+    let OracleNodeIr::Spell(body) = &mut ir.items[0].node else {
+        unreachable!()
+    };
+    let seek = body
+        .body
+        .clauses
+        .iter_mut()
+        .find(|clause| clause.id == seek_id)
+        .unwrap();
+    assert_eq!(
+        seek.where_x_expression.as_deref(),
+        Some("the number of colors among permanents you control")
+    );
+    seek.where_x_expression = Some("your life total".into());
+    let rebound = lower_oracle_ir(&mut ir);
+    assert!(matches!(
+        rebound.abilities[0].effect.as_ref(),
+        Effect::Seek {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+            },
+            ..
+        }
+    ));
+    assert_eq!(
+        rebound.abilities[0].description.as_deref(),
+        Some(text.as_str())
+    );
+    assert!(!ability_has_unimplemented(&rebound.abilities[0]));
+}
+
+#[test]
+fn jev_ordinary_target_defined_token() {
+    let (ir, lowered) = parse_two_layer(
+        OUTER_ORDINARY_SPIRIT,
+        "Synthetic ordinary Spirit",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(ir.source_text, OUTER_ORDINARY_SPIRIT);
+    assert_collected_source_contract(
+        &ir,
+        OUTER_ORDINARY_SPIRIT,
+        OUTER_ORDINARY_SPIRIT,
+        OUTER_ORDINARY_SPIRIT,
+    );
+    assert_outer_token_owner(&ir);
+    assert_outer_spirit_lowered(&lowered, 1);
+    assert_eq!(
+        lowered.abilities[0].description.as_deref(),
+        Some(OUTER_ORDINARY_SPIRIT)
+    );
+    insta::assert_json_snapshot!("jev_ordinary_target_defined_token_ir", &ir);
+    insta::assert_json_snapshot!("jev_ordinary_target_defined_token_lowered", &lowered);
+}
+
+#[test]
+fn ordinary_tap_outer_and_continuation_keep_exact_token_owner() {
+    for prefix in ["", "Draw a card.\n"] {
+        let text = format!("{prefix}Tap target creature. {OUTER_ORDINARY_SPIRIT}");
+        let (ir, lowered) =
+            parse_two_layer(&text, "Synthetic ordinary Tap Spirit", &["Instant"], &[]);
+        assert_eq!(ir.source_text, text);
+        assert_eq!(ir.items.len(), 1, "continuation must be one root: {ir:#?}");
+        let body = format!(
+            "{}Tap target creature. {OUTER_ORDINARY_SPIRIT}",
+            if prefix.is_empty() {
+                ""
+            } else {
+                "Draw a card. "
+            }
+        );
+        assert_collected_source_contract(&ir, &text, &text, &body);
+        assert_outer_token_owner(&ir);
+        assert_outer_spirit_lowered(&lowered, 2);
+        let chain: Vec<_> =
+            std::iter::successors(Some(&lowered.abilities[0]), |d| d.sub_ability.as_deref())
+                .collect();
+        assert!(chain.iter().any(|d| matches!(
+            *d.effect,
+            Effect::SetTapState {
+                state: crate::types::ability::TapStateChange::Tap,
+                ..
+            }
+        )));
+        assert_eq!(
+            matches!(*chain[0].effect, Effect::Draw { .. }),
+            !prefix.is_empty()
+        );
+        assert_eq!(
+            lowered.abilities[0].description.as_deref(),
+            Some(text.as_str())
+        );
+    }
+}
+
+#[test]
+fn outer_collected_sources_keep_full_residuals() {
+    // SHAPE: raw audit coverage is independent of normalized head-item extent.
+    let broken = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.";
+    for (suffix, residual) in [
+        (
+            broken,
+            "Sacrifice the token at the beginning of the next end step",
+        ),
+        (
+            "Destroy target creature. Dance with the moon.",
+            "Dance with the moon",
+        ),
+    ] {
+        let raw = format!("Draw a card.\n{suffix}");
+        let body = format!("Draw a card. {suffix}");
+        let (ir, lowered) =
+            parse_two_layer(&raw, "Synthetic complete-source wrapper", &["Instant"], &[]);
+        assert_collected_source_contract(&ir, &raw, &raw, &body);
+        assert_complete_clause_fragment(&ir, residual);
+        assert_eq!(lowered.abilities.len(), 1);
+        assert!(matches!(*lowered.abilities[0].effect, Effect::Draw { .. }));
+        assert_eq!(
+            lowered.abilities[0].description.as_deref(),
+            Some(raw.as_str())
+        );
+        assert!(std::iter::successors(Some(&lowered.abilities[0]), |node| node.sub_ability.as_deref()).any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains(residual))));
+    }
+}
+
+#[test]
+fn ability_word_boundary_preserves_complete_circadian_source_and_audit() {
+    let circadian = "Vivid — Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    let raw = format!("Draw a card.\n{circadian}");
+    let (ir, lowered) = parse_two_layer(&raw, "Synthetic Circadian boundary", &["Instant"], &[]);
+    assert_eq!(ir.source_text, raw);
+    assert_eq!(
+        ir.items.len(),
+        2,
+        "ability word retains its independent owner"
+    );
+    assert_eq!(lowered.abilities.len(), 2);
+    assert!(matches!(*lowered.abilities[0].effect, Effect::Draw { .. }));
+    assert_eq!(
+        lowered.abilities[0].description.as_deref(),
+        Some("Draw a card.")
+    );
+    assert_eq!(lowered.abilities[1].description.as_deref(), Some(circadian));
+    assert!(!ability_has_unimplemented(&lowered.abilities[1]));
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::Seek {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::DistinctColorsAmong { .. }
+            },
+            ..
+        }
+    ));
+    let item = &ir.items[1];
+    assert_eq!(item.source.fragment(), Some(circadian));
+    assert_eq!(
+        (item.source.span().first_line, item.source.span().last_line),
+        (1, 1)
+    );
+    assert_eq!(
+        &raw[item.source.span().start_byte..item.source.span().end_byte],
+        circadian
+    );
+    let OracleNodeIr::Spell(body) = &item.node else {
+        panic!("{ir:#?}")
+    };
+    assert_eq!(body.source_text, OUTER_CIRCADIAN_BODY);
+    for expected in [OUTER_CIRCADIAN_SEEK, OUTER_CIRCADIAN_GRANT] {
+        assert!(body.body.clauses.iter().any(|clause| clause
+            .source
+            .fragment()
+            .is_some_and(|fragment| fragment.contains(expected))));
+    }
+    let units = super::feature::audit_units(&ir.items, &ir.source_text);
+    assert_eq!(units.len(), 2);
+    for (unit, expected) in units.iter().zip(["Draw a card.", circadian]) {
+        assert_eq!(unit.text, expected);
+        assert_eq!(&raw[unit.span.start_byte..unit.span.end_byte], expected);
+    }
+}
+
+#[test]
+fn white_suns_twilight_outer_and_token_owners() {
+    for prefix in ["", "Draw a card.\n"] {
+        let text = format!("{prefix}{OUTER_WHITE_SUN}");
+        let (ir, lowered) = parse_two_layer(&text, "White Sun's Twilight", &["Sorcery"], &[]);
+        assert_eq!(ir.source_text, text);
+        assert_eq!(ir.items.len(), 1, "continuation must be one root: {ir:#?}");
+        let normalized = format!("{prefix}{OUTER_WHITE_NORMALIZED}");
+        let body = format!(
+            "{}{OUTER_WHITE_SEMANTIC}",
+            if prefix.is_empty() {
+                ""
+            } else {
+                "Draw a card. "
+            }
+        );
+        assert_collected_source_contract(&ir, &text, &normalized, &body);
+        assert_complete_clause_fragment(&ir, "Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\"");
+        assert_complete_clause_fragment(&ir, "If X is 5 or more, destroy all other creatures");
+        assert_eq!(lowered.abilities.len(), 1);
+        assert!(lowered.statics.is_empty());
+        assert!(lowered.parse_warnings.is_empty());
+        assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+        assert_eq!(
+            lowered.abilities[0].description.as_deref(),
+            Some(format!("{prefix}{OUTER_WHITE_SEMANTIC}").as_str())
+        );
+        let chain: Vec<_> =
+            std::iter::successors(Some(&lowered.abilities[0]), |d| d.sub_ability.as_deref())
+                .collect();
+        assert_eq!(
+            matches!(*chain[0].effect, Effect::Draw { .. }),
+            !prefix.is_empty()
+        );
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        };
+        assert!(chain
+            .iter()
+            .any(|d| matches!(d.effect.as_ref(), Effect::GainLife { amount, .. } if amount == &x)));
+        let token = chain
+            .iter()
+            .find(|d| matches!(*d.effect, Effect::Token { .. }))
+            .expect("Mites");
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            colors,
+            types,
+            keywords,
+            static_abilities,
+            ..
+        } = token.effect.as_ref()
+        else {
+            unreachable!()
+        };
+        // CR 111.3 + CR 702.164 + CR 509.1b: characteristics/restrictions belong to tokens.
+        assert_eq!(power, &crate::types::ability::PtValue::Fixed(1));
+        assert_eq!(toughness, &crate::types::ability::PtValue::Fixed(1));
+        assert_eq!(count, &x);
+        assert!(colors.is_empty());
+        for ty in ["Phyrexian", "Mite", "Artifact", "Creature"] {
+            assert!(types.iter().any(|s| s.eq_ignore_ascii_case(ty)));
+        }
+        assert!(keywords.contains(&crate::types::keywords::Keyword::Toxic(1)));
+        assert!(static_abilities
+            .iter()
+            .any(|s| s.mode == crate::types::statics::StaticMode::CantBlock
+                && s.affected == TargetFilter::SelfRef));
+        let destroy = chain
+            .iter()
+            .find(|d| matches!(*d.effect, Effect::DestroyAll { .. }))
+            .expect("X-gated wipe");
+        assert_eq!(
+            destroy.condition,
+            Some(crate::types::ability::AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            })
+        );
+        assert!(
+            matches!(destroy.effect.as_ref(), Effect::DestroyAll { target, .. } if crate::game::filter::filter_contains_filter_prop(target, &|prop| *prop == FilterProp::Another))
+        );
+    }
+}
+
+#[test]
+fn jev_target_defined_token() {
+    // Synthetic independent duration consumer; full Broken Visage also needs delayed cleanup.
+    let (ir, lowered) = parse_two_layer("Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Target creature gets +1/+1 until end of turn.", "Synthetic target-defined Spirit", &["Instant"], &[]);
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    insta::assert_json_snapshot!("jev_target_defined_token_ir", &ir);
+    insta::assert_json_snapshot!("jev_target_defined_token_lowered", &lowered);
+}
+
+#[test]
+fn repeated_population_full_card_ir() {
+    let (ir, lowered) = parse_two_layer("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.\nCounter target noncreature spell.", "Machinist's Dismissal", &["Instant"], &[]);
+    assert_eq!(lowered.statics.len(), 1);
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(lowered.parse_warnings.is_empty());
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    insta::assert_json_snapshot!("repeated_population_dismissal_ir", &ir);
+    insta::assert_json_snapshot!("repeated_population_dismissal_lowered", &lowered);
+    let (ir, lowered) = parse_two_layer_with_keywords("This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard.\nLifelink", "Gargantuan Leech", &["Lifelink"], &["Creature"], &["Leech"]);
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered
+        .extracted_keywords
+        .contains(&crate::types::keywords::Keyword::Lifelink));
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("repeated_population_leech_ir", &ir);
+    insta::assert_json_snapshot!("repeated_population_leech_lowered", &lowered);
+}
+
+#[test]
+fn coordinated_population_candlekeep() {
+    let (ir, lowered) = parse_two_layer(
+        "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.",
+        "Candlekeep Inspiration", &["Sorcery"], &[],
+    );
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    assert!(
+        matches!(lowered.abilities[0].effect.as_ref(), Effect::GenericEffect { static_abilities, .. } if static_abilities.iter().any(|s| s.modifications.len() == 2))
+    );
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("coordinated_population_candlekeep_ir", &ir);
+    insta::assert_json_snapshot!("coordinated_population_candlekeep_lowered", &lowered);
+}
+
+#[test]
+fn coordinated_population_full_card_ir() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)",
+        "Sailors' Bane", &["Ward"], &["Creature"], &["Dragon", "Turtle"],
+    );
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered.parse_warnings.is_empty());
+    assert!(lowered
+        .abilities
+        .iter()
+        .all(|a| !ability_has_unimplemented(a)));
+    assert!(lowered.extracted_keywords.iter().any(|k| matches!(k,
+        crate::types::keywords::Keyword::Ward(crate::types::keywords::WardCost::Mana(cost)) if cost == &ManaCost::generic(4))));
+    insta::assert_json_snapshot!("coordinated_population_sailors_ir", &ir);
+    insta::assert_json_snapshot!("coordinated_population_sailors_lowered", &lowered);
+}
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
     matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
@@ -3354,4 +4154,104 @@ fn krumar_initiate_preserves_full_activation_in_both_layers() {
     assert!(lowered.parse_warnings.is_empty());
     insta::assert_json_snapshot!("krumar_initiate_ir", &ir);
     insta::assert_json_snapshot!("krumar_initiate_lowered", &lowered);
+}
+
+#[test]
+fn locket_name_population() {
+    let (ir, lowered) = parse_two_layer("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.", "Locket of Yesterdays", &["Artifact"], &[]);
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered.abilities.is_empty());
+    assert!(lowered.parse_warnings.is_empty());
+    insta::assert_json_snapshot!("locket_name_population_ir", &ir);
+    insta::assert_json_snapshot!("locket_name_population_lowered", &lowered);
+}
+
+#[test]
+fn craterous_prior_controller_source_and_lowered() {
+    // SHAPE: snapshot bytes are materialized only at the combined boundary.
+    let text = "Craterous Stomp deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+    let (ir, lowered) =
+        parse_two_layer(text, "Craterous Stomp", &["Kindred", "Instant"], &["Giant"]);
+    assert_eq!(ir.source_text, text);
+    assert_eq!(ir.items.len(), 1);
+    let OracleNodeIr::Spell(spell) = &ir.items[0].node else {
+        panic!("outer instruction")
+    };
+    assert_eq!(spell.body.clauses.len(), 2);
+    let population = &spell.body.clauses[1];
+    assert_eq!(
+        population.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    assert!(population
+        .source
+        .fragment()
+        .unwrap()
+        .contains("Each other creature"));
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(lowered.parse_warnings.is_empty());
+    assert!(!ability_has_unimplemented(&lowered.abilities[0]));
+    let decoded: crate::parser::oracle::ParsedAbilities =
+        serde_json::from_value(serde_json::to_value(&lowered).unwrap()).unwrap();
+    assert_eq!(
+        decoded.abilities[0]
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    insta::assert_json_snapshot!("craterous_prior_controller_ir", &ir);
+    insta::assert_json_snapshot!("craterous_prior_controller_lowered", &lowered);
+}
+
+#[test]
+fn jev_mandatory_counter_adjustment_two_layers() {
+    // SHAPE. Snapshot materialization is reserved for the combined candidate.
+    let parent="Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it.";
+    let full="Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
+    let (parent_ir, parent_lowered) =
+        parse_two_layer(parent, "Immard, the Stormcleaver", &["Creature"], &[]);
+    assert_eq!(parent_ir.source_text, parent);
+    assert!(!parent_lowered.triggers.is_empty());
+    assert!(parent_lowered.triggers.iter().all(|t| matches!(
+        t.execute.as_ref().unwrap().effect.as_ref(),
+        Effect::ChooseCounterAdjustment { .. }
+    )));
+    let (full_ir, full_lowered) =
+        parse_two_layer(full, "Immard, the Stormcleaver", &["Creature"], &[]);
+    assert_eq!(full_ir.source_text, full);
+    assert!(
+        !full_lowered.triggers.is_empty(),
+        "modal block must reach trigger route"
+    );
+    for trigger in &full_lowered.triggers {
+        let parent = trigger.execute.as_deref().unwrap();
+        assert!(matches!(
+            parent.effect.as_ref(),
+            Effect::ChooseCounterAdjustment { .. }
+        ));
+        let child = parent
+            .sub_ability
+            .as_deref()
+            .expect("independent reflexive modal");
+        assert!(child.condition.as_ref().unwrap().has_when_you_do_marker());
+        let (result, counters) = child
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .unwrap();
+        assert_eq!(Some(result), parent.declares_return_result);
+        assert_eq!(counters, &crate::types::counter::CounterMatch::Any);
+        assert_eq!(child.mode_abilities.len(), 2);
+    }
+    insta::assert_json_snapshot!(
+        "jev_mandatory_counter_adjustment_ir",
+        (&parent_ir, &full_ir)
+    );
+    insta::assert_json_snapshot!(
+        "jev_mandatory_counter_adjustment_lowered",
+        (&parent_lowered, &full_lowered)
+    );
 }

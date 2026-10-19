@@ -119,6 +119,7 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }

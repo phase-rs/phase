@@ -4512,14 +4512,142 @@ pub struct CounterGrowth {
     pub per_cycle_delta: u32,
 }
 
+/// One replacement-visible batch belonging to a particular creation instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCreationBatch {
+    pub owner: PlayerId,
+    pub spec: Box<crate::types::proposed_event::TokenSpec>,
+    pub copy: Option<Box<CopyTokenSpec>>,
+    pub instructions: crate::types::proposed_event::TokenCreationInstructions,
+    pub enter_tapped: EtbTapState,
+    pub count: u32,
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub applied: HashSet<AppliedReplacementKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationWork {
+    Proposed(TokenCreationBatch),
+    Approved(TokenCreationBatch),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationPending {
+    Replacement,
+    Entry,
+    Substitution,
+    Caller,
+    CallerSelection,
+}
+
+/// Serializable post-creation work. Each segment consumes only its own suffix of
+/// the operation's birth-pinned result before the next subject can start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationCallerState {
+    #[default]
+    Plain,
+    Blocking {
+        current: ObjectIncarnationRef,
+        remaining: VecDeque<ObjectIncarnationRef>,
+        owner: TargetFilter,
+    },
+    Encore {
+        current: PlayerId,
+        remaining: VecDeque<PlayerId>,
+    },
+    Myriad {
+        current: PlayerId,
+        remaining: VecDeque<PlayerId>,
+        defender: PlayerId,
+    },
+    Populate {
+        eligible: Vec<ObjectId>,
+    },
+    Investigate {
+        player: PlayerId,
+    },
+    Amass {
+        controller: PlayerId,
+        subtype: String,
+        count: u32,
+    },
+    EmpowerJace {
+        controller: PlayerId,
+        count: u32,
+    },
+    Debug {
+        run_etb: bool,
+        preset: Option<crate::types::card::TokenImageRef>,
+        body: Option<Box<crate::types::proposed_event::TokenCharacteristics>>,
+    },
+    EachPlayerCopyChosen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenCreationCopyStatus {
+    Pending(crate::types::identifiers::TokenCreationFrameId),
+    Completed(crate::types::ability::ForwardedResultContext),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenCreationProgress {
+    Completed(crate::types::ability::ForwardedResultContext),
+    Pending(crate::types::identifiers::TokenCreationFrameId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCopyTokenResolution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_id: Option<crate::types::identifiers::TokenCreationFrameId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_parent: Option<crate::types::identifiers::TokenCreationFrameId>,
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub work: VecDeque<TokenCreationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<TokenCreationPending>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_queue_tail: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_incarnations: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<Box<ResolvedAbility>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Box<PendingContinuation>>,
+    #[serde(default)]
+    pub caller: TokenCreationCallerState,
+    #[serde(default)]
+    pub segment_start: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created_ids: Vec<ObjectId>,
     #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+}
+
+impl PendingCopyTokenResolution {
+    pub(crate) fn legacy(
+        remaining: VecDeque<PendingCopyTokenBatch>,
+        effect_kind: EffectKind,
+        source_id: ObjectId,
+    ) -> Self {
+        Self {
+            creation_id: None,
+            result_parent: None,
+            work: VecDeque::new(),
+            pending: None,
+            replacement_queue_tail: None,
+            created_incarnations: Vec::new(),
+            creator: None,
+            continuation: None,
+            caller: TokenCreationCallerState::Plain,
+            segment_start: 0,
+            created_ids: Vec::new(),
+            remaining,
+            effect_kind,
+            source_id,
+        }
+    }
 }
 
 /// Private, face-complete source for a debug-created card that has not yet
@@ -4604,6 +4732,8 @@ pub struct CopyChosenSelection {
 /// continue the already-collected action walk after this player's step completes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEachPlayerCopyChosen {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_status: Option<TokenCreationCopyStatus>,
     pub stage: CopyChosenStage,
     pub player: PlayerId,
     /// `[0]` copied, `[1]` (optional) scales the copy.
@@ -6035,6 +6165,8 @@ pub struct PendingCounterRemovalInFlight {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_binding: Option<CounterRemovalResultBinding>,
     /// Remaining per-object counter removals.
     pub remaining: Vec<PendingCounterRemoval>,
     /// Effect kind for the terminating `EffectResolved` event.
@@ -6054,6 +6186,8 @@ pub struct PendingCounterRemovalQueue {
 
 #[derive(Deserialize)]
 struct PendingCounterRemovalQueueWire {
+    #[serde(default)]
+    result_binding: Option<CounterRemovalResultBinding>,
     remaining: Vec<PendingCounterRemovalWire>,
     #[serde(default)]
     source_id: Option<ObjectId>,
@@ -6098,6 +6232,7 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             remaining,
+            result_binding: wire.result_binding,
             effect_kind: wire.effect_kind,
             source_ability_id: wire.source_ability_id,
             total: wire.total,
@@ -6225,6 +6360,9 @@ pub enum PendingBatchZoneChangeCause {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBatchZoneMoveRequest {
     pub object_id: ObjectId,
+    /// CR 400.7: the original instruction's exact member and origin.
+    #[serde(deserialize_with = "deserialize_expected_origin")]
+    pub expected_origin: Option<(ObjectIncarnationRef, Zone)>,
     pub destination: Zone,
     pub cause: PendingBatchZoneChangeCause,
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
@@ -6267,6 +6405,216 @@ pub struct PendingBatchZoneMoveRequest {
         skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
     )]
     pub face_down_in_exile: crate::types::ability::ExileConcealment,
+}
+
+fn deserialize_expected_origin<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<(ObjectIncarnationRef, Zone)>, D::Error> {
+    Option::<(InstructionMemberWire, Zone)>::deserialize(deserializer)
+        .map(|origin| origin.map(|(pin, zone)| (pin.into(), zone)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionMemberWire {
+    object_id: ObjectId,
+    incarnation: u64,
+}
+
+impl From<InstructionMemberWire> for ObjectIncarnationRef {
+    fn from(pin: InstructionMemberWire) -> Self {
+        Self::of(pin.object_id, pin.incarnation)
+    }
+}
+
+/// CR 608.2c: result kind belongs to the instruction, including an empty result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InstructionResult {
+    ZoneChanges(Vec<ZoneChangeRecord>),
+    RevealedCards(RevealedInstructionResult),
+    CounterRemovals(CounterRemovalInstructionResult),
+}
+
+/// CR 608.2c + CR 400.7: an instruction-local execution capability. A choice,
+/// queue, and proposed removal transport the same key; none discovers a result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterRemovalResultBinding {
+    pub occurrence: ReturnResultOccurrenceId,
+    pub result: ReturnResultId,
+    #[serde(deserialize_with = "deserialize_counter_source")]
+    pub source: ObjectIdentityBinding,
+    #[serde(deserialize_with = "deserialize_counter_recipient")]
+    pub recipient: Option<ObjectIncarnationRef>,
+    pub counters: crate::types::counter::CounterMatch,
+}
+
+/// CR 122.1: one actual, strictly positive, accepted removal. Repeated
+/// deliveries of the same (incarnation, kind) add to this record's count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterRemovalRecord {
+    #[serde(deserialize_with = "deserialize_counter_member")]
+    pub object: ObjectIncarnationRef,
+    pub counter_type: CounterType,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "CounterRemovalInstructionResultWire")]
+pub struct CounterRemovalInstructionResult {
+    pub source: ObjectIdentityBinding,
+    pub recipient: Option<ObjectIncarnationRef>,
+    pub counters: crate::types::counter::CounterMatch,
+    pub counter_removals: Vec<CounterRemovalRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CounterRemovalInstructionResultWire {
+    #[serde(deserialize_with = "deserialize_counter_source")]
+    source: ObjectIdentityBinding,
+    #[serde(deserialize_with = "deserialize_counter_recipient")]
+    recipient: Option<ObjectIncarnationRef>,
+    counters: crate::types::counter::CounterMatch,
+    counter_removals: Vec<CounterRemovalRecord>,
+}
+
+fn deserialize_counter_member<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ObjectIncarnationRef, D::Error> {
+    InstructionMemberWire::deserialize(deserializer).map(Into::into)
+}
+
+fn deserialize_counter_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ObjectIdentityBinding, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SourceWire {
+        reference: InstructionMemberWire,
+        expected_zone: Zone,
+    }
+    let source = SourceWire::deserialize(deserializer)?;
+    Ok(ObjectIdentityBinding::new(
+        source.reference.into(),
+        source.expected_zone,
+    ))
+}
+
+fn deserialize_counter_recipient<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ObjectIncarnationRef>, D::Error> {
+    Option::<InstructionMemberWire>::deserialize(deserializer).map(|pin| pin.map(Into::into))
+}
+
+impl TryFrom<CounterRemovalInstructionResultWire> for CounterRemovalInstructionResult {
+    type Error = String;
+    fn try_from(wire: CounterRemovalInstructionResultWire) -> Result<Self, Self::Error> {
+        let mut seen = HashSet::new();
+        if wire.counter_removals.iter().any(|record| {
+            record.count == 0
+                || Some(record.object) != wire.recipient
+                || !wire.counters.matches(&record.counter_type)
+                || !seen.insert((record.object, record.counter_type.clone()))
+        }) {
+            return Err("incoherent counter-removal records".into());
+        }
+        Ok(Self {
+            source: wire.source,
+            recipient: wire.recipient,
+            counters: wire.counters,
+            counter_removals: wire.counter_removals,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevealedInstructionResult {
+    #[serde(deserialize_with = "deserialize_revealed_members")]
+    pub revealed_cards: Vec<ObjectIncarnationRef>,
+}
+
+fn deserialize_revealed_members<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ObjectIncarnationRef>, D::Error> {
+    let members: Vec<ObjectIncarnationRef> =
+        Vec::<InstructionMemberWire>::deserialize(deserializer)?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+    let mut seen = HashSet::new();
+    if members.iter().any(|pin| !seen.insert(pin.object_id)) {
+        return Err(serde::de::Error::custom(
+            "duplicate revealed instruction member",
+        ));
+    }
+    Ok(members)
+}
+
+impl InstructionResult {
+    pub fn zone_changes(&self) -> Option<&[ZoneChangeRecord]> {
+        match self {
+            Self::ZoneChanges(records) => Some(records),
+            Self::RevealedCards(_) | Self::CounterRemovals(_) => None,
+        }
+    }
+    pub fn zone_changes_mut(&mut self) -> Option<&mut Vec<ZoneChangeRecord>> {
+        match self {
+            Self::ZoneChanges(records) => Some(records),
+            Self::RevealedCards(_) | Self::CounterRemovals(_) => None,
+        }
+    }
+    pub fn revealed_cards(&self) -> Option<&[ObjectIncarnationRef]> {
+        match self {
+            Self::RevealedCards(result) => Some(&result.revealed_cards),
+            Self::ZoneChanges(_) | Self::CounterRemovals(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod revealed_result_codec_tests {
+    use super::*;
+    #[test]
+    fn instruction_result_preserves_kind_and_required_origin_presence() {
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!({"revealed_cards": []}),
+        ] {
+            let result: InstructionResult = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&result).unwrap(), value);
+            assert_ne!(
+                result.zone_changes().is_some(),
+                result.revealed_cards().is_some()
+            );
+        }
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"revealed_cards": [], "records": []}),
+            serde_json::json!({"revealed_cards": [null]}),
+            serde_json::json!({"revealed_cards": [1]}),
+            serde_json::json!({"revealed_cards": [{"object_id": 1,"incarnation": 3}, {"object_id": 1,"incarnation": 3}]}),
+        ] {
+            assert!(serde_json::from_value::<InstructionResult>(bad).is_err());
+        }
+        let ordinary = serde_json::json!({"object_id": 1, "destination": "Battlefield", "cause": {"Effect": {"source": 9}}, "expected_origin": null});
+        let request: PendingBatchZoneMoveRequest =
+            serde_json::from_value(ordinary.clone()).unwrap();
+        assert_eq!(request.expected_origin, None);
+        assert!(serde_json::to_value(&request)
+            .unwrap()
+            .get("expected_origin")
+            .is_some());
+        let mut missing = ordinary;
+        missing.as_object_mut().unwrap().remove("expected_origin");
+        assert!(
+            serde_json::from_value::<PendingBatchZoneMoveRequest>(missing).is_err(),
+            "Option alone does not enforce this key"
+        );
+    }
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -7148,6 +7496,8 @@ pub enum TokenEntryEventEmission {
 /// is the whole point of postponing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingTokenBattlefieldEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     pub object_id: ObjectId,
     /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
     pub name: String,
@@ -7164,6 +7514,8 @@ pub struct PendingTokenBattlefieldEntry {
 /// resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTokenEntryTail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     pub owner: PlayerId,
     pub copy: Box<CopyTokenSpec>,
     pub enter_tapped: EtbTapState,
@@ -7197,6 +7549,8 @@ pub enum PendingCounterPostAction {
         ability: Box<ResolvedAbility>,
     },
     FinalizeAmass {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         subtype: String,
         ability: Box<ResolvedAbility>,
@@ -7213,6 +7567,8 @@ pub enum PendingCounterPostAction {
         object_id: ObjectId,
     },
     FinalizeTokenEntry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         attach_to: Option<AttachTarget>,
@@ -7221,12 +7577,18 @@ pub enum PendingCounterPostAction {
         controller: PlayerId,
     },
     ContinueTokenCreation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
         owner: PlayerId,
         spec: Box<TokenSpec>,
         enter_tapped: EtbTapState,
         remaining_count: u32,
     },
     FinalizeCopyTokenEntry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         enters_attacking: bool,
@@ -7234,6 +7596,8 @@ pub enum PendingCounterPostAction {
         controller: PlayerId,
     },
     ContinueCopyTokenCreation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
@@ -7241,6 +7605,8 @@ pub enum PendingCounterPostAction {
         remaining_count: u32,
     },
     ApplyCopyTokenModificationsAndFinalize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         enters_attacking: bool,
@@ -7262,6 +7628,8 @@ pub enum PendingCounterPostAction {
         tail: Box<CopyTokenEntryTail>,
     },
     FinalizeCommittedLiminalTokenEntry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
         source_id: ObjectId,
@@ -7274,6 +7642,8 @@ pub enum PendingCounterPostAction {
         entry_events: TokenEntryEventEmission,
     },
     ContinueLiminalCopyTokenBatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
@@ -12227,6 +12597,10 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
     ability.declares_return_result.is_some()
         || ability.reads_return_result.is_some()
         || ability
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.references_counter_result(None))
+        || ability
             .sub_ability
             .as_deref()
             .is_some_and(has_return_result_metadata)
@@ -12238,9 +12612,13 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
 
 pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: ReturnResultId) -> bool {
     ability
-        .reads_return_result
+        .condition
         .as_ref()
-        .is_some_and(|(id, _)| *id == result_id)
+        .is_some_and(|condition| condition.references_counter_result(Some(result_id)))
+        || ability
+            .reads_return_result
+            .as_ref()
+            .is_some_and(|(id, _)| *id == result_id)
         || ability
             .sub_ability
             .as_deref()
@@ -12256,6 +12634,24 @@ pub(crate) fn live_return_result_occurrences(
 ) -> HashSet<ReturnResultOccurrenceId> {
     let mut live = HashSet::new();
     live.extend(state.active_return_result_occurrence);
+    if let WaitingFor::ChooseOneOfBranch { context, .. } = &state.waiting_for {
+        live.extend(
+            context
+                .counter_removal_result
+                .as_ref()
+                .map(|binding| binding.occurrence),
+        );
+    }
+    if let Some(ProposedEvent::RemoveCounter {
+        result_binding: Some(binding),
+        ..
+    }) = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| &pending.proposed)
+    {
+        live.insert(binding.occurrence);
+    }
     for frame in state.resolution_stack.iter() {
         match frame {
             ResolutionFrame::OptionalEffect(optional) => {
@@ -12285,16 +12681,31 @@ pub(crate) fn live_return_result_occurrences(
                     live.insert(*occurrence_id);
                 }
             }
+            ResolutionFrame::CounterRemovals(queue) => {
+                live.extend(
+                    queue
+                        .result_binding
+                        .as_ref()
+                        .map(|binding| binding.occurrence),
+                );
+            }
+            ResolutionFrame::ChooseOneOf(pending) => {
+                live.extend(
+                    pending
+                        .context
+                        .counter_removal_result
+                        .as_ref()
+                        .map(|binding| binding.occurrence),
+                );
+            }
             ResolutionFrame::RepeatFor(_)
             | ResolutionFrame::RepeatUntil(_)
             | ResolutionFrame::RepeatedOptionalPayment(_)
             | ResolutionFrame::CounterMoves(_)
-            | ResolutionFrame::CounterRemovals(_)
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
-            | ResolutionFrame::ChooseOneOf(_)
             | ResolutionFrame::VoteBallot(_)
             | ResolutionFrame::PerPlayerZoneChoice(_)
             | ResolutionFrame::PerCategoryZoneChoice(_)
@@ -12322,6 +12733,210 @@ pub(crate) fn live_return_result_occurrences(
 }
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
+    let counter_reader_waits_for = |source_id: ObjectId| {
+        state
+            .resolution_stack
+            .ability_continuations()
+            .any(|pending| {
+                pending.chain.source_id == source_id
+                    && pending
+                        .chain
+                        .condition
+                        .as_ref()
+                        .and_then(super::ability::AbilityCondition::counter_removal_event)
+                        .is_some()
+            })
+    };
+    let validate_binding = |binding: &CounterRemovalResultBinding| -> Result<(), String> {
+        if binding.occurrence.0 == 0
+            || !crate::game::effects::counter_removal_binding_is_valid(state, binding)
+        {
+            return Err("counter-removal result binding is missing or incoherent".into());
+        }
+        if state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some_and(|owner| {
+                owner.source_id != binding.source.reference.object_id
+                    || owner
+                        .trigger_source
+                        .as_ref()
+                        .is_some_and(|source| source.identity != binding.source)
+                    || owner
+                        .source_ref(state)
+                        .is_some_and(|pin| pin != binding.source.reference)
+            })
+        {
+            return Err("counter-removal ticket disagrees with its resolving owner".into());
+        }
+        if !state
+            .resolution_stack
+            .ability_continuations()
+            .any(|pending| {
+                pending.return_result_occurrence == Some(binding.occurrence)
+                    && reads_return_result_id(&pending.chain, binding.result)
+            })
+        {
+            return Err("counter-removal ticket has no exact owned reader continuation".into());
+        }
+        Ok(())
+    };
+    if let Some(pending) = &state.pending_replacement {
+        if !crate::game::replacement::damage_source_context_coherent(
+            state,
+            &pending.proposed,
+            pending.damage_source_context.as_ref(),
+        ) {
+            return Err("pending damage source authority is missing or incoherent".into());
+        }
+        if let ProposedEvent::RemoveCounter {
+            result_binding: Some(binding),
+            object_id,
+            counter_type,
+            ..
+        } = &pending.proposed
+        {
+            validate_binding(binding)?;
+            if !binding
+                .recipient
+                .is_some_and(|pin| pin.object_id == *object_id)
+                || !binding.counters.matches(counter_type)
+            {
+                return Err("pending counter removal disagrees with its bound producer".into());
+            }
+        }
+        if let ProposedEvent::RemoveCounter { result_binding, .. } = &pending.proposed {
+            if result_binding.is_none()
+                && state.resolution_stack.iter().any(|frame| {
+                    matches!(frame, ResolutionFrame::CounterRemovals(queue) if queue.result_binding.is_some())
+                })
+            {
+                return Err("current bound counter proposal is missing its result ticket".into());
+            }
+            if let Some(queue) = state.active_counter_removals() {
+                if queue.in_flight.is_some() && &queue.result_binding != result_binding {
+                    return Err("counter proposal disagrees with its owning queue ticket".into());
+                }
+            }
+        }
+    }
+    if let WaitingFor::ChooseOneOfBranch {
+        context,
+        continuation,
+        source_id,
+        parent_occurrences,
+        ..
+    } = &state.waiting_for
+    {
+        if let Some(binding) = &context.counter_removal_result {
+            validate_binding(binding)?;
+            if binding.source.reference.object_id != *source_id
+                || !matches!(parent_occurrences.occurrences().as_slice(), [(TargetRef::Object(id), Some(pin))]
+                    if Some(*pin) == binding.recipient && *id == pin.object_id)
+            {
+                return Err("counter branch recipient/source disagrees with result".into());
+            }
+        } else if counter_reader_waits_for(*source_id)
+            || continuation.as_deref().is_some_and(|ability| {
+                ability
+                    .condition
+                    .as_ref()
+                    .and_then(super::ability::AbilityCondition::counter_removal_event)
+                    .is_some()
+            })
+        {
+            return Err("counter branch is missing producer authority".into());
+        }
+    }
+    for frame in state.resolution_stack.iter() {
+        match frame {
+            ResolutionFrame::CounterRemovals(queue) => {
+                if let Some(binding) = &queue.result_binding {
+                    validate_binding(binding)?;
+                } else if counter_reader_waits_for(queue.source_ability_id) {
+                    // The owned reader requires its producer's authority even
+                    // when both optional transport copies were omitted.
+                    return Err("counter-removal queue is missing producer authority".into());
+                }
+            }
+            ResolutionFrame::ChooseOneOf(pending) => {
+                if let Some(binding) = &pending.context.counter_removal_result {
+                    validate_binding(binding)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    fn validate_reveal_readers(
+        state: &GameState,
+        root: &ResolvedAbility,
+        occurrence: Option<ReturnResultOccurrenceId>,
+        mut future: HashSet<ReturnResultId>,
+    ) -> Result<(), String> {
+        if let Some(id) = root.declares_return_result {
+            future.insert(id);
+        }
+        if let Some((result, counters)) = root
+            .condition
+            .as_ref()
+            .and_then(super::ability::AbilityCondition::counter_removal_event)
+        {
+            if !future.contains(&result) {
+                crate::game::effects::counter_reflexive_occurrences_for_occurrence(
+                    state, root, result, counters, occurrence,
+                )
+                .map_err(|error| format!("invalid counter event reader: {error:?}"))?;
+            }
+        }
+        if crate::game::effects::is_named_revealed_reader(root)
+            && root
+                .reads_return_result
+                .as_ref()
+                .is_some_and(|(id, _)| !future.contains(id))
+        {
+            crate::game::effects::named_revealed_members_for_occurrence(state, root, occurrence)
+                .map_err(|error| format!("invalid live reveal reader: {error:?}"))?;
+        }
+        if let Some(sub) = &root.sub_ability {
+            validate_reveal_readers(state, sub, occurrence, future.clone())?;
+        }
+        if let Some(other) = &root.else_ability {
+            validate_reveal_readers(state, other, occurrence, future)?;
+        }
+        Ok(())
+    }
+    let revealed_authority = state
+        .return_result_frames
+        .values()
+        .flat_map(|frame| frame.values())
+        .any(|result| result.revealed_cards().is_some());
+    for frame in state.resolution_stack.iter() {
+        if let ResolutionFrame::BatchDelivery(batch) = frame {
+            let exact = revealed_authority
+                || batch
+                    .requests
+                    .iter()
+                    .any(|request| request.expected_origin.is_some());
+            if exact
+                && (batch.remaining.len() != batch.requests.len()
+                    || batch
+                        .remaining
+                        .iter()
+                        .zip(&batch.requests)
+                        .any(|(id, request)| *id != request.object_id))
+            {
+                return Err("revealed-result batch is missing exact queued requests".into());
+            }
+            for request in &batch.requests {
+                if request.expected_origin.is_some_and(|(pin, zone)| {
+                    pin.object_id != request.object_id || zone != Zone::Library
+                }) {
+                    return Err("revealed-result queued request has incompatible origin".into());
+                }
+            }
+        }
+    }
     if state.next_return_result_occurrence_id == 0 {
         return Err("return-result occurrence allocator is zero".to_string());
     }
@@ -12355,7 +12970,12 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         None if has_return_result_metadata(&frame.ability) => {
             Err("return-result optional effect has no occurrence stamp".to_string())
         }
-        _ => Ok(()),
+        _ => validate_reveal_readers(
+            state,
+            &frame.ability,
+            frame.return_result_occurrence,
+            HashSet::new(),
+        ),
     };
 
     let mut parked_publishers = HashSet::new();
@@ -12387,6 +13007,12 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             ResolutionFrame::OptionalEffect(optional) => validate_optional_frame(optional)?,
             ResolutionFrame::AbilityContinuation(frame) => {
                 let pending = &frame.pending;
+                validate_reveal_readers(
+                    state,
+                    &pending.chain,
+                    pending.return_result_occurrence,
+                    HashSet::new(),
+                )?;
                 match pending.return_result_occurrence {
                     Some(id) if !frame_exists(id) => {
                         return Err(format!(
@@ -20929,6 +21555,10 @@ impl<'de> Deserialize<'de> for LiminalEntrant {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
     pub object: LiminalEntrant,
     pub name: String,
     pub source_id: ObjectId,
@@ -21939,7 +22569,7 @@ declare_game_state! {
     /// CR 608.2c: Isolated instruction-result records for every live resolving root.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub return_result_frames:
-        BTreeMap<ReturnResultOccurrenceId, BTreeMap<ReturnResultId, Vec<ZoneChangeRecord>>>,
+        BTreeMap<ReturnResultOccurrenceId, BTreeMap<ReturnResultId, InstructionResult>>,
     /// The synchronous execution context; parked continuations carry their own stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_return_result_occurrence: Option<ReturnResultOccurrenceId>,
@@ -24321,6 +24951,114 @@ fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> 
     visit(value, &receipts)
 }
 
+pub(crate) fn validate_token_creation_authorities(state: &GameState) -> Result<(), String> {
+    let check = |id: Option<crate::types::identifiers::TokenCreationFrameId>| {
+        if let Some(id) = id {
+            if state.resolution_stack.token_creation(id).is_none() {
+                return Err(format!("token entry names unknown creation {}", id.0));
+            }
+        }
+        Ok(())
+    };
+    if let Some(pending) = &state.pending_replacement {
+        if let ProposedEvent::CreateToken {
+            creation_frame,
+            instructions,
+            ..
+        } = &pending.proposed
+        {
+            if creation_frame.is_some() != instructions.is_some() {
+                return Err("creation event has partial instruction authority".into());
+            }
+            check(*creation_frame)?;
+        }
+    }
+    for entry in state.liminal_entries.values() {
+        if entry.creation_frame.is_some() != entry.instructions.is_some() {
+            return Err("liminal token has partial creation authority".into());
+        }
+        check(entry.creation_frame)?;
+    }
+    if let Some(entry) = &state.pending_token_battlefield_entry {
+        check(entry.creation_frame)?;
+    }
+    fn check_installed(ability: &ResolvedAbility) -> Result<(), String> {
+        if ability.context.token_creation_parent.is_some() {
+            return Err("installed delayed payload retains a live creation affiliation".into());
+        }
+        if let Some(child) = &ability.sub_ability {
+            check_installed(child)?;
+        }
+        if let Some(child) = &ability.else_ability {
+            check_installed(child)?;
+        }
+        Ok(())
+    }
+    for delayed in &state.delayed_triggers {
+        check_installed(&delayed.ability)?;
+    }
+    for frame in state.resolution_stack.iter() {
+        if let crate::types::resolution::ResolutionFrame::CounterAdditions(pending) = frame {
+            for action in pending
+                .completion
+                .iter()
+                .flat_map(|completion| &completion.post_actions)
+            {
+                let id = match action {
+                    PendingCounterPostAction::FinalizeTokenEntry { creation_frame, .. }
+                    | PendingCounterPostAction::FinalizeAmass { creation_frame, .. }
+                    | PendingCounterPostAction::FinalizeCopyTokenEntry { creation_frame, .. }
+                    | PendingCounterPostAction::ContinueCopyTokenCreation {
+                        creation_frame, ..
+                    }
+                    | PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        creation_frame,
+                        ..
+                    }
+                    | PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                        creation_frame,
+                        ..
+                    }
+                    | PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+                        creation_frame,
+                        ..
+                    } => *creation_frame,
+                    PendingCounterPostAction::ContinueTokenCreation {
+                        creation_frame,
+                        instructions,
+                        ..
+                    } => {
+                        if creation_frame.is_some() != instructions.is_some() {
+                            return Err(
+                                "counter continuation has partial creation authority".into()
+                            );
+                        }
+                        *creation_frame
+                    }
+                    PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost {
+                        tail, ..
+                    } => tail.creation_frame,
+                    _ => None,
+                };
+                check(id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn freeze_stored_created_token_referents(state: &mut GameState) {
+    for delayed in &mut state.delayed_triggers {
+        // CR 603.7c: legacy installation already selected its targets. Never
+        // consult today's LastCreated or re-pin an object at a later epoch.
+        let result = crate::types::ability::ForwardedResultContext {
+            targets: delayed.ability.targets.clone(),
+            object_incarnations: delayed.ability.target_incarnations.clone(),
+        };
+        crate::game::effects::delayed_trigger::freeze_created_result(&mut delayed.ability, &result);
+    }
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -24360,6 +25098,8 @@ impl GameStateDecode {
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        freeze_stored_created_token_referents(&mut state);
+        validate_token_creation_authorities(&state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
@@ -24395,6 +25135,8 @@ impl GameStateDecode {
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
+        freeze_stored_created_token_referents(&mut state);
+        validate_token_creation_authorities(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
@@ -24692,6 +25434,8 @@ pub struct PostReplacementDrainDispatch {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
     /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
 
@@ -25606,6 +26350,10 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
+    /// Private source authority for this exact damage event, established before
+    /// any replacement consult, including synchronous replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_source_context: Option<TriggerSourceContext>,
     pub proposed: ProposedEvent,
     /// CR 701.21a + CR 614.1: An inner Battlefield→graveyard `ZoneChange`
     /// can pause for a `Moved` replacement after its enclosing sacrifice was
@@ -33818,6 +34566,7 @@ mod drain_stack_reentrancy_tests {
             matches!(
                 stack.resident(),
                 Some(PostReplacementDrain {
+                    token_creation_parent: None,
                     status: DrainStatus::Paused,
                     ..
                 })
@@ -33854,6 +34603,7 @@ mod drain_stack_reentrancy_tests {
             matches!(
                 stack.resident(),
                 Some(PostReplacementDrain {
+                    token_creation_parent: None,
                     status: DrainStatus::Paused,
                     ..
                 })
@@ -35229,6 +35979,7 @@ mod tests {
     fn pending_counter_removal_queue_migrates_legacy_single_source_entries() {
         let source_id = ObjectId(17);
         let mut legacy_wire = serde_json::to_value(PendingCounterRemovalQueue {
+            result_binding: None,
             remaining: Vec::new(),
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(18),
@@ -41795,6 +42546,7 @@ mod tests {
 
         fn copy_chosen_frame(trigger_event: GameEvent) -> ResolutionFrame {
             ResolutionFrame::EachPlayerCopyChosen(PendingEachPlayerCopyChosen {
+                copy_status: None,
                 stage: CopyChosenStage::AwaitingCopy,
                 player: PlayerId(0),
                 chosen: Vec::new(),
@@ -48883,5 +49635,163 @@ mod shared_zone_storage_tests {
             stray.loop_fingerprint(),
             "the non-canonical seat's own container is hashed too"
         );
+    }
+}
+
+#[cfg(test)]
+mod sought_result_current_tests {
+    use super::*;
+    use crate::game::effects::seek::tests::{finish_sought_pause, sought_pause_fixture};
+    #[test]
+    fn jev_sought_result_current_pause_reload() {
+        let (runner, cards, _) = sought_pause_fixture();
+        let state = runner.state();
+        assert!(validate_return_result_occurrence_coherence(state).is_ok());
+        let raw: GameState = serde_json::from_slice(&serde_json::to_vec(state).unwrap()).unwrap();
+        let trusted: PersistedGameState = serde_json::from_slice(
+            &serde_json::to_vec(&PersistedGameState::capture(state.clone())).unwrap(),
+        )
+        .unwrap();
+        for loaded in [raw, trusted.into_game_state().unwrap()] {
+            assert_eq!(loaded.return_result_frames, state.return_result_frames);
+            assert_eq!(
+                loaded.next_return_result_occurrence_id,
+                state.next_return_result_occurrence_id
+            );
+            let mut runner = crate::game::scenario::GameRunner::from_state(loaded);
+            finish_sought_pause(&mut runner, &cards);
+        }
+        for mutation in 0..5 {
+            let mut bad = state.clone();
+            match mutation {
+                0 => bad.return_result_frames.clear(),
+                1 => bad.next_return_result_occurrence_id = 0,
+                2 => {
+                    let BatchCompletion::RecordInstructionZoneResult {
+                        occurrence_id,
+                        result_id,
+                        ..
+                    } = bad
+                        .active_batch_delivery()
+                        .unwrap()
+                        .completion
+                        .as_ref()
+                        .unwrap()
+                    else {
+                        panic!()
+                    };
+                    let (occurrence_id, result_id) = (*occurrence_id, *result_id);
+                    bad.return_result_frames
+                        .get_mut(&occurrence_id)
+                        .unwrap()
+                        .insert(result_id, InstructionResult::ZoneChanges(Vec::new()));
+                }
+                3 => {
+                    let completion = bad.active_batch_delivery().unwrap().completion.clone();
+                    let delivery = bad.active_batch_delivery_mut().unwrap();
+                    if let Some(BatchCompletion::RecordInstructionZoneResult {
+                        settled_records,
+                        ..
+                    }) = &mut delivery.completion
+                    {
+                        *settled_records = Some(Vec::new());
+                    }
+                    assert!(completion.is_some());
+                }
+                4 => {
+                    let duplicate = bad.active_batch_delivery().unwrap().clone();
+                    bad.push_batch_delivery(duplicate);
+                    assert!(validate_return_result_occurrence_coherence(&bad)
+                        .unwrap_err()
+                        .contains("duplicate parked publishers"));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_slice::<GameState>(&serde_json::to_vec(&bad).unwrap()).is_err(),
+                "malformed current mutation {mutation}"
+            );
+        }
+        let historical = GameState::new_two_player(42);
+        let mut value = serde_json::to_value(historical).unwrap();
+        for field in [
+            "return_result_frames",
+            "active_return_result_occurrence",
+            "next_return_result_occurrence_id",
+        ] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        let loaded: GameState = serde_json::from_value(value).unwrap();
+        assert!(loaded.return_result_frames.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_result_codec_tests {
+    use super::*;
+    use crate::types::counter::{CounterMatch, CounterType};
+    #[test]
+    fn u13_counter_results_have_strict_pins_positive_counts_and_distinct_typed_accessors() {
+        let pin = ObjectIncarnationRef::of(ObjectId(7), 3);
+        let result = InstructionResult::CounterRemovals(CounterRemovalInstructionResult {
+            source: ObjectIdentityBinding::new(pin, Zone::Battlefield),
+            recipient: Some(pin),
+            counters: CounterMatch::OfType(CounterType::Generic("charge".into())),
+            counter_removals: vec![CounterRemovalRecord {
+                object: pin,
+                counter_type: CounterType::Generic("charge".into()),
+                count: 2,
+            }],
+        });
+        let good = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            serde_json::from_value::<InstructionResult>(good.clone()).unwrap(),
+            result
+        );
+        assert!(result.zone_changes().is_none());
+        assert!(result.revealed_cards().is_none());
+        let zone = InstructionResult::ZoneChanges(vec![]);
+        assert_eq!(zone.zone_changes().unwrap().len(), 0);
+        let reveal = InstructionResult::RevealedCards(RevealedInstructionResult {
+            revealed_cards: vec![pin],
+        });
+        assert_eq!(reveal.revealed_cards().unwrap(), &[pin]);
+        assert!(reveal.zone_changes().is_none());
+        for fault in 0..8 {
+            let mut bad = good.clone();
+            match fault {
+                0 => bad["counter_removals"][0]["count"] = serde_json::json!(0),
+                1 => {
+                    let duplicate = bad["counter_removals"][0].clone();
+                    bad["counter_removals"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(duplicate);
+                }
+                2 => {
+                    bad["counter_removals"][0]["counter_type"] =
+                        serde_json::to_value(CounterType::Time).unwrap()
+                }
+                3 => bad["counter_removals"][0]["object"]["incarnation"] = serde_json::json!(4),
+                4 => bad["recipient"] = serde_json::json!(7),
+                5 => bad["counter_removals"][0]["object"] = serde_json::json!(7),
+                6 => bad["source"]["reference"] = serde_json::json!(7),
+                7 => {
+                    bad.as_object_mut().unwrap().remove("recipient");
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_value::<InstructionResult>(bad).is_err(),
+                "fault {fault}"
+            );
+        }
+        let mut empty = good;
+        empty["counter_removals"] = serde_json::json!([]);
+        empty["recipient"] = serde_json::Value::Null;
+        assert!(matches!(
+            serde_json::from_value::<InstructionResult>(empty).unwrap(),
+            InstructionResult::CounterRemovals(_)
+        ));
     }
 }

@@ -35,6 +35,50 @@ use crate::game::effects::change_zone::shuffle_library;
 use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::ability::FaceDownProfile;
 
+#[cfg(test)]
+mod instruction_origin_tests {
+    use super::*;
+    #[test]
+    fn original_proposal_checks_pin_before_entry_replacements() {
+        for fault in 0..3 {
+            let mut state = GameState::new_two_player(42);
+            let id = zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(1),
+                PlayerId(1),
+                "Selected member".into(),
+                Zone::Library,
+            );
+            let pin = ObjectIncarnationRef::from_object(&state.objects[&id]);
+            let request = ZoneMoveRequest::effect(id, Zone::Battlefield, ObjectId(99))
+                .performed_by(PlayerId(0))
+                .expecting_origin(pin, Zone::Library);
+            let request = ZoneMoveRequest::from_pending(request.into_pending());
+            assert_eq!(request.expected_origin, Some((pin, Zone::Library)));
+            match fault {
+                1 => zones::move_to_zone(&mut state, id, Zone::Hand, &mut Vec::new()),
+                2 => {
+                    zones::move_to_zone(&mut state, id, Zone::Hand, &mut Vec::new());
+                    zones::move_to_zone(&mut state, id, Zone::Library, &mut Vec::new());
+                }
+                _ => {}
+            }
+            let mut events = Vec::new();
+            move_object_with_terminal(&mut state, request, &mut events);
+            if fault == 0 {
+                assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+                assert_eq!(state.objects[&id].controller, PlayerId(1));
+            } else {
+                assert_ne!(state.objects[&id].zone, Zone::Battlefield);
+                assert!(
+                    events.is_empty(),
+                    "stale original proposal never reaches replacement consult"
+                );
+            }
+        }
+    }
+}
+
 /// Why this zone change is happening. Determines pipeline engagement (PLAN §3)
 /// and is carried onto `ProposedEvent::ZoneChange.cause` / `ZoneChangeRecord`.
 ///
@@ -197,6 +241,7 @@ pub struct ExileLinkSpec {
 /// pipeline copy except change_zone already did this).
 pub struct ZoneMoveRequest {
     pub object_id: ObjectId,
+    pub expected_origin: Option<(ObjectIncarnationRef, Zone)>,
     pub to: Zone,
     pub cause: ZoneChangeCause,
     pub mods: EntryMods,
@@ -217,6 +262,11 @@ pub struct ZoneMoveRequest {
 }
 
 impl ZoneMoveRequest {
+    /// CR 400.7: preserve the selected incarnation until its original proposal.
+    pub(crate) fn expecting_origin(mut self, pin: ObjectIncarnationRef, zone: Zone) -> Self {
+        self.expected_origin = Some((pin, zone));
+        self
+    }
     fn into_pending(self) -> PendingBatchZoneMoveRequest {
         let cause = match self.cause {
             ZoneChangeCause::Effect { source } => PendingBatchZoneChangeCause::Effect { source },
@@ -243,6 +293,7 @@ impl ZoneMoveRequest {
         };
         PendingBatchZoneMoveRequest {
             object_id: self.object_id,
+            expected_origin: self.expected_origin,
             destination: self.to,
             cause,
             enter_tapped: self.mods.enter_tapped,
@@ -289,6 +340,7 @@ impl ZoneMoveRequest {
         };
         Self {
             object_id: pending.object_id,
+            expected_origin: pending.expected_origin,
             to: pending.destination,
             cause,
             mods: EntryMods {
@@ -317,6 +369,7 @@ impl ZoneMoveRequest {
     pub fn effect(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::Effect { source },
             mods: EntryMods::default(),
@@ -331,6 +384,7 @@ impl ZoneMoveRequest {
     pub fn cost(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::Cost { source },
             mods: EntryMods::default(),
@@ -349,6 +403,7 @@ impl ZoneMoveRequest {
     pub fn spell_resolution_default(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::SpellResolutionDefault,
             mods: EntryMods::default(),
@@ -363,6 +418,7 @@ impl ZoneMoveRequest {
     pub fn state_based_action(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::StateBasedAction,
             mods: EntryMods::default(),
@@ -390,6 +446,7 @@ impl ZoneMoveRequest {
     ) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to: Zone::Hand,
             cause: ZoneChangeCause::Draw {
                 seed_applied: seed_applied.clone(),
@@ -411,6 +468,7 @@ impl ZoneMoveRequest {
     pub fn casting_to_stack(object_id: ObjectId, source: ObjectId, caster: PlayerId) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to: Zone::Stack,
             cause: ZoneChangeCause::CastingToStack { source },
             mods: EntryMods {
@@ -431,6 +489,7 @@ impl ZoneMoveRequest {
     pub fn pregame(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::PregameProcedure,
             mods: EntryMods::default(),
@@ -446,6 +505,7 @@ impl ZoneMoveRequest {
     pub fn player_left_game(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::PlayerLeftGame,
             mods: EntryMods::default(),
@@ -463,6 +523,7 @@ impl ZoneMoveRequest {
     pub(crate) fn merged_component(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::MergedComponentRouting,
             mods: EntryMods::default(),
@@ -477,6 +538,7 @@ impl ZoneMoveRequest {
     pub fn debug(object_id: ObjectId, to: Zone) -> Self {
         Self {
             object_id,
+            expected_origin: None,
             to,
             cause: ZoneChangeCause::DebugCommand,
             mods: EntryMods::default(),
@@ -788,6 +850,14 @@ pub(crate) fn move_object_with_terminal(
     };
     let from_zone = object.zone;
     let member = ObjectIncarnationRef::from_object(object);
+    // CR 400.7: every original proposal, including a resumed queued member,
+    // must still name the selected object in its selected zone.
+    if req
+        .expected_origin
+        .is_some_and(|(pin, zone)| pin != member || zone != from_zone)
+    {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
 
     // CR 111.8 + CR 603.2g (PLAN §8 Risk #11): Hoist the cheap object-level guards that
     // `zones::move_to_zone` enforces unconditionally to BEFORE the replacement
@@ -1542,6 +1612,32 @@ fn anticipated_zone_change_delivery(
     ))
 }
 
+/// Materialize the ordinary uniform requests admitted by historical saves.
+/// Explicit legacy loading uses the same reconstruction as the runtime fallback
+/// so saving an undrained legacy batch writes a complete current request queue.
+pub(crate) fn normalize_legacy_batch_requests(pending: &mut PendingBatchDeliveries) {
+    if pending.requests.is_empty() {
+        pending.requests = pending
+            .remaining
+            .iter()
+            .map(|&obj_id| {
+                let mut req = ZoneMoveRequest::effect(
+                    obj_id,
+                    pending.destination,
+                    pending.source_id.unwrap_or(obj_id),
+                );
+                req.mods.enter_tapped = pending.enter_tapped;
+                req.exile_links.tracking = pending.exile_tracking;
+                if let Some(position) = pending.library_placement.clone() {
+                    req = req.at_library_position(position);
+                }
+                req.replacement_applied = pending.replacement_applied.clone();
+                req.into_pending()
+            })
+            .collect();
+    }
+}
+
 /// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the
 /// per-object replacement choice that paused it resolved (and its object's
 /// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
@@ -1571,22 +1667,19 @@ fn anticipated_zone_change_delivery(
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    if let Some(pending) = state.active_batch_delivery().cloned() {
+    if let Some(mut pending) = state.active_batch_delivery().cloned() {
+        normalize_legacy_batch_requests(&mut pending);
         let PendingBatchDeliveries {
             mut logical_zone_change_group,
             paused_current,
             remaining,
             destination,
-            source_id,
-            enter_tapped,
-            exile_tracking,
-            library_placement,
             completion,
-            replacement_applied,
             requests,
             attempted,
             zone_change_record_start,
             mut deferred_events,
+            ..
         } = pending;
         deferred_events.append(events);
         let attempted = if attempted.is_empty() {
@@ -1594,27 +1687,10 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
         } else {
             attempted
         };
-        let reqs: Vec<ZoneMoveRequest> = if requests.is_empty() {
-            remaining
-                .into_iter()
-                .map(|obj_id| {
-                    let mut req =
-                        ZoneMoveRequest::effect(obj_id, destination, source_id.unwrap_or(obj_id));
-                    req.mods.enter_tapped = enter_tapped;
-                    req.exile_links.tracking = exile_tracking;
-                    if let Some(position) = library_placement.clone() {
-                        req = req.at_library_position(position);
-                    }
-                    req.replacement_applied = replacement_applied.clone();
-                    req
-                })
-                .collect()
-        } else {
-            requests
-                .into_iter()
-                .map(ZoneMoveRequest::from_pending)
-                .collect()
-        };
+        let reqs = requests
+            .into_iter()
+            .map(ZoneMoveRequest::from_pending)
+            .collect();
         if let Some(ref paused_current) = paused_current {
             crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                 state,
@@ -1823,6 +1899,7 @@ mod paused_search_audience_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
             proposed: original.clone(),
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -7515,5 +7592,126 @@ mod hand_entry_receiver_tests {
         assert!(state.players[1].hand.contains(&first));
         assert!(state.players[1].hand.contains(&second));
         assert_eq!(rebound_owners(&state), vec![Some(P0), Some(P0)]);
+    }
+}
+
+#[cfg(test)]
+mod sought_completion_order_tests {
+    use super::*;
+    #[test]
+    fn sought_batch_result_is_unpublished_through_repeated_and_final_pause() {
+        let (mut runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        for pause in 0..2 {
+            let batch = runner
+                .state()
+                .active_batch_delivery()
+                .expect("parked batch");
+            let Some(BatchCompletion::RecordInstructionZoneResult {
+                occurrence_id,
+                result_id,
+                settled_records,
+            }) = &batch.completion
+            else {
+                panic!("missing named completion")
+            };
+            assert!(settled_records.is_none());
+            assert!(!runner.state().return_result_frames[occurrence_id].contains_key(result_id));
+            assert_eq!(
+                batch.remaining.len(),
+                1 - pause,
+                "final member still has a completion owner"
+            );
+            assert!(batch.paused_current.is_some());
+            let action = crate::ai_support::legal_actions(runner.state())
+                .into_iter()
+                .find(|action| {
+                    matches!(
+                        action,
+                        crate::types::actions::GameAction::ChooseReplacement { index: 0 }
+                    )
+                })
+                .unwrap();
+            runner.act(action).unwrap();
+        }
+        for _ in 0..20 {
+            if runner.state().stack.is_empty()
+                && matches!(
+                    runner.state().waiting_for,
+                    crate::types::game_state::WaitingFor::Priority { .. }
+                )
+            {
+                break;
+            }
+            runner
+                .act(crate::types::actions::GameAction::PassPriority)
+                .unwrap();
+        }
+        for card in cards {
+            assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+            assert_eq!(runner.state().objects[&card].perpetual_mods.len(), 1);
+        }
+        assert!(runner.state().active_batch_delivery().is_none());
+        assert!(
+            runner.state().return_result_frames.is_empty(),
+            "completed occurrence retires normally"
+        );
+    }
+    #[test]
+    fn sought_terminal_records_exclude_no_move_and_unrelated_nested_occurrences() {
+        let (runner, _, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let mut group = runner
+            .state()
+            .active_batch_delivery()
+            .unwrap()
+            .logical_zone_change_group
+            .clone();
+        let record = runner
+            .state()
+            .return_result_frames
+            .values()
+            .flat_map(|frame| frame.values())
+            .filter_map(|result| result.zone_changes())
+            .find(|records| !records.is_empty())
+            .unwrap()[0]
+            .clone();
+        let event = crate::types::events::GameEvent::ZoneChanged {
+            object_id: record.object_id,
+            from: record.from_zone,
+            to: record.to_zone,
+            record: Box::new(record.clone()),
+        };
+        let mut nested = record.clone();
+        nested.object_id = ObjectId(99999);
+        let nested_event = crate::types::events::GameEvent::ZoneChanged {
+            object_id: nested.object_id,
+            from: nested.from_zone,
+            to: nested.to_zone,
+            record: Box::new(nested),
+        };
+        // Typed settlement isolation: only the selected member's terminal move
+        // names occurrence0; an unrelated nested move must not enter the result.
+        group.all_origin_occurrences = vec![
+            crate::types::game_state::LogicalZoneChangeOccurrence { ordinal: 0, event },
+            crate::types::game_state::LogicalZoneChangeOccurrence {
+                ordinal: 1,
+                event: nested_event,
+            },
+        ];
+        group.terminal_outcomes = vec![
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Moved {
+                occurrence_ordinal: 0,
+            },
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Prevented,
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Remained,
+        ];
+        assert_eq!(
+            crate::types::game_state::settled_logical_zone_change_records(&group),
+            vec![record]
+        );
+        group.terminal_outcomes = vec![
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Prevented,
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Remained,
+        ];
+        assert!(crate::types::game_state::settled_logical_zone_change_records(&group).is_empty());
     }
 }

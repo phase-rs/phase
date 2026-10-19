@@ -8,8 +8,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::character::complete::satisfy;
-use nom::combinator::{all_consuming, eof, map, map_opt, map_res, opt, peek, value, verify};
-use nom::multi::{many0, separated_list1};
+use nom::combinator::{all_consuming, cut, eof, map, map_opt, map_res, opt, peek, value, verify};
+use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -27,7 +27,8 @@ use super::target::{
 use crate::parser::oracle_ir::context::{bind_controller_phrase, PlayerAntecedents};
 use crate::parser::oracle_target::{
     parse_counter_suffix, parse_shared_quality, parse_shared_quality_clause,
-    parse_target_with_syntax, parse_type_phrase_folding, TargetSyntax,
+    parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -35,8 +36,9 @@ use crate::types::ability::{
     CastManaSpentMetric, Comparator, ControllerRef, CountBinding, CountScope, DamageChannel,
     DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet, ObjectProperty,
     ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
-    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
-    ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SharedQualityRelation,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -1167,6 +1169,8 @@ pub(crate) fn parse_extreme_chosen_number_ref(input: &str) -> OracleResult<'_, Q
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         alt((
+            parse_repeated_object_population,
+            parse_coordinated_card_population,
             parse_guessed_number_ref,
             parse_object_count_by_shared_quality,
             parse_chosen_number_ref,
@@ -1758,8 +1762,16 @@ fn parse_counter_object_scope(input: &str) -> OracleResult<'_, ObjectScope> {
 
 /// Parse "the number of [type] you control" → ObjectCount.
 fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((tag("the total number of "), tag("the number of "))).parse(input)?;
+    let (rest, _) = parse_card_count_introduction(input)?;
     parse_number_of_inner(rest)
+}
+
+fn parse_card_count_introduction(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("the total number of "), tag("the number of "))),
+    )
+    .parse(input)
 }
 
 /// The maximizing extremum adjective. Oracle text prints several
@@ -2107,7 +2119,11 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // CR 123.6d + CR 123.6e: first, so no earlier arm can stop `alt` with a
         // stranded remainder; its "unique vowels"/"<letter>'s" + sticker-set
         // language is disjoint from every other arm's.
-        parse_name_sticker_letter_count,
+        alt((
+            parse_repeated_object_population,
+            |i| parse_coordinated_card_population_body(i, &ParseContext::default()),
+            parse_name_sticker_letter_count,
+        )),
         // CR 110.4: the permanent-type head lowers to `ObjectCountDistinct`, not
         // `DistinctCardTypes`, so it must precede the card-type head.
         parse_distinct_permanent_types_in_zone,
@@ -2843,6 +2859,489 @@ fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRe
     ))
 }
 
+/// CR 201.2a + CR 601.2f: a complete population relative to the spell being priced.
+/// The recognized introducer commits the suffix, so malformed references/locatives
+/// cannot fall back to a generic card count.
+pub(crate) fn parse_cast_spell_name_population(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, head) = take_until(" with the same ").parse(input)?;
+    let (rest, (_, quality, _)) = (
+        tag(" with the same "),
+        value(SharedQuality::Name, tag("name")),
+        tag(" as "),
+    )
+        .parse(rest)?;
+    let (rest, reference) =
+        cut(value(TargetFilter::CastingSpell, tag("that spell"))).parse(rest)?;
+    let (head_filter, remainder) =
+        parse_type_phrase_folding_with_ctx(head, &mut ParseContext::default());
+    if head.is_empty()
+        || !remainder.is_empty()
+        || !quantity_filter_has_meaningful_content(&head_filter)
+    {
+        return Err(nom::Err::Failure(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let (rest, locative) = cut(preceded(
+        tag(" "),
+        terminated(
+            parse_population_locative,
+            (nom::character::complete::space0, eof),
+        ),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    head_filter,
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::SharesQuality {
+                            quality,
+                            reference: Some(Box::new(reference)),
+                            relation: SharedQualityRelation::Shares,
+                        },
+                    ])),
+                    locative,
+                ],
+            },
+        },
+    ))
+}
+
+fn parse_population_locative(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (_, _) = peek(tag("in ")).parse(input)?;
+    let (mut properties, controller, consumed) =
+        crate::parser::oracle_target::parse_zone_suffix(input).ok_or_else(|| oracle_err(input))?;
+    // CR 108.3 + CR 109.5 + CR 400.1: possessive card zones retain their
+    // owner authority independently of the shared head's ownership restriction.
+    if let Some(controller) = controller {
+        properties.push(FilterProp::Owned { controller });
+    }
+    Ok((
+        &input[consumed..],
+        TargetFilter::Typed(TypedFilter::card().properties(properties)),
+    ))
+}
+
+/// Split independently repeated quantifiers before either scalar admission or
+/// expression addition. A recognized connector owns every later member.
+pub(crate) fn parse_repeated_population_segments(input: &str) -> OracleResult<'_, Vec<&str>> {
+    fn before_connector(input: &str) -> OracleResult<'_, &str> {
+        terminated(
+            take_until(" and each"),
+            peek((tag(" and each"), alt((tag(" "), eof)))),
+        )
+        .parse(input)
+    }
+    fn segment(input: &str) -> OracleResult<'_, &str> {
+        verify(alt((before_connector, nom::combinator::rest)), |s: &str| {
+            !s.trim().is_empty()
+        })
+        .parse(input)
+    }
+    let (rest, first) = verify(before_connector, |s: &str| !s.trim().is_empty()).parse(input)?;
+    let (rest, mut segments) =
+        many1(preceded(tag(" and each"), cut(preceded(tag(" "), segment)))).parse(rest)?;
+    let (rest, _) = cut(eof).parse(rest)?;
+    segments.insert(0, first);
+    Ok((rest, segments))
+}
+
+// A positive zone bound is sufficient even if another conjunct narrows it.
+// Every disjunction branch must be bounded; a free complement proves nothing.
+fn repeated_population_zone_bound(filter: &TargetFilter) -> Option<Vec<Zone>> {
+    match filter {
+        TargetFilter::Typed(_) => {
+            let zones = filter.extract_zones();
+            (!zones.is_empty()).then_some(zones)
+        }
+        TargetFilter::And { filters } => filters
+            .iter()
+            .filter_map(repeated_population_zone_bound)
+            .reduce(|mut a, b| {
+                // allow-noncombinator: typed Zone-set intersection, not text dispatch.
+                a.retain(|zone| b.contains(zone));
+                a
+            }),
+        TargetFilter::Or { filters } if !filters.is_empty() => {
+            let bounds: Option<Vec<_>> =
+                filters.iter().map(repeated_population_zone_bound).collect();
+            let mut zones = Vec::new();
+            for zone in bounds?.into_iter().flatten() {
+                // allow-noncombinator: typed Zone-set membership, not text dispatch.
+                if !zones.contains(&zone) {
+                    zones.push(zone);
+                }
+            }
+            Some(zones)
+        }
+        _ => None,
+    }
+}
+
+fn unzoned_nominal_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            !typed.type_filters.is_empty() && filter.extract_zones().is_empty()
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(unzoned_nominal_population)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod repeated_population_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_scalar_members_are_complete_and_zone_disjoint() {
+        for phrase in [
+            "artifact you control and each artifact card in your hand",
+            "cave you control and each cave card in your graveyard",
+            "artifact card in your hand and each artifact you control",
+            "creature your opponents control and each creature card in your graveyard and each artifact card in your hand",
+            "cards you own in exile and in your graveyard and each artifact you control",
+        ] {
+            assert!(matches!(parse_repeated_object_population(phrase), Ok(("", QuantityRef::ObjectCount { .. }))), "{phrase}");
+            for introduction in ["", "the number of ", "the total number of "] {
+                let text = format!("{introduction}{phrase}");
+                assert!(matches!(parse_quantity_ref_complete(&text), Ok(("", QuantityRef::ObjectCount { .. }))), "{text}");
+            }
+            assert!(parse_for_each_clause_ref_complete(phrase).is_ok(), "{phrase}");
+            assert!(parse_for_each_clause_ref_with_context(phrase, &ParseContext::default()).is_ok());
+        }
+        for member in ["cave card in your graveyard", "artifact card in your hand"] {
+            let (_, filter) =
+                parse_single_locative_population(member, &ParseContext::default()).unwrap();
+            let TargetFilter::And { filters } = filter else {
+                panic!("independent locative retains both head and zone");
+            };
+            assert!(matches!(&filters[1], TargetFilter::Typed(typed)
+                if typed.controller.is_none() && typed.properties.contains(&FilterProp::Owned { controller: ControllerRef::You })));
+        }
+        for phrase in [
+            "artifact you control and each creature you control",
+            "artifact you control and each artifact you control",
+            "artifact card in your hand and each creature card in your hand",
+            "artifact you control and each mystery you control",
+            "artifact you control and each artifact card in your hand and each",
+            "card in exile and in your graveyard and each mystery you control",
+        ] {
+            assert!(
+                matches!(
+                    parse_repeated_object_population(phrase),
+                    Err(nom::Err::Failure(_))
+                ),
+                "{phrase}"
+            );
+            assert!(
+                crate::parser::oracle_quantity::parse_for_each_clause(phrase).is_none(),
+                "{phrase}"
+            );
+            assert!(
+                crate::parser::oracle_quantity::parse_quantity_ref(phrase).is_none(),
+                "{phrase}"
+            );
+        }
+        assert!(matches!(
+            parse_repeated_population_segments("artifact and eachness creature"),
+            Err(nom::Err::Error(_))
+        ));
+        assert!(matches!(
+            parse_repeated_population_segments("artifact and each"),
+            Err(nom::Err::Failure(_))
+        ));
+    }
+
+    #[test]
+    fn scalar_zone_proof_does_not_infer_boolean_or_player_domains() {
+        let hand = TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+        );
+        let nominal = TargetFilter::Typed(TypedFilter::creature());
+        assert!(repeated_population_zone_bound(&TargetFilter::Or {
+            filters: vec![hand.clone(), nominal.clone()]
+        })
+        .is_none());
+        assert_eq!(
+            repeated_population_zone_bound(&TargetFilter::And {
+                filters: vec![
+                    hand.clone(),
+                    TargetFilter::Not {
+                        filter: Box::new(nominal)
+                    }
+                ]
+            }),
+            Some(vec![Zone::Hand])
+        );
+        assert!(!unzoned_nominal_population(&TargetFilter::SpecificObject {
+            id: crate::types::identifiers::ObjectId(1)
+        }));
+        assert!(!unzoned_nominal_population(&TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )));
+    }
+}
+
+pub(crate) fn parse_repeated_object_population(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_repeated_object_population_with_context(input, &ParseContext::default())
+}
+
+// CR 108.3 + CR 109.4 + CR 400.1: an independently quantified card-zone
+// member uses the locative's owner authority, not a stored/LKI controller.
+fn parse_single_locative_population<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let (locative, head) = take_until(" in ").parse(input)?;
+    let (head_filter, remainder) = parse_type_phrase_folding_with_ctx(head, &mut ctx.clone());
+    if head.is_empty()
+        || !remainder.is_empty()
+        || !quantity_filter_has_meaningful_content(&head_filter)
+    {
+        return Err(oracle_err(input));
+    }
+    let (rest, zone) = all_consuming(parse_population_locative).parse(locative.trim_start())?;
+    Ok((
+        rest,
+        TargetFilter::And {
+            filters: vec![head_filter, zone],
+        },
+    ))
+}
+
+pub(crate) fn parse_repeated_object_population_with_context<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, QuantityRef> {
+    let (input, _) = opt(parse_card_count_introduction).parse(input)?;
+    let (rest, segments) = parse_repeated_population_segments(input)?;
+    let mut filters = Vec::new();
+    let mut bounds: Vec<Vec<Zone>> = Vec::new();
+    for segment in segments {
+        let segment = segment.trim();
+        let mut filter = match parse_coordinated_card_population_with_context(segment, ctx) {
+            Ok(("", QuantityRef::ObjectCount { filter })) => filter,
+            Err(nom::Err::Failure(error)) => return Err(nom::Err::Failure(error)),
+            _ => match parse_single_locative_population(segment, ctx) {
+                Ok(("", filter)) => filter,
+                _ => {
+                    let (filter, remainder) =
+                        parse_type_phrase_folding_with_ctx(segment, &mut ctx.clone());
+                    if !remainder.trim().is_empty()
+                        || !quantity_filter_has_meaningful_content(&filter)
+                    {
+                        return Err(nom::Err::Failure(OracleError::new(
+                            segment,
+                            nom::error::ErrorKind::Verify,
+                        )));
+                    }
+                    filter
+                }
+            },
+        };
+        // CR 109.2: only a wholly nominal, unzoned member has the implicit
+        // battlefield domain. Make that bound explicit before unioning legs.
+        if unzoned_nominal_population(&filter) {
+            filter = TargetFilter::And {
+                filters: vec![
+                    filter,
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ])),
+                ],
+            };
+        }
+        let Some(bound) = repeated_population_zone_bound(&filter) else {
+            return Err(nom::Err::Failure(OracleError::new(
+                segment,
+                nom::error::ErrorKind::Verify,
+            )));
+        };
+        // allow-noncombinator: typed Zone-set intersection, not text dispatch.
+        if bounds
+            .iter()
+            .any(|prior| prior.iter().any(|zone| bound.contains(zone)))
+        {
+            return Err(nom::Err::Failure(OracleError::new(
+                segment,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        bounds.push(bound);
+        filters.push(filter);
+    }
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Or { filters },
+        },
+    ))
+}
+
+/// Complete coordinated card population; Error means another grammar owns it,
+/// while Failure preserves an unfinished coordinated form across fallbacks.
+pub(crate) fn parse_coordinated_card_population(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_coordinated_card_population_with_context(input, &ParseContext::default())
+}
+
+pub(crate) fn parse_coordinated_card_population_with_context<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, QuantityRef> {
+    let (input, _) = opt(parse_card_count_introduction).parse(input)?;
+    parse_coordinated_card_population_body(input, ctx)
+}
+
+fn parse_coordinated_card_population_body<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, QuantityRef> {
+    let (locatives, head) = take_until(" in ").parse(input)?;
+    let (head_filter, remainder) = parse_type_phrase_folding_with_ctx(head, &mut ctx.clone());
+    if head.is_empty()
+        || !remainder.is_empty()
+        || !quantity_filter_has_meaningful_content(&head_filter)
+    {
+        return Err(oracle_err(input));
+    }
+    let (rest, first_zone) = parse_population_locative(locatives.trim_start())?;
+    // Commit only after a valid first locative and the actual coordinated-zone
+    // introducer. "and each" belongs to the separate repeated-population grammar.
+    let (_, _) = peek((tag(" and in"), alt((tag(" "), eof)))).parse(rest)?;
+    let (rest, mut zones) =
+        cut(many1(preceded(tag(" and "), parse_population_locative))).parse(rest)?;
+    zones.insert(0, first_zone);
+    let (rest, predicate) = cut(opt(preceded(
+        tag(" "),
+        crate::parser::oracle_target::parse_relative_card_filter,
+    )))
+    .parse(rest)?;
+    let (rest, _) = cut(eof).parse(rest)?;
+    // CR 109.2a + CR 715.2a + CR 715.2c: the shared card predicate intersects
+    // the whole zone union; an Adventure card remains one member of that union.
+    let mut filters = vec![head_filter, TargetFilter::Or { filters: zones }];
+    if let Some(predicate) = predicate {
+        filters.push(predicate);
+    }
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And { filters },
+        },
+    ))
+}
+
+#[cfg(test)]
+mod coordinated_population_tests {
+    use super::*;
+
+    #[test]
+    fn coordinated_count_introductions() {
+        let head = "cards you own in exile and in your graveyard";
+        for introduction in ["", "the number of ", "the total number of "] {
+            let complete = format!("{introduction}{head} that are instant cards, are sorcery cards, and/or have an adventure");
+            let expected = parse_coordinated_card_population(&complete).unwrap().1;
+            assert_eq!(parse_quantity_ref_complete(&complete).unwrap().1, expected);
+            assert_eq!(
+                parse_quantity_ref(&complete).unwrap(),
+                ("", expected.clone())
+            );
+            assert!(crate::parser::oracle_quantity::parse_quantity_ref(&complete).is_some());
+            assert!(crate::parser::oracle_quantity::parse_for_each_clause(&complete).is_some());
+            assert!(parse_for_each_clause_ref_with_they_controller(
+                &complete,
+                &PlayerAntecedents::default()
+            )
+            .is_ok());
+            if !introduction.is_empty() {
+                assert_eq!(parse_the_number_of(&complete).unwrap(), ("", expected));
+            }
+            for tail in [
+                "that are instant cards, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+                "that are instant cards, are sorcery cards, and/or have an adventure, are squirrels wearing hats",
+                "that are instant cards, are sorcery cards, and/or",
+                "that are instant cards, are sorcery cards, and/or have an adventure,",
+            ] {
+                let malformed = format!("{introduction}{head} {tail}");
+                assert!(matches!(parse_coordinated_card_population(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(matches!(parse_quantity_ref(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(matches!(parse_quantity_ref_complete(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(matches!(parse_for_each_clause_ref_with_they_controller(&malformed, &PlayerAntecedents::default()), Err(nom::Err::Failure(_))), "{malformed}");
+                assert!(crate::parser::oracle_quantity::parse_quantity_ref(&malformed).is_none(), "{malformed}");
+                assert!(crate::parser::oracle_quantity::parse_for_each_clause(&malformed).is_none(), "{malformed}");
+                if !introduction.is_empty() {
+                    assert!(matches!(parse_the_number_of(&malformed), Err(nom::Err::Failure(_))), "{malformed}");
+                }
+            }
+        }
+        assert!(parse_the_number_of("the total number of creatures you control").is_ok());
+        assert!(matches!(
+            parse_coordinated_card_population("the number of creatures you control"),
+            Err(nom::Err::Error(_))
+        ));
+    }
+
+    #[test]
+    fn coordinated_population_complete() {
+        for phrase in [
+            "card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an adventure",
+            "card you own in your graveyard and in exile that is an artifact card or a card that has an adventure",
+            "card you own in exile and in your graveyard and in your hand that is a creature card",
+            "cards in your graveyard and in an opponent's graveyard",
+            "card in exile and in their graveyard",
+        ] {
+            assert!(matches!(parse_coordinated_card_population(phrase), Ok(("", QuantityRef::ObjectCount { .. }))), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_for_each_clause(phrase).is_some(), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_quantity_ref(&format!("the number of {phrase}")).is_some(), "{phrase}");
+        }
+        for phrase in [
+            "card you own in exile and in unknown",
+            "card you own in exile and in",
+            "card you own in exile and in your graveyard and",
+            "card you own in exile and in your graveyard that's an instant card or unknown",
+            "card you own in exile and in your graveyard that's an instant card and",
+            "card you own in exile and in your graveyard that's a card that has an adventures",
+            "card you own in exile and in your graveyard that's a card that has an unknown adventure",
+        ] {
+            assert!(matches!(parse_coordinated_card_population(phrase), Err(nom::Err::Failure(_))), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_for_each_clause(phrase).is_none(), "{phrase}");
+            assert!(crate::parser::oracle_quantity::parse_quantity_ref(&format!("the number of {phrase}")).is_none(), "{phrase}");
+        }
+        let phrase = "card you own in exile and in your graveyard and each artifact you control";
+        assert!(matches!(
+            parse_coordinated_card_population(phrase),
+            Err(nom::Err::Failure(_))
+        ));
+        assert!(matches!(
+            crate::parser::oracle_quantity::parse_for_each_clause(phrase),
+            Some(QuantityRef::ObjectCount { .. })
+        ));
+        assert!(matches!(
+            crate::parser::oracle_quantity::parse_quantity_ref(&format!("the number of {phrase}")),
+            Some(QuantityRef::ObjectCount { .. })
+        ));
+        assert!(matches!(
+            parse_coordinated_card_population(
+                "artifact you control and each artifact card in your hand"
+            ),
+            Err(nom::Err::Error(_))
+        ));
+        assert!(matches!(
+            parse_coordinated_card_population("card in exile and inside a graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+    }
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
@@ -3002,6 +3501,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -3139,6 +3639,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -5401,7 +5902,13 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
     input: &'a str,
     antecedents: &PlayerAntecedents,
 ) -> OracleResult<'a, QuantityRef> {
+    let population_context = ParseContext {
+        relative_player_scope: antecedents.third_person.clone(),
+        ..Default::default()
+    };
     alt((
+        |i| parse_repeated_object_population_with_context(i, &population_context),
+        |i| parse_coordinated_card_population_with_context(i, &population_context),
         // CR 123.6d + CR 123.6e: first, so no earlier arm can stop `alt` with a
         // stranded remainder; its "unique vowel"/"<letter>'s" + sticker-set
         // language is disjoint from every other arm's.
@@ -14611,5 +15118,76 @@ mod tests {
                 .is_err(),
             "no superlative means no aggregate axis — must not match"
         );
+    }
+}
+
+#[cfg(test)]
+mod casting_name_population_tests {
+    use super::*;
+
+    #[test]
+    fn cast_name_population_complete_and_committed_suffix() {
+        for (head, zone) in [
+            ("card", "your graveyard"),
+            ("artifact card", "your hand"),
+            ("creature card", "an opponent's graveyard"),
+        ] {
+            let input = format!("{head} with the same name as that spell in {zone}");
+            let (rest, quantity) = parse_cast_spell_name_population(&input).unwrap();
+            assert!(rest.is_empty());
+            assert!(
+                matches!(quantity, QuantityRef::ObjectCount { filter: TargetFilter::And { filters } } if filters.len() == 3)
+            );
+        }
+        for input in [
+            "card with the same name as that spell",
+            "card with the same name as that impostor in your graveyard",
+            "mystery with the same name as that spell in your graveyard",
+            "card with the same name as that spell in your graveyard unfinished",
+            "card with the same name as that spellbook in your graveyard",
+        ] {
+            assert!(
+                matches!(
+                    parse_cast_spell_name_population(input),
+                    Err(nom::Err::Failure(_))
+                ),
+                "{input}"
+            );
+        }
+        assert!(matches!(
+            parse_cast_spell_name_population(
+                "artifact you control and each artifact card in your hand"
+            ),
+            Err(nom::Err::Error(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod jev_distinct_color_grammar_tests {
+    use super::*;
+
+    #[test]
+    fn jev_color_quantity_complete_population_and_union() {
+        // SHAPE: the same quantity authority serves where-X and for-each.
+        let (_, colors) =
+            parse_quantity_ref_complete("the number of colors among permanents you control")
+                .unwrap();
+        assert!(
+            matches!(&colors, QuantityRef::DistinctColorsAmong { source: CardTypeSetSource::Objects { filter: TargetFilter::Typed(typed) } } if typed.controller == Some(ControllerRef::You) && typed.type_filters.contains(&TypeFilter::Permanent))
+        );
+        assert_eq!(
+            parse_for_each_clause_ref_complete("color among permanents you control")
+                .unwrap()
+                .1,
+            colors
+        );
+        assert!(matches!(parse_quantity_ref_complete("the number of colors among permanents you control and spells you've cast this turn").unwrap().1, QuantityRef::DistinctColorsAmong { source: CardTypeSetSource::AnyOf { .. } }));
+        for text in [
+            "the number of colors among permanents you control unfinished",
+            "the number of colors among mysteries you control",
+        ] {
+            assert!(parse_quantity_ref_complete(text).is_err(), "{text}");
+        }
     }
 }

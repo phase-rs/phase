@@ -1,10 +1,101 @@
 use std::str::FromStr;
 
+#[cfg(test)]
+mod u14_quality_tests {
+    use super::*;
+
+    #[test]
+    fn u14_quality_grammar_preserves_scope() {
+        for subject in ["creature", "creatures", "each creature"] {
+            for head in ["with", "that have", "that each have"] {
+                for quality in ["the chosen quality", "that quality"] {
+                    let text = format!("{subject} {head} mana value of {quality}");
+                    let (filter, rest) =
+                        parse_type_phrase_folding_with_ctx(&text, &mut ParseContext::default());
+                    assert!(rest.is_empty(), "{text}: {rest}");
+                    assert!(crate::game::filter::filter_contains_filter_prop(
+                        &filter,
+                        &|p| matches!(
+                            p,
+                            FilterProp::ManaValueParity {
+                                parity: ParitySource::LastNamedChoice
+                            }
+                        )
+                    ));
+                }
+            }
+        }
+        let mut ctx = ParseContext::default();
+        assert!(
+            parse_mana_value_suffix("with mana value of the chosen quality", &mut ctx).is_some()
+        );
+        assert!(
+            parse_mana_value_suffix("with mana value of the chosen qualityness", &mut ctx)
+                .is_none()
+        );
+        assert!(matches!(
+            parse_mana_value_suffix("with mana value 3 or less", &mut ctx),
+            Some((FilterProp::Cmc { .. }, _))
+        ));
+        for text in [
+            "creatures of the chosen color",
+            "creatures of the chosen type",
+        ] {
+            let (filter, rest) = parse_type_phrase_folding_with_ctx(text, &mut ctx);
+            assert!(rest.is_empty(), "{text}: {rest}");
+            assert!(!crate::game::filter::filter_contains_filter_prop(
+                &filter,
+                &|p| matches!(p, FilterProp::ManaValueParity { .. })
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod prior_controller_population_tests {
+    use super::*;
+
+    #[test]
+    fn prior_controller_population_keeps_typed_relation_and_source_relative_sibling() {
+        for text in [
+            "each other creature that player controls",
+            "all other Elf creatures that player controls",
+            "other creatures that player controls",
+        ] {
+            let (TargetFilter::Typed(typed), rest) =
+                parse_type_phrase_folding_with_ctx(text, &mut ParseContext::default())
+            else {
+                panic!("typed population")
+            };
+            assert!(rest.is_empty(), "{text}: {rest}");
+            assert_eq!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            );
+            assert_eq!(
+                typed.properties,
+                vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget)
+                }]
+            );
+        }
+        let (TargetFilter::Typed(own), rest) = parse_type_phrase_folding_with_ctx(
+            "other creatures you control",
+            &mut ParseContext::default(),
+        ) else {
+            panic!("source sibling")
+        };
+        assert!(rest.is_empty());
+        assert_eq!(own.controller, Some(ControllerRef::You));
+        assert!(own.properties.contains(&FilterProp::Another));
+    }
+}
+
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, one_of, satisfy, space1};
 use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
-use nom::multi::many0;
+use nom::multi::{many0, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -2621,6 +2712,9 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
+    if let Some(population) = parse_prior_controller_population(text, ctx) {
+        return population;
+    }
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
@@ -6115,6 +6209,54 @@ pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetF
     TargetFilter::Or { filters }
 }
 
+/// CR 608.2c + CR 115.10a: an untargeted population can name the controller
+/// of the preceding selected creature. Chain construction must prove that
+/// antecedent before accepting this provisional relation.
+pub(crate) fn parse_prior_controller_population<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    let antecedents = ctx.player_antecedents();
+    if antecedents.declared_that_player.is_some()
+        || antecedents
+            .third_person
+            .as_ref()
+            .is_some_and(|scope| !matches!(scope, ControllerRef::ParentTargetController))
+    {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let ((), original_rest) = nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            preceded(
+                multispace0,
+                preceded(
+                    opt(alt((tag::<_, _, OracleError<'_>>("each "), tag("all ")))),
+                    tag("other "),
+                ),
+            ),
+        )
+        .parse(input)
+    })?;
+    let mut scoped = ctx.clone_player_antecedents();
+    scoped.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    let (TargetFilter::Typed(mut typed), after) =
+        parse_type_phrase_folding_with_ctx(original_rest, &mut scoped)
+    else {
+        return None;
+    };
+    if typed.controller != Some(ControllerRef::ParentTargetController)
+        || typed.type_filters.is_empty()
+    {
+        return None;
+    }
+    typed.properties.push(FilterProp::DistinctFrom {
+        reference: Box::new(TargetFilter::ParentTarget),
+    });
+    Some((TargetFilter::Typed(typed), after))
+}
+
 fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
     // Delegate to the shared nom combinator table which handles both singular
     // and plural forms in longest-match-first order.
@@ -6937,19 +7079,30 @@ pub(crate) fn parse_mana_value_suffix(
         return Some((prop, text.len() - after.len()));
     }
 
-    if let Ok((after, _)) = (
-        parse_suffix_subject_head,
+    if let Ok((after, (negative, _, _, _))) = (
+        alt((
+            value(false, parse_suffix_subject_head),
+            value(true, tag("without ")),
+        )),
         tag::<_, _, OracleError<'_>>("mana value of "),
         alt((
             tag::<_, _, OracleError<'_>>("the chosen quality"),
             tag::<_, _, OracleError<'_>>("that quality"),
         )),
+        not(satisfy(|c| c.is_alphanumeric() || c == '_')),
     )
         .parse(trimmed)
     {
+        let prop = FilterProp::ManaValueParity {
+            parity: ParitySource::LastNamedChoice,
+        };
         return Some((
-            FilterProp::ManaValueParity {
-                parity: ParitySource::LastNamedChoice,
+            if negative {
+                FilterProp::Not {
+                    prop: Box::new(prop),
+                }
+            } else {
+                prop
             },
             text.len() - after.len(),
         ));
@@ -8584,6 +8737,7 @@ fn parse_shared_quality_reference<'a>(
         }
     }
 
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("one or more ")).parse(input)?;
     let (filter, rest) = parse_target_disjunction(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -8817,6 +8971,7 @@ pub(crate) fn parse_shared_quality_clause<'a>(
 ) -> nom::IResult<&'a str, FilterProp, OracleError<'a>> {
     type Vbe<'a> = OracleError<'a>;
     let (rest, _) = tag::<_, _, Vbe>("that ").parse(input)?;
+    let (rest, _) = opt(tag::<_, _, Vbe>("each ")).parse(rest)?;
     let (rest, relation) = alt((
         value(
             SharedQualityRelation::DoesNotShare,
@@ -8841,9 +8996,10 @@ pub(crate) fn parse_shared_quality_clause<'a>(
     .parse(rest)?;
     let (rest, _) = opt(alt((tag::<_, _, Vbe>("a "), tag("at least one ")))).parse(rest)?;
     let (rest, quality) = parse_shared_quality(rest)?;
-    let (rest, reference) = opt(nom::sequence::preceded(tag::<_, _, Vbe>(" with "), |i| {
-        parse_shared_quality_reference(i, ctx)
-    }))
+    let (rest, reference) = opt(nom::sequence::preceded(
+        tag::<_, _, Vbe>(" with "),
+        nom::combinator::cut(|i| parse_shared_quality_reference(i, ctx)),
+    ))
     .parse(rest)?;
 
     Ok((
@@ -9253,22 +9409,9 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     // even while it is using its normal face. Reuse the shared relative-clause
     // property path so spell filters and ordinary target filters agree on the
     // same `FilterProp::HasAdventure` predicate.
-    if let Ok((after_verb, _)) = alt((
-        tag::<_, _, OracleError<'_>>("has "),
-        tag::<_, _, OracleError<'_>>("have "),
-    ))
-    .parse(after_that)
-    {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an adventure").parse(after_verb) {
-            let next_char_is_boundary = rest
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
-            if next_char_is_boundary {
-                let consumed = that_len + after_that.len() - rest.len();
-                return Some((vec![FilterProp::HasAdventure], consumed));
-            }
-        }
+    if let Ok((rest, property)) = parse_adventure_have_predicate(after_that) {
+        let consumed = that_len + after_that.len() - rest.len();
+        return Some((vec![property], consumed));
     }
 
     // CR 508.6: "that attacked you this turn" — defender-scoped attack-history
@@ -9870,6 +10013,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -10108,6 +10252,74 @@ fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter
     }
 
     Ok((rest, type_filters))
+}
+
+fn parse_relative_card_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = opt(alt((tag("is "), tag("are ")))).parse(input)?;
+    if let Ok((rest, property)) = parse_adventure_have_predicate(input) {
+        return Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![property])),
+        ));
+    }
+    // Reuse the property suffix's Adventure leaf and its word boundary.
+    let (after_article, _) = opt(nom_primitives::parse_article).parse(input)?;
+    if let Ok((after_card, _)) = nom_quantity::parse_card_word(after_article) {
+        if let Some((properties, consumed)) = parse_that_clause_suffix(after_card, None) {
+            if properties == [FilterProp::HasAdventure] {
+                return Ok((
+                    &after_card[consumed..],
+                    TargetFilter::Typed(TypedFilter::card().properties(properties)),
+                ));
+            }
+        }
+    }
+    let (rest, kind) = parse_relative_core_type_leg(input)?;
+    let (rest, _) = opt(preceded(tag(" "), nom_quantity::parse_card_word)).parse(rest)?;
+    Ok((rest, TargetFilter::Typed(TypedFilter::new(kind))))
+}
+
+fn parse_adventure_have_predicate(input: &str) -> OracleResult<'_, FilterProp> {
+    let (rest, _) = alt((tag("has "), tag("have "))).parse(input)?;
+    let (rest, _) = opt(nom_primitives::parse_article).parse(rest)?;
+    let (rest, _) = tag("adventure").parse(rest)?;
+    let (rest, _) = nom::combinator::not(nom::character::complete::satisfy(|c| {
+        c.is_alphanumeric() || c == '_'
+    }))
+    .parse(rest)?;
+    Ok((rest, FilterProp::HasAdventure))
+}
+
+/// A relative-list head cannot start a separate instruction, even when its
+/// predicate is unfinished. Shared with the where-X operand boundary owner.
+pub(crate) fn parse_relative_card_continuation_head(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value(
+            (),
+            terminated(
+                alt((tag("is"), tag("are"), tag("has"), tag("have"))),
+                alt((tag(" "), nom::combinator::eof)),
+            ),
+        ),
+        value((), nom_primitives::parse_article),
+        value((), parse_relative_core_type_leg),
+        value((), nom_quantity::parse_card_word),
+    ))
+    .parse(input)
+}
+
+/// CR 109.2a + CR 715.2a: relative card predicates may mix card types with
+/// Adventure properties, while the caller retains shared head/zone restrictions.
+pub(crate) fn parse_relative_card_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (after_intro, _, negated) = parse_relative_clause_intro(input)
+        .ok_or_else(|| super::oracle_nom::error::oracle_err(input))?;
+    if negated {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    let (rest, filters) =
+        separated_list1(parse_relative_core_type_separator, parse_relative_card_leg)
+            .parse(after_intro)?;
+    Ok((rest, TargetFilter::Or { filters }))
 }
 
 /// Parses a positive relative card-type clause like
@@ -10948,6 +11160,60 @@ pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn u15_negative_quality_suffix_is_complete_and_composable() {
+        for head in ["with ", "that have ", "that each have ", "without "] {
+            for quality in ["the chosen quality", "that quality"] {
+                let text = format!("{head}mana value of {quality}");
+                let (prop, consumed) =
+                    parse_mana_value_suffix(&text, &mut ParseContext::default()).unwrap();
+                assert_eq!(consumed, text.len());
+                let parity = FilterProp::ManaValueParity {
+                    parity: ParitySource::LastNamedChoice,
+                };
+                assert_eq!(
+                    prop,
+                    if head == "without " {
+                        FilterProp::Not {
+                            prop: Box::new(parity),
+                        }
+                    } else {
+                        parity
+                    }
+                );
+                let bad = format!("{text}ness");
+                assert!(parse_mana_value_suffix(&bad, &mut ParseContext::default()).is_none());
+            }
+        }
+        assert!(
+            parse_mana_value_suffix("without mana value 3", &mut ParseContext::default()).is_none()
+        );
+        for noun in ["creature", "creatures", "each creature"] {
+            for (qualifier, controller) in [
+                ("", None),
+                (" you control", Some(ControllerRef::You)),
+                (" your opponents control", Some(ControllerRef::Opponent)),
+            ] {
+                for quality in ["the chosen quality", "that quality"] {
+                    let text = format!("{noun}{qualifier} without mana value of {quality}");
+                    let (filter, rest) = parse_target(&text);
+                    assert!(rest.is_empty(), "{text}: {rest}");
+                    assert_eq!(
+                        filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: controller.clone(),
+                            properties: vec![FilterProp::Not {
+                                prop: Box::new(FilterProp::ManaValueParity {
+                                    parity: ParitySource::LastNamedChoice,
+                                })
+                            }],
+                        })
+                    );
+                }
+            }
+        }
+    }
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::AttackerBlockStatus;
@@ -15607,6 +15873,81 @@ mod tests {
         }
 
         assert!(parse_that_clause_suffix(" that has an adventures", None).is_none());
+    }
+
+    #[test]
+    fn coordinated_relative_predicate() {
+        for phrase in [
+            "that are instant cards, are sorcery cards, and/or have an adventure",
+            "that are sorcery cards or have an adventure or are instant cards",
+            "that's an instant, sorcery, or card that has an adventure",
+            "that are instants",
+            "that are instant cards, are sorceries",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_relative_card_filter)
+                    .parse(phrase)
+                    .is_ok(),
+                "{phrase}"
+            );
+        }
+        for malformed in [
+            "that are instantsx",
+            "that are instant cards, are sorceriesx",
+            "that are instant cards and have",
+            "that are instant cards and have an adventures",
+            "that are instant cards and have an unknown adventure",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_relative_card_filter)
+                    .parse(malformed)
+                    .is_err(),
+                "{malformed}"
+            );
+        }
+        for head in [
+            "is",
+            "are",
+            "has",
+            "have",
+            "an instant card",
+            "a sorcery card",
+            "card",
+            "instant",
+        ] {
+            assert!(
+                parse_relative_card_continuation_head(head).is_ok(),
+                "{head}"
+            );
+        }
+        let (rest, filter) = parse_relative_card_filter(
+            "that's an instant card, a sorcery card, or a card that has an adventure",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::HasAdventure])
+                    ),
+                ]
+            }
+        );
+        let (rest, types) =
+            parse_relative_core_type_list("an instant or a card that has an adventure").unwrap();
+        assert_eq!(types, vec![TypeFilter::Instant, TypeFilter::Card]);
+        assert_eq!(rest, " that has an adventure");
+        let (rest, types) =
+            parse_relative_core_type_list("an instant card, a sorcery card").unwrap();
+        assert_eq!(types, vec![TypeFilter::Instant]);
+        assert_eq!(rest, " card, a sorcery card");
+        assert!(nom::combinator::all_consuming(parse_relative_card_filter)
+            .parse("that's a card that has an adventures")
+            .is_err());
     }
 
     #[test]
@@ -20941,6 +21282,62 @@ mod tests {
         assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
+    #[test]
+    fn jev_shared_quality_each_and_quantified_reference_are_independent_axes() {
+        let ctx = ParseContext::default();
+        for subject in ["that share ", "that shares ", "that each share "] {
+            for reference in [
+                "permanents you control",
+                "one or more permanents you control",
+            ] {
+                let input = format!("{subject}a color with {reference}, next");
+                let (rest, prop) = parse_shared_quality_clause(&input, &ctx).unwrap();
+                assert_eq!(rest, ", next");
+                let FilterProp::SharesQuality {
+                    quality,
+                    reference: Some(reference),
+                    relation,
+                } = prop
+                else {
+                    panic!("{prop:?}")
+                };
+                assert_eq!(quality, SharedQuality::Color);
+                assert_eq!(relation, SharedQualityRelation::Shares);
+                let TargetFilter::Typed(typed) = *reference else {
+                    panic!("{reference:?}")
+                };
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+            }
+        }
+        let (_, negative) = parse_shared_quality_clause(
+            "that each don't share a creature type with one or more creatures you control",
+            &ctx,
+        )
+        .unwrap();
+        assert!(matches!(
+            negative,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(_),
+                relation: SharedQualityRelation::DoesNotShare
+            }
+        ));
+        assert!(parse_shared_quality_clause("that share a color", &ctx).is_ok());
+        for input in [
+            "that share a color with ",
+            "that each share a color with one or more nonsense",
+        ] {
+            assert!(
+                matches!(
+                    parse_shared_quality_clause(input, &ctx),
+                    Err(nom::Err::Failure(_))
+                ),
+                "explicit reference cannot become a group constraint: {input}"
+            );
+        }
+    }
+
     /// CR 707.2 + CR 115.10a: Duplication Device — "target creature becomes a
     /// copy of any creature on the battlefield". "any creature on the
     /// battlefield" carries no controller restriction (any player's
@@ -23489,5 +23886,31 @@ mod color_or_type_union {
         }
         assert!(parse_type_phrase_union("Giant", &scope).is_none());
         assert!(parse_type_phrase_union("Goblin or Shaman you know", &scope).is_none());
+    }
+}
+
+#[cfg(test)]
+mod casting_name_reference_preservation_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_same_name_nouns_keep_source_or_parent_authority() {
+        assert_eq!(
+            parse_same_name_suffix("with the same name as this creature")
+                .unwrap()
+                .0,
+            FilterProp::SameName
+        );
+        assert_eq!(
+            parse_same_name_suffix("with the same name as ~").unwrap().0,
+            FilterProp::SameName
+        );
+        assert_eq!(
+            parse_same_name_suffix("with the same name as that creature")
+                .unwrap()
+                .0,
+            FilterProp::SameNameAsParentTarget
+        );
+        assert!(parse_same_name_suffix("with the same name as that spell").is_none());
     }
 }

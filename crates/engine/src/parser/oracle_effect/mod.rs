@@ -686,6 +686,7 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::DayNightIsNeither
@@ -759,6 +760,7 @@ fn rebind_source_counter_condition(condition: &mut AbilityCondition, to: ObjectS
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::SourceIsTapped
@@ -2202,6 +2204,7 @@ fn condition_reads_the_event_subject(condition: &AbilityCondition) -> bool {
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::SourceIsTapped
@@ -6964,6 +6967,67 @@ fn try_parse_create_token_sequence(
     Some(clause)
 }
 
+/// CR 115.10a + CR 608.2c: a demonstrative names the immediately
+/// preceding mandatory single-creature announcement. Only an absorbed
+/// no-regeneration definition is transparent here. CR 608.2h: battlefield
+/// announcements use their pinned live/LKI reader; nonbattlefield cards retain
+/// the effect-context snapshot of their expected zone.
+fn token_pt_antecedent_origin(clauses: &[ClauseIr]) -> Option<TargetReadOrigin> {
+    let mut previous = clauses.iter().rev();
+    let mut clause = previous.next()?;
+    while matches!(
+        clause.disposition,
+        ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::CantRegenerate { .. })
+        }
+    ) {
+        clause = previous.next()?;
+    }
+    if clause.condition.is_some()
+        || clause.parsed.condition.is_some()
+        || clause.is_optional
+        || clause.parsed.optional
+        || clause.opponent_may_scope.is_some()
+        || clause.repeat_for.is_some()
+        || clause.player_scope.is_some()
+        || clause
+            .multi_target
+            .as_ref()
+            .is_some_and(|spec| fixed_slot_count(spec) != Some(1))
+        || clause
+            .parsed
+            .multi_target
+            .as_ref()
+            .is_some_and(|spec| fixed_slot_count(spec) != Some(1))
+        || clause.parsed.sub_ability.is_some()
+        || clause.unless_pay.is_some()
+        || clause.parsed.unless_pay.is_some()
+        || clause.delayed_condition.is_some()
+        || clause.prefix_delayed_condition.is_some()
+        || !matches!(
+            clause.disposition,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None
+            }
+        )
+    {
+        return None;
+    }
+    let filter = single_declared_slot_filter(&clause.parsed.effect).ok()??;
+    match filter {
+        // allow-noncombinator: typed filter membership, not Oracle string dispatch.
+        TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Creature) => {
+            Some(if filter.denotes_battlefield_objects() {
+                TargetReadOrigin::ParentAnnouncement
+            } else {
+                TargetReadOrigin::OwnAnnouncement
+            })
+        }
+        _ => None,
+    }
+}
+
 fn token_source_pt_followup_can_apply_to_chunk(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -9104,7 +9168,31 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
     imperative::is_for_each_opponent_choose_controlled(lower)
 }
 
+/// Recognize the unfinished universal head without consuming or blessing its body.
+fn is_all_revealed_result_consumer(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            peek((
+                opt(tag("then ")),
+                tag("if "),
+                tag("all cards "),
+                tag("revealed "),
+                opt(tag("in ")),
+                tag("this way are "),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 608.2c: retain the complete following instruction until its consumer exists.
+    if is_all_revealed_result_consumer(text) {
+        return parsed_clause(Effect::unimplemented("all_revealed_result_consumer", text));
+    }
     // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
     // own duration, so it must run before the clause shell peels a trailing one.
     {
@@ -10876,6 +10964,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -13533,6 +13622,38 @@ fn parse_quoted_self_spell_cost_body(
 /// [`PerpetualModification::ModifyCost`]. The quoted self-spell cost modifier is
 /// realized at resolution by injecting a synthetic [`StaticMode::ModifyCost`]
 /// into the card's persistent static baseline.
+pub(crate) fn parse_sought_perpetual_cost(
+    input: &str,
+) -> OracleResult<'_, (ManaCost, crate::types::statics::CostModifyMode)> {
+    let (input, _) = alt((tag("those cards "), tag("they "))).parse(input)?;
+    let (input, _) = tag("perpetually ").parse(input)?;
+    let (input, _) = alt((tag("gain "), tag("gains "))).parse(input)?;
+    let (input, parameters) = nom::sequence::delimited(
+        nom::character::complete::char('"'),
+        parse_quoted_self_spell_cost_body,
+        nom::character::complete::char('"'),
+    )
+    .parse(input)?;
+    let (input, _) = all_consuming(opt(nom::character::complete::char('.'))).parse(input)?;
+    Ok((input, parameters))
+}
+
+/// Complete source proof for an independent scalar-life instruction.
+pub(crate) fn sought_corridor_life_amount(text: &str) -> Option<QuantityExpr> {
+    let text = strip_leading_sequence_connector(text).trim();
+    let lower = text.to_lowercase();
+    let ((_, amount, _, _), _) = nom_on_lower(text, &lower, |input| {
+        all_consuming((
+            tag("you gain "),
+            nom_quantity::parse_quantity_expr_number,
+            tag(" life"),
+            opt(nom::character::complete::char('.')),
+        ))
+        .parse(input)
+    })?;
+    Some(amount)
+}
+
 fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
@@ -42341,6 +42462,12 @@ fn parse_effect_chain_ir_body(
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
     let outer_declared_slots = std::mem::take(&mut ctx.chain_declared_slots);
+    let mut pending_token_definition: Option<(
+        usize,
+        crate::parser::oracle_ir::effect_chain::ClauseId,
+        PtValue,
+        PtValue,
+    )> = None;
     'chunks: for (chunk_idx, chunk) in chunks.iter().enumerate() {
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
@@ -42368,6 +42495,55 @@ fn parse_effect_chain_ir_body(
             .map(|_| (builder.clauses().len(), chunk.text.clone()));
         builder.set_pending_leading_duration(chunk.leading_duration.clone());
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
+        if is_all_revealed_result_consumer(chunk.text.trim()) {
+            if let Some((condition, _, body)) =
+                conditions::parse_all_revealed_condition(chunk.text.trim(), ctx)
+            {
+                if let Some(effect) = sequence::parse_all_revealed_move(body) {
+                    builder
+                        .clause(
+                            chunk.text.trim(),
+                            parsed_clause(effect),
+                            chunk.boundary_after,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .condition(Some(condition))
+                        .push();
+                    continue;
+                }
+            }
+            unimplemented_clause(
+                &mut builder,
+                "all_revealed_result_consumer",
+                chunk.text.trim(),
+                chunk.boundary_after,
+            );
+            continue;
+        }
+        // The lookahead's bound pair is consumed once, only by its next chunk.
+        if let Some((expected_chunk, owner, power, toughness)) = pending_token_definition.take() {
+            if expected_chunk == chunk_idx {
+                builder
+                    .clause(
+                        normalized_text,
+                        placeholder_parsed_clause("token_pt_definition"),
+                        chunk.boundary_after,
+                        ClauseDisposition::Continue {
+                            continuation: Some(ContinuationAst::TokenSourcePowerToughness {
+                                power,
+                                toughness,
+                            }),
+                        },
+                    )
+                    .token_definition_owner(Some(owner))
+                    .push();
+                continue;
+            }
+        }
+
         if normalized_text.is_empty() {
             continue;
         }
@@ -44109,9 +44285,7 @@ fn parse_effect_chain_ir_body(
                         refuse_target_pt_threshold_rider_with_own_target(clause);
                     }
                 }
-                for c in body_ir.clauses {
-                    builder.absorb_clause(c);
-                }
+                builder.absorb_clauses(body_ir.clauses);
                 continue;
             }
         }
@@ -44675,14 +44849,60 @@ fn parse_effect_chain_ir_body(
                 Some(ControllerRef::ParentTargetController)
             )
             && chain_parent_target_controller_scope.is_some();
-        let token_pt_followup = chunks
+        let token_definition = chunks
             .get(chunk_idx + 1)
             .filter(|_| token_source_pt_followup_can_apply_to_chunk(normalized_text))
             .and_then(|next| {
-                let next_text = strip_leading_sequence_connector(&next.text).trim();
-                sequence::parse_token_source_power_toughness_followup(next_text)
+                sequence::parse_token_source_power_toughness_followup(
+                    strip_leading_sequence_connector(&next.text).trim(),
+                )
             })
-            .map(|(power, toughness)| TokenPtFollowup::PowerToughness { power, toughness });
+            .and_then(|(mut power, mut toughness)| {
+                let target_demonstrative = [&power, &toughness].iter().any(|value| {
+                    matches!(
+                        value,
+                        PtValue::Quantity(QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Demonstrative
+                            } | QuantityRef::Toughness {
+                                scope: ObjectScope::Demonstrative
+                            }
+                        })
+                    )
+                });
+                let origin = if target_demonstrative
+                    && ctx
+                        .demonstrative_object_ref
+                        .as_ref()
+                        .is_some_and(|reference| !matches!(reference, TargetFilter::ParentTarget))
+                {
+                    TargetReadOrigin::OwnAnnouncement
+                } else if target_demonstrative {
+                    let origin = token_pt_antecedent_origin(builder.clauses())?;
+                    if origin == TargetReadOrigin::ParentAnnouncement {
+                        for value in [&mut power, &mut toughness] {
+                            if let PtValue::Quantity(QuantityExpr::Ref {
+                                qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },
+                            }) = value
+                            {
+                                if *scope == ObjectScope::Demonstrative {
+                                    *scope = ObjectScope::Target;
+                                }
+                            }
+                        }
+                    }
+                    origin
+                } else {
+                    TargetReadOrigin::OwnAnnouncement
+                };
+                Some((power, toughness, origin))
+            });
+        let token_pt_followup = token_definition.as_ref().map(|(power, toughness, _)| {
+            TokenPtFollowup::PowerToughness {
+                power: power.clone(),
+                toughness: toughness.clone(),
+            }
+        });
         let nearest_bare_card_publisher = builder
             .clauses()
             .iter()
@@ -46429,7 +46649,13 @@ fn parse_effect_chain_ir_body(
                 // scan has to survive for this caller.
                 let mut temp_env = assembly::AssemblyEnv::default();
                 temp_env.observe(&temp_defs, None, assembly::NodeRole::Primary);
-                apply_clause_continuation(&mut temp_defs, ic.clone(), kind, &temp_env);
+                apply_clause_continuation(
+                    &mut temp_defs,
+                    ic.clone(),
+                    kind,
+                    &temp_env,
+                    previous.source.fragment().unwrap_or_default(),
+                );
                 (*temp_defs.last().unwrap().effect).clone()
             } else if previous.disposition.followup().is_some() {
                 // A non-absorbed clause with a followup continuation means the continuation
@@ -47067,6 +47293,30 @@ fn parse_effect_chain_ir_body(
                 continue 'chunks;
             }
 
+            // CR 608.2c + CR 115.10a: this population reads one preceding
+            // creature announcement; neither its controller nor its exclusion is
+            // a fresh target. An unproved relation retains the complete fragment.
+            let prior_controller_population = matches!(&clause.effect,
+            Effect::GenericEffect { target: None, static_abilities, .. }
+                if static_abilities.iter().any(|definition| matches!(
+                    definition.affected.as_ref(), Some(TargetFilter::Typed(typed))
+                        if typed.controller == Some(ControllerRef::ParentTargetController)
+                            && typed.properties.iter().any(|property| matches!(property,
+                                FilterProp::DistinctFrom { reference }
+                                    if matches!(reference.as_ref(), TargetFilter::ParentTarget)))
+                )));
+            if prior_controller_population
+                && token_pt_antecedent_origin(builder.clauses())
+                    != Some(TargetReadOrigin::ParentAnnouncement)
+            {
+                unimplemented_clause(
+                    &mut builder,
+                    "prior_controller_population_antecedent",
+                    normalized_text,
+                    chunk.boundary_after,
+                );
+                continue;
+            }
             let clause_declared_group = chunk_ctx.clause_declared_group.take();
             if let Some(group) = clause_declared_group {
                 declarations.push((builder.clauses().len(), group));
@@ -47101,6 +47351,24 @@ fn parse_effect_chain_ir_body(
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                 .declared_player_group(clause_declared_group)
                 .push();
+
+            if prior_controller_population {
+                if let Some(reader) = builder.last_mut() {
+                    reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+                }
+            }
+
+            if let Some((power, toughness, origin)) = token_definition {
+                if let Some(creator) = builder.last_mut() {
+                    if matches!(creator.parsed.effect, Effect::Token { .. })
+                        && creator.parsed.sub_ability.is_none()
+                    {
+                        creator.target_reads = origin;
+                        pending_token_definition =
+                            Some((chunk_idx + 1, creator.id, power, toughness));
+                    }
+                }
+            }
 
             // CR 115.1 + CR 608.2c: the comparative gate's "that creature" reads the
             // single object the immediately preceding instruction announced

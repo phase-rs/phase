@@ -1,4 +1,776 @@
 use super::*;
+
+const U14_STANDARD: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
+const U14_ASHLING: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+
+#[test]
+fn u15_full_ashling_joint_readers_and_complete_subject() {
+    use crate::types::ability::{ParitySource, ReplacementMode, TapStateChange, TypeFilter};
+    let mut doc = parse_oracle_ir(
+        U14_ASHLING,
+        "Ashling's Prerogative",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, U14_ASHLING);
+    assert_eq!(doc.items.len(), 3);
+    let relation = doc
+        .relations
+        .iter()
+        .find_map(|r| match r {
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                chooser,
+                statics,
+                replacements,
+            }) => Some((*chooser, statics.clone(), replacements.clone())),
+            _ => None,
+        })
+        .expect("one exact joint printed relation");
+    assert_eq!(relation.0, doc.items[0].id);
+    assert_eq!(relation.1, vec![doc.items[1].id]);
+    assert_eq!(relation.2, vec![doc.items[2].id]);
+    assert!(source_parity_chooser(&doc.items[0]));
+    for (index, line) in U14_ASHLING.lines().enumerate() {
+        assert_eq!(doc.items[index].source.fragment(), Some(line));
+    }
+    let OracleNodeIr::Replacement(ir) = &doc.items[2].node else {
+        panic!("{doc:#?}")
+    };
+    assert_eq!(ir.definition.event, ReplacementEvent::Moved);
+    assert_eq!(ir.definition.destination_zone, Some(Zone::Battlefield));
+    assert_eq!(ir.definition.mode, ReplacementMode::Mandatory);
+    assert_eq!(
+        ir.definition.valid_card,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Not {
+                prop: Box::new(FilterProp::ManaValueParity {
+                    parity: ParitySource::SourceChosen
+                })
+            }],
+        }))
+    );
+    let execute = ir.definition.execute.as_deref().unwrap();
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap
+        }
+    ));
+    assert!(execute.sub_ability.is_none() && execute.else_ability.is_none());
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.replacements.len(), 2);
+    assert_eq!(parsed.statics.len(), 1);
+    assert!(parsed.abilities.is_empty());
+}
+
+#[test]
+fn u15_joint_multiple_readers_preserve_unrelated_and_local_items() {
+    let text = format!("{U14_ASHLING}\nEach creature with mana value of the chosen quality has flying.\nEach creature without mana value of the chosen quality enters untapped.\nChoose odd or even.\nCreatures have vigilance.");
+    let doc = parse_oracle_ir(
+        &text,
+        "Synthetic multiple readers",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    let relations: Vec<_> = doc
+        .relations
+        .iter()
+        .filter_map(|relation| match relation {
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                chooser,
+                statics,
+                replacements,
+            }) => Some((chooser, statics, replacements)),
+            _ => None,
+        })
+        .collect();
+    let [(chooser, statics, replacements)] = relations.as_slice() else {
+        panic!("one joint relation")
+    };
+    assert_eq!(**chooser, doc.items[0].id);
+    assert_eq!(statics.len(), 2);
+    assert_eq!(replacements.len(), 2);
+    assert!(statics.iter().all(|id| !replacements.contains(id)));
+    let mut readers = 0;
+    for item in &doc.items {
+        let filter = match &item.node {
+            OracleNodeIr::Static(ir) if statics.contains(&item.id) => {
+                ir.definition.affected.as_ref()
+            }
+            OracleNodeIr::Replacement(ir) if replacements.contains(&item.id) => {
+                ir.definition.valid_card.as_ref()
+            }
+            _ => None,
+        };
+        if let Some(filter) = filter {
+            readers += 1;
+            assert!(target_filter_uses_filter_prop(filter, &|prop| matches!(
+                prop,
+                FilterProp::ManaValueParity {
+                    parity: ParitySource::SourceChosen
+                }
+            )));
+            assert!(!source_parity_static_reader(filter));
+        }
+    }
+    assert_eq!(readers, 4);
+    assert!(doc
+        .items
+        .iter()
+        .any(|item| item.source.fragment() == Some("Choose odd or even.")
+            && !statics.contains(&item.id)
+            && !replacements.contains(&item.id)));
+    assert!(doc.items.iter().any(|item| matches!(&item.node, OracleNodeIr::Static(ir)
+        if ir.definition.modifications == [ContinuousModification::AddKeyword { keyword: Keyword::Vigilance }]
+            && !statics.contains(&item.id))));
+}
+
+#[test]
+fn u15_external_subject_refuses_residual_and_self_fallback() {
+    let positive = "Each creature without mana value of the chosen quality enters tapped.";
+    assert!(super::oracle_replacement::parse_replacement_line(positive, "Synthetic").is_some());
+    for text in [
+        "Each creature without mana value of the chosen qualityness enters tapped.",
+        "Each creature without mana value of the chosen quality enters tapped and draw a card.",
+        "Each creature with an unexplained quality enters tapped.",
+        "This enchantment mentions that a creature enters tapped.",
+        "This enchantment enters tapped. Draw a card.",
+    ] {
+        assert!(
+            super::oracle_replacement::parse_replacement_line(text, "Synthetic").is_none(),
+            "{text}"
+        );
+    }
+    assert!(super::oracle_replacement::parse_replacement_line(
+        "This enchantment enters tapped.",
+        "Synthetic"
+    )
+    .is_some());
+}
+
+#[test]
+fn u15_joint_reader_transaction_refuses_every_stale_half() {
+    use crate::types::ability::ParitySource;
+    for corruption in 0..20 {
+        let mut doc = parse_oracle_ir(
+            U14_ASHLING,
+            "Ashling's Prerogative",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(doc.items.len(), 3);
+        let mut relation = doc
+            .relations
+            .iter()
+            .find(|relation| {
+                matches!(
+                    relation,
+                    DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+                )
+            })
+            .unwrap()
+            .clone();
+        for item in &mut doc.items {
+            let filter = match &mut item.node {
+                OracleNodeIr::Static(ir) => ir.definition.affected.as_mut(),
+                OracleNodeIr::Replacement(ir) => ir.definition.valid_card.as_mut(),
+                _ => None,
+            };
+            if let Some(filter) = filter {
+                let mut complete = true;
+                rewrite_filter_props(
+                    filter,
+                    &mut |_| {},
+                    &mut |prop| {
+                        if let FilterProp::ManaValueParity {
+                            parity: parity @ ParitySource::SourceChosen,
+                        } = prop
+                        {
+                            *parity = ParitySource::LastNamedChoice;
+                        }
+                    },
+                    &mut complete,
+                );
+                assert!(complete);
+            }
+        }
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+            chooser,
+            statics,
+            replacements,
+        }) = &mut relation
+        else {
+            unreachable!()
+        };
+        assert_eq!(statics.len(), 1);
+        assert_eq!(replacements.len(), 1);
+        match corruption {
+            0 => {}
+            1 => *chooser = OracleItemId(u32::MAX),
+            2 => statics.clear(),
+            3 => replacements.clear(),
+            4 => replacements.push(replacements[0]),
+            5 => statics.push(replacements[0]),
+            6 => replacements[0] = statics[0],
+            7 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.event = ReplacementEvent::ChangeZone;
+            }
+            8 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.destination_zone = Some(Zone::Graveyard);
+            }
+            9 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.execute.as_deref_mut().unwrap().optional = true;
+            }
+            10 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                let tail = ir.definition.execute.clone();
+                ir.definition.execute.as_deref_mut().unwrap().sub_ability = tail;
+            }
+            11 => doc.items[2].source = doc.items[0].source.clone(),
+            12 => doc.items[2].id = doc.items[1].id,
+            13 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.quantity_modification =
+                    Some(crate::types::ability::QuantityModification::Double);
+            }
+            14 => {
+                let mut second = doc.items[0].clone();
+                second.id = OracleItemId(u32::MAX - 1);
+                doc.items.push(second);
+            }
+            15 => doc.items[2].source = doc.items[1].source.clone(),
+            16 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.execute.as_deref_mut().unwrap().cost = Some(AbilityCost::Tap);
+            }
+            17 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[0].node else {
+                    unreachable!()
+                };
+                ir.definition.execute.as_deref_mut().unwrap().cost = Some(AbilityCost::Tap);
+            }
+            18 => {
+                let foreign = parse_oracle_ir(
+                    &U14_ASHLING.replace("enters tapped.", "enters untapped."),
+                    "Ashling's Prerogative",
+                    &[],
+                    &["Enchantment".into()],
+                    &[],
+                );
+                doc.items[2].source = foreign.items[2].source.clone();
+            }
+            19 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.condition =
+                    Some(crate::types::ability::ReplacementCondition::UnlessYourTurn);
+            }
+            _ => unreachable!(),
+        }
+        let identities: Vec<_> = doc
+            .items
+            .iter()
+            .map(|item| (item.id, item.source.clone()))
+            .collect();
+        apply_source_parity_statics(&mut doc, &[relation]);
+        for (item, (id, source)) in doc.items.iter().zip(identities) {
+            assert_eq!(item.id, id);
+            assert_eq!(item.source, source);
+        }
+        if corruption == 0 {
+            assert!(
+                matches!(&doc.items[1].node, OracleNodeIr::Static(ir) if ir.definition.affected.as_ref().is_some_and(|filter| target_filter_uses_filter_prop(filter, &|prop| matches!(prop, FilterProp::ManaValueParity { parity: ParitySource::SourceChosen }))))
+            );
+            assert!(
+                matches!(&doc.items[2].node, OracleNodeIr::Replacement(ir) if ir.definition.valid_card.as_ref().is_some_and(|filter| target_filter_uses_filter_prop(filter, &|prop| matches!(prop, FilterProp::ManaValueParity { parity: ParitySource::SourceChosen }))))
+            );
+        } else {
+            for (index, category) in [
+                (1, UnsupportedAbilityCategory::StaticStructure),
+                (2, UnsupportedAbilityCategory::ReplacementStructure),
+            ] {
+                assert!(
+                    matches!(&doc.items[index].node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.category == category),
+                    "corruption {corruption}: {doc:#?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn u14_source_parity_relation_two_layers() {
+    // SHAPE: runtime entry and haste are exercised by jev_chosen_parity.
+    for text in [
+        U14_STANDARD.to_string(),
+        format!("Creatures have vigilance.\n{U14_STANDARD}\nCreatures have trample."),
+        format!("As this enchantment enters, choose a color.\n{U14_STANDARD}"),
+    ] {
+        let mut doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        let relation = doc
+            .relations
+            .iter()
+            .find_map(|r| match r {
+                DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                    chooser,
+                    statics,
+                    replacements,
+                }) if replacements.is_empty() => Some((*chooser, statics)),
+                _ => None,
+            })
+            .expect("exact linked parity relation");
+        assert_eq!(relation.1.len(), 1);
+        assert_ne!(relation.0, relation.1[0]);
+        let chooser = doc.items.iter().find(|i| i.id == relation.0).unwrap();
+        assert!(source_parity_chooser(chooser));
+        let consumer = doc.items.iter().find(|i| i.id == relation.1[0]).unwrap();
+        let OracleNodeIr::Static(ir) = &consumer.node else {
+            panic!("static")
+        };
+        assert!(target_filter_uses_filter_prop(
+            ir.definition.affected.as_ref().unwrap(),
+            &|p| matches!(
+                p,
+                FilterProp::ManaValueParity {
+                    parity: crate::types::ability::ParitySource::SourceChosen
+                }
+            )
+        ));
+        assert!(ir
+            .definition
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(parsed
+            .statics
+            .iter()
+            .any(|s| s
+                .affected
+                .as_ref()
+                .is_some_and(|f| target_filter_uses_filter_prop(f, &|p| matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: crate::types::ability::ParitySource::SourceChosen
+                    }
+                )))));
+        assert!(parsed
+            .abilities
+            .iter()
+            .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })));
+    }
+}
+
+#[test]
+fn u14_relation_refuses_ambiguous_or_unowned_static() {
+    let reader = "Each creature with mana value of the chosen quality has haste.";
+    for text in [reader.to_string(), format!("{reader}\nAs this enchantment enters, choose odd or even."), format!("As this enchantment enters, choose a color.\n{reader}"), format!("As this enchantment enters, choose odd or even.\nAs this enchantment enters, choose odd or even.\n{reader}")] {
+        let mut doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        assert!(doc.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == reader)), "{doc:#?}");
+        assert!(lower_oracle_ir(&mut doc).statics.iter().all(|s| !s.affected.as_ref().is_some_and(source_parity_static_reader)));
+    }
+    // Every malformed relation starts with the same successfully parsed nodes.
+    for corruption in 0..10 {
+        let mut doc = parse_oracle_ir(
+            U14_STANDARD,
+            "Parity Standard",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        let relation = doc
+            .relations
+            .iter()
+            .find(|r| {
+                matches!(
+                    r,
+                    DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+                )
+            })
+            .unwrap()
+            .clone();
+        // Recreate the local reader so the applier must validate before rewriting.
+        if let OracleNodeIr::Static(ir) = &mut doc.items[1].node {
+            ir.definition.affected = Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::ManaValueParity {
+                    parity: crate::types::ability::ParitySource::LastNamedChoice,
+                }],
+            )));
+        }
+        let original = doc.items[1].source.clone();
+        match corruption {
+            0 => {
+                doc.items.remove(0);
+            }
+            1 => {
+                doc.items[0].id = doc.items[1].id;
+            }
+            2 => {
+                let source = doc.items[1].source.clone();
+                doc.items[0].source = source;
+            }
+            n => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[0].node else {
+                    panic!("replacement")
+                };
+                match n {
+                    3 => ir.definition.valid_card = Some(TargetFilter::Any),
+                    4 => ir.definition.mode = ReplacementMode::Optional { decline: None },
+                    5 => ir.definition.destination_zone = Some(Zone::Graveyard),
+                    6 => ir.definition.execute.as_mut().unwrap().optional = true,
+                    7 => {
+                        let a = ir.definition.execute.as_mut().unwrap();
+                        a.effect = Box::new(Effect::Choose {
+                            choice_type: ChoiceType::OddOrEven,
+                            persist: true,
+                            selection: crate::types::ability::TargetSelectionMode::Random,
+                        });
+                    }
+                    8 => {
+                        ir.definition.execute.as_mut().unwrap().sub_ability =
+                            Some(Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    player: TargetFilter::Controller,
+                                },
+                            )));
+                    }
+                    9 => {
+                        ir.definition.execute.as_mut().unwrap().else_ability =
+                            Some(Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    player: TargetFilter::Controller,
+                                },
+                            )));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        apply_source_parity_statics(&mut doc, &[relation]);
+        let failed = doc
+            .items
+            .iter()
+            .find(|i| matches!(i.node, OracleNodeIr::Unsupported { .. }))
+            .unwrap();
+        assert_eq!(failed.source, original);
+        assert!(
+            matches!(&failed.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == reader)
+        );
+    }
+}
+
+#[test]
+fn u15_full_ashling_closes_delivered_entry_gap() {
+    let mut doc = parse_oracle_ir(
+        U14_ASHLING,
+        "Ashling's Prerogative",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, U14_ASHLING);
+    assert!(doc.items.iter().any(source_parity_chooser));
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| s
+            .affected
+            .as_ref()
+            .is_some_and(|f| target_filter_uses_filter_prop(f, &|p| matches!(
+                p,
+                FilterProp::ManaValueParity {
+                    parity: crate::types::ability::ParitySource::SourceChosen
+                }
+            )))));
+    let face = crate::types::card::CardFace {
+        name: "Ashling's Prerogative".into(),
+        oracle_text: Some(U14_ASHLING.into()),
+        replacements: parsed.replacements,
+        static_abilities: parsed.statics,
+        abilities: parsed.abilities,
+        ..Default::default()
+    };
+    assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+}
+
+const U13_IMMARD: &str = "Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
+
+#[test]
+fn u13_full_immard_exact_instruction_modal_roundtrip_and_coverage() {
+    // SHAPE; the public card-test flow supplies the runtime discriminator.
+    let parsed = parse_oracle_text(
+        U13_IMMARD,
+        "Immard, the Stormcleaver",
+        &[],
+        &["Creature".into()],
+        &["Human".into(), "Soldier".into()],
+    );
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert_eq!(parsed.triggers.len(), 2);
+    for trigger in &parsed.triggers {
+        let parent = trigger.execute.as_deref().unwrap();
+        assert!(
+            matches!(parent.effect.as_ref(), Effect::ChooseCounterAdjustment {
+            adjustment: CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(crate::types::counter::CounterType::Generic(kind)),
+            count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef,
+        } if kind == "charge")
+        );
+        assert!(!parent.optional);
+        let child = parent.sub_ability.as_deref().unwrap();
+        assert!(child.condition.as_ref().unwrap().has_when_you_do_marker());
+        let (result, counters) = child
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .unwrap();
+        assert_eq!(Some(result), parent.declares_return_result);
+        assert_eq!(counters, &crate::types::counter::CounterMatch::Any);
+        assert_eq!(child.mode_abilities.len(), 2);
+        assert!(matches!(
+            child.mode_abilities[0].effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                damage_source: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            child.mode_abilities[1].duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+    }
+    let encoded = serde_json::to_string(&parsed).unwrap();
+    let roundtrip: ParsedAbilities = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap(),
+        serde_json::to_value(roundtrip).unwrap()
+    );
+    let face = crate::types::card::CardFace {
+        triggers: parsed.triggers,
+        ..Default::default()
+    };
+    assert!(!crate::game::coverage::card_face_has_unimplemented_parts(
+        &face
+    ));
+}
+
+#[test]
+fn u13_kind_connector_specificity_and_complete_strict_neighbors() {
+    for kind in ["charge", "oil", "+1/+1"] {
+        let text = format!("When this creature enters, put a {kind} counter on it or remove one from it. When you remove a {kind} counter this way, choose one —\n• Draw a card.\n• You gain 1 life.");
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic exact counter",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let parent = parsed.triggers[0].execute.as_deref().unwrap();
+        let child = parent
+            .sub_ability
+            .as_deref()
+            .expect("matching counter producer");
+        assert!(child
+            .condition
+            .as_ref()
+            .unwrap()
+            .counter_removal_event()
+            .is_some());
+        assert_eq!(child.mode_abilities.len(), 2);
+    }
+    for connector in [
+        "When you remove two counters this way",
+        "When you remove a counter this way if you control a Forest",
+        "When you remove an oil counter this way",
+        "When you add a counter this way",
+    ] {
+        let text = format!("When this creature enters, put a charge counter on it or remove one from it. {connector}, choose one —\n• Draw a card.\n• You gain 1 life.");
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic refused relation",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let parent = parsed.triggers[0].execute.as_deref().unwrap();
+        let Effect::Unimplemented {
+            description: Some(fragment),
+            ..
+        } = parent.effect.as_ref()
+        else {
+            panic!("unmodeled complete connector must remain strict: {parent:#?}");
+        };
+        for retained in [
+            "put a charge counter",
+            connector,
+            "Draw a card",
+            "You gain 1 life",
+        ] {
+            // allow-noncombinator: assertion over diagnostic fragments.
+            assert!(fragment.contains(retained), "{fragment}");
+        }
+    }
+}
+
+#[test]
+fn game_preserve_complete_public_reveal_chain() {
+    let scalar = "Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.";
+    let parsed = parse_oracle_text(scalar, "Synthetic aggregate", &[], &["Instant".into()], &[]);
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert_eq!(parsed.abilities.len(), 1);
+    let head = &parsed.abilities[0];
+    assert_eq!(head.player_scope, Some(PlayerFilter::All));
+    assert!(matches!(*head.effect, Effect::RevealTop { count: 1, .. }));
+    let tail = head.sub_ability.as_deref().unwrap();
+    assert_eq!(tail.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(tail.player_scope, None);
+    assert!(matches!(
+        *tail.effect,
+        Effect::GainLife {
+            player: TargetFilter::Controller,
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            }
+        }
+    ));
+    assert!(tail.sub_ability.is_none());
+
+    let payment = parse_oracle_text("Each player reveals the top card of their library unless they pay 1 life. You gain 3 life.", "Synthetic payment", &[], &["Instant".into()], &[]);
+    assert!(payment.parse_warnings.is_empty(), "{payment:#?}");
+    let head = &payment.abilities[0];
+    assert_eq!(head.player_scope, Some(PlayerFilter::All));
+    assert!(matches!(*head.effect, Effect::RevealTop { .. }));
+    assert_eq!(
+        head.unless_pay,
+        Some(UnlessPayModifier {
+            payer: TargetFilter::ScopedPlayer,
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
+        })
+    );
+    assert!(matches!(
+        *head.sub_ability.as_deref().unwrap().effect,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+
+    let full = "At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    let mut ir = parse_oracle_ir(full, "Game Preserve", &[], &["Enchantment".into()], &[]);
+    assert_eq!(ir.source_text, full);
+    let parsed = lower_oracle_ir(&mut ir);
+    assert_eq!(parsed.triggers.len(), 1);
+    let head = parsed.triggers[0].execute.as_deref().unwrap();
+    assert!(matches!(*head.effect, Effect::RevealTop { .. }));
+    let reader = head.sub_ability.as_deref().unwrap();
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert_eq!(
+        reader.reads_return_result.as_ref().map(|(id, _)| *id),
+        head.declares_return_result
+    );
+    assert!(head.declares_return_result.is_some());
+    assert!(matches!(
+        *reader.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::None,
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        reader.condition,
+        Some(AbilityCondition::QuantityCheck {
+            comparator: Comparator::EQ,
+            ..
+        })
+    ));
+    assert_eq!(reader.player_scope, None);
+}
+
+#[test]
+fn ordinary_reveal_scalar_public_chain() {
+    for (head, scope, count) in [
+        (
+            "Each player reveals the top card of their library",
+            Some(PlayerFilter::All),
+            1,
+        ),
+        (
+            "Each player reveals the top two cards of their library",
+            Some(PlayerFilter::All),
+            2,
+        ),
+        (
+            "Each opponent reveals the top card of their library",
+            Some(PlayerFilter::Opponent),
+            1,
+        ),
+        ("Reveal the top card of your library", None, 1),
+    ] {
+        let text = format!("{head}. You gain life equal to the number of cards revealed this way.");
+        let mut ir = parse_oracle_ir(&text, "Synthetic aggregate", &[], &["Instant".into()], &[]);
+        assert_eq!(ir.source_text, text);
+        let parsed = lower_oracle_ir(&mut ir);
+        assert_eq!(parsed.abilities.len(), 1);
+        let root = &parsed.abilities[0];
+        assert_eq!(root.player_scope, scope);
+        assert!(matches!(*root.effect, Effect::RevealTop { count: n, .. } if n == count));
+        let scalar = root.sub_ability.as_deref().unwrap();
+        assert!(matches!(
+            *scalar.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                }
+            }
+        ));
+        assert_eq!(scalar.player_scope, None);
+        assert_eq!(scalar.sub_link, SubAbilityLink::SequentialSibling);
+        for node in [root, scalar] {
+            assert!(node.declares_return_result.is_none());
+            assert!(node.reads_return_result.is_none());
+            assert!(node.multi_target.is_none());
+        }
+        assert!(parsed.statics.is_empty());
+        assert!(parsed.parse_warnings.is_empty());
+    }
+}
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::parser::oracle_ir::doc::{
     OracleDocBuilder, OracleNodeIr, OracleSourceSpan, RelationSynthesisIr,
@@ -9,11 +781,926 @@ use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CountScope,
     CounterAdjustment, DamageKindFilter, DoorLockOp, PlayerRelation,
-    SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
+    SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin, UnlessPayModifier,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
+
+const ORDINARY_SPIRIT: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.";
+const FULL_BROKEN: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.";
+const FULL_CIRCADIAN: &str = "Vivid — Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+const FULL_WHITE_SUN: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This token can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)";
+const WHITE_SUN_SEMANTIC: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures.";
+const FULL_BROOD: &str = "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, create one of those tokens.";
+const NORMALIZED_BROOD: &str = "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice ~: Add {C}.\" Otherwise, create one of those tokens.";
+const CIRCADIAN_BODY: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+const CIRCADIAN_SEEK: &str = "Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control";
+const CIRCADIAN_GRANT: &str = "For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+
+#[test]
+fn broken_visage_complete_public_chain() {
+    let parsed = parse_oracle_text(FULL_BROKEN, "Broken Visage", &[], &["Instant".into()], &[]);
+    assert_ordinary_spirit_shape(&parsed, 1);
+    let chain = scope_chain(&parsed.abilities[0]);
+    assert_eq!(
+        chain.len(),
+        3,
+        "destroy, defined creation, independent cleanup"
+    );
+    assert!(matches!(
+        *chain[0].effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    ));
+    assert!(matches!(*chain[1].effect, Effect::Token { .. }));
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = chain[2].effect.as_ref()
+    else {
+        panic!("normal delayed cleanup: {chain:#?}");
+    };
+    assert!(matches!(
+        condition,
+        DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::End
+        }
+    ));
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            ..
+        }
+    ));
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some(FULL_BROKEN)
+    );
+}
+
+fn scope_spell(text: &str) -> ParsedAbilities {
+    parse_oracle_text(text, "Synthetic outer scope", &[], &["Instant".into()], &[])
+}
+
+fn scope_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(Some(def), |d| d.sub_ability.as_deref()).collect()
+}
+
+fn assert_ordinary_spirit_shape(parsed: &ParsedAbilities, target_count: usize) {
+    // SHAPE; actual creation is exercised in integration::jev_token_followup.
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(parsed.statics.is_empty());
+    assert!(!has_unimplemented(&parsed.abilities[0]), "{parsed:#?}");
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    let chain = scope_chain(&parsed.abilities[0]);
+    assert_eq!(
+        chain
+            .iter()
+            .filter(
+                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+            )
+            .count(),
+        target_count
+    );
+    assert!(chain.iter().any(|d| matches!(
+        *d.effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    )));
+    let tokens: Vec<_> = chain
+        .iter()
+        .filter(|d| matches!(*d.effect, Effect::Token { .. }))
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    let token = tokens[0];
+    assert_eq!(token.target_reads, TargetReadOrigin::ParentAnnouncement);
+    let Effect::Token {
+        power, toughness, ..
+    } = token.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    // CR 111.3 + CR 115.10a: the separate defining sentence adds no target.
+    assert_eq!(
+        *power,
+        crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        })
+    );
+    assert_eq!(
+        *toughness,
+        crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        })
+    );
+}
+
+#[test]
+fn target_defined_token_ordinary_public_document() {
+    let parsed = scope_spell(ORDINARY_SPIRIT);
+    assert_ordinary_spirit_shape(&parsed, 1);
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some(ORDINARY_SPIRIT)
+    );
+}
+
+#[test]
+fn outer_spell_instruction_owns_nested_static_text() {
+    // SHAPE: the complete outer spells own their nested definitions and grants.
+    for (name, text) in [
+        ("Broken Visage", FULL_BROKEN),
+        ("Circadian Struggle", FULL_CIRCADIAN),
+    ] {
+        let mut ir = parse_oracle_ir(text, name, &[], &["Instant".into()], &[]);
+        assert_eq!(ir.source_text, text);
+        assert_eq!(ir.items.len(), 1, "{ir:#?}");
+        assert_eq!(ir.items[0].source.fragment(), Some(text));
+        let OracleNodeIr::Spell(body) = &ir.items[0].node else {
+            panic!("outer spell owner: {ir:#?}")
+        };
+        if name == "Broken Visage" {
+            assert_eq!(body.source_text, text);
+            assert!(body
+                .body
+                .clauses
+                .iter()
+                .any(|c| matches!(c.parsed.effect, Effect::Destroy { .. })));
+            let creator = body
+                .body
+                .clauses
+                .iter()
+                .find(|c| matches!(c.parsed.effect, Effect::Token { .. }))
+                .expect("Spirit creator");
+            assert!(body
+                .body
+                .clauses
+                .iter()
+                .any(|c| c.token_definition_owner == Some(creator.id)));
+        } else {
+            assert_eq!(body.source_text, CIRCADIAN_BODY);
+        }
+        let parsed = lower_oracle_ir(&mut ir);
+        assert!(parsed.statics.is_empty(), "{name}: {parsed:#?}");
+        assert_eq!(parsed.abilities.len(), 1);
+        assert_eq!(parsed.abilities[0].description.as_deref(), Some(text));
+        assert!(!has_unimplemented(&parsed.abilities[0]));
+        let gaps: Vec<_> = scope_chain(&parsed.abilities[0])
+            .iter()
+            .filter_map(|d| match d.effect.as_ref() {
+                Effect::Unimplemented { description, .. } => description.as_deref(),
+                _ => None,
+            })
+            .collect();
+        if name == "Broken Visage" {
+            assert!(gaps.is_empty());
+            assert!(scope_chain(&parsed.abilities[0])
+                .iter()
+                .any(|node| matches!(node.effect.as_ref(), Effect::CreateDelayedTrigger { .. })));
+        } else {
+            assert!(scope_chain(&parsed.abilities[0]).iter().any(|d| matches!(
+                d.effect.as_ref(),
+                Effect::Seek {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::DistinctColorsAmong { .. }
+                    },
+                    ..
+                }
+            )));
+            assert!(gaps.is_empty());
+            let seek = &parsed.abilities[0];
+            let grant = seek.sub_ability.as_deref().expect("perpetual grant");
+            assert!(seek.declares_return_result.is_some());
+            assert_eq!(
+                grant.reads_return_result.as_ref().map(|(id, _)| *id),
+                seek.declares_return_result
+            );
+            assert!(matches!(
+                grant.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctColorsAmong { .. }
+                })
+            ));
+            assert!(
+                matches!(grant.effect.as_ref(), Effect::ApplyPerpetual { modification: crate::types::ability::PerpetualModification::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount }, .. } if *amount == crate::types::mana::ManaCost::generic(1))
+            );
+            assert!(parsed.parse_warnings.is_empty());
+        }
+    }
+}
+
+#[test]
+fn jev_circadian_complete_public_shape() {
+    assert_eq!(
+        FULL_CIRCADIAN,
+        format!("Vivid — {CIRCADIAN_SEEK}. {CIRCADIAN_GRANT}")
+    );
+    let parsed = scope_spell(FULL_CIRCADIAN);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.statics.is_empty());
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert!(!has_unimplemented(&parsed.abilities[0]));
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some(FULL_CIRCADIAN)
+    );
+    let grant = parsed.abilities[0].sub_ability.as_deref().unwrap();
+    assert_eq!(
+        grant.reads_return_result.as_ref().map(|(id, _)| *id),
+        parsed.abilities[0].declares_return_result
+    );
+    assert!(grant.reads_return_result.is_some());
+}
+
+#[test]
+fn jev_seek_excerpt_is_fully_bound_and_malformed_references_stay_honest() {
+    // SHAPE: this is explicitly only Circadian's first instruction.
+    let excerpt = format!("{CIRCADIAN_SEEK}.");
+    let parsed = scope_spell(&excerpt);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert!(!has_unimplemented(&parsed.abilities[0]));
+    let Effect::Seek { filter, count, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("{parsed:#?}");
+    };
+    assert!(matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { .. }
+        }
+    ));
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("{filter:?}")
+    };
+    assert!(typed.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::SharesQuality {
+            reference: Some(_),
+            ..
+        }
+    )));
+    for text in [
+        "Seek two cards that each share a color with.",
+        "Seek two cards that each share a color with one or more mysteries you control.",
+        "Seek two cards that each share a texture with permanents you control.",
+        "Seek two cards that each share a color with permanents you control except on Tuesdays.",
+    ] {
+        let bad = scope_spell(text);
+        assert!(
+            bad.abilities.iter().any(has_unimplemented),
+            "must retain complete unsupported semantics: {text}: {bad:#?}"
+        );
+        assert!(
+            bad.abilities
+                .iter()
+                .flat_map(scope_chain)
+                .any(|node| matches!(
+                    node.effect.as_ref(),
+                    Effect::Unimplemented { description: Some(fragment), .. }
+                        if fragment.trim_end_matches('.') == text.trim_end_matches('.')
+                )),
+            "complete rejected instruction, not just its suffix: {text}: {bad:#?}"
+        );
+        assert!(
+            bad.abilities
+                .iter()
+                .flat_map(scope_chain)
+                .all(|node| !matches!(node.effect.as_ref(), Effect::Seek { .. })),
+            "a rejected restriction cannot leave a broad Seek: {bad:#?}"
+        );
+    }
+    let unsupported = "Seek X cards, where X is the number of mysteries you control.";
+    let bad = scope_spell(unsupported);
+    assert_eq!(bad.abilities[0].description.as_deref(), Some(unsupported));
+    assert!(
+        bad.abilities
+            .iter()
+            .flat_map(scope_chain)
+            .any(|node| matches!(
+                node.effect.as_ref(),
+                Effect::Unimplemented { name, description: Some(fragment) }
+                    if name == "where_x_binding"
+                        && fragment == "where X is the number of mysteries you control"
+            )),
+        "complete unrepresentable where-X operand: {bad:#?}"
+    );
+}
+
+#[test]
+fn ordinary_tap_prefix_keeps_nearest_token_owner() {
+    for prefix in ["", "Draw a card.\n"] {
+        let source = format!("{prefix}Tap target creature. {ORDINARY_SPIRIT}");
+        let parsed = scope_spell(&source);
+        assert_ordinary_spirit_shape(&parsed, 2);
+        let chain = scope_chain(&parsed.abilities[0]);
+        assert!(chain.iter().any(|d| matches!(
+            *d.effect,
+            Effect::SetTapState {
+                state: TapStateChange::Tap,
+                ..
+            }
+        )));
+        if !prefix.is_empty() {
+            assert!(matches!(*chain[0].effect, Effect::Draw { .. }));
+        }
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some(source.as_str())
+        );
+    }
+}
+
+#[test]
+fn outer_instruction_continuation_keeps_unsupported_suffix_and_boundaries() {
+    for command in [
+        "Destroy target creature.",
+        "Destroy target creature. Dance with the moon.",
+    ] {
+        let source = format!("Draw a card.\n{command}");
+        let parsed = scope_spell(&source);
+        assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+        assert!(matches!(*parsed.abilities[0].effect, Effect::Draw { .. }));
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some(source.as_str())
+        );
+        assert_eq!(
+            has_unimplemented(&parsed.abilities[0]),
+            command != "Destroy target creature."
+        );
+        if command != "Destroy target creature." {
+            assert!(scope_chain(&parsed.abilities[0]).iter().any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.trim_end_matches('.') == "Dance with the moon")));
+        }
+    }
+    for boundary in [
+        "\nDestroy target creature.",
+        "Vivid — Destroy target creature.",
+        "When this spell is cast, draw a card.",
+        "{1}: Draw a card.",
+        "This spell costs {1} less to cast.",
+        "Flying",
+        "If a creature would die, exile it instead.",
+        "Choose one —\n• Draw a card.\n• Destroy target creature.",
+    ] {
+        let source = format!("Draw a card.\n{boundary}");
+        let parsed = scope_spell(&source);
+        assert!(
+            matches!(*parsed.abilities[0].effect, Effect::Draw { .. }),
+            "{source}: {parsed:#?}"
+        );
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some("Draw a card."),
+            "{source}"
+        );
+        assert!(
+            parsed.abilities.len() > 1
+                || !parsed.statics.is_empty()
+                || !parsed.triggers.is_empty()
+                || !parsed.replacements.is_empty()
+                || !parsed.extracted_keywords.is_empty(),
+            "boundary must have its own positive owner: {source}: {parsed:#?}"
+        );
+    }
+}
+
+#[test]
+fn outer_instruction_keeps_true_host_owners() {
+    // CR 113.3a/b/d + CR 207.2c: real host owners precede outer commands.
+    for cost in [
+        "This spell costs {1} less to cast.",
+        "Void — This spell costs {1} less to cast.",
+    ] {
+        let parsed = scope_spell(&format!("{cost}\n{ORDINARY_SPIRIT}"));
+        assert_eq!(parsed.statics.len(), 1, "{parsed:#?}");
+        assert!(
+            matches!(parsed.statics[0].mode, StaticMode::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, ref amount, .. } if amount == &ManaCost::generic(1))
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert!(!has_unimplemented(&parsed.abilities[0]));
+        assert!(scope_chain(&parsed.abilities[0])
+            .iter()
+            .any(|d| matches!(*d.effect, Effect::Token { .. })));
+    }
+    let cda = parse_oracle_text("Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.", "Tarmogoyf", &[], &["Creature".into()], &[]);
+    assert!(cda.statics.iter().any(|s| s
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::SetDynamicPower { .. }))));
+    for text in [
+        "Destroy target creature.",
+        "Vivid — DeStRoY target creature.",
+        "Create a 1/1 white Soldier creature token.",
+        "Counter target spell.",
+        "Exile target creature.",
+        "Tap target creature.",
+    ] {
+        let parsed = scope_spell(text);
+        assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+        assert!(!has_unimplemented(&parsed.abilities[0]), "{text}");
+        assert!(parsed.statics.is_empty());
+    }
+    for text in [
+        "Whenever this creature attacks, destroy target creature.",
+        "{T}: Destroy target creature.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic owner", &[], &["Creature".into()], &[]);
+        if text == "{T}: Destroy target creature." {
+            assert!(parsed
+                .abilities
+                .iter()
+                .any(|d| d.kind == AbilityKind::Activated
+                    && matches!(*d.effect, Effect::Destroy { .. })));
+        } else {
+            assert!(parsed.triggers.iter().any(|t| t
+                .execute
+                .as_ref()
+                .is_some_and(|d| matches!(*d.effect, Effect::Destroy { .. }))));
+        }
+    }
+}
+
+fn assert_white_sun_shape(parsed: &ParsedAbilities, draw: bool) {
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(parsed.statics.is_empty());
+    assert!(!has_unimplemented(&parsed.abilities[0]), "{parsed:#?}");
+    assert!(parsed.parse_warnings.is_empty());
+    let chain = scope_chain(&parsed.abilities[0]);
+    assert_eq!(matches!(*chain[0].effect, Effect::Draw { .. }), draw);
+    let x = QuantityExpr::Ref {
+        qty: QuantityRef::Variable { name: "X".into() },
+    };
+    assert!(chain
+        .iter()
+        .any(|d| matches!(d.effect.as_ref(), Effect::GainLife { amount, .. } if amount == &x)));
+    let token = chain
+        .iter()
+        .find(|d| matches!(*d.effect, Effect::Token { .. }))
+        .unwrap();
+    let Effect::Token {
+        power,
+        toughness,
+        count,
+        colors,
+        types,
+        keywords,
+        static_abilities,
+        ..
+    } = token.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    // CR 111.3 + CR 702.164 + CR 509.1b: all restrictions belong to the Mites.
+    assert_eq!(power, &crate::types::ability::PtValue::Fixed(1));
+    assert_eq!(toughness, &crate::types::ability::PtValue::Fixed(1));
+    assert_eq!(count, &x);
+    assert!(colors.is_empty());
+    for ty in ["Phyrexian", "Mite", "Artifact", "Creature"] {
+        assert!(
+            types.iter().any(|s| s.eq_ignore_ascii_case(ty)),
+            "{types:?}"
+        );
+    }
+    assert!(keywords.contains(&Keyword::Toxic(1)));
+    assert!(static_abilities
+        .iter()
+        .any(|s| s.mode == StaticMode::CantBlock && s.affected == TargetFilter::SelfRef));
+    let destroy = chain
+        .iter()
+        .find(|d| matches!(*d.effect, Effect::DestroyAll { .. }))
+        .expect("conditional wipe");
+    assert_eq!(
+        destroy.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        })
+    );
+    assert!(
+        matches!(destroy.effect.as_ref(), Effect::DestroyAll { target, .. } if crate::game::filter::filter_contains_filter_prop(target, &|prop| *prop == FilterProp::Another))
+    );
+}
+
+#[test]
+fn white_suns_twilight_public_document_keeps_token_restriction() {
+    for prefix in ["", "Draw a card.\n"] {
+        let text = format!("{prefix}{FULL_WHITE_SUN}");
+        let parsed = scope_spell(&text);
+        assert_white_sun_shape(&parsed, !prefix.is_empty());
+        let prepared = format!("{prefix}{WHITE_SUN_SEMANTIC}");
+        assert_eq!(
+            parsed.abilities[0].description.as_deref(),
+            Some(prepared.as_str())
+        );
+    }
+}
+
+#[test]
+fn brood_birthing_keeps_noncategory_collection_boundary() {
+    // SHAPE: only the existing boundary is claimed, not complete Brood semantics.
+    // Both quote-view clients must retain the unquoted "They have" marker.
+    for (raw, normalized) in [(FULL_BROOD, NORMALIZED_BROOD), (FULL_WHITE_SUN, "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy all other creatures. (Players dealt combat damage by a creature with toxic 1 also get a poison counter.)")] {
+        let lower = normalized.to_lowercase();
+        assert!(parse_outer_spell_instruction_head(&lower).is_err());
+        assert!(is_static_pattern(&lower));
+        let view = crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower);
+        assert_eq!(is_static_pattern(&view), raw == FULL_BROOD);
+        let trace = crate::parser::parse_oracle_text_traced(raw, "Synthetic boundary", &[], &["Sorcery".into()], &[]);
+        assert_eq!(trace.original_source, raw);
+        assert_eq!(trace.normalized_source, normalized);
+        assert!(!trace.events.is_empty());
+        let ir = parse_oracle_ir(raw, "Synthetic boundary", &[], &["Sorcery".into()], &[]);
+        assert!(!ir.items.is_empty());
+        assert_eq!(ir.source_text, raw);
+        assert!(ir.items.iter().any(|item| item.source.fragment() == Some(normalized)));
+    }
+    let wrapped = format!("Draw a card.\n{FULL_BROOD}");
+    let trace = crate::parser::parse_oracle_text_traced(
+        &wrapped,
+        "Synthetic Brood wrapper",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(trace.original_source, wrapped);
+    assert_eq!(
+        trace.normalized_source,
+        format!("Draw a card.\n{NORMALIZED_BROOD}")
+    );
+    assert!(trace.events.iter().any(|event| event.span.first_line == 1));
+    let mut ir = parse_oracle_ir(
+        &wrapped,
+        "Synthetic Brood wrapper",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(ir.source_text, wrapped);
+    assert!(ir
+        .items
+        .iter()
+        .any(|item| item.source.span().first_line == 1
+            && item.source.fragment() == Some(NORMALIZED_BROOD)));
+    let parsed = lower_oracle_ir(&mut ir);
+    assert!(matches!(*parsed.abilities[0].effect, Effect::Draw { .. }));
+    assert_eq!(
+        parsed.abilities[0].description.as_deref(),
+        Some("Draw a card.")
+    );
+}
+
+#[test]
+fn unquoted_cant_block_retains_static_owner() {
+    let parsed = parse_oracle_text(
+        "This creature can't block.",
+        "Synthetic restriction",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| s.mode == StaticMode::CantBlock && s.affected == TargetFilter::SelfRef));
+    assert_white_sun_shape(&scope_spell(FULL_WHITE_SUN), false);
+}
+
+#[test]
+fn target_defined_token_duration_public_document() {
+    // SHAPE: synthetic full document with two printed targets, no delayed clause.
+    let parsed = parse_oracle_text("Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Target creature gets +1/+1 until end of turn.", "Synthetic duration Spirit", &[], &["Instant".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(parsed.statics.is_empty());
+    let chain: Vec<_> =
+        std::iter::successors(Some(&parsed.abilities[0]), |d| d.sub_ability.as_deref()).collect();
+    assert!(chain
+        .iter()
+        .all(|d| !matches!(*d.effect, Effect::Unimplemented { .. })));
+    assert!(matches!(
+        *chain[0].effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        chain
+            .iter()
+            .filter(|d| matches!(*d.effect, Effect::Token { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        chain
+            .iter()
+            .filter(
+                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+            )
+            .count(),
+        2
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+}
+
+#[test]
+fn coordinated_population_where_x_full_source_honesty() {
+    assert_coordinated_where_x_full_source_honesty(&["", "the number of "]);
+}
+
+#[test]
+fn coordinated_total_count_full_source_honesty() {
+    assert_coordinated_where_x_full_source_honesty(&["the total number of "]);
+}
+
+// SHAPE: synthetic full-source witnesses for existing integer Draw consumers.
+// Actual delivery is covered by coordinated_population_draw_composition.
+#[test]
+fn coordinated_population_draw_full_source() {
+    let head = "cards you own in exile and in your graveyard";
+    let complete_tail = "that are instant cards, are sorcery cards, and/or have an Adventure";
+    let population = complete_coordinated_population_quantity();
+    for (introduction, expected) in [
+        ("the number of ", population.clone()),
+        ("the total number of ", population.clone()),
+        (
+            "one plus the total number of ",
+            QuantityExpr::Offset {
+                inner: Box::new(population.clone()),
+                offset: 1,
+            },
+        ),
+        (
+            "twice the number of ",
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(population.clone()),
+            },
+        ),
+    ] {
+        let operand = format!("{introduction}{head} {complete_tail}");
+        // Public clause normalization trims terminal punctuation before lowering.
+        // The punctuation sibling must retain the entire complete expression.
+        for ending in [".", ",."] {
+            let source = format!("Draw X cards, where X is {operand}{ending}");
+            let parsed = parse_oracle_text(
+                &source,
+                "Synthetic complete Draw population",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert_eq!(parsed.abilities.len(), 1);
+            assert!(!has_unimplemented(&parsed.abilities[0]), "{source}");
+            assert!(
+                matches!(parsed.abilities[0].effect.as_ref(), Effect::Draw { count, target: TargetFilter::Controller } if count == &expected),
+                "{source}: {:?}",
+                parsed.abilities
+            );
+            assert!(parsed.parse_warnings.is_empty(), "{source}");
+        }
+        for tail in [
+            "that are instant cards, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, have",
+        ] {
+            let operand = format!("{introduction}{head} {tail}");
+            let source = format!("Draw X cards, where X is {operand}.");
+            let malformed = parse_oracle_text(
+                &source,
+                "Synthetic malformed Draw population",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert!(malformed.abilities.iter().any(has_unimplemented), "{source}");
+            assert!(malformed.abilities.iter().any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains(&operand))), "whole original Draw operand: {source}: {:?}", malformed.abilities);
+        }
+    }
+}
+
+fn complete_coordinated_population_quantity() -> QuantityExpr {
+    // CR 108.3 + CR 109.2a + CR 715.2a: shared ownership and zones intersect
+    // the three alternatives; expected values are independent of parser output.
+    let owned = FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    let typed =
+        |kind, properties| TargetFilter::Typed(TypedFilter::new(kind).properties(properties));
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    typed(TypeFilter::Card, vec![owned.clone()]),
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(
+                                TypeFilter::Card,
+                                vec![FilterProp::InZone { zone: Zone::Exile }],
+                            ),
+                            typed(
+                                TypeFilter::Card,
+                                vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    },
+                                    owned,
+                                ],
+                            ),
+                        ],
+                    },
+                    TargetFilter::Or {
+                        filters: vec![
+                            typed(TypeFilter::Instant, vec![]),
+                            typed(TypeFilter::Sorcery, vec![]),
+                            typed(TypeFilter::Card, vec![FilterProp::HasAdventure]),
+                        ],
+                    },
+                ],
+            },
+        },
+    }
+}
+
+fn assert_coordinated_where_x_full_source_honesty(introductions: &[&str]) {
+    fn unsupported_fragment_has(ability: &AbilityDefinition, operand: &str) -> bool {
+        matches!(ability.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.contains(operand))
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(|a| unsupported_fragment_has(a, operand))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|a| unsupported_fragment_has(a, operand))
+            || ability
+                .mode_abilities
+                .iter()
+                .any(|a| unsupported_fragment_has(a, operand))
+    }
+    let head = "cards you own in exile and in your graveyard";
+    for introduction in introductions {
+        let operand = format!("{introduction}{head} that are instant cards, are sorcery cards, and/or have an Adventure");
+        let frame = |operand: &str| {
+            format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {operand}.")
+        };
+        let expected = complete_coordinated_population_quantity();
+        for punctuation in ["", ","] {
+            let source = frame(&format!("{operand}{punctuation}"));
+            let complete = parse_oracle_text(
+                &source,
+                "Candlekeep Inspiration",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert_eq!(complete.abilities.len(), 1);
+            let ability = &complete.abilities[0];
+            assert!(!has_unimplemented(ability), "{source}");
+            // CR 611.2a + CR 613.4b: both base characteristics retain the
+            // stated duration and the layer-7b dynamic setting operation.
+            assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } = ability.effect.as_ref()
+            else {
+                panic!("complete base P/T effect: {source}");
+            };
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(static_abilities.len(), 1);
+            let definition = &static_abilities[0];
+            assert_eq!(definition.mode, StaticMode::Continuous);
+            assert_eq!(
+                definition.affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You)
+                ))
+            );
+            assert!(!definition.characteristic_defining);
+            assert_eq!(
+                definition.modifications,
+                vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: expected.clone()
+                    },
+                    ContinuousModification::SetToughnessDynamic {
+                        value: expected.clone()
+                    },
+                ]
+            );
+            assert!(complete.parse_warnings.is_empty(), "{source}");
+        }
+        for tail in [
+            "that are instant cards, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or have an unknown adventure",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
+            "that are instant cards, are sorcery cards, and/or",
+            "that are instant cards, are sorcery cards, and/or have an Adventure, have",
+        ] {
+            let operand = format!("{introduction}{head} {tail}");
+            let source = frame(&operand);
+            let malformed = parse_oracle_text(&source, "Synthetic population witness", &[], &["Sorcery".into()], &[]);
+            assert!(malformed.abilities.iter().any(has_unimplemented), "must remain unsupported: {source}");
+            assert!(malformed.abilities.iter().any(|a| unsupported_fragment_has(a, &operand)), "full operand in unsupported fragment: {:?}", malformed.abilities);
+        }
+    }
+}
+
+#[test]
+fn coordinated_population_where_x_instruction_boundary() {
+    let operand = "the total number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure";
+    for separator in [", ", ", and ", ", then ", ". "] {
+        let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {operand}{separator}draw a card.");
+        let parsed = parse_oracle_text(
+            &source,
+            "Synthetic instruction boundary",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(
+            parsed.abilities.iter().all(|a| !has_unimplemented(a)),
+            "{source}: {:?}",
+            parsed.abilities
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. })),
+            "{source}"
+        );
+        fn has_draw(a: &AbilityDefinition) -> bool {
+            matches!(a.effect.as_ref(), Effect::Draw { .. })
+                || a.sub_ability.as_deref().is_some_and(has_draw)
+        }
+        assert!(
+            parsed.abilities.iter().any(has_draw),
+            "following instruction retained: {source}"
+        );
+    }
+    for prefix in ["one plus ", "twice ", "half "] {
+        let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {prefix}{operand}.");
+        let parsed = parse_oracle_text(
+            &source,
+            "Synthetic arithmetic boundary",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(
+            parsed.abilities.iter().any(has_unimplemented),
+            "unchanged unsupported consumer: {source}"
+        );
+    }
+}
+
+#[test]
+fn coordinated_population_unknown_tail_is_honest() {
+    let oracle = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
+    let supported = parse_oracle_text(
+        oracle,
+        "Sailors' Bane",
+        &["Ward".into()],
+        &["Creature".into()],
+        &["Dragon".into(), "Turtle".into()],
+    );
+    assert_eq!(supported.statics.len(), 1);
+    assert!(supported.abilities.iter().all(|a| !has_unimplemented(a)));
+    assert!(supported.parse_warnings.is_empty());
+    assert!(supported.extracted_keywords.iter().any(|k| matches!(k, Keyword::Ward(crate::types::keywords::WardCost::Mana(cost)) if cost == &ManaCost::generic(4))));
+    for count in [
+        "card you own in exile and in unknown",
+        "card you own in exile and in",
+        "card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an unknown adventure",
+        "card you own in exile and in your graveyard that's an instant card and",
+    ] {
+        let oracle = format!("This spell costs {{1}} less to cast for each {count}.");
+        let parsed = parse_oracle_text(&oracle, "Synthetic hostile cost", &[], &["Creature".into()], &[]);
+        assert!(parsed.statics.is_empty(), "must not emit a weaker cost: {count}");
+        let residual = parsed.abilities.iter().find(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "static_structure")).expect("visible unsupported static");
+        assert_eq!(residual.description.as_deref(), Some(oracle.as_str()), "complete fragment retained");
+    }
+}
 
 #[test]
 fn teferi_master_of_time_minus_ten_preserves_two_extra_turns() {
@@ -34421,4 +36108,1140 @@ fn ir_facade_demotes_a_refused_granter_name() {
         &*def.effect,
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
+}
+
+#[test]
+fn repeated_full_card_preserves_independent_instructions() {
+    // SHAPE: public full-source routing, paired with production cast tests.
+    let dismissal = parse_oracle_text("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.\nCounter target noncreature spell.", "Machinist's Dismissal", &[], &["Instant".into()], &[]);
+    assert_eq!(dismissal.statics.len(), 1);
+    assert_eq!(dismissal.abilities.len(), 1);
+    assert!(dismissal.parse_warnings.is_empty());
+    assert!(dismissal.abilities.iter().all(|a| !has_unimplemented(a)));
+    let leech = parse_oracle_text("This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard.\nLifelink", "Gargantuan Leech", &["Lifelink".into()], &["Creature".into()], &["Leech".into()]);
+    assert_eq!(leech.statics.len(), 1);
+    assert!(leech.extracted_keywords.contains(&Keyword::Lifelink));
+    assert!(leech.parse_warnings.is_empty());
+    let coordinated = parse_oracle_text("This spell costs {1} less to cast for each card you own in exile and in your graveyard and each artifact you control.", "Synthetic coordinated and repeated", &[], &["Artifact".into()], &[]);
+    assert_eq!(coordinated.statics.len(), 1);
+    assert!(coordinated.parse_warnings.is_empty());
+}
+
+// SHAPE: runtime payment/resolution is covered by integration::jev_cost_populations.
+#[test]
+fn locket_complete_name_population_shape() {
+    let oracle = "Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Locket of Yesterdays",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    assert!(parsed.abilities.is_empty());
+    assert_eq!(parsed.statics.len(), 1);
+    let StaticMode::ModifyCost {
+        mode,
+        amount,
+        dynamic_count:
+            Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::And { filters },
+            }),
+        ..
+    } = &parsed.statics[0].mode
+    else {
+        panic!("complete cost population")
+    };
+    assert_eq!(*mode, crate::types::statics::CostModifyMode::Reduce);
+    assert_eq!(*amount, crate::types::mana::ManaCost::generic(1));
+    assert_eq!(filters.len(), 3);
+    assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::card()));
+    assert_eq!(
+        filters[1],
+        TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(TargetFilter::CastingSpell)),
+                relation: SharedQualityRelation::Shares
+            }])
+        )
+    );
+    assert_eq!(
+        filters[2],
+        TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        ]))
+    );
+    assert_eq!(
+        parsed.statics[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+    for body in [
+        "card with the same name as that spell in your unknown",
+        "card with the same name as that spell in your graveyard unfinished",
+        "card with the same name as that impostor in your graveyard",
+        "card with the same name as that spellbook in your graveyard",
+    ] {
+        let text = format!("Spells you cast cost {{1}} less to cast for each {body}.");
+        let malformed = parse_oracle_text(
+            &text,
+            "Synthetic malformed Locket",
+            &[],
+            &["Artifact".into()],
+            &[],
+        );
+        assert!(malformed.statics.is_empty(), "{body}");
+        assert!(
+            !malformed.parse_warnings.is_empty()
+                || malformed
+                    .abilities
+                    .iter()
+                    .any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+            "malformed full source must remain visibly unsupported: {body}"
+        );
+    }
+}
+
+#[test]
+fn craterous_full_document_shape() {
+    // SHAPE: the public cast/combat discriminators live in jev_prior_controller.
+    let text = "Craterous Stomp deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+    let parsed = parse_oracle_text(
+        text,
+        "Craterous Stomp",
+        &[],
+        &["Kindred".into(), "Instant".into()],
+        &["Giant".into()],
+    );
+    assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+    assert!(
+        parsed.statics.is_empty(),
+        "the outer sentence is an instruction"
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let root = &parsed.abilities[0];
+    assert!(!has_unimplemented(root), "{root:#?}");
+    assert!(matches!(root.effect.as_ref(), Effect::DealDamage {
+        amount: QuantityExpr::Fixed { value: 3 }, target: TargetFilter::Typed(typed), ..
+    } if typed.controller == Some(ControllerRef::Opponent)
+        && typed.type_filters == vec![TypeFilter::Creature]));
+    let population = root
+        .sub_ability
+        .as_deref()
+        .expect("second printed instruction");
+    assert_eq!(
+        population.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    let Effect::GenericEffect {
+        target: None,
+        duration: Some(crate::types::ability::Duration::Permanent),
+        static_abilities,
+        ..
+    } = population.effect.as_ref()
+    else {
+        panic!("{population:#?}")
+    };
+    assert_eq!(static_abilities.len(), 1);
+    let Some(TargetFilter::Typed(filter)) = &static_abilities[0].affected else {
+        panic!("typed population")
+    };
+    assert_eq!(
+        filter.controller,
+        Some(ControllerRef::ParentTargetController)
+    );
+    assert!(filter.properties.iter().any(|p| matches!(p, FilterProp::DistinctFrom { reference } if matches!(reference.as_ref(), TargetFilter::ParentTarget))));
+    assert!(static_abilities[0].modifications.iter().any(|m| matches!(m, crate::types::ability::ContinuousModification::AddSubtype { subtype } if subtype == "Coward")));
+    assert!(
+        static_abilities[0].modifications.len() >= 2,
+        "the quoted rule must survive alongside Coward"
+    );
+    assert!(population.sub_ability.is_none());
+}
+
+#[test]
+fn prior_controller_malformed_quote_public_document_remains_unsupported() {
+    for body in [
+        "This creature can't block Giants or Warriors blorple.",
+        "This creature can't block Giants or Warriors blorple unless you control a Wall.",
+    ] {
+        let text = format!("Synthetic deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains \"{body}\"");
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".into()], &[]);
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "outer damage must remain reachable"
+        );
+        assert!(matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::DealDamage { .. }
+        ));
+        let face = crate::types::card::CardFace {
+            abilities: parsed.abilities,
+            static_abilities: parsed.statics,
+            ..Default::default()
+        };
+        assert!(
+            crate::game::coverage::card_face_has_unimplemented_parts(&face),
+            "{face:#?}"
+        );
+        let encoded = serde_json::to_string(&face).unwrap();
+        // allow-noncombinator: test assertion on retained diagnostic text, not dispatch.
+        assert!(
+            encoded.contains("Giants or Warriors blorple"),
+            "retain the failed quoted body"
+        );
+    }
+}
+
+#[test]
+fn legacy_counter_adjustment_document_axes_keep_complete_typed_chain() {
+    use crate::types::counter::CounterMatch;
+
+    // SHAPE: synthetic grammar-axis documents; full pinned Clockspinning has its
+    // own test, but its first target disjunction bypasses the ordering defect.
+    let assert_legacy = |clause: &str, adjustment| {
+        for punctuation in ["", "."] {
+            let text = format!("Choose a counter on target permanent. {clause}{punctuation}");
+            let parsed = parse_oracle_text(
+                &text,
+                "Synthetic legacy axes",
+                &[],
+                &["Instant".into()],
+                &[],
+            );
+            assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+            let parent = &parsed.abilities[0];
+            assert!(
+                matches!(parent.effect.as_ref(), Effect::TargetOnly { .. }),
+                "{text}"
+            );
+            let adjustment_def = parent
+                .sub_ability
+                .as_deref()
+                .expect("complete second instruction");
+            assert_eq!(
+                adjustment_def.effect.as_ref(),
+                &Effect::ChooseCounterAdjustment {
+                    adjustment,
+                    counters: CounterMatch::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                },
+                "{text}"
+            );
+            assert!(adjustment_def.sub_ability.is_none(), "{text}");
+            assert!(parent.else_ability.is_none() && adjustment_def.else_ability.is_none());
+        }
+    };
+    for from in [
+        "",
+        " from it",
+        " from that permanent",
+        " from that card",
+        " from that permanent or card",
+    ] {
+        assert_legacy(
+            &format!("remove that counter{from}"),
+            CounterAdjustment::Remove,
+        );
+        for on in [
+            "it",
+            "that permanent",
+            "that card",
+            "that permanent or card",
+        ] {
+            assert_legacy(
+                &format!("remove that counter{from} or put another of those counters on {on}"),
+                CounterAdjustment::AddOrRemove,
+            );
+        }
+    }
+    for on in [
+        "it",
+        "that permanent",
+        "that card",
+        "that permanent or card",
+    ] {
+        assert_legacy(
+            &format!("put another of those counters on {on}"),
+            CounterAdjustment::Add,
+        );
+    }
+
+    for text in [
+        "put a charge counter on target creature or remove one from it",
+        "remove a charge counter from target creature or put one on it",
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            "Synthetic fixed-kind control",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+        assert!(
+            matches!(
+                parsed.abilities[0].effect.as_ref(),
+                Effect::ChooseCounterAdjustment {
+                    adjustment: CounterAdjustment::AddOrRemove,
+                    counters: CounterMatch::OfType(crate::types::counter::CounterType::Generic(kind)),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target,
+                } if kind == "charge" && !target.is_context_ref()
+            ),
+            "{text}: {parsed:#?}"
+        );
+    }
+    for text in [
+        "put a charge counter on target creature or remove two from it",
+        "put a charge counter on target creature or remove an oil counter from it",
+        "put a charge counter on target creature or remove one from ~",
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            "Synthetic malformed fixed-kind",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "{text}: {parsed:#?}");
+        assert!(
+            matches!(
+                parsed.abilities[0].effect.as_ref(),
+                Effect::Unimplemented { description: Some(fragment), .. } if fragment == text
+            ),
+            "complete malformed fixed-kind clause must remain a gap: {text}: {parsed:#?}"
+        );
+    }
+}
+
+#[test]
+fn mandatory_counter_adjustment_parent_and_legacy_axes_shape() {
+    use crate::types::ability::{CounterAdjustment, QuantityExpr, TargetFilter};
+    use crate::types::counter::CounterMatch;
+    let text="Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it.";
+    let parsed = parse_oracle_text(
+        text,
+        "Immard, the Stormcleaver",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 2);
+    for trigger in &parsed.triggers {
+        let def = trigger.execute.as_deref().expect("mandatory parent");
+        assert!(
+            matches!(def.effect.as_ref(),Effect::ChooseCounterAdjustment { adjustment:CounterAdjustment::AddOrRemove,counters:CounterMatch::OfType(crate::types::counter::CounterType::Generic(kind)),count:QuantityExpr::Fixed { value:1 },target:TargetFilter::SelfRef } if kind=="charge")
+        );
+        assert!(def.sub_ability.is_none());
+    }
+    for text in [
+        "Put another of those counters on it.",
+        "Remove that counter from it.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic legacy", &[], &["Instant".into()], &[]);
+        assert!(matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::ChooseCounterAdjustment {
+                counters: CounterMatch::Any,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn u13_paragraph_and_trigger_boundaries_cannot_supply_an_earlier_producer() {
+    let independent = format!("{U13_IMMARD}\n\nWhen this creature dies, you gain 1 life.");
+    let parsed = parse_oracle_text(
+        &independent,
+        "Immard, the Stormcleaver",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 3);
+    assert!(parsed.triggers[..2].iter().all(|trigger| trigger
+        .execute
+        .as_deref()
+        .unwrap()
+        .declares_return_result
+        .is_some()));
+    let separate = parsed.triggers[2].execute.as_deref().unwrap();
+    assert!(matches!(separate.effect.as_ref(), Effect::GainLife { .. }));
+    assert!(separate.declares_return_result.is_none());
+    for split in [
+        "\n\n",
+        "\n\nWhen this creature attacks, you gain 1 life.\n\n",
+    ] {
+        let text = format!("When this creature enters, put a charge counter on it or remove one from it.{split}When you remove a counter this way, choose one —\n• Draw a card.\n• You gain 2 life.");
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic separate producer",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert!(parsed
+            .triggers
+            .iter()
+            .any(
+                |trigger| trigger.execute.as_deref().is_some_and(|parent| matches!(
+                    parent.effect.as_ref(),
+                    Effect::ChooseCounterAdjustment { .. }
+                ) && parent
+                    .declares_return_result
+                    .is_none())
+            ));
+        assert!(
+            parsed.triggers.iter().any(|trigger| trigger
+                .execute
+                .as_deref()
+                .is_some_and(|root| matches!(root.effect.as_ref(), Effect::Unimplemented { .. }))),
+            "unbound complete modal stays strict: {parsed:#?}"
+        );
+    }
+}
+
+#[test]
+fn u14_relation_is_transactional_and_exact_item_bound() {
+    let text = format!("{U14_STANDARD}\nEach creature with mana value of the chosen quality has flying.\nCreatures have vigilance.");
+    for corruption in 0..4 {
+        let mut doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        let mut relation = doc
+            .relations
+            .iter()
+            .find(|r| {
+                matches!(
+                    r,
+                    DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+                )
+            })
+            .unwrap()
+            .clone();
+        let unrelated = doc.items.last().unwrap().clone();
+        let mut reader_ids = Vec::new();
+        for item in &mut doc.items {
+            if let OracleNodeIr::Static(ir) = &mut item.node {
+                if ir.definition.affected.as_ref().is_some_and(|f| {
+                    target_filter_uses_filter_prop(f, &|p| {
+                        matches!(
+                            p,
+                            FilterProp::ManaValueParity {
+                                parity: ParitySource::SourceChosen
+                            }
+                        )
+                    })
+                }) {
+                    reader_ids.push(item.id);
+                    let mut complete = true;
+                    rewrite_filter_props(
+                        ir.definition.affected.as_mut().unwrap(),
+                        &mut |_| {},
+                        &mut |p| {
+                            if let FilterProp::ManaValueParity { parity } = p {
+                                *parity = ParitySource::LastNamedChoice;
+                            }
+                        },
+                        &mut complete,
+                    );
+                    assert!(complete);
+                }
+            }
+        }
+        assert_eq!(reader_ids.len(), 2);
+        if let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+            chooser,
+            statics,
+            replacements: _,
+        }) = &mut relation
+        {
+            match corruption {
+                0 => {}
+                1 => statics[1] = unrelated.id,
+                2 => statics[1] = OracleItemId(u32::MAX),
+                3 => *chooser = unrelated.id,
+                _ => unreachable!(),
+            }
+        }
+        let sources: Vec<_> = doc
+            .items
+            .iter()
+            .filter(|i| reader_ids.contains(&i.id))
+            .map(|i| (i.id, i.source.clone()))
+            .collect();
+        apply_source_parity_statics(&mut doc, &[relation]);
+        assert_eq!(doc.items.last().unwrap(), &unrelated);
+        for (id, source) in sources {
+            let item = doc.items.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(item.source, source);
+            if corruption == 0 {
+                let OracleNodeIr::Static(ir) = &item.node else {
+                    panic!("valid exact reader")
+                };
+                assert!(target_filter_uses_filter_prop(
+                    ir.definition.affected.as_ref().unwrap(),
+                    &|p| matches!(
+                        p,
+                        FilterProp::ManaValueParity {
+                            parity: ParitySource::SourceChosen
+                        }
+                    )
+                ));
+            } else {
+                assert!(
+                    matches!(&item.node, OracleNodeIr::Unsupported { unsupported, .. } if text.contains(&unsupported.fragment) && !unsupported.fragment.is_empty())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn u14_full_extinction_retains_local_choice_and_complete_residue() {
+    let text = "Choose odd or even. Exile each creature with mana value of the chosen quality. (Zero is even.)";
+    let mut doc = parse_oracle_ir(text, "Extinction Event", &[], &["Sorcery".into()], &[]);
+    assert!(!doc.relations.iter().any(|r| matches!(
+        r,
+        DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+    )));
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(matches!(
+        parsed.abilities[0].effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::OddOrEven,
+            persist: false,
+            ..
+        }
+    ));
+    let tail = parsed.abilities[0].sub_ability.as_deref().unwrap();
+    let Effect::ChangeZone {
+        target,
+        destination: Zone::Exile,
+        ..
+    } = tail.effect.as_ref()
+    else {
+        panic!("local exile tail")
+    };
+    assert!(target_filter_uses_filter_prop(target, &|p| matches!(
+        p,
+        FilterProp::ManaValueParity {
+            parity: ParitySource::LastNamedChoice
+        }
+    )));
+    for (head, quality) in [
+        ("with", "the chosen quality"),
+        ("that have", "that quality"),
+        ("that each have", "the chosen quality"),
+    ] {
+        let good = format!("As this enchantment enters, choose odd or even.\nCreatures {head} mana value of {quality} have haste.");
+        let good_doc = parse_oracle_ir(&good, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        assert!(good_doc.items.iter().any(source_parity_chooser));
+        assert!(good_doc.relations.iter().any(|r| matches!(
+            r,
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+        )));
+        let failed_line =
+            format!("Creatures {head} mana value of {quality} have haste and draw two cards.");
+        let bad = format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+        let bad_doc = parse_oracle_ir(&bad, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        assert!(bad_doc.items.iter().any(source_parity_chooser));
+        assert!(bad_doc.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)));
+    }
+}
+
+#[test]
+fn u14_compound_and_turn_documents_link_only_affected_object_filters() {
+    for line in [
+        "You and creatures you control that each have mana value of the chosen quality have hexproof.",
+        "During your turn, creatures that have mana value of that quality have haste.",
+        "During turns other than yours, creatures that each have mana value of the chosen quality have haste.",
+        "Other creatures you control that have mana value of that quality have haste.",
+    ] {
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let doc = parse_oracle_ir(&text, "Parity Standard", &[], &["Enchantment".into()], &[]);
+        let readers = doc.items.iter().filter_map(|i| match &i.node { OracleNodeIr::Static(ir) => Some(ir), _ => None }).collect::<Vec<_>>();
+        assert!(doc.items.iter().any(source_parity_chooser));
+        assert!(readers.iter().any(|ir| ir.definition.affected.as_ref().is_some_and(|f|
+            target_filter_uses_filter_prop(f, &|p| matches!(p, FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))));
+        assert!(readers.iter().all(|ir| !ir.definition.affected.as_ref().is_some_and(source_parity_static_reader)));
+    }
+}
+
+#[test]
+fn u14_reference_full_documents_preserve_independent_items() {
+    let cloud = "During your turn, as long as Cloud is equipped, it has double strike and indestructible. (This creature deals both first-strike and regular combat damage. Damage and effects that say \"destroy\" don't destroy this creature.)\nEquip abilities you activate that target Cloud cost {2} less to activate.";
+    let mut doc = parse_oracle_ir(
+        cloud,
+        "Cloud, Planet's Champion",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, cloud);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| matches!(s.mode, StaticMode::ModifyCost { .. })));
+    assert!(parsed.statics.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::DoubleStrike
+        }
+    ) && s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible
+        }
+    )));
+    let raggadragga = "Each creature you control with a mana ability gets +2/+2.\nWhenever a creature you control with a mana ability attacks, untap it.\nWhenever you cast a spell, if at least seven mana was spent to cast it, untap target creature. It gets +7/+7 and gains trample until end of turn.";
+    let mut doc = parse_oracle_ir(
+        raggadragga,
+        "Raggadragga, Goreguts Boss",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, raggadragga);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.triggers.len(), 2);
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|s| s
+            .affected
+            .as_ref()
+            .is_some_and(|f| target_filter_uses_filter_prop(f, &|p| matches!(
+                p,
+                FilterProp::HasManaAbility
+            )))));
+    let whip = "Equipped creature has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\" (Exile cards from the top of your library until you exile a nonland card with mana value 10 or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)\nEquip {1}";
+    let mut doc = parse_oracle_ir(
+        whip,
+        "Swashbuckler's Whip",
+        &[],
+        &["Artifact".into()],
+        &["Equipment".into()],
+    );
+    assert_eq!(doc.source_text, whip);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.abilities.len(), 1, "independent equip ability");
+    let grants = parsed
+        .statics
+        .iter()
+        .flat_map(|s| &s.modifications)
+        .filter(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .count();
+    assert_eq!(grants, 2);
+}
+
+#[test]
+fn u14_complete_where_x_and_companion_documents() {
+    // SHAPE: exact positives reach each complete owner before its hostile twin.
+    for line in [
+        "Creatures have mobilize X, where X is its power.",
+        "Enchanted creature can't be blocked and has haste and gets +1/+1.",
+        "Enchanted creature can't be blocked by creatures with flying and has haste and gets +1/+1.",
+        "Enchanted creature can't be blocked except by two or more creatures and has haste and gets +1/+1.",
+    ] {
+        let mut good = parse_oracle_ir(line, "Complete static", &[], &["Enchantment".into()], &[]);
+        assert_eq!(good.source_text, line);
+        assert!(!good.items.iter().any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })), "{good:#?}");
+        let parsed = lower_oracle_ir(&mut good);
+        assert!(!parsed.statics.is_empty());
+        if line == "Creatures have mobilize X, where X is its power." {
+            assert!(parsed.statics.iter().flat_map(|s| &s.modifications).any(|m| matches!(m, ContinuousModification::AddDynamicKeyword { .. })));
+        } else {
+            assert_eq!(parsed.statics.len(), 2);
+            assert!(parsed.statics.iter().flat_map(|s| &s.modifications).any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })));
+            assert!(parsed.statics.iter().flat_map(|s| &s.modifications).any(|m| matches!(m, ContinuousModification::AddKeyword { keyword: Keyword::Haste })));
+        }
+        let connector = if line == "Creatures have mobilize X, where X is its power." { "," } else { " and" };
+        let bad = format!("{}{connector} draw two cards.", line.trim_end_matches('.'));
+        let doc = parse_oracle_ir(&bad, "Complete static", &[], &["Enchantment".into()], &[]);
+        assert_eq!(doc.source_text, bad);
+        assert!(doc.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == bad)), "{doc:#?}");
+        assert!(!doc.items.iter().any(|i| matches!(i.node, OracleNodeIr::Static(_))), "no supported partial static: {doc:#?}");
+    }
+}
+
+#[test]
+fn u14_base_stat_documents_preserve_each_axis_and_full_maha() {
+    for (predicate, expected) in [
+        (
+            "have base toughness 1",
+            vec![ContinuousModification::SetToughness { value: 1 }],
+        ),
+        (
+            "have base power 3",
+            vec![ContinuousModification::SetPower { value: 3 }],
+        ),
+        (
+            "have base power and toughness 2/2",
+            vec![
+                ContinuousModification::SetPower { value: 2 },
+                ContinuousModification::SetToughness { value: 2 },
+            ],
+        ),
+    ] {
+        let line = format!("Creatures your opponents control {predicate}.");
+        // Only the toughness form is Maha's actual full Oracle. The other
+        // two documents are explicitly synthetic grammar preservation cases.
+        let (name, text) = if predicate == "have base toughness 1" {
+            (
+                "Maha, Its Feathers Night",
+                format!("Flying, trample\nWard—Discard a card.\n{line}"),
+            )
+        } else {
+            ("Synthetic base stat", line.clone())
+        };
+        let mut doc = parse_oracle_ir(&text, name, &[], &["Creature".into()], &[]);
+        assert_eq!(doc.source_text, text);
+        assert!(
+            !doc.items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{doc:#?}"
+        );
+        let parsed = lower_oracle_ir(&mut doc);
+        let static_def = parsed
+            .statics
+            .iter()
+            .find(|s| s.modifications == expected)
+            .expect("exact base-stat modifications");
+        assert_eq!(
+            static_def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent)
+            ))
+        );
+        for tail in [" and draw two cards", ", draw two cards", " unexplained"] {
+            let failed_line = format!("Creatures your opponents control {predicate}{tail}.");
+            let bad_text = text.replace(&line, &failed_line);
+            let bad = parse_oracle_ir(&bad_text, name, &[], &["Creature".into()], &[]);
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert!(!bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Static(ir) if ir.definition.modifications.iter().any(|m| matches!(m, ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. })))), "no partial base setter: {bad:#?}");
+        }
+    }
+}
+
+#[test]
+fn u14_source_bound_mixed_keyword_verb_documents() {
+    let remove_flying = ContinuousModification::RemoveKeyword {
+        keyword: Keyword::Flying,
+    };
+    let add_haste = ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste,
+    };
+    let remove_haste = ContinuousModification::RemoveKeyword {
+        keyword: Keyword::Haste,
+    };
+    let add_vigilance = ContinuousModification::AddKeyword {
+        keyword: Keyword::Vigilance,
+    };
+    for (predicate, expected) in [
+        (
+            "loses flying and has haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "lose flying and gain haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "loses flying, has haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "loses flying, and gains haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "has haste and loses flying",
+            vec![add_haste.clone(), remove_flying.clone()],
+        ),
+        (
+            "gains haste, loses flying",
+            vec![add_haste.clone(), remove_flying.clone()],
+        ),
+        (
+            "loses flying and loses haste",
+            vec![remove_flying.clone(), remove_haste.clone()],
+        ),
+        (
+            "loses flying and haste",
+            vec![remove_flying.clone(), remove_haste],
+        ),
+        (
+            "loses flying and has haste and gains vigilance",
+            vec![
+                remove_flying.clone(),
+                add_haste.clone(),
+                add_vigilance.clone(),
+            ],
+        ),
+        (
+            "loses flying, has haste, vigilance",
+            vec![remove_flying, add_haste, add_vigilance],
+        ),
+    ] {
+        // Complete explicitly synthetic supplier/consumer contract.
+        let line = format!("Each creature with mana value of the chosen quality {predicate}.");
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let mut good = parse_oracle_ir(
+            &text,
+            "Synthetic mixed parity",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(good.source_text, text);
+        assert!(good.items.iter().any(source_parity_chooser));
+        assert!(
+            !good
+                .items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{good:#?}"
+        );
+        let parsed = lower_oracle_ir(&mut good);
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(parsed.statics[0].modifications, expected, "{predicate}");
+        assert!(parsed.statics[0].affected.as_ref().is_some_and(|f| {
+            target_filter_uses_filter_prop(f, &|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: ParitySource::SourceChosen
+                    }
+                )
+            })
+        }));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let failed_line = format!("{}{}.", line.trim_end_matches('.'), tail);
+            let bad_text =
+                format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+            let bad = parse_oracle_ir(
+                &bad_text,
+                "Synthetic mixed parity",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(source_parity_chooser));
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert!(
+                !bad.items
+                    .iter()
+                    .any(|i| matches!(i.node, OracleNodeIr::Static(_))),
+                "no partial static: {bad:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn u14_inherited_removal_documents_keep_complete_operations() {
+    let remove = |keyword| ContinuousModification::RemoveKeyword { keyword };
+    let add = |keyword| ContinuousModification::AddKeyword { keyword };
+    let loss = || vec![remove(Keyword::Flying), remove(Keyword::Haste)];
+    let loss_grant = || {
+        vec![
+            remove(Keyword::Flying),
+            remove(Keyword::Haste),
+            add(Keyword::Vigilance),
+        ]
+    };
+    let mut dynamic_doc = parse_oracle_ir(
+        "Creatures have mobilize X, where X is its power.",
+        "Synthetic dynamic companion",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    let dynamic = lower_oracle_ir(&mut dynamic_doc);
+    assert_eq!(dynamic.statics.len(), 1);
+    let mut dynamic_loss = dynamic.statics[0].modifications.clone();
+    assert!(matches!(
+        dynamic_loss.as_slice(),
+        [ContinuousModification::AddDynamicKeyword { .. }]
+    ));
+    dynamic_loss.extend([
+        remove(Keyword::Flying),
+        remove(Keyword::Haste),
+        remove(Keyword::Vigilance),
+    ]);
+    for (predicate, expected) in [
+        (
+            "has mobilize X and loses flying and haste, where X is its power and vigilance",
+            dynamic_loss,
+        ),
+        ("loses flying and haste and has vigilance", loss_grant()),
+        ("lose flying and haste and have vigilance", loss_grant()),
+        ("lose flying and haste and gain vigilance", loss_grant()),
+        ("loses flying, haste, gains vigilance", loss_grant()),
+        ("loses flying, haste, and gains vigilance", loss_grant()),
+        (
+            "loses flying and haste and loses vigilance",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                remove(Keyword::Vigilance),
+            ],
+        ),
+        (
+            "lose flying, haste, and lose vigilance",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                remove(Keyword::Vigilance),
+            ],
+        ),
+        (
+            "loses flying and haste and gets +1/+1",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ],
+        ),
+        (
+            "loses flying, haste, and have base toughness 1",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                ContinuousModification::SetToughness { value: 1 },
+            ],
+        ),
+        (
+            "has vigilance and loses flying and haste",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+            ],
+        ),
+        (
+            "has vigilance and loses flying and haste and gains trample",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "have vigilance, lose flying, haste, and gain trample",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "loses flying and haste and has vigilance and trample",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Vigilance),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "loses flying and has haste and vigilance",
+            vec![
+                remove(Keyword::Flying),
+                add(Keyword::Haste),
+                add(Keyword::Vigilance),
+            ],
+        ),
+        ("loses flying and haste", loss()),
+    ] {
+        // Explicitly synthetic full two-line source, not printed card wording.
+        let line = format!("Each creature with mana value of the chosen quality {predicate}.");
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let mut good = parse_oracle_ir(
+            &text,
+            "Synthetic inherited parity",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(good.source_text, text);
+        assert!(good.items.iter().any(source_parity_chooser));
+        assert!(
+            !good
+                .items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{good:#?}"
+        );
+        let consumer = good
+            .items
+            .iter()
+            .find(|i| matches!(i.node, OracleNodeIr::Static(_)))
+            .unwrap();
+        let consumer_id = consumer.id;
+        assert_eq!(consumer.source.fragment(), Some(line.as_str()));
+        assert_eq!(consumer.source.span().first_line, 2);
+        let parsed = lower_oracle_ir(&mut good);
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(parsed.statics[0].modifications, expected, "{predicate}");
+        assert!(parsed.statics[0].affected.as_ref().is_some_and(|f| {
+            target_filter_uses_filter_prop(f, &|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: ParitySource::SourceChosen
+                    }
+                )
+            })
+        }));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let failed_line = format!("{}{}.", line.trim_end_matches('.'), tail);
+            let bad_text =
+                format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+            let bad = parse_oracle_ir(
+                &bad_text,
+                "Synthetic inherited parity",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(source_parity_chooser));
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            let refused = bad
+                .items
+                .iter()
+                .find(|i| i.id == consumer_id)
+                .expect("same source item");
+            assert_eq!(refused.source.fragment(), Some(failed_line.as_str()));
+            assert_eq!(refused.source.span().first_line, 2);
+            assert!(
+                !bad.items
+                    .iter()
+                    .any(|i| matches!(i.node, OracleNodeIr::Static(_))),
+                "no partial static: {bad:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn u14_inherited_removal_companion_documents() {
+    for companion in [
+        "gets +1/+1",
+        "have base power and toughness 2/2",
+        "gets +1/+0 for each Mountain you control",
+        "are Bears in addition to their other creature types",
+        "has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\"",
+        "has protection from red. This effect doesn't remove this Aura.",
+    ] {
+        let modeled_line = format!("Creatures {}.", companion.trim_end_matches('.'));
+        let mut modeled_doc = parse_oracle_ir(
+            &modeled_line,
+            "Synthetic companion",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        let modeled = lower_oracle_ir(&mut modeled_doc);
+        assert_eq!(modeled.statics.len(), 1, "{modeled_doc:#?}");
+        assert!(!modeled.statics[0].modifications.is_empty());
+        let mut expected = vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Flying,
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Haste,
+            },
+        ];
+        expected.extend(modeled.statics[0].modifications.clone());
+        let line = format!(
+            "Each creature with mana value of the chosen quality loses flying and haste and {}.",
+            companion.trim_end_matches('.')
+        );
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let mut good = parse_oracle_ir(
+            &text,
+            "Synthetic inherited companion",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(good.source_text, text);
+        assert!(good.items.iter().any(source_parity_chooser));
+        assert!(
+            !good
+                .items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{good:#?}"
+        );
+        let consumer = good
+            .items
+            .iter()
+            .find(|i| matches!(i.node, OracleNodeIr::Static(_)))
+            .unwrap();
+        let consumer_id = consumer.id;
+        assert_eq!(consumer.source.fragment(), Some(line.as_str()));
+        assert_eq!(consumer.source.span().first_line, 2);
+        let parsed = lower_oracle_ir(&mut good);
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(parsed.statics[0].modifications, expected, "{companion}");
+        assert!(parsed.statics[0].affected.as_ref().is_some_and(|f| {
+            target_filter_uses_filter_prop(f, &|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: ParitySource::SourceChosen
+                    }
+                )
+            })
+        }));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let failed_line = format!("{}{tail}.", line.trim_end_matches('.'));
+            let bad_text =
+                format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+            let bad = parse_oracle_ir(
+                &bad_text,
+                "Synthetic inherited companion",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(source_parity_chooser));
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            let refused = bad
+                .items
+                .iter()
+                .find(|i| i.id == consumer_id)
+                .expect("same source item");
+            assert_eq!(refused.source.fragment(), Some(failed_line.as_str()));
+            assert_eq!(refused.source.span().first_line, 2);
+            assert!(
+                !bad.items
+                    .iter()
+                    .any(|i| matches!(i.node, OracleNodeIr::Static(_))),
+                "no partial static: {bad:#?}"
+            );
+        }
+    }
 }

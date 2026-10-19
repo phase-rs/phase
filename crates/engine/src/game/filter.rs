@@ -5,6 +5,74 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod prior_controller_filter_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::{Effect, TargetReadOrigin};
+
+    #[test]
+    fn prior_controller_exclusion_uses_selected_birth_and_missing_anchor_fails_closed() {
+        let mut scenario = GameScenario::new();
+        let b = scenario.add_creature(P1, "Selected B", 2, 8).id();
+        let a = scenario.add_creature(P1, "Other A", 2, 8).id();
+        let c = scenario.add_creature(P0, "Caster C", 2, 8).id();
+        let mut state = scenario.build().state().clone();
+        let old = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let lki = state.objects[&b].snapshot_public_characteristics();
+        let mut reader = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(b), TargetRef::Object(c)],
+            ObjectId(999),
+            P0,
+        );
+        reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+        reader.target_pins = vec![
+            Some(old),
+            Some(ObjectIncarnationRef::from_object(&state.objects[&c])),
+        ];
+        let population = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::ParentTargetController)
+                .properties(vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }]),
+        );
+        let matches = |state: &GameState, reader: &ResolvedAbility, id| {
+            matches_target_filter(state, id, &population, &FilterContext::from_ability(reader))
+        };
+        assert!(matches(&state, &reader, a));
+        assert!(!matches(&state, &reader, b));
+        assert!(!matches(&state, &reader, c));
+        state
+            .lki_by_incarnation
+            .entry(b)
+            .or_default()
+            .insert(old.incarnation, lki);
+        state.objects.get_mut(&b).unwrap().incarnation += 1;
+        assert!(
+            matches(&state, &reader, b),
+            "returned same-id birth is other than old B"
+        );
+        state.objects.get_mut(&b).unwrap().controller = P0;
+        assert!(
+            matches(&state, &reader, a),
+            "old controller comes from pinned LKI"
+        );
+        assert!(!matches(&state, &reader, b));
+        state.lki_by_incarnation.remove(&b);
+        assert!(!matches(&state, &reader, a));
+        reader.target_pins[0] = None;
+        assert!(
+            !matches(&state, &reader, c),
+            "missing anchor cannot broaden into caster population"
+        );
+    }
+}
+
 use crate::game::combat;
 use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
@@ -25,8 +93,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    AttackDeclarationRecord, CastingVariant, CounterAddedRecord, DamageRecord, GameState,
+    LKISnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -172,6 +240,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -418,6 +487,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -576,6 +646,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -961,6 +1032,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -1321,6 +1393,8 @@ pub fn normalize_contextual_filter_with_liveness(
 /// receiver; it is NOT a licence to build the literal or `..*ctx` by hand.)
 #[derive(Clone, Copy)]
 pub struct FilterContext<'a> {
+    /// Exact selected spell authority, bound only for cast-time evaluation.
+    pub casting_spell: Option<CastSpellContext>,
     pub source_id: ObjectId,
     pub source_controller: Option<PlayerId>,
     pub ability: Option<&'a ResolvedAbility>,
@@ -1365,6 +1439,71 @@ pub struct FilterContext<'a> {
     pub declared_slot_view: Option<&'a [Option<crate::game::targeting::DeclaredSlotBinding>]>,
     /// CR 201.5a: the granter stamped on the definition this filter is read for.
     pub granting_object: Option<ObjectIncarnationRef>,
+}
+
+/// CR 601.2a + CR 601.2b: the exact spell and selected casting characteristics.
+#[derive(Debug, Clone, Copy)]
+pub struct CastSpellContext {
+    pub object_id: ObjectId,
+    pub casting_variant: CastingVariant,
+}
+
+impl CastSpellContext {
+    /// CR 601.2a + CR 601.2b: recover only this object's current announcement.
+    pub fn announced(state: &GameState, object_id: ObjectId) -> Option<Self> {
+        let casting_variant = state
+            .objects
+            .get(&object_id)
+            .filter(|object| object.zone == Zone::Stack || object.spell_announcement.is_some())
+            .and_then(|_| {
+                state.stack.iter().find(|entry| {
+                    entry.id == object_id && matches!(entry.kind, StackEntryKind::Spell { .. })
+                })
+            })
+            .and_then(|entry| match &entry.kind {
+                StackEntryKind::Spell {
+                    casting_variant, ..
+                } => Some(*casting_variant),
+                _ => None,
+            })
+            .or_else(|| {
+                state
+                    .waiting_for
+                    .pending_cast_ref()
+                    .filter(|pending| {
+                        pending.object_id == object_id && pending.activation_ability_index.is_none()
+                    })
+                    .map(|pending| pending.casting_variant)
+            })
+            .or_else(|| {
+                state
+                    .pending_cast
+                    .as_ref()
+                    .filter(|pending| {
+                        pending.object_id == object_id && pending.activation_ability_index.is_none()
+                    })
+                    .map(|pending| pending.casting_variant)
+            })?;
+        Some(Self {
+            object_id,
+            casting_variant,
+        })
+    }
+
+    pub fn for_spell(state: &GameState, object_id: ObjectId) -> Self {
+        Self::announced(state, object_id).unwrap_or_else(|| Self {
+            object_id,
+            casting_variant: if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.fused_split_spell)
+            {
+                CastingVariant::Fuse
+            } else {
+                CastingVariant::Normal
+            },
+        })
+    }
 }
 
 impl<'a> FilterContext<'a> {
@@ -1446,10 +1585,17 @@ fn source_controller_or_lki(state: &GameState, source_id: ObjectId) -> Option<Pl
 }
 
 impl<'a> FilterContext<'a> {
+    /// Bind the exact selected spell for this cast-time filter evaluation.
+    pub fn with_casting_spell(mut self, casting_spell: CastSpellContext) -> Self {
+        self.casting_spell = Some(casting_spell);
+        self
+    }
+
     /// Context-free object matching. Use only for constraints whose filters are
     /// printed object qualities rather than source/controller-relative clauses.
     pub fn neutral() -> Self {
         Self {
+            casting_spell: None,
             source_id: ObjectId(0),
             source_controller: None,
             ability: None,
@@ -1471,6 +1617,7 @@ impl<'a> FilterContext<'a> {
     pub fn from_source(state: &GameState, source_id: ObjectId) -> Self {
         let source_controller = source_controller_or_lki(state, source_id);
         Self {
+            casting_spell: None,
             source_id,
             source_controller,
             ability: None,
@@ -1488,6 +1635,7 @@ impl<'a> FilterContext<'a> {
     /// replacement-effect matching, etc.
     pub fn from_source_with_controller(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
+            casting_spell: None,
             source_id,
             source_controller: Some(controller),
             ability: None,
@@ -1505,6 +1653,7 @@ impl<'a> FilterContext<'a> {
     /// with the same storage id. The controller is latched with that source.
     pub fn from_trigger_source(source: &'a TriggerSourceContext) -> Self {
         Self {
+            casting_spell: None,
             source_id: source.identity.reference.object_id,
             source_controller: Some(source.lki.controller),
             ability: None,
@@ -1525,6 +1674,7 @@ impl<'a> FilterContext<'a> {
         controller: PlayerId,
     ) -> Self {
         Self {
+            casting_spell: None,
             source_id: source.identity.reference.object_id,
             source_controller: Some(controller),
             ability: None,
@@ -1547,6 +1697,7 @@ impl<'a> FilterContext<'a> {
     ) -> Self {
         let source_controller = source_controller_or_lki(state, source_id);
         Self {
+            casting_spell: None,
             source_id,
             source_controller,
             ability: None,
@@ -1564,6 +1715,7 @@ impl<'a> FilterContext<'a> {
     /// `chosen_x` and `targets` captured at cast time.
     pub fn from_ability(ability: &'a ResolvedAbility) -> Self {
         Self {
+            casting_spell: None,
             source_id: ability.source_id,
             source_controller: Some(ability.controller),
             ability: Some(ability),
@@ -1583,6 +1735,7 @@ impl<'a> FilterContext<'a> {
         recipient_id: ObjectId,
     ) -> Self {
         Self {
+            casting_spell: None,
             source_id: ability.source_id,
             source_controller: Some(ability.controller),
             ability: Some(ability),
@@ -1605,6 +1758,7 @@ impl<'a> FilterContext<'a> {
         controller: PlayerId,
     ) -> Self {
         Self {
+            casting_spell: None,
             source_id: ability.source_id,
             source_controller: Some(controller),
             ability: Some(ability),
@@ -1640,6 +1794,9 @@ fn parent_target_controller_player(
     ability: Option<&ResolvedAbility>,
 ) -> Option<PlayerId> {
     ability.and_then(|a| {
+        if a.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement {
+            return crate::game::ability_utils::parent_target_controller(a, state);
+        }
         crate::game::targeting::resolve_effect_player_ref(
             state,
             a,
@@ -2175,6 +2332,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -2578,6 +2736,7 @@ fn filter_contains_input(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -3795,6 +3954,7 @@ pub(crate) fn rebind_declared_groups_in_condition(
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
@@ -4146,7 +4306,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
 
 /// Rewrite every node and property reachable through `filter`, recording any incomplete
 /// bounded population walk in `complete` for the transactional caller.
-fn rewrite_filter_props(
+pub(crate) fn rewrite_filter_props(
     filter: &mut TargetFilter,
     rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
@@ -4226,6 +4386,7 @@ fn rewrite_filter_props(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -5049,6 +5210,40 @@ pub fn matches_target_filter(
     filter_inner(state, object_id, filter, ctx)
 }
 
+/// Live population membership during announcement. Ordinary permission and
+/// recorded-object readers deliberately retain their own origin authorities.
+pub(crate) fn matches_target_filter_in_population(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let Some(entry) = super::casting::announced_spell_entry(state, object_id) else {
+        return matches_target_filter(state, object_id, filter, ctx);
+    };
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if object.is_phased_out() {
+        return false;
+    }
+    // CR 601.2a + CR 108.3: the announced caster controls this spell; its
+    // original owner is unchanged. Project only this supplied live object.
+    let mut projected = object.clone();
+    projected.zone = Zone::Stack;
+    projected.controller = entry.controller;
+    if let StackEntryKind::Spell {
+        casting_variant, ..
+    } = &entry.kind
+    {
+        // CR 202.3d + CR 702.102b: only the exact selected Fuse entry supplies
+        // the combined-characteristics hint before final payment persists it.
+        projected.fused_split_spell =
+            *casting_variant == crate::types::game_state::CastingVariant::Fuse;
+    }
+    matches_target_filter_on_object(state, &projected, filter, ctx)
+}
+
 /// Evaluate a live card whose zone-change record says it departed `from`: the player axis reads
 /// the card as a resident of that zone (CR 603.10a for a graveyard, CR 400.1 as the format
 /// modifies it for a library), while every other property reads the live card.
@@ -5169,6 +5364,9 @@ pub(crate) fn matches_stack_target_filter(
     match filter {
         TargetFilter::Any => true,
         TargetFilter::StackSpell => matches!(&entry.kind, StackEntryKind::Spell { .. }),
+        TargetFilter::CastingSpell => ctx
+            .casting_spell
+            .is_some_and(|spell| spell.object_id == stack_obj_id),
         TargetFilter::StackAbility {
             controller,
             tag,
@@ -5266,6 +5464,7 @@ fn stack_entry_controller_matches(
         ctx.recipient_id,
         ctx.triggering_object,
         ctx.granting_object,
+        ctx.casting_spell,
     );
     match controller {
         None => true,
@@ -5352,6 +5551,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOnly,
     )
 }
@@ -5691,6 +5891,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.triggering_object,
             ctx.declared_slot_view,
             ctx.granting_object,
+            ctx.casting_spell,
             ControllerLookup::OwnerZone,
         );
     }
@@ -5711,6 +5912,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::OwnerZone,
     )
 }
@@ -5863,18 +6065,53 @@ fn entry_projection_exists_for(
 /// Adaptive Automaton, Bloodline Pretender). These only add, and read no
 /// characteristic, so their written order and their affected set are exact.
 fn entry_projection_allowlisted(def: &crate::types::ability::StaticDefinition) -> bool {
+    entry_haste_static_allowlisted(def)
+        || (def.mode == StaticMode::Continuous
+            && def.condition.is_none()
+            && matches!(def.affected, Some(TargetFilter::SelfRef))
+            && !def.modifications.is_empty()
+            && def.modifications.iter().all(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddChosenSubtype { .. }
+                        | ContinuousModification::AddChosenColor { .. }
+                        | ContinuousModification::AddAllCreatureTypes
+                )
+            }))
+}
+
+// CR 614.12 + CR 613.1f: this class reads only stable creature/controller/MV
+// inputs and adds only redundant Haste (CR 702.10d).
+fn entry_haste_static_allowlisted(def: &crate::types::ability::StaticDefinition) -> bool {
+    fn property(prop: &FilterProp) -> bool {
+        match prop {
+            FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(_) | ParitySource::SourceChosen,
+            } => true,
+            FilterProp::Not { prop } => property(prop),
+            FilterProp::AnyOf { props } => !props.is_empty() && props.iter().all(property),
+            _ => false,
+        }
+    }
     def.mode == StaticMode::Continuous
         && def.condition.is_none()
-        && matches!(def.affected, Some(TargetFilter::SelfRef))
+        && def.per_player_condition.is_none()
+        && matches!(def.affected_zone, None | Some(Zone::Battlefield))
+        && matches!(def.effect_zone, None | Some(Zone::Battlefield))
+        && !def.characteristic_defining
         && !def.modifications.is_empty()
         && def.modifications.iter().all(|modification| {
             matches!(
                 modification,
-                ContinuousModification::AddChosenSubtype { .. }
-                    | ContinuousModification::AddChosenColor { .. }
-                    | ContinuousModification::AddAllCreatureTypes
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste
+                }
             )
         })
+        && matches!(&def.affected, Some(TargetFilter::Typed(typed))
+            if typed.type_filters.as_slice() == [TypeFilter::Creature]
+                && matches!(typed.controller, None | Some(ControllerRef::You | ControllerRef::Opponent))
+                && !typed.properties.is_empty() && typed.properties.iter().all(property))
 }
 
 /// Whether an own static can apply to the entrant itself. An "other" filter
@@ -5943,13 +6180,22 @@ pub(crate) fn entry_projection_reads_choices(
 ) -> bool {
     entrant.static_definitions.as_slice().iter().any(|def| {
         entry_projection_allowlisted(def)
-            && def.modifications.iter().any(|modification| {
+            && (def.affected.as_ref().is_some_and(|filter| {
+                filter_contains_filter_prop(filter, &|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::ManaValueParity {
+                            parity: ParitySource::SourceChosen
+                        }
+                    )
+                })
+            }) || def.modifications.iter().any(|modification| {
                 matches!(
                     modification,
                     ContinuousModification::AddChosenSubtype { .. }
                         | ContinuousModification::AddChosenColor { .. }
                 )
-            })
+            }))
     })
 }
 
@@ -6011,6 +6257,18 @@ fn apply_entrant_own_statics(
             crate::game::layers::derive_intrinsic_basic_land_mana_abilities(entrant);
         }
     }
+    let source = crate::game::triggers::trigger_source_context_for_latch(state, entrant);
+    let context = FilterContext::from_trigger_source(&source);
+    for def in applicable {
+        if entry_haste_static_allowlisted(def)
+            && def.affected.as_ref().is_some_and(|filter| {
+                matches_target_filter_on_object(state, entrant, filter, &context)
+            })
+            && !entrant.keywords.contains(&Keyword::Haste)
+        {
+            entrant.keywords.push(Keyword::Haste);
+        }
+    }
 }
 
 /// CR 614.12: match `filter` against a projected entrant (an
@@ -6035,6 +6293,7 @@ pub(crate) fn matches_target_filter_on_object(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -6072,6 +6331,7 @@ fn entry_filter_matches_staged(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -6118,6 +6378,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.triggering_object,
                     ctx.declared_slot_view,
                     ctx.granting_object,
+                    ctx.casting_spell,
                     ControllerLookup::LiveOrLki,
                 );
             }
@@ -6187,6 +6448,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.triggering_object,
                     ctx.declared_slot_view,
                     ctx.granting_object,
+                    ctx.casting_spell,
                     ControllerLookup::LiveOrLki,
                 )
             })
@@ -6195,9 +6457,21 @@ pub fn matches_target_filter_on_battlefield_entry(
             owner,
             spec,
             enter_tapped,
+            copy,
             ..
         } => {
-            let obj = build_battlefield_entry_token_object(*owner, spec, *enter_tapped);
+            let obj = if let Some(copy) = copy {
+                let mut projected = crate::game::effects::token::copy_probe_object_for(
+                    copy,
+                    &state.all_creature_types,
+                );
+                projected.owner = *owner;
+                projected.controller = *owner;
+                projected.tapped = enter_tapped.resolve(copy.tapped);
+                projected
+            } else {
+                build_battlefield_entry_token_object(*owner, spec, *enter_tapped)
+            };
             filter_inner_for_object(
                 state,
                 &obj,
@@ -6212,6 +6486,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.triggering_object,
                 ctx.declared_slot_view,
                 ctx.granting_object,
+                ctx.casting_spell,
                 ControllerLookup::LiveOrLki,
             )
         }
@@ -6288,6 +6563,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -6336,6 +6612,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -6388,6 +6665,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -6449,6 +6727,58 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     entered_incarnation: Option<u64>,
     departed_from: Option<Zone>,
 ) -> bool {
+    matches_target_filter_on_exact_snapshot(
+        state,
+        object_id,
+        lki,
+        filter,
+        ctx,
+        entered_incarnation,
+        departed_from,
+        None,
+    )
+}
+
+/// The subject is independent from the replacement's relative `FilterContext`.
+/// CR 400.7 + CR 608.2h: departed facts remain authoritative through recursive
+/// property evaluation, even when the same storage id holds a returned object.
+pub(crate) fn matches_target_filter_on_exact_source(
+    state: &GameState,
+    subject: &TriggerSourceContext,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if subject.identity.reference.is_current(state)
+        && state
+            .objects
+            .get(&subject.identity.reference.object_id)
+            .is_some_and(|object| object.zone == subject.identity.expected_zone)
+    {
+        return matches_target_filter(state, subject.identity.reference.object_id, filter, ctx);
+    }
+    matches_target_filter_on_exact_snapshot(
+        state,
+        subject.identity.reference.object_id,
+        &subject.lki,
+        filter,
+        ctx,
+        Some(subject.identity.reference.incarnation),
+        Some(subject.identity.expected_zone),
+        Some(subject),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn matches_target_filter_on_exact_snapshot(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    entered_incarnation: Option<u64>,
+    departed_from: Option<Zone>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
     let record = ZoneChangeRecord {
         object_id,
         name: lki.name.clone(),
@@ -6457,7 +6787,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         supertypes: lki.supertypes.clone(),
         keywords: lki.keywords.clone(),
         trigger_definitions: Vec::new(),
-        trigger_source_context: None,
+        trigger_source_context: subject.cloned(),
         power: lki.power,
         toughness: lki.toughness,
         // CR 208.4b + CR 613.4b: Carry base P/T into the synthesized record so
@@ -6482,14 +6812,20 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // instant the host leaves the battlefield (CR 704.5m/n), so the live board can
         // never answer this for a source that is already gone.
         attachments: lki.attachments.clone(),
-        linked_exile_snapshot: vec![],
-        is_token: state
-            .objects
-            .get(&object_id)
-            .is_some_and(|object| object.is_token),
-        combat_status: Default::default(),
+        linked_exile_snapshot: subject
+            .map_or_else(Vec::new, |source| source.linked_exile_snapshot.clone()),
+        is_token: subject.map_or_else(
+            || {
+                state
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|object| object.is_token)
+            },
+            |source| source.is_token,
+        ),
+        combat_status: subject.map_or_else(Default::default, |source| source.combat_status.clone()),
         co_departed: Vec::new(),
-        attached_to: None,
+        attached_to: subject.and_then(|source| source.attached_to.clone()),
         entered_incarnation,
         turn_zone_change_index: 0,
         recorded_turn_number: 0,
@@ -6497,7 +6833,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // `FilterProp::Suspected` reads the cost-paid look-back value.
         is_suspected: lki.is_suspected,
     };
-    matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
+    zone_change_filter_inner_with_subject(state, &record, record.from_zone, filter, ctx, subject)
 }
 
 /// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
@@ -6633,6 +6969,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOnly,
     )
 }
@@ -6806,6 +7143,7 @@ fn filter_inner_with_lookup(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         controller_lookup,
     )
 }
@@ -6825,6 +7163,171 @@ fn filter_inner_for_object(
     triggering_object: Option<TriggeringObjectRef>,
     declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
     granting_object: Option<ObjectIncarnationRef>,
+    casting_spell: Option<CastSpellContext>,
+    controller_lookup: ControllerLookup,
+) -> bool {
+    filter_object_verdict(
+        state,
+        obj,
+        object_id,
+        filter,
+        source_id,
+        source_controller,
+        ability,
+        trigger_source,
+        recipient_id,
+        scoped_iteration_player,
+        triggering_object,
+        declared_slot_view,
+        granting_object,
+        casting_spell,
+        controller_lookup,
+    )
+    .unwrap_or(false)
+}
+
+// Preserve every non-parity predicate, including zone licensing, in its existing
+// owner. Only parity's Option-valued properties are peeled for composition.
+fn typed_without_parity_properties(typed: &TypedFilter) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: typed.type_filters.clone(),
+        controller: typed.controller.clone(),
+        properties: typed
+            .properties
+            .iter()
+            .filter(|prop| !prop_has_parity(prop))
+            .cloned()
+            .collect(),
+    })
+}
+
+fn prop_has_parity(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::ManaValueParity { .. } => true,
+        FilterProp::Not { prop } => prop_has_parity(prop),
+        FilterProp::AnyOf { props } => props.iter().any(prop_has_parity),
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn filter_object_verdict(
+    state: &GameState,
+    obj: &GameObject,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
+    ability: Option<&ResolvedAbility>,
+    trigger_source: Option<&TriggerSourceContext>,
+    recipient_id: Option<ObjectId>,
+    scoped_iteration_player: Option<PlayerId>,
+    triggering_object: Option<TriggeringObjectRef>,
+    declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
+    granting_object: Option<ObjectIncarnationRef>,
+    casting_spell: Option<CastSpellContext>,
+    controller_lookup: ControllerLookup,
+) -> Option<bool> {
+    let recurse = |filter: &TargetFilter| {
+        filter_object_verdict(
+            state,
+            obj,
+            object_id,
+            filter,
+            source_id,
+            source_controller,
+            ability,
+            trigger_source,
+            recipient_id,
+            scoped_iteration_player,
+            triggering_object,
+            declared_slot_view,
+            granting_object,
+            casting_spell,
+            controller_lookup,
+        )
+    };
+    match filter {
+        TargetFilter::Not { filter } => recurse(filter).map(|matched| !matched),
+        TargetFilter::And { filters } => kleene_and(filters.iter().map(recurse)),
+        TargetFilter::Or { filters } => kleene_or(filters.iter().map(recurse)),
+        TargetFilter::Typed(typed) if typed.properties.iter().any(prop_has_parity) => {
+            let baseline = typed_without_parity_properties(typed);
+            let known = filter_object_known(
+                state,
+                obj,
+                object_id,
+                &baseline,
+                source_id,
+                source_controller,
+                ability,
+                trigger_source,
+                recipient_id,
+                scoped_iteration_player,
+                triggering_object,
+                declared_slot_view,
+                granting_object,
+                casting_spell,
+                controller_lookup,
+            );
+            let mut source = source_context_from_filter(
+                state,
+                source_id,
+                source_controller,
+                ability,
+                trigger_source,
+                recipient_id,
+                triggering_object,
+                granting_object,
+                casting_spell,
+            );
+            source.declared_slot_view = declared_slot_view;
+            kleene_and(
+                std::iter::once(Some(known)).chain(
+                    typed
+                        .properties
+                        .iter()
+                        .filter(|prop| prop_has_parity(prop))
+                        .map(|prop| filter_prop_verdict(prop, state, obj, object_id, &source)),
+                ),
+            )
+        }
+        _ => Some(filter_object_known(
+            state,
+            obj,
+            object_id,
+            filter,
+            source_id,
+            source_controller,
+            ability,
+            trigger_source,
+            recipient_id,
+            scoped_iteration_player,
+            triggering_object,
+            declared_slot_view,
+            granting_object,
+            casting_spell,
+            controller_lookup,
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn filter_object_known(
+    state: &GameState,
+    obj: &GameObject,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
+    ability: Option<&ResolvedAbility>,
+    trigger_source: Option<&TriggerSourceContext>,
+    recipient_id: Option<ObjectId>,
+    scoped_iteration_player: Option<PlayerId>,
+    triggering_object: Option<TriggeringObjectRef>,
+    declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
+    granting_object: Option<ObjectIncarnationRef>,
+    casting_spell: Option<CastSpellContext>,
     controller_lookup: ControllerLookup,
 ) -> bool {
     match filter {
@@ -7008,7 +7511,8 @@ fn filter_inner_for_object(
                             recipient_id,
                             triggering_object,
                             granting_object,
-                        );
+        casting_spell,
+    );
                         match source_defending_player(state, &source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -7026,7 +7530,8 @@ fn filter_inner_for_object(
                             recipient_id,
                             triggering_object,
                             granting_object,
-                        );
+        casting_spell,
+    );
                         match source_chosen_player(&source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -7104,7 +7609,8 @@ fn filter_inner_for_object(
                 recipient_id,
                 triggering_object,
                 granting_object,
-            );
+        casting_spell,
+    );
             source_ctx.declared_slot_view = declared_slot_view;
             properties.iter().all(|p| match p {
                 FilterProp::Owned { controller } => {
@@ -7129,6 +7635,7 @@ fn filter_inner_for_object(
             triggering_object,
             declared_slot_view,
             granting_object,
+            casting_spell,
             controller_lookup,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
@@ -7146,6 +7653,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                casting_spell,
                 controller_lookup,
             )
         }),
@@ -7164,6 +7672,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                casting_spell,
                 controller_lookup,
             )
         }),
@@ -7184,9 +7693,11 @@ fn filter_inner_for_object(
                     triggering_object,
                     declared_slot_view,
                     granting_object,
+                    casting_spell,
                 },
             )
         }
+        TargetFilter::CastingSpell => casting_spell.is_some_and(|spell| spell.object_id == object_id),
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
         // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
@@ -7285,7 +7796,8 @@ fn filter_inner_for_object(
             recipient_id,
             triggering_object,
             granting_object,
-        )
+        casting_spell,
+    )
         .chosen_attributes
         .iter()
         .any(|attr| {
@@ -7388,6 +7900,7 @@ fn filter_inner_for_object(
                     triggering_object,
                     declared_slot_view,
                     granting_object,
+                    casting_spell,
                     controller_lookup,
                 )
         }
@@ -7406,7 +7919,8 @@ fn filter_inner_for_object(
                 recipient_id,
                 triggering_object,
                 granting_object,
-            );
+        casting_spell,
+    );
             let linked = if trigger_source.is_some() {
                 source_ctx.linked_exile_snapshot
             } else {
@@ -7522,7 +8036,8 @@ fn filter_inner_for_object(
                 recipient_id,
                 triggering_object,
                 granting_object,
-            );
+        casting_spell,
+    );
             let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
                 _ => None,
@@ -7542,6 +8057,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                casting_spell,
             };
             state
                 .last_chosen_damage_source
@@ -7626,6 +8142,82 @@ fn zone_change_filter_inner(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    zone_change_filter_inner_with_subject(state, record, licensed, filter, ctx, None)
+}
+
+fn zone_change_filter_inner_with_subject(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    licensed: Option<Zone>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
+    zone_change_filter_verdict(state, record, licensed, filter, ctx, subject).unwrap_or(false)
+}
+
+fn zone_change_filter_verdict(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    licensed: Option<Zone>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> Option<bool> {
+    let recurse = |filter: &TargetFilter| {
+        zone_change_filter_verdict(state, record, licensed, filter, ctx, subject)
+    };
+    match filter {
+        TargetFilter::Not { filter } => recurse(filter).map(|matched| !matched),
+        TargetFilter::And { filters } => kleene_and(filters.iter().map(recurse)),
+        TargetFilter::Or { filters } => kleene_or(filters.iter().map(recurse)),
+        TargetFilter::Typed(typed) if typed.properties.iter().any(prop_has_parity) => {
+            let known = zone_change_filter_known(
+                state,
+                record,
+                licensed,
+                &typed_without_parity_properties(typed),
+                ctx,
+                subject,
+            );
+            let mut source = source_context_from_filter(
+                state,
+                ctx.source_id,
+                ctx.source_controller,
+                ctx.ability,
+                ctx.trigger_source,
+                ctx.recipient_id,
+                ctx.triggering_object,
+                ctx.granting_object,
+                ctx.casting_spell,
+            );
+            source.declared_slot_view = ctx.declared_slot_view;
+            kleene_and(
+                std::iter::once(Some(known)).chain(
+                    typed
+                        .properties
+                        .iter()
+                        .filter(|prop| prop_has_parity(prop))
+                        .map(|prop| {
+                            zone_change_property_verdict(prop, state, record, &source, subject)
+                        }),
+                ),
+            )
+        }
+        _ => Some(zone_change_filter_known(
+            state, record, licensed, filter, ctx, subject,
+        )),
+    }
+}
+
+fn zone_change_filter_known(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    licensed: Option<Zone>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
     let source_id = ctx.source_id;
     let source_controller = ctx.source_controller;
     let ability = ctx.ability;
@@ -7696,7 +8288,8 @@ fn zone_change_filter_inner(
                 None,
                 triggering_object,
                 ctx.granting_object,
-            );
+        ctx.casting_spell,
+    );
 
             // CR 400.1 + CR 109.4: a zone without controllers answers the controller axis
             // for every seat reading the same container, like the live-object door.
@@ -7791,18 +8384,18 @@ fn zone_change_filter_inner(
                         owned_axis_admits(state, &source_ctx, controller, owner)
                     })
                 }
-                _ => zone_change_record_matches_property(prop, state, record, &source_ctx),
+                _ => zone_change_record_property_with_subject(prop, state, record, &source_ctx, subject),
             })
         }
         TargetFilter::Not { filter: inner } => {
-            !zone_change_filter_inner(state, record, licensed, inner, ctx)
+            !zone_change_filter_inner_with_subject(state, record, licensed, inner, ctx, subject)
         }
         TargetFilter::Or { filters } => filters
             .iter()
-            .any(|inner| zone_change_filter_inner(state, record, licensed, inner, ctx)),
+            .any(|inner| zone_change_filter_inner_with_subject(state, record, licensed, inner, ctx, subject)),
         TargetFilter::And { filters } => filters
             .iter()
-            .all(|inner| zone_change_filter_inner(state, record, licensed, inner, ctx)),
+            .all(|inner| zone_change_filter_inner_with_subject(state, record, licensed, inner, ctx, subject)),
         TargetFilter::SpecificObject { id } => record.object_id == *id,
         // SpecificPlayer scopes to players, not objects — a zone-change record
         // is always an object transition.
@@ -7828,7 +8421,8 @@ fn zone_change_filter_inner(
                 None,
                 triggering_object,
                 ctx.granting_object,
-            );
+        ctx.casting_spell,
+    );
             let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
                     ChosenAttribute::CardName(n) => Some(n.as_str()),
                     _ => None,
@@ -7863,7 +8457,8 @@ fn zone_change_filter_inner(
                     None,
                     triggering_object,
                     ctx.granting_object,
-                )
+        ctx.casting_spell,
+    )
                 .chosen_attributes
                 .iter()
                 .any(|attr| matches!(attr, ChosenAttribute::Card(pin) if *pin == occurrence))
@@ -7920,6 +8515,7 @@ fn zone_change_filter_inner(
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner => false,
@@ -8122,6 +8718,54 @@ pub fn spell_record_matches_filter(
     controller: PlayerId,
     all_creature_types: &[String],
 ) -> bool {
+    spell_record_filter_verdict(record, filter, controller, all_creature_types).unwrap_or(false)
+}
+
+fn spell_record_filter_verdict(
+    record: &SpellCastRecord,
+    filter: &TargetFilter,
+    controller: PlayerId,
+    all_creature_types: &[String],
+) -> Option<bool> {
+    let recurse = |filter: &TargetFilter| {
+        spell_record_filter_verdict(record, filter, controller, all_creature_types)
+    };
+    match filter {
+        TargetFilter::Not { filter } => recurse(filter).map(|matched| !matched),
+        TargetFilter::And { filters } => kleene_and(filters.iter().map(recurse)),
+        TargetFilter::Or { filters } => kleene_or(filters.iter().map(recurse)),
+        TargetFilter::Typed(typed) if typed.properties.iter().any(prop_has_parity) => {
+            let known = spell_record_filter_known(
+                record,
+                &typed_without_parity_properties(typed),
+                controller,
+                all_creature_types,
+            );
+            kleene_and(
+                std::iter::once(Some(known)).chain(
+                    typed
+                        .properties
+                        .iter()
+                        .filter(|prop| prop_has_parity(prop))
+                        .map(|prop| spell_record_property_verdict(record, prop)),
+                ),
+            )
+        }
+        _ => Some(spell_record_filter_known(
+            record,
+            filter,
+            controller,
+            all_creature_types,
+        )),
+    }
+}
+
+fn spell_record_filter_known(
+    record: &SpellCastRecord,
+    filter: &TargetFilter,
+    controller: PlayerId,
+    all_creature_types: &[String],
+) -> bool {
     match filter {
         TargetFilter::Any => true,
         TargetFilter::Typed(TypedFilter {
@@ -8221,6 +8865,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -8330,7 +8975,41 @@ pub fn spell_object_matches_filter_from_for(
     all_creature_types: &[String],
     fused: bool,
 ) -> bool {
-    let record = spell_cast_record_from_object_for(spell_obj, fused);
+    let casting_spell = CastSpellContext {
+        object_id: spell_obj.id,
+        casting_variant: if fused || spell_obj.fused_split_spell {
+            CastingVariant::Fuse
+        } else {
+            CastingVariant::Normal
+        },
+    };
+    spell_object_matches_filter_from_for_cast(
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_controller,
+        all_creature_types,
+        casting_spell,
+    )
+}
+
+/// CR 601.2b + CR 708.4: an explicitly selected state-free record.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_for_cast(
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    all_creature_types: &[String],
+    casting_spell: CastSpellContext,
+) -> bool {
+    let record = crate::game::restrictions::live_spell_cast_record_for(
+        spell_obj,
+        origin_zone,
+        casting_spell.casting_variant,
+    );
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -8381,10 +9060,49 @@ pub fn spell_object_matches_filter_from_state_for(
     all_creature_types: &[String],
     fused: bool,
 ) -> bool {
+    let casting_spell = if fused {
+        CastSpellContext {
+            object_id: spell_obj.id,
+            casting_variant: CastingVariant::Fuse,
+        }
+    } else {
+        CastSpellContext::for_spell(state, spell_obj.id)
+    };
+    spell_object_matches_filter_from_state_for_cast(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        casting_spell,
+    )
+}
+
+/// CR 601.2b + CR 708.4: filter the exact selected spell before announcement.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_state_for_cast(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    casting_spell: CastSpellContext,
+) -> bool {
+    if casting_spell.object_id != spell_obj.id {
+        return false;
+    }
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
-    let record = spell_cast_record_from_object_for(spell_obj, fused);
+    let record = crate::game::restrictions::live_spell_cast_record_for(
+        spell_obj,
+        origin_zone,
+        casting_spell.casting_variant,
+    );
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -8407,6 +9125,7 @@ pub fn spell_object_matches_filter_from_state_for(
             // itself from the command zone — Eminence must not reduce its
             // own cost).
             spell_object_id: Some(spell_obj.id),
+            casting_spell: Some(casting_spell),
         }),
     )
 }
@@ -8428,8 +9147,17 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
 /// COMBINED-characteristics projection (CR 702.102b) for a pre-payment fused
 /// split spell whose `fused_split_spell` marker is not yet set; the non-`_for`
 /// entry delegates with `fused = false`.
+#[cfg(test)]
 fn spell_cast_record_from_object_for(spell_obj: &GameObject, fused: bool) -> SpellCastRecord {
-    crate::game::restrictions::live_spell_cast_record_for(spell_obj, spell_obj.zone, fused)
+    crate::game::restrictions::live_spell_cast_record_for(
+        spell_obj,
+        spell_obj.zone,
+        if fused || spell_obj.fused_split_spell {
+            CastingVariant::Fuse
+        } else {
+            CastingVariant::Normal
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -8447,9 +9175,95 @@ struct SpellFilterContext<'a> {
     /// `SpellCastRecord.spell_object_id` and is resolved in `game::quantity`'s
     /// own-cast exclusion arm, not through this context.
     spell_object_id: Option<ObjectId>,
+    casting_spell: Option<CastSpellContext>,
 }
 
 fn spell_object_matches_filter_inner(
+    record: &SpellCastRecord,
+    zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    all_creature_types: &[String],
+    context: Option<SpellFilterContext<'_>>,
+) -> bool {
+    spell_object_filter_verdict(
+        record,
+        zone,
+        caster,
+        filter,
+        source_controller,
+        all_creature_types,
+        context,
+    )
+    .unwrap_or(false)
+}
+
+fn spell_object_filter_verdict(
+    record: &SpellCastRecord,
+    zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    all_creature_types: &[String],
+    context: Option<SpellFilterContext<'_>>,
+) -> Option<bool> {
+    let recurse = |filter: &TargetFilter| {
+        spell_object_filter_verdict(
+            record,
+            zone,
+            caster,
+            filter,
+            source_controller,
+            all_creature_types,
+            context,
+        )
+    };
+    match filter {
+        TargetFilter::Not { filter } => recurse(filter).map(|matched| !matched),
+        TargetFilter::And { filters } => kleene_and(filters.iter().map(recurse)),
+        TargetFilter::Or { filters } => kleene_or(filters.iter().map(recurse)),
+        TargetFilter::Typed(typed) if typed.properties.iter().any(prop_has_parity) => {
+            let known = spell_object_filter_known(
+                record,
+                zone,
+                caster,
+                &typed_without_parity_properties(typed),
+                source_controller,
+                all_creature_types,
+                context,
+            );
+            kleene_and(
+                std::iter::once(Some(known)).chain(
+                    typed
+                        .properties
+                        .iter()
+                        .filter(|prop| prop_has_parity(prop))
+                        .map(|prop| {
+                            spell_object_property_verdict(
+                                record,
+                                zone,
+                                prop,
+                                all_creature_types,
+                                context,
+                            )
+                        }),
+                ),
+            )
+        }
+        _ => Some(spell_object_filter_known(
+            record,
+            zone,
+            caster,
+            filter,
+            source_controller,
+            all_creature_types,
+            context,
+        )),
+    }
+}
+
+fn spell_object_filter_known(
     record: &SpellCastRecord,
     zone: Zone,
     caster: PlayerId,
@@ -8545,6 +9359,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -8596,6 +9411,50 @@ fn spell_object_matches_property(
     all_creature_types: &[String],
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
+    spell_object_property_verdict(record, zone, prop, all_creature_types, context).unwrap_or(false)
+}
+
+// CR 607.5a: an undefined linked choice stays unavailable through complement.
+fn spell_object_property_verdict(
+    record: &SpellCastRecord,
+    zone: Zone,
+    prop: &FilterProp,
+    all_creature_types: &[String],
+    context: Option<SpellFilterContext<'_>>,
+) -> Option<bool> {
+    match prop {
+        FilterProp::ManaValueParity { parity } => {
+            let choice = context.and_then(|ctx| ctx.state.last_named_choice.as_ref());
+            let attributes = context
+                .and_then(|ctx| ctx.state.objects.get(&ctx.source_id))
+                .map_or(&[][..], |source| source.chosen_attributes.as_slice());
+            parity_from_source(parity, choice, attributes)
+                .map(|parity| mana_value_matches_parity(record.mana_value, parity))
+        }
+        FilterProp::Not { prop } => {
+            spell_object_property_verdict(record, zone, prop, all_creature_types, context)
+                .map(|matched| !matched)
+        }
+        FilterProp::AnyOf { props } => kleene_or(props.iter().map(|prop| {
+            spell_object_property_verdict(record, zone, prop, all_creature_types, context)
+        })),
+        _ => Some(spell_object_property_known(
+            record,
+            zone,
+            prop,
+            all_creature_types,
+            context,
+        )),
+    }
+}
+
+fn spell_object_property_known(
+    record: &SpellCastRecord,
+    zone: Zone,
+    prop: &FilterProp,
+    all_creature_types: &[String],
+    context: Option<SpellFilterContext<'_>>,
+) -> bool {
     match prop {
         FilterProp::InZone { zone: required } => zone == *required,
         FilterProp::InAnyZone { zones } => zones.contains(&zone),
@@ -8618,7 +9477,10 @@ fn spell_object_matches_property(
         }
         FilterProp::ManaValueParity { parity } => {
             let choice = context.and_then(|ctx| ctx.state.last_named_choice.as_ref());
-            mana_value_matches_parity_source(record.mana_value, parity, choice)
+            let attributes = context
+                .and_then(|ctx| ctx.state.objects.get(&ctx.source_id))
+                .map_or(&[][..], |source| source.chosen_attributes.as_slice());
+            mana_value_matches_parity_source(record.mana_value, parity, choice, attributes)
         }
         FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
             context
@@ -8771,6 +9633,26 @@ fn spell_record_matches_type_filter(
 }
 
 fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) -> bool {
+    spell_record_property_verdict(record, prop).unwrap_or(false)
+}
+
+fn spell_record_property_verdict(record: &SpellCastRecord, prop: &FilterProp) -> Option<bool> {
+    match prop {
+        FilterProp::ManaValueParity { parity } => parity_from_source(parity, None, &[])
+            .map(|parity| mana_value_matches_parity(record.mana_value, parity)),
+        FilterProp::Not { prop } => {
+            spell_record_property_verdict(record, prop).map(|matched| !matched)
+        }
+        FilterProp::AnyOf { props } => kleene_or(
+            props
+                .iter()
+                .map(|prop| spell_record_property_verdict(record, prop)),
+        ),
+        _ => Some(spell_record_property_known(record, prop)),
+    }
+}
+
+fn spell_record_property_known(record: &SpellCastRecord, prop: &FilterProp) -> bool {
     match prop {
         FilterProp::WithKeyword { value } => record.keywords.iter().any(|k| k == value),
         FilterProp::HasKeywordKind { value } => record.keywords.iter().any(|k| k.kind() == *value),
@@ -8807,7 +9689,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
             }
         },
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, None)
+            mana_value_matches_parity_source(record.mana_value, parity, None, &[])
         }
         // CR 202.1: SpellCastRecord retains colors + mana_value but no per-shard
         // ManaCost, so colored-pip count is unsupported here. RUNTIME: TODO.
@@ -8974,6 +9856,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
 
 /// Context about the source of an ability, used during filter property evaluation.
 struct SourceContext<'a> {
+    casting_spell: Option<CastSpellContext>,
     id: ObjectId,
     controller: Option<PlayerId>,
     /// CR 601.2c + CR 608.2b: mirror of `FilterContext::declared_slot_view`, read
@@ -9060,6 +9943,7 @@ pub(crate) fn source_defending_player_for_test(
         None,
         None,
         trigger_source,
+        None,
         None,
         None,
         None,
@@ -9150,6 +10034,7 @@ fn source_context_from_filter<'a>(
     recipient_id: Option<ObjectId>,
     triggering_object: Option<TriggeringObjectRef>,
     granting_object: Option<ObjectIncarnationRef>,
+    casting_spell: Option<CastSpellContext>,
 ) -> SourceContext<'a> {
     let (lki, attached_to, saddled_by, convoked_creatures, linked_exile_snapshot) =
         if let Some(source) = trigger_source {
@@ -9239,6 +10124,7 @@ fn source_context_from_filter<'a>(
         });
 
     SourceContext {
+        casting_spell,
         id: source_id,
         controller: source_controller.or(Some(lki.controller)),
         declared_slot_view: None,
@@ -9486,6 +10372,7 @@ fn aura_can_enchant_referenced_target(
                 triggering_object: source.triggering_object,
                 declared_slot_view: source.declared_slot_view,
                 granting_object: source.granting_object,
+                casting_spell: source.casting_spell,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
@@ -9517,6 +10404,7 @@ fn resolve_filter_threshold(
             source.controller.unwrap_or(PlayerId(0)),
             QuantityContext {
                 granting_object: source.granting_object,
+                spell: source.casting_spell,
                 ..QuantityContext::new(source.id)
             },
         ),
@@ -9562,13 +10450,27 @@ fn matches_last_chosen_card_predicate(
     }
 }
 
-fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Option<Parity> {
+fn parity_from_source(
+    source: &ParitySource,
+    choice: Option<&ChoiceValue>,
+    chosen_attributes: &[crate::types::ability::ChosenAttribute],
+) -> Option<Parity> {
     match source {
         ParitySource::Fixed(parity) => Some(*parity),
         ParitySource::LastNamedChoice => match choice {
             Some(ChoiceValue::OddOrEven(parity)) => Some(*parity),
             _ => None,
         },
+        // CR 607.2d + CR 607.5a: only this source's linked stored choice is
+        // authority; later local choices and another source cannot supply it.
+        ParitySource::SourceChosen => {
+            chosen_attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    crate::types::ability::ChosenAttribute::OddOrEven(parity) => Some(*parity),
+                    _ => None,
+                })
+        }
     }
 }
 
@@ -9583,8 +10485,9 @@ fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
     choice: Option<&ChoiceValue>,
+    chosen_attributes: &[crate::types::ability::ChosenAttribute],
 ) -> bool {
-    parity_from_source(source, choice)
+    parity_from_source(source, choice, chosen_attributes)
         .is_some_and(|parity| mana_value_matches_parity(mana_value, parity))
 }
 
@@ -9730,6 +10633,44 @@ fn owned_axis_admits(
 }
 
 fn matches_filter_prop(
+    prop: &FilterProp,
+    state: &GameState,
+    obj: &GameObject,
+    object_id: ObjectId,
+    source: &SourceContext<'_>,
+) -> bool {
+    filter_prop_verdict(prop, state, obj, object_id, source).unwrap_or(false)
+}
+
+fn filter_prop_verdict(
+    prop: &FilterProp,
+    state: &GameState,
+    obj: &GameObject,
+    object_id: ObjectId,
+    source: &SourceContext<'_>,
+) -> Option<bool> {
+    match prop {
+        FilterProp::ManaValueParity { parity } => parity_from_source(
+            parity,
+            state.last_named_choice.as_ref(),
+            &source.chosen_attributes,
+        )
+        .map(|parity| mana_value_matches_parity(obj.effective_mana_value(), parity)),
+        FilterProp::Not { prop } => {
+            filter_prop_verdict(prop, state, obj, object_id, source).map(|matched| !matched)
+        }
+        FilterProp::AnyOf { props } => kleene_or(
+            props
+                .iter()
+                .map(|prop| filter_prop_verdict(prop, state, obj, object_id, source)),
+        ),
+        _ => Some(matches_filter_prop_known(
+            prop, state, obj, object_id, source,
+        )),
+    }
+}
+
+fn matches_filter_prop_known(
     prop: &FilterProp,
     state: &GameState,
     obj: &GameObject,
@@ -9910,7 +10851,12 @@ fn matches_filter_prop(
             // CR 202.3d + CR 709.4b: combined mana value off the stack (a split
             // card's parity is that of both halves), chosen half on the stack.
             let mana_value = obj.effective_mana_value();
-            mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                &source.chosen_attributes,
+            )
         }
         // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
         // mana cost via the single counting authority, then compare with the
@@ -10447,8 +11393,22 @@ fn matches_filter_prop(
         // reference resolution below). Used by Radiance's "each OTHER creature
         // that shares a color with it" — excludes the already-damaged target.
         FilterProp::DistinctFrom { reference } => {
-            // `matches_filter_prop` runs once per candidate object, so short-circuit
-            // via `.any()` rather than collecting the reference ids into a `Vec`.
+            // CR 608.2b + CR 608.2h + CR 400.7: a marked exclusion names
+            // the same selected incarnation as its controller. No anchor is
+            // no population; a returned incarnation is a different object.
+            if matches!(reference.as_ref(), TargetFilter::ParentTarget) {
+                if let Some(ability) = source.ability.filter(|ability| {
+                    ability.target_reads
+                        == crate::types::ability::TargetReadOrigin::ParentAnnouncement
+                }) {
+                    return crate::game::ability_utils::selected_parent_target_incarnation(ability)
+                        .is_some_and(|selected| {
+                            selected != ObjectIncarnationRef::from_object(obj)
+                        });
+                }
+            }
+            // Legacy matching short-circuits via `.any()` rather than collecting
+            // reference IDs for each candidate object.
             //
             // NOTE (fail-open asymmetry): the `ParentTarget` arm reads ONLY
             // `ability.targets` — it lacks the LKI / `recipient_id` /
@@ -10758,6 +11718,55 @@ fn zone_change_record_matches_property(
     record: &ZoneChangeRecord,
     source: &SourceContext<'_>,
 ) -> bool {
+    zone_change_record_property_with_subject(prop, state, record, source, None)
+}
+
+fn zone_change_record_property_with_subject(
+    prop: &FilterProp,
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    source: &SourceContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
+    zone_change_property_verdict(prop, state, record, source, subject).unwrap_or(false)
+}
+
+fn zone_change_property_verdict(
+    prop: &FilterProp,
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    source: &SourceContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> Option<bool> {
+    match prop {
+        FilterProp::ManaValueParity { parity } => parity_from_source(
+            parity,
+            state.last_named_choice.as_ref(),
+            &source.chosen_attributes,
+        )
+        .map(|parity| mana_value_matches_parity(record.mana_value, parity)),
+        FilterProp::Not { prop } => {
+            zone_change_property_verdict(prop, state, record, source, subject)
+                .map(|matched| !matched)
+        }
+        FilterProp::AnyOf { props } => kleene_or(
+            props
+                .iter()
+                .map(|prop| zone_change_property_verdict(prop, state, record, source, subject)),
+        ),
+        _ => Some(zone_change_property_known(
+            prop, state, record, source, subject,
+        )),
+    }
+}
+
+fn zone_change_property_known(
+    prop: &FilterProp,
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    source: &SourceContext<'_>,
+    subject: Option<&TriggerSourceContext>,
+) -> bool {
     match prop {
         // -------- Group 1: snapshot-derivable --------
         // CR 702: Keyword presence on the event-time object.
@@ -10784,7 +11793,7 @@ fn zone_change_record_matches_property(
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
         FilterProp::NotHistoric => {
-            !zone_change_record_matches_property(&FilterProp::Historic, state, record, source)
+            !zone_change_record_property_with_subject(&FilterProp::Historic, state, record, source, subject)
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => card_names_match(&record.name, name),
@@ -10812,10 +11821,10 @@ fn zone_change_record_matches_property(
             record.mana_value as i32,
             resolve_filter_threshold(state, value, source),
         ),
-        // CR 202.3 + CR 608.2c: The event-time mana value is fixed in the
-        // snapshot; the chosen odd/even quality is read from resolution state.
+        // CR 202.3 + CR 607.2d + CR 608.2h: candidate mana value is event-time;
+        // durable choice belongs to the already resolved exact/captured source.
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref(), &source.chosen_attributes)
         }
         // CR 202.1: Zone-change records currently snapshot mana value, not the
         // full printed mana cost. Exact-cost predicates fail closed here.
@@ -11003,10 +12012,10 @@ fn zone_change_record_matches_property(
         // a battlefield zone-change event, consult the live object after entry
         // so Soulbond's "another unpaired creature enters" trigger can see the
         // entering creature before any pair-forming effect resolves.
-        FilterProp::Unpaired => state
+        FilterProp::Unpaired => subject.map_or_else(|| state
             .objects
             .get(&record.object_id)
-            .is_some_and(|obj| obj.paired_with.is_none()),
+            .is_some_and(|obj| obj.paired_with.is_none()), |subject| subject.paired_with.is_none()),
 
         // CR 608.2h: predicates whose state IS captured into the exit-time LKI
         // snapshot (counters, tap status) are answered from `lki_cache`, keyed by
@@ -11016,7 +12025,8 @@ fn zone_change_record_matches_property(
             counters,
             comparator,
             count,
-        } => state.lki_cache.get(&record.object_id).is_some_and(|lki| {
+        } => subject.map(|source| &source.lki)
+            .or_else(|| state.lki_cache.get(&record.object_id)).is_some_and(|lki| {
             let selector = match counters {
                 CounterMatch::Any => None,
                 CounterMatch::OfType(ct) => Some(ct),
@@ -11054,18 +12064,16 @@ fn zone_change_record_matches_property(
         // Blunder, evaluated after the bounce/exile). Read the exit-time tap state
         // captured into the LKI snapshot at zone exit (zones.rs), keyed by the
         // record's object id — mirrors the `Counters` arm's `lki_cache` lookup.
-        FilterProp::Tapped => state
-            .lki_cache
-            .get(&record.object_id)
+        FilterProp::Tapped => subject.map(|source| &source.lki)
+            .or_else(|| state.lki_cache.get(&record.object_id))
             .is_some_and(|lki| lki.tapped),
         // CR 110.5 + CR 110.5d: symmetric sibling of `Tapped`. A look-back
         // "was untapped" rider reads the exit-time tap state from the LKI
         // snapshot and asserts it was NOT tapped. Fail-closed (no snapshot ⇒
         // false) mirrors the `Tapped` arm: a card not on the battlefield is
         // neither tapped nor untapped, so absence of a snapshot answers neither.
-        FilterProp::Untapped => state
-            .lki_cache
-            .get(&record.object_id)
+        FilterProp::Untapped => subject.map(|source| &source.lki)
+            .or_else(|| state.lki_cache.get(&record.object_id))
             .is_some_and(|lki| !lki.tapped),
         // CR 508.1a + CR 608.2h: "attacked this turn" is a turn-scoped HISTORICAL FACT about
         // the object as it most recently existed, not a query against live combat state.
@@ -11152,10 +12160,10 @@ fn zone_change_record_matches_property(
         // Disjunctive composite: recurse into inner props under the same record.
         FilterProp::AnyOf { props } => props
             .iter()
-            .any(|p| zone_change_record_matches_property(p, state, record, source)),
+            .any(|p| zone_change_record_property_with_subject(p, state, record, source, subject)),
         // CR 608.2c: Logical negation — recurse under the same record and invert.
         FilterProp::Not { prop } => {
-            !zone_change_record_matches_property(prop, state, record, source)
+            !zone_change_record_property_with_subject(prop, state, record, source, subject)
         }
 
         // -------- Group 4: not-yet-supported (known conservative gaps) --------
@@ -11356,7 +12364,7 @@ fn shared_quality_values(
             if source.name.is_empty() {
                 HashSet::new()
             } else {
-                HashSet::from([source.name.to_ascii_lowercase()])
+                HashSet::from([source.name.to_lowercase()])
             }
         }
         SharedQuality::ManaValue => HashSet::from([source.mana_value.to_string()]),
@@ -11443,6 +12451,9 @@ fn object_shared_quality_values(
     // CR 202.3d + CR 709.4b: A split card off the stack shares its combined mana
     // value and combined colors; both no-op for single-face cards. Bound to a
     // local because `SharedQualitySource.colors` borrows a slice.
+    if matches!(quality, SharedQuality::Name) {
+        return obj.effective_names().into_iter().collect();
+    }
     let effective_colors = obj.effective_colors();
     shared_quality_values(
         SharedQualitySource {
@@ -11553,6 +12564,16 @@ fn evaluate_shares_quality(
     relation: &SharedQualityRelation,
     source: &SourceContext<'_>,
 ) -> bool {
+    if reference
+        .as_deref()
+        .is_some_and(|reference| matches!(reference, TargetFilter::CastingSpell))
+        && source
+            .casting_spell
+            .and_then(|spell| state.objects.get(&spell.object_id))
+            .is_none()
+    {
+        return false;
+    }
     let shares = reference.as_ref().is_none_or(|reference_filter| {
         object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
     });
@@ -11594,6 +12615,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             attachments: Vec::new(),
         });
     SourceContext {
+        casting_spell: context.casting_spell,
         id: context.source_id,
         controller: Some(context.source_controller),
         lki: lki.clone(),
@@ -11745,6 +12767,31 @@ fn object_shares_quality_with_reference_filter(
     reference_filter: &TargetFilter,
     source: &SourceContext<'_>,
 ) -> bool {
+    if matches!(reference_filter, TargetFilter::CastingSpell) {
+        return source
+            .casting_spell
+            .and_then(|spell| {
+                let object = state.objects.get(&spell.object_id)?;
+                let mut projected = object.clone();
+                projected.zone = Zone::Stack;
+                projected.fused_split_spell = spell.casting_variant == CastingVariant::Fuse;
+                let values = if matches!(quality, SharedQuality::Name) {
+                    object
+                        .spell_names_for(spell.casting_variant)
+                        .into_iter()
+                        .collect()
+                } else {
+                    object_shared_quality_values(&projected, quality, &state.all_creature_types)
+                };
+                Some(object_shares_quality_values(
+                    obj,
+                    quality,
+                    &values,
+                    &state.all_creature_types,
+                ))
+            })
+            .unwrap_or(false);
+    }
     if matches!(reference_filter, TargetFilter::ParentTarget) {
         return parent_target_shared_quality_values(state, source, quality).is_some_and(|values| {
             object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
@@ -11795,6 +12842,7 @@ fn object_shares_quality_with_reference_filter(
         triggering_object: source.triggering_object,
         declared_slot_view: source.declared_slot_view,
         granting_object: source.granting_object,
+        casting_spell: source.casting_spell,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
     // creature you control" or "a creature card in your graveyard" to the zone
@@ -12343,6 +13391,665 @@ fn player_matches_target_filter_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u15_parsed_external_filter_characteristic_axes() {
+        let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Ashling's Prerogative",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert!(parsed.parse_warnings.is_empty());
+        assert_eq!(parsed.replacements.len(), 2);
+        assert_eq!(parsed.statics.len(), 1);
+        let filter = parsed
+            .replacements
+            .iter()
+            .find_map(|def| {
+                def.valid_card
+                    .as_ref()
+                    .filter(|filter| **filter != TargetFilter::SelfRef)
+            })
+            .unwrap();
+        assert!(
+            matches!(filter, TargetFilter::Typed(tf) if tf.type_filters == [TypeFilter::Creature] && matches!(tf.properties.as_slice(), [FilterProp::Not { prop }] if matches!(prop.as_ref(), FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+        );
+        for parity in [
+            ParitySource::SourceChosen,
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+        ] {
+            let mut control = filter.clone();
+            let mut count = 0;
+            let mut complete = true;
+            rewrite_filter_props(
+                &mut control,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: value @ ParitySource::SourceChosen,
+                    } = prop
+                    {
+                        *value = parity;
+                        count += 1;
+                    }
+                },
+                &mut complete,
+            );
+            assert!(complete);
+            assert_eq!(count, 1);
+            assert_eq!(
+                target_filter_characteristic_reads(&control),
+                CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::MANA_COST)
+            );
+        }
+    }
+
+    #[test]
+    fn u15_four_doors_preserve_unknown_through_boolean_composition() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Registry source");
+        let candidate = add_creature(&mut state, PlayerId(1), "MV3 entrant");
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(3);
+        state.objects.get_mut(&candidate).unwrap().chosen_attributes =
+            vec![ChosenAttribute::OddOrEven(Parity::Even)];
+        state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Even));
+        let record = spell_cast_record_from_object(&state.objects[&candidate]);
+        let event = state.objects[&candidate].snapshot_for_zone_change(
+            candidate,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        let parity = FilterProp::ManaValueParity {
+            parity: ParitySource::SourceChosen,
+        };
+        let not = FilterProp::Not {
+            prop: Box::new(parity.clone()),
+        };
+        let double = FilterProp::Not {
+            prop: Box::new(not.clone()),
+        };
+        let known_true = FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 3 },
+        };
+        let known_false = FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 2 },
+        };
+        for chosen in [None, Some(Parity::Odd), Some(Parity::Even)] {
+            state.objects.get_mut(&source).unwrap().chosen_attributes =
+                chosen.into_iter().map(ChosenAttribute::OddOrEven).collect();
+            let source_context = source_context_from_filter(
+                &state,
+                source,
+                Some(PlayerId(0)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let spell_context = Some(SpellFilterContext {
+                state: &state,
+                source_id: source,
+                source_controller: PlayerId(0),
+                spell_object_id: Some(candidate),
+                casting_spell: None,
+            });
+            for (prop, expected) in [
+                (parity.clone(), chosen.map(|parity| parity == Parity::Odd)),
+                (not.clone(), chosen.map(|parity| parity == Parity::Even)),
+                (double.clone(), chosen.map(|parity| parity == Parity::Odd)),
+                (
+                    FilterProp::AnyOf {
+                        props: vec![parity.clone(), known_true.clone()],
+                    },
+                    Some(true),
+                ),
+                (
+                    FilterProp::AnyOf {
+                        props: vec![parity.clone(), known_false.clone()],
+                    },
+                    chosen.map(|parity| parity == Parity::Odd),
+                ),
+            ] {
+                assert_eq!(
+                    filter_prop_verdict(
+                        &prop,
+                        &state,
+                        &state.objects[&candidate],
+                        candidate,
+                        &source_context
+                    ),
+                    expected
+                );
+                assert_eq!(
+                    zone_change_property_verdict(&prop, &state, &event, &source_context, None),
+                    expected
+                );
+                assert_eq!(
+                    spell_object_property_verdict(&record, Zone::Stack, &prop, &[], spell_context),
+                    expected
+                );
+                assert_eq!(
+                    matches_filter_prop(
+                        &prop,
+                        &state,
+                        &state.objects[&candidate],
+                        candidate,
+                        &source_context
+                    ),
+                    expected.unwrap_or(false)
+                );
+                let typed = TargetFilter::Typed(TypedFilter::creature().properties(vec![prop]));
+                let context = FilterContext::from_source(&state, source);
+                assert_eq!(
+                    matches_target_filter_on_object(
+                        &state,
+                        &state.objects[&candidate],
+                        &typed,
+                        &context
+                    ),
+                    expected.unwrap_or(false)
+                );
+                let inverted = TargetFilter::Not {
+                    filter: Box::new(typed.clone()),
+                };
+                assert_eq!(
+                    matches_target_filter_on_object(
+                        &state,
+                        &state.objects[&candidate],
+                        &inverted,
+                        &context
+                    ),
+                    expected.map(|matched| !matched).unwrap_or(false)
+                );
+                assert_eq!(
+                    spell_object_filter_verdict(
+                        &record,
+                        Zone::Stack,
+                        PlayerId(1),
+                        &inverted,
+                        PlayerId(0),
+                        &[],
+                        spell_context
+                    ),
+                    expected.map(|matched| !matched)
+                );
+                assert_eq!(
+                    zone_change_filter_verdict(
+                        &state,
+                        &event,
+                        event.from_zone,
+                        &inverted,
+                        &context,
+                        None
+                    ),
+                    expected.map(|matched| !matched)
+                );
+                let or = TargetFilter::Or {
+                    filters: vec![typed.clone(), TargetFilter::Any],
+                };
+                let and = TargetFilter::And {
+                    filters: vec![typed, TargetFilter::None],
+                };
+                assert!(matches_target_filter_on_object(
+                    &state,
+                    &state.objects[&candidate],
+                    &or,
+                    &context
+                ));
+                assert!(!matches_target_filter_on_object(
+                    &state,
+                    &state.objects[&candidate],
+                    &and,
+                    &context
+                ));
+            }
+        }
+        for prop in [&parity, &not, &double] {
+            assert_eq!(spell_record_property_verdict(&record, prop), None);
+            assert!(!spell_record_matches_property(&record, prop));
+            let typed = TargetFilter::Typed(TypedFilter::creature().properties(vec![prop.clone()]));
+            assert!(!spell_record_matches_filter(
+                &record,
+                &typed,
+                PlayerId(0),
+                &[]
+            ));
+            assert!(!spell_record_matches_filter(
+                &record,
+                &TargetFilter::Not {
+                    filter: Box::new(typed.clone())
+                },
+                PlayerId(0),
+                &[]
+            ));
+            assert!(spell_record_matches_filter(
+                &record,
+                &TargetFilter::Or {
+                    filters: vec![typed.clone(), TargetFilter::Any]
+                },
+                PlayerId(0),
+                &[]
+            ));
+            assert!(!spell_record_matches_filter(
+                &record,
+                &TargetFilter::And {
+                    filters: vec![typed, TargetFilter::None]
+                },
+                PlayerId(0),
+                &[]
+            ));
+        }
+        let fixed = FilterProp::ManaValueParity {
+            parity: ParitySource::Fixed(Parity::Odd),
+        };
+        assert!(spell_record_matches_property(&record, &fixed));
+        assert!(!spell_record_matches_property(
+            &record,
+            &FilterProp::Not {
+                prop: Box::new(fixed)
+            }
+        ));
+        for mv in [0, 2, 3] {
+            let row = SpellCastRecord {
+                mana_value: mv,
+                ..record.clone()
+            };
+            let even = FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Even),
+            };
+            assert_eq!(spell_record_matches_property(&row, &even), mv % 2 == 0);
+            assert_eq!(
+                spell_record_matches_property(
+                    &row,
+                    &FilterProp::Not {
+                        prop: Box::new(even)
+                    }
+                ),
+                mv % 2 != 0
+            );
+        }
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::OddOrEven(Parity::Odd)];
+        let captured = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        state.objects.get_mut(&source).unwrap().incarnation += 1;
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::OddOrEven(Parity::Even)];
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(2);
+        let old = source_context_from_filter(
+            &state,
+            source,
+            None,
+            None,
+            Some(&captured),
+            None,
+            None,
+            None,
+            None,
+        );
+        let live =
+            source_context_from_filter(&state, source, None, None, None, None, None, None, None);
+        // The old Odd source and event MV3 remain independent of the returned
+        // Even source and current MV2. Inversion keeps that exact authority.
+        assert_eq!(
+            zone_change_property_verdict(&not, &state, &event, &old, None),
+            Some(false)
+        );
+        assert_eq!(
+            zone_change_property_verdict(&not, &state, &event, &live, None),
+            Some(true)
+        );
+        assert_eq!(
+            filter_prop_verdict(&not, &state, &state.objects[&candidate], candidate, &old),
+            Some(true)
+        );
+        assert_eq!(
+            filter_prop_verdict(&not, &state, &state.objects[&candidate], candidate, &live),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn u15_entry_projection_applies_own_parity_haste_before_keyword_reader() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Synthetic creature source");
+        let parsed = crate::parser::parse_oracle_text("As this creature enters, choose odd or even.\nEach creature with mana value of the chosen quality has haste.", "Synthetic creature source", &[], &["Creature".into()], &[]);
+        assert!(parsed.parse_warnings.is_empty());
+        assert_eq!(parsed.replacements.len(), 1);
+        assert_eq!(parsed.statics.len(), 1);
+        let object = state.objects.get_mut(&source).unwrap();
+        object.mana_cost = ManaCost::generic(3);
+        object.replacement_definitions = parsed.replacements.into();
+        object.static_definitions = parsed.statics.into();
+        assert!(entry_projection_reads_choices(object));
+        let consumer = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::WithKeyword {
+                value: Keyword::Haste,
+            },
+        ]));
+        for (parity, expected) in [(Parity::Odd, true), (Parity::Even, false)] {
+            let projected = EntryProjection::proposed(
+                &state,
+                state.objects[&source].clone(),
+                &[ChosenAttribute::OddOrEven(parity)],
+                Some(PlayerId(1)),
+                &consumer,
+            )
+            .unwrap();
+            assert_eq!(projected.controller, PlayerId(1));
+            assert_eq!(projected.keywords.contains(&Keyword::Haste), expected);
+            let captured =
+                crate::game::triggers::trigger_source_context_for_latch(&state, &projected);
+            assert_eq!(
+                matches_target_filter_on_object(
+                    &state,
+                    &projected,
+                    &consumer,
+                    &FilterContext::from_trigger_source(&captured)
+                ),
+                expected
+            );
+            state.objects.get_mut(&source).unwrap().chosen_attributes =
+                vec![ChosenAttribute::OddOrEven(parity)];
+            let delivered = EntryProjection::delivered(&state, source, &consumer).unwrap();
+            assert_eq!(delivered.keywords.contains(&Keyword::Haste), expected);
+        }
+        let base = state.objects[&source].static_definitions[0].clone();
+        assert!(entry_haste_static_allowlisted(&base));
+        for fixed in [false, true] {
+            let mut definition = base.clone();
+            let Some(TargetFilter::Typed(typed)) = &mut definition.affected else {
+                unreachable!()
+            };
+            typed.controller = Some(ControllerRef::You);
+            if fixed {
+                typed.properties = vec![FilterProp::ManaValueParity {
+                    parity: ParitySource::Fixed(Parity::Odd),
+                }];
+            }
+            state.objects.get_mut(&source).unwrap().static_definitions = vec![definition].into();
+            let projected = EntryProjection::proposed(
+                &state,
+                state.objects[&source].clone(),
+                &[ChosenAttribute::OddOrEven(Parity::Odd)],
+                Some(PlayerId(1)),
+                &consumer,
+            )
+            .unwrap();
+            assert!(projected.keywords.contains(&Keyword::Haste));
+            for choices in [vec![], vec![ChosenAttribute::Color(ManaColor::Blue)]] {
+                let projected = EntryProjection::proposed(
+                    &state,
+                    state.objects[&source].clone(),
+                    &choices,
+                    Some(PlayerId(1)),
+                    &consumer,
+                )
+                .unwrap();
+                assert_eq!(projected.keywords.contains(&Keyword::Haste), fixed);
+            }
+        }
+        let mut unsupported = base.clone();
+        unsupported.condition = Some(crate::types::ability::StaticCondition::DuringYourTurn);
+        assert!(!entry_haste_static_allowlisted(&unsupported));
+        assert!(entry_projection_unprojected_writes(&[unsupported])
+            .intersects(CharacteristicKinds::ABILITIES));
+        let mut removal = base.clone();
+        removal.modifications = vec![ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Haste,
+        }];
+        assert!(!entry_haste_static_allowlisted(&removal));
+        let mut reads_ability = base;
+        let Some(TargetFilter::Typed(typed)) = &mut reads_ability.affected else {
+            unreachable!()
+        };
+        typed.properties.push(FilterProp::WithKeyword {
+            value: Keyword::Flying,
+        });
+        assert!(!entry_haste_static_allowlisted(&reads_ability));
+    }
+
+    #[test]
+    fn u14_parity_current_legacy_and_captured_sources() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Odd source");
+        let candidate = add_creature(&mut state, PlayerId(1), "Even chosen candidate");
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(3);
+        state.objects.get_mut(&candidate).unwrap().chosen_attributes =
+            vec![ChosenAttribute::OddOrEven(Parity::Even)];
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![
+            ChosenAttribute::Color(ManaColor::Blue),
+            ChosenAttribute::OddOrEven(Parity::Odd),
+            ChosenAttribute::OddOrEven(Parity::Even),
+        ];
+        state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Even));
+        let record = spell_cast_record_from_object(&state.objects[&candidate]);
+        let event = state.objects[&candidate].snapshot_for_zone_change(
+            candidate,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        let captured = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let fixed: ParitySource =
+            serde_json::from_str(r#"{"type":"Fixed","value":"Even"}"#).unwrap();
+        let local: ParitySource = serde_json::from_str(r#"{"type":"LastNamedChoice"}"#).unwrap();
+        for (parity, expected) in [
+            (ParitySource::SourceChosen, true),
+            (local, false),
+            (fixed, false),
+        ] {
+            let prop = FilterProp::ManaValueParity { parity };
+            let context = source_context_from_filter(
+                &state,
+                source,
+                Some(PlayerId(0)),
+                None,
+                Some(&captured),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                matches_filter_prop(
+                    &prop,
+                    &state,
+                    &state.objects[&candidate],
+                    candidate,
+                    &context
+                ),
+                expected
+            );
+            assert_eq!(
+                zone_change_record_matches_property(&prop, &state, &event, &context),
+                expected
+            );
+            let spell_context = SpellFilterContext {
+                state: &state,
+                source_id: source,
+                source_controller: PlayerId(0),
+                spell_object_id: Some(candidate),
+                casting_spell: None,
+            };
+            assert_eq!(
+                spell_object_matches_property(
+                    &record,
+                    Zone::Stack,
+                    &prop,
+                    &[],
+                    Some(spell_context)
+                ),
+                expected
+            );
+            assert!(!spell_record_matches_property(&record, &prop));
+        }
+        let even_record = SpellCastRecord {
+            mana_value: 2,
+            ..record.clone()
+        };
+        assert!(spell_record_matches_property(
+            &even_record,
+            &FilterProp::ManaValueParity { parity: fixed }
+        ));
+        assert!(spell_object_matches_property(
+            &even_record,
+            Zone::Stack,
+            &FilterProp::ManaValueParity { parity: fixed },
+            &[],
+            None
+        ));
+        for parity in [ParitySource::SourceChosen, ParitySource::LastNamedChoice] {
+            assert!(!spell_object_matches_property(
+                &even_record,
+                Zone::Stack,
+                &FilterProp::ManaValueParity { parity },
+                &[],
+                None
+            ));
+            assert!(!spell_record_matches_property(
+                &even_record,
+                &FilterProp::ManaValueParity { parity }
+            ));
+        }
+        let durable_prop = FilterProp::ManaValueParity {
+            parity: ParitySource::SourceChosen,
+        };
+        assert_eq!(
+            target_filter_characteristic_reads(&TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![durable_prop.clone()])
+            )),
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::MANA_COST)
+        );
+        // CR 608.2h: the event record retains MV3 while the live candidate changes.
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(2);
+        let context = source_context_from_filter(
+            &state,
+            source,
+            None,
+            None,
+            Some(&captured),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(zone_change_record_matches_property(
+            &durable_prop,
+            &state,
+            &event,
+            &context
+        ));
+        assert!(!matches_filter_prop(
+            &durable_prop,
+            &state,
+            &state.objects[&candidate],
+            candidate,
+            &context
+        ));
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(3);
+        state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Odd));
+        let local_prop = FilterProp::ManaValueParity { parity: local };
+        assert!(spell_object_matches_property(
+            &record,
+            Zone::Stack,
+            &local_prop,
+            &[],
+            Some(SpellFilterContext {
+                state: &state,
+                source_id: source,
+                source_controller: PlayerId(0),
+                spell_object_id: Some(candidate),
+                casting_spell: None
+            })
+        ));
+        // CR 400.7 + CR 608.2h: an old captured source cannot read a returned
+        // same-ID incarnation, even though its live stored answer is opposite.
+        state.objects.get_mut(&source).unwrap().incarnation += 1;
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::OddOrEven(Parity::Even)];
+        let old = source_context_from_filter(
+            &state,
+            source,
+            Some(PlayerId(0)),
+            None,
+            Some(&captured),
+            None,
+            None,
+            None,
+            None,
+        );
+        let prop = FilterProp::ManaValueParity {
+            parity: ParitySource::SourceChosen,
+        };
+        assert!(matches_filter_prop(
+            &prop,
+            &state,
+            &state.objects[&candidate],
+            candidate,
+            &old
+        ));
+        assert!(zone_change_record_matches_property(
+            &prop, &state, &event, &old
+        ));
+        let live =
+            source_context_from_filter(&state, source, None, None, None, None, None, None, None);
+        assert!(!matches_filter_prop(
+            &prop,
+            &state,
+            &state.objects[&candidate],
+            candidate,
+            &live
+        ));
+        state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Odd));
+        for attrs in [vec![], vec![ChosenAttribute::Color(ManaColor::Blue)]] {
+            state.objects.get_mut(&source).unwrap().chosen_attributes = attrs;
+            let missing = source_context_from_filter(
+                &state, source, None, None, None, None, None, None, None,
+            );
+            assert!(!matches_filter_prop(
+                &prop,
+                &state,
+                &state.objects[&candidate],
+                candidate,
+                &missing
+            ));
+            assert!(!zone_change_record_matches_property(
+                &prop, &state, &event, &missing
+            ));
+            assert!(!spell_object_matches_property(
+                &record,
+                Zone::Stack,
+                &prop,
+                &[],
+                Some(SpellFilterContext {
+                    state: &state,
+                    source_id: source,
+                    source_controller: PlayerId(0),
+                    spell_object_id: Some(candidate),
+                    casting_spell: None
+                })
+            ));
+        }
+        for mv in [0, 2, 3] {
+            assert_eq!(
+                mana_value_matches_parity_source(mv, &fixed, None, &[]),
+                mv != 3
+            );
+        }
+    }
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
@@ -13511,6 +15218,7 @@ mod tests {
             source,
             Some(PlayerId(0)),
             Some(&child),
+            None,
             None,
             None,
             None,
@@ -21128,6 +22836,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         // Leg 1: legendary creature (Arbaaz Mir, In Garruk's Wake-style ETB).
@@ -21202,6 +22911,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -21305,6 +23015,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -21440,8 +23151,17 @@ mod tests {
         assert_eq!(record.power, Some(2), "snapshot must capture current power");
         assert_eq!(record.toughness, Some(2));
 
-        let source_ctx =
-            source_context_from_filter(&state, id, Some(PlayerId(0)), None, None, None, None, None);
+        let source_ctx = source_context_from_filter(
+            &state,
+            id,
+            Some(PlayerId(0)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let pt_filter = |scope| FilterProp::PtComparison {
             stat: PtStat::Power,
             scope,
@@ -21585,6 +23305,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let token_record = ZoneChangeRecord {
@@ -21664,6 +23385,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -21803,6 +23525,7 @@ mod tests {
             &state,
             src,
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -25203,6 +26926,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            damage_source_context: None,
             proposed,
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -25259,5 +26983,311 @@ mod entry_projection_tests {
         ));
         unrelated.inherit_delivery_boundary(&original);
         assert!(!unrelated.parks_delivery(&original));
+    }
+}
+
+#[cfg(test)]
+mod casting_name_context_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    #[test]
+    fn cast_binding_survives_recursive_filters_without_source_or_stack_fallback() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_artifact_from_oracle(P1, "Unrelated source", "")
+            .id();
+        let spell = scenario.add_spell_to_hand(P0, "Exact spell", true).id();
+        let matching = scenario
+            .add_spell_to_graveyard(P0, "Exact spell", true)
+            .id();
+        let different = scenario
+            .add_spell_to_graveyard(P0, "Unrelated source", true)
+            .id();
+        let runner = scenario.build();
+        let shared =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+        let nested = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, shared.clone()],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SpecificObject { id: different }),
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source_with_controller(source, P0);
+        assert!(!matches_target_filter(
+            runner.state(),
+            matching,
+            &nested,
+            &ctx
+        ));
+        let bound = ctx.with_casting_spell(CastSpellContext {
+            object_id: spell,
+            casting_variant: CastingVariant::Normal,
+        });
+        assert!(matches_target_filter(
+            runner.state(),
+            matching,
+            &nested,
+            &bound
+        ));
+        assert!(!matches_target_filter(
+            runner.state(),
+            different,
+            &shared,
+            &bound
+        ));
+        assert!(matches_target_filter(
+            runner.state(),
+            spell,
+            &TargetFilter::CastingSpell,
+            &bound
+        ));
+        assert!(!matches_target_filter(
+            runner.state(),
+            source,
+            &TargetFilter::CastingSpell,
+            &bound
+        ));
+        for relation in [
+            SharedQualityRelation::Shares,
+            SharedQualityRelation::DoesNotShare,
+        ] {
+            let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation,
+                },
+            ]));
+            assert!(!matches_target_filter(
+                runner.state(),
+                matching,
+                &filter,
+                &ctx
+            ));
+            let missing = ctx.with_casting_spell(CastSpellContext {
+                object_id: ObjectId(u64::MAX),
+                casting_variant: CastingVariant::Normal,
+            });
+            assert!(!matches_target_filter(
+                runner.state(),
+                matching,
+                &filter,
+                &missing
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod jev_shared_color_filter_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    #[test]
+    fn jev_color_overlap_is_nonempty_any_overlap_with_controlled_battlefield_population() {
+        let mut scenario = GameScenario::new();
+        let reference = scenario
+            .add_enchantment_from_oracle(P0, "White reference", "")
+            .with_color(vec![ManaColor::White])
+            .id();
+        scenario
+            .add_enchantment_from_oracle(P1, "Opponent blue", "")
+            .with_color(vec![ManaColor::Blue]);
+        let eligible = scenario
+            .add_spell_to_library_top(P0, "White red", true)
+            .with_color(vec![ManaColor::White, ManaColor::Red])
+            .id();
+        let blue = scenario
+            .add_spell_to_library_top(P0, "Blue", true)
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let colorless = scenario
+            .add_spell_to_library_top(P0, "Colorless", true)
+            .id();
+        scenario
+            .add_spell_to_hand(P0, "Blue hand", true)
+            .with_color(vec![ManaColor::Blue]);
+        scenario
+            .add_spell_to_graveyard(P0, "Blue graveyard", true)
+            .with_color(vec![ManaColor::Blue]);
+        let mut runner = scenario.build();
+        let ctx = FilterContext::from_source_with_controller(reference, P0);
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::Color,
+                    reference: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+                    ))),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+        assert!(matches_target_filter(
+            runner.state(),
+            eligible,
+            &filter,
+            &ctx
+        ));
+        assert!(!matches_target_filter(runner.state(), blue, &filter, &ctx));
+        assert!(!matches_target_filter(
+            runner.state(),
+            colorless,
+            &filter,
+            &ctx
+        ));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .color
+            .clear();
+        assert!(
+            !matches_target_filter(runner.state(), colorless, &filter, &ctx),
+            "empty colors do not overlap"
+        );
+    }
+
+    #[test]
+    fn jev_descendants_reference_cannot_be_satisfied_by_the_library_card_itself() {
+        let mut scenario = GameScenario::new();
+        let candidate = scenario
+            .add_spell_to_library_top(P0, "Elf card", false)
+            .as_creature()
+            .with_subtypes(vec!["Elf"])
+            .id();
+        let reference = scenario
+            .add_creature(P0, "Battlefield Elf", 2, 2)
+            .with_subtypes(vec!["Elf"])
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().all_creature_types = vec!["Elf".into(), "Human".into()];
+        let ctx = FilterContext::from_source_with_controller(reference, P0);
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+        // CR 109.2: "a creature you control" means battlefield creatures.
+        assert!(matches_target_filter(
+            runner.state(),
+            candidate,
+            &filter,
+            &ctx
+        ));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .card_types
+            .subtypes = vec!["Human".into()];
+        assert!(!matches_target_filter(
+            runner.state(),
+            candidate,
+            &filter,
+            &ctx
+        ));
+    }
+}
+
+#[cfg(test)]
+mod u13_exact_damage_subject_filter_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    #[test]
+    fn u13_recursive_snapshot_properties_do_not_read_the_returned_object_or_unkeyed_lki() {
+        let mut s = GameScenario::new();
+        let source = s.add_creature(P0, "Synthetic exact subject", 4, 4).id();
+        let host = s.add_creature(P1, "Synthetic installer", 2, 2).id();
+        let mut state = s.build().state().clone();
+        let charge = CounterType::Generic("charge".into());
+        let object = state.objects.get_mut(&source).unwrap();
+        object.controller = P1;
+        object.tapped = true;
+        object.is_token = true;
+        object.paired_with = Some(host);
+        object.counters.insert(charge.clone(), 3);
+        let subject = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let ctx = FilterContext::from_source_with_controller(host, P1);
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::AnyOf {
+                                props: vec![FilterProp::Token, FilterProp::NonToken],
+                            },
+                            FilterProp::Counters {
+                                counters: CounterMatch::OfType(charge),
+                                comparator: Comparator::EQ,
+                                count: QuantityExpr::Fixed { value: 3 },
+                            },
+                            FilterProp::Tapped,
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::Untapped),
+                            },
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::Unpaired),
+                            },
+                        ]),
+                ),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent),
+                    )),
+                },
+            ],
+        };
+        assert!(matches_target_filter_on_exact_source(
+            &state, &subject, &filter, &ctx
+        ));
+        let object = state.objects.get_mut(&source).unwrap();
+        object.incarnation += 1;
+        object.controller = P0;
+        object.tapped = false;
+        object.is_token = false;
+        object.paired_with = None;
+        object.counters.clear();
+        let poison = state.objects[&source].snapshot_public_characteristics();
+        state.lki_cache.insert(source, poison);
+        assert!(!matches_target_filter(&state, source, &filter, &ctx));
+        assert!(matches_target_filter_on_exact_source(
+            &state, &subject, &filter, &ctx
+        ));
+        assert!(!matches_target_filter_on_exact_source(
+            &state,
+            &subject,
+            &filter,
+            &FilterContext::from_source_with_controller(host, P0)
+        ));
+        let token =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Token]));
+        assert!(matches_target_filter_on_exact_source(
+            &state, &subject, &token, &ctx
+        ));
+        assert!(!matches_target_filter(&state, source, &token, &ctx));
+        assert_eq!(state.objects[&source].controller, P0);
+        assert!(state.objects[&source].counters.is_empty());
     }
 }

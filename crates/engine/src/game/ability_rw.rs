@@ -1433,7 +1433,8 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
             chain_root.unwrap_or(WriteScope::EventObject)
         }
         TargetFilter::LastCreated => WriteScope::Created,
-        TargetFilter::None
+        TargetFilter::CastingSpell
+        | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
@@ -2392,6 +2393,7 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
 /// serde oracle's whole-value walk). `ParentTargetSlot` is deliberately excluded.
 fn legacy_target_filter(f: &TargetFilter) -> bool {
     match f {
+        TargetFilter::CastingSpell => false,
         // CR 102.1: the player-axis crossing. `legacy_player_filter` is the
         // authority for whether a player predicate carries a legacy-12 tag
         // (`PlayerAttribute`'s quantity payloads can), so delegate rather than
@@ -2649,6 +2651,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
 /// but classifies for member-boundness, not the frozen-12 tags.
 fn member_bound_target_filter(f: &TargetFilter) -> bool {
     match f {
+        TargetFilter::CastingSpell => false,
         // Per-source tracked/exiled/chosen storage, attachments, event- and
         // replacement-context referents (fail-closed: `ParentTargetSlot`/
         // `StackAbility` are parent/stack-context referents outside the legacy-12
@@ -2777,6 +2780,12 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
 /// authoritative `rw_quantity_expr` member-bound bit.
 fn member_bound_filter_prop(p: &FilterProp) -> bool {
     match p {
+        // CR 607.2d: a durable choice belongs to this member's own source.
+        FilterProp::ManaValueParity { parity } => match parity {
+            crate::types::ability::ParitySource::SourceChosen => true,
+            crate::types::ability::ParitySource::Fixed(_)
+            | crate::types::ability::ParitySource::LastNamedChoice => false,
+        },
         FilterProp::CanEnchant { target } => member_bound_target_filter(target),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
@@ -2850,7 +2859,6 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasKeywordKind { .. }
         | FilterProp::WithoutKeyword { .. }
         | FilterProp::WithoutKeywordKind { .. }
-        | FilterProp::ManaValueParity { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
@@ -3295,7 +3303,8 @@ fn legacy_effect(x: &Effect) -> bool {
                     .is_some_and(|condition| legacy_quantity_expr(&condition.rhs))
                 || legacy_target_filter(target)
         }
-        Effect::ChooseCounterAdjustment { count, .. } => legacy_quantity_expr(count),
+        Effect::ChooseCounterAdjustment { adjustment: _, counters: _, count, target } =>
+            legacy_quantity_expr(count) || legacy_target_filter(target),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             legacy_effect(replacement_effect)
         }
@@ -3961,6 +3970,16 @@ fn board_membership_read(filter: &TargetFilter) -> RwProfile {
     // CR 603.10a (PR-6.75 c5): a read whose filter names a per-member-bound set /
     // attachment / chosen referent is member-distinct ⇒ refuses batch-T1.
     p.reads_member_bound |= member_bound_target_filter(filter);
+    if super::filter::filter_contains_filter_prop(filter, &|prop| {
+        matches!(
+            prop,
+            FilterProp::ManaValueParity {
+                parity: crate::types::ability::ParitySource::SourceChosen
+            }
+        )
+    }) {
+        p.merge(reads_src_of(StateKind::Other));
+    }
     p
 }
 
@@ -4788,12 +4807,11 @@ fn rw_effect(
             }
             (p, sc)
         }
-        // CR 122.1 + CR 608.2d: slot-less counter adjustment reads/writes the
-        // propagated parent target at resolution, then delegates through a
-        // runtime-built ChooseOneOf. Until this profiler can recover that parent
-        // target scope, model it conservatively.
-        Effect::ChooseCounterAdjustment { count, .. } => {
+        // CR 122.1 + CR 608.2d: runtime-built branches remain conservative;
+        // the authored recipient and quantity still contribute their reads.
+        Effect::ChooseCounterAdjustment { adjustment: _, counters: _, count, target } => {
             let mut p = RwProfile::conservative();
+            p.merge(rw_target_filter(target));
             p.merge(rw_quantity_expr(count));
             (p, None)
         }
@@ -6777,6 +6795,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
 
 fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
     match x {
+        // CR 603.12: immutable, member-bound instruction receipts. Neither a
+        // live triggering-object read nor a write to that object.
+        AbilityCondition::CounterRemovedThisWay { result: _, counters: _ } => member_bound_read(),
         // CR 608.2c + CR 603.3b: the damage/exploit record is frozen at the trigger
         // event; a sibling cannot alter whether this source dealt that damage or exploited that creature.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
@@ -7255,6 +7276,7 @@ fn filter_prop_reads_player_choice_label(prop: &FilterProp) -> bool {
 /// the 12 tags). Composite filters descend to catch nested event refs.
 fn rw_target_filter(x: &TargetFilter) -> RwProfile {
     let mut p = match x {
+        TargetFilter::CastingSpell => RwProfile::empty(),
         // D5 carriers (9 TargetFilter tags of the 12).
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -7353,6 +7375,16 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
     // (target_chooser / nested filter) refuses batch-T1. Position-agnostic —
     // `member_bound_target_filter` descends composites itself.
     p.reads_member_bound |= member_bound_target_filter(x);
+    if super::filter::filter_contains_filter_prop(x, &|prop| {
+        matches!(
+            prop,
+            FilterProp::ManaValueParity {
+                parity: crate::types::ability::ParitySource::SourceChosen
+            }
+        )
+    }) {
+        p.merge(reads_src_of(StateKind::Other));
+    }
     p
 }
 
@@ -7525,6 +7557,145 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u15_parsed_external_filter_rw_axes() {
+        use crate::types::ability::{Parity, ParitySource};
+        let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Ashling's Prerogative",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert!(parsed.parse_warnings.is_empty());
+        assert_eq!(parsed.replacements.len(), 2);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(parsed.abilities.is_empty());
+        assert!(parsed
+            .replacements
+            .iter()
+            .any(
+                |definition| definition.valid_card == Some(TargetFilter::SelfRef)
+                    && definition
+                        .execute
+                        .as_deref()
+                        .is_some_and(|ability| matches!(
+                            ability.effect.as_ref(),
+                            crate::types::ability::Effect::Choose {
+                                choice_type: crate::types::ability::ChoiceType::OddOrEven,
+                                persist: true,
+                                ..
+                            }
+                        ))
+            ));
+        assert_eq!(
+            parsed.statics[0].modifications,
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Haste,
+            }]
+        );
+        let original = parsed
+            .replacements
+            .iter()
+            .find_map(|def| {
+                def.valid_card
+                    .as_ref()
+                    .filter(|filter| **filter != TargetFilter::SelfRef)
+            })
+            .unwrap();
+        assert!(
+            matches!(original, TargetFilter::Typed(tf) if tf.type_filters == [crate::types::ability::TypeFilter::Creature] && tf.controller.is_none() && matches!(tf.properties.as_slice(), [FilterProp::Not { prop }] if matches!(prop.as_ref(), FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+        );
+        for parity in [
+            ParitySource::SourceChosen,
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+        ] {
+            let mut filter = original.clone();
+            let mut leaves = 0;
+            let mut complete = true;
+            crate::game::filter::rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: value @ ParitySource::SourceChosen,
+                    } = prop
+                    {
+                        *value = parity;
+                        leaves += 1;
+                    }
+                },
+                &mut complete,
+            );
+            assert!(complete);
+            assert_eq!(leaves, 1);
+            let bound = parity == ParitySource::SourceChosen;
+            for profile in [rw_target_filter(&filter), board_membership_read(&filter)] {
+                assert_eq!(profile.reads_member_bound, bound);
+                assert_eq!(profile.reads_src.other, bound);
+                assert!(!profile.reads_event_live);
+                assert!(
+                    !profile.writes_event_object.any()
+                        && !profile.writes_self.any()
+                        && !profile.writes_external.any()
+                );
+            }
+            assert!(!legacy_target_filter(&filter));
+            let TargetFilter::Typed(tf) = &filter else {
+                unreachable!()
+            };
+            assert_eq!(member_bound_filter_prop(&tf.properties[0]), bound);
+            assert!(!legacy_filter_prop(&tf.properties[0]));
+        }
+    }
+
+    #[test]
+    fn u14_parity_classification_axes() {
+        use crate::types::ability::{Parity, ParitySource};
+        for parity in [
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+            ParitySource::SourceChosen,
+        ] {
+            let prop = FilterProp::ManaValueParity { parity };
+            let bound = parity == ParitySource::SourceChosen;
+            assert_eq!(member_bound_filter_prop(&prop), bound);
+            assert!(!legacy_filter_prop(&prop));
+            let typed =
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                    props: vec![FilterProp::Not {
+                        prop: Box::new(prop),
+                    }],
+                }]));
+            for filter in [
+                typed.clone(),
+                TargetFilter::And {
+                    filters: vec![TargetFilter::Any, typed.clone()],
+                },
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, typed.clone()],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(typed.clone()),
+                },
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::DistinctFrom {
+                        reference: Box::new(typed.clone()),
+                    },
+                ])),
+            ] {
+                for profile in [rw_target_filter(&filter), board_membership_read(&filter)] {
+                    assert_eq!(profile.reads_member_bound, bound);
+                    assert_eq!(profile.reads_src.other, bound);
+                    assert!(!profile.reads_event_live && !profile.writes_event_object.any());
+                    assert!(!profile.writes_self.any() && !profile.writes_external.any());
+                }
+            }
+        }
+    }
     use crate::types::ability::{
         AbilityKind, AggregateFunction, ChoiceType, CombatHistoryScope, Comparator, CountScope,
         LetterQuery, PropertyAggregate, PtValue, ReciprocalZoneChoiceRole, TargetSelectionMode,
@@ -9899,5 +10070,122 @@ mod tests {
             rw_trigger_condition(&TriggerCondition::ChoseRingBearer),
             reads_event_live()
         );
+    }
+}
+
+#[cfg(test)]
+mod sought_reader_rw_tests {
+    use super::*;
+    #[test]
+    fn game_preserve_named_membership_is_member_bound() {
+        let parsed = crate::parser::parse_oracle_text("At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Game Preserve", &[], &["Enchantment".into()], &[]);
+        let definition = parsed.triggers[0].execute.as_deref().unwrap();
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            definition,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(resolved
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .reads_return_result
+            .is_some());
+        let profile = ability_rw_profile(&resolved);
+        assert!(profile.reads_member_bound());
+        assert!(profile.reads_board.any());
+        assert!(profile.writes_external.any());
+    }
+    #[test]
+    fn sought_parsed_chain_is_member_bound_with_persistent_card_writes() {
+        let parsed = crate::parser::parse_oracle_text(
+            r#"Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain "This spell costs {1} less to cast.""#,
+            "Circadian Struggle",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let root = crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(root
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .reads_return_result
+            .is_some());
+        let profile = ability_rw_profile(&root);
+        assert!(profile.reads_member_bound());
+        assert!(profile.reads_board.any());
+        assert!(profile.writes_external.any());
+        let unbound = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(!ability_rw_profile(&unbound).reads_member_bound());
+    }
+
+    #[test]
+    fn mandatory_adjustment_recipient_legacy_and_rw_axes_are_consumed() {
+        let effect = |target| Effect::ChooseCounterAdjustment {
+            adjustment: crate::types::ability::CounterAdjustment::AddOrRemove,
+            counters: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("charge".into()),
+            ),
+            count: QuantityExpr::Fixed { value: 1 },
+            target,
+        };
+        assert!(!legacy_effect(&effect(TargetFilter::SelfRef)));
+        assert!(legacy_effect(&effect(TargetFilter::CostPaidObject)));
+        let (p, _) = rw_effect(&effect(TargetFilter::SelfRef), None, PlayerSpan::None, None);
+        assert!(p.reads_member_bound());
+        assert!(p.reads_board.any());
+        assert!(p.writes_external.any());
+        let (dynamic, _) = rw_effect(
+            &effect(TargetFilter::EventTarget),
+            None,
+            PlayerSpan::None,
+            None,
+        );
+        assert!(dynamic.reads_member_bound());
+        assert!(dynamic.reads_event_live);
+        // The runtime-built branch remains conservatively external, not a proven
+        // event-object write; this axis cannot authorize batch precision.
+        assert!(!dynamic.writes_event_object.any());
+    }
+}
+
+#[cfg(test)]
+mod u13_counter_condition_rw_tests {
+    use super::*;
+    #[test]
+    fn u13_counter_result_read_is_member_bound_without_writes_or_event_live_authority() {
+        let condition = AbilityCondition::CounterRemovedThisWay {
+            result: crate::types::ability::ReturnResultId(1),
+            counters: crate::types::counter::CounterMatch::Any,
+        };
+        let profile = rw_ability_condition(&condition);
+        assert!(profile.reads_member_bound());
+        assert!(!profile.reads_event_live);
+        assert!(!profile.writes_event_object.any());
+        assert!(!profile.writes_external.any());
+        let plain = ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert!(!ability_rw_profile(&plain).reads_member_bound());
+        assert!(ability_rw_profile(&plain).writes_external.any());
     }
 }

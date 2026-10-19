@@ -5667,19 +5667,19 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Reverting WIRE_PROTOCOL_VERSION itself (135 → 134) breaks both
-  // halves' premise: the v134 frame now equals the reverted constant and is
+  // bump. Reverting WIRE_PROTOCOL_VERSION itself (141 → 140) breaks both
+  // halves' premise: the v140 frame now equals the reverted constant and is
   // admitted instead of refused — this test would fail at that first
-  // assertion ("promise resolved … instead of rejecting") — and the v135
+  // assertion ("promise resolved … instead of rejecting") — and the v141
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the
-  // reach-guard — without it "refuses v133" is also satisfied by a client
+  // reach-guard — without it "refuses v139" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v134) and admits its own (v135)", async () => {
+  it("refuses the previous wire protocol (v140) and admits its own (v141)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(134));
+    await refusing.conn.simulateData(setupFrameAt(140));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -5691,7 +5691,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(135));
+    await admitting.conn.simulateData(setupFrameAt(141));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect((await admitting.adapter.getState()).objects["42"]).toMatchObject({

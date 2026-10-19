@@ -325,6 +325,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         crate::game::effects::prepare::remove_linked_prepared_copy_if_idle(state, object_id);
     }
 
+    let selected_cast = super::filter::CastSpellContext::announced(state, object_id);
+
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
         // CR 400.7 + CR 614.1a: Rod of Absorption's stack-exile rider is a
         // transient marker on the spell object. The stack resolver snapshots it
@@ -413,14 +415,14 @@ pub(crate) fn apply_zone_exit_cleanup(
             // CR 400.7 + CR 406.6: which player exiled this card is a fact
             // about its stay in exile; the new object has no such history.
             obj_mut.exiled_by = None;
-            // CR 708.4: a spell CAST face down (morph/disguise via an exile
-            // permission) is turned face down as part of the cast and keeps
-            // that status on the stack. Only the exile-zone face-down
-            // designation ends here (foretold/hideaway cards, which stash no
-            // identity in `back_face`); the cast is the one exile exit whose
-            // destination is the stack and whose object carries the cast
-            // stash (`spell_is_cast_face_down`, #5171's discriminator).
-            if !(to == Zone::Stack && obj_mut.spell_is_cast_face_down()) {
+            // CR 406.3a + CR 708.4: only a selected face-down cast keeps its
+            // shell and identity stash. Natural alternative-face metadata is
+            // retained when a concealed card is cast face up.
+            if !(to == Zone::Stack
+                && selected_cast.is_some_and(|cast| {
+                    cast.casting_variant == crate::types::game_state::CastingVariant::FaceDown
+                }))
+            {
                 obj_mut.face_down = false;
             }
             obj_mut.casting_permissions.retain(|p| {

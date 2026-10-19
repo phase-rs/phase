@@ -4,6 +4,288 @@ use super::lower::{
 };
 use super::sequence::split_clause_sequence;
 use super::*;
+
+// SHAPE: public runtime discriminators live in integration::jev_reveal_aggregate.
+#[test]
+fn ordinary_reveal_scalar_chain_preserves_scope_and_source() {
+    for (head, count, scope) in [
+        (
+            "Each player reveals the top card of their library",
+            1,
+            Some(PlayerFilter::All),
+        ),
+        (
+            "Each player reveals the top two cards of their library",
+            2,
+            Some(PlayerFilter::All),
+        ),
+        ("Reveal the top card of your library", 1, None),
+    ] {
+        let text = format!("{head}. You gain life equal to the number of cards revealed this way.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert_eq!(ir.clauses[0].source.fragment(), Some(head));
+        assert!(ir.clauses[0].boundary.is_some());
+        assert!(ir
+            .clauses
+            .iter()
+            .all(|clause| clause.reads_return_result.is_none()));
+        let chain = parse_effect_chain(&text, AbilityKind::Spell);
+        assert_eq!(chain.player_scope, scope);
+        assert!(matches!(*chain.effect, Effect::RevealTop { count: n, .. } if n == count));
+        let scalar = chain
+            .sub_ability
+            .as_deref()
+            .expect("independent count consumer");
+        assert_eq!(scalar.player_scope, None);
+        assert_eq!(scalar.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(
+            &*scalar.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize
+                }
+            }
+        ));
+        assert!(scalar.sub_ability.is_none());
+        for node in [&chain, scalar] {
+            assert!(node.declares_return_result.is_none());
+            assert!(node.reads_return_result.is_none());
+        }
+    }
+}
+
+#[test]
+fn ordinary_reveal_local_and_document_boundaries() {
+    let local = parse_effect_chain("Each player reveals the top card of their library, loses life equal to that card's mana value, then puts it into their hand.", AbilityKind::Spell);
+    assert_eq!(local.player_scope, Some(PlayerFilter::All));
+    let loss = local.sub_ability.as_deref().unwrap();
+    assert_eq!(loss.sub_link, SubAbilityLink::ContinuationStep);
+    assert!(matches!(*loss.effect, Effect::LoseLife { .. }));
+    assert!(matches!(
+        *loss.sub_ability.as_deref().unwrap().effect,
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            ..
+        }
+    ));
+    for text in [
+        "Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.\n\nYou gain 3 life.",
+        "Choose one —\n• Each player reveals the top card of their library. You gain life equal to the number of cards revealed this way.\n• You gain 3 life.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic boundaries", &[], &["Instant".into()], &[]);
+        assert!(!parsed.abilities.is_empty());
+        assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
+        fn check(def: &AbilityDefinition) {
+            assert!(!matches!(*def.effect, Effect::Unimplemented { .. }));
+            assert!(def.declares_return_result.is_none());
+            assert!(def.reads_return_result.is_none());
+            if matches!(*def.effect, Effect::RevealTop { .. }) {
+                let scalar = def.sub_ability.as_deref().unwrap();
+                assert!(matches!(*scalar.effect, Effect::GainLife { amount: QuantityExpr::Ref { qty: QuantityRef::TrackedSetSize }, .. }));
+                assert_eq!(scalar.sub_link, SubAbilityLink::SequentialSibling);
+                assert_eq!(scalar.player_scope, None);
+            }
+            if let Some(sub) = &def.sub_ability { check(sub); }
+            for mode in &def.mode_abilities { check(mode); }
+        }
+        for ability in &parsed.abilities { check(ability); }
+    }
+}
+
+#[test]
+fn ordinary_scoped_reveal_carries_unless_payment() {
+    let chain = parse_effect_chain("Each player reveals the top card of their library unless they pay 1 life. You gain 3 life.", AbilityKind::Spell);
+    assert_eq!(chain.player_scope, Some(PlayerFilter::All));
+    assert!(matches!(*chain.effect, Effect::RevealTop { count: 1, .. }));
+    assert_eq!(
+        chain.unless_pay,
+        Some(UnlessPayModifier {
+            payer: TargetFilter::ScopedPlayer,
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
+        })
+    );
+    assert!(!chain.optional);
+    assert!(chain.condition.is_none());
+    let tail = chain.sub_ability.as_deref().unwrap();
+    assert_eq!(tail.player_scope, None);
+    assert!(matches!(
+        *tail.effect,
+        Effect::GainLife {
+            player: TargetFilter::Controller,
+            amount: QuantityExpr::Fixed { value: 3 }
+        }
+    ));
+}
+
+#[test]
+fn all_revealed_consumer_preserves_complete_gap_at_both_entries() {
+    for fragment in [
+        "If all cards revealed this way are creature cards, put those cards onto the battlefield",
+        "If all cards revealed in this way are artifact cards, draw a card",
+        "Then if all cards revealed this way are unsupported predicates, do something unsupported",
+    ] {
+        let leaf = parse_effect_clause(fragment, &mut ParseContext::default());
+        assert!(
+            matches!(&leaf.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source == fragment)
+        );
+        let text = format!("Each player reveals the top card of their library. {fragment}.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::Dig { .. } | Effect::RevealTop { .. }
+        ));
+        assert!(
+            matches!(&ir.clauses[1].parsed.effect, Effect::Unimplemented { name, description: Some(source) } if name == "all_revealed_result_consumer" && source.eq_ignore_ascii_case(fragment))
+        );
+        assert!(ir.clauses[1].reads_return_result.is_none());
+    }
+    // CR 110.2a + CR 608.2c: the bare instruction has a different controller;
+    // this consumer supports the explicit individual-owner instruction only.
+    let owner_text = "Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    let owner = parse_effect_chain(owner_text, AbilityKind::Spell);
+    assert!(matches!(*owner.effect, Effect::RevealTop { count: 1, .. }));
+    let reader = owner.sub_ability.as_deref().unwrap();
+    assert!(matches!(
+        *reader.effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(owner.declares_return_result.is_some());
+    assert_eq!(
+        reader.reads_return_result.as_ref().map(|(id, _)| *id),
+        owner.declares_return_result
+    );
+    // Adjacent non-universal conditions retain their own admission route.
+    for text in [
+        "If you control a creature, draw a card",
+        "If that card is a creature card, draw a card",
+    ] {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(
+            matches!(clause.effect, Effect::Draw { .. }),
+            "adjacent conditional reaches its supported body: {clause:#?}"
+        );
+        assert!(
+            !matches!(&clause.effect, Effect::Unimplemented { name, .. } if name == "all_revealed_result_consumer")
+        );
+    }
+}
+
+#[test]
+fn all_revealed_reader_requires_exact_clause_owner() {
+    let unbound = "If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control";
+    assert!(matches!(
+        parse_effect_clause(unbound, &mut ParseContext::default()).effect,
+        Effect::Unimplemented { .. }
+    ));
+    for predicate in ["creature", "artifact"] {
+        let text = format!("Each player reveals the top two cards of their library. If all cards revealed this way are {predicate} cards, put those cards onto the battlefield under their owners' control.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert_eq!(
+            ir.clauses[1]
+                .reads_return_result
+                .as_ref()
+                .map(|(id, _)| *id),
+            Some(ir.clauses[0].id)
+        );
+        let chain = parse_effect_chain(&text, AbilityKind::Spell);
+        let reader = chain.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            reader.reads_return_result.as_ref().map(|(id, _)| *id),
+            chain.declares_return_result
+        );
+        assert!(matches!(
+            *reader.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::None,
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                enters_under: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            reader.condition,
+            Some(AbilityCondition::QuantityCheck { .. })
+        ));
+        assert_eq!(reader.player_scope, None);
+    }
+}
+
+#[test]
+fn all_revealed_relation_refuses_ambiguous_producers_and_residuals() {
+    let reader = "If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    for producer in [
+        "You may reveal the top card of your library.",
+        "Reveal the top card of your library unless you pay 1 life.",
+        "If you control a creature, reveal the top card of your library.",
+        "Look at the top card of your library.",
+        "Reveal cards from the top of your library until you reveal a creature card.",
+    ] {
+        let text = format!("{producer} {reader}");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        let last = ir.clauses.last().unwrap();
+        assert!(
+            matches!(last.parsed.effect, Effect::Unimplemented { .. }),
+            "{text}: {ir:#?}"
+        );
+        assert!(last.reads_return_result.is_none());
+    }
+    for suffix in [
+        " tapped",
+        " with an additional +1/+1 counter on them",
+        " while you control a creature",
+    ] {
+        let text = format!("Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control{suffix}.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::RevealTop { .. } | Effect::Dig { .. }
+        ));
+        assert!(
+            ir.clauses
+                .iter()
+                .any(|clause| matches!(clause.parsed.effect, Effect::Unimplemented { .. })),
+            "{ir:#?}"
+        );
+    }
+    for text in [
+        format!("Reveal the top card of your library.\n\n{reader}"),
+        format!("Choose one —\n• Reveal the top card of your library.\n• {reader}"),
+    ] {
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic relation boundary",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert!(!parsed.abilities.is_empty());
+        fn check(definition: &AbilityDefinition) {
+            assert!(definition.declares_return_result.is_none());
+            assert!(definition.reads_return_result.is_none());
+            if let Some(sub) = &definition.sub_ability {
+                check(sub);
+            }
+            for mode in &definition.mode_abilities {
+                check(mode);
+            }
+        }
+        for definition in &parsed.abilities {
+            check(definition);
+        }
+    }
+}
 use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
 use crate::parser::oracle_ir::ast::EntersUnderSpec;
@@ -25,6 +307,202 @@ use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
+
+const TARGET_DEFINED_TOKEN: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Target creature gets +1/+1 until end of turn.";
+
+// SHAPE: runtime discrimination lives in integration::jev_token_followup.
+#[test]
+fn token_pt_definition_has_exact_clause_owner() {
+    let ir = parse_effect_chain_ir(
+        TARGET_DEFINED_TOKEN,
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+    let creator = ir
+        .clauses
+        .iter()
+        .find(|c| matches!(c.parsed.effect, Effect::Token { .. }))
+        .expect("creation");
+    let definition = ir
+        .clauses
+        .iter()
+        .find(|c| {
+            matches!(
+                c.disposition.followup(),
+                Some(ContinuationAst::TokenSourcePowerToughness { .. })
+            )
+        })
+        .expect("definition");
+    assert_eq!(definition.token_definition_owner, Some(creator.id));
+    assert_eq!(
+        creator.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement
+    );
+    let lowered = parse_effect_chain(TARGET_DEFINED_TOKEN, AbilityKind::Spell);
+    let token = std::iter::successors(Some(&lowered), |d| d.sub_ability.as_deref())
+        .find(|d| matches!(*d.effect, Effect::Token { .. }))
+        .unwrap();
+    let Effect::Token {
+        power, toughness, ..
+    } = token.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        *power,
+        PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target
+            }
+        })
+    );
+    assert_eq!(
+        *toughness,
+        PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: ObjectScope::Target
+            }
+        })
+    );
+}
+
+#[test]
+fn token_definition_keeps_nonbattlefield_card_context() {
+    // SHAPE: the public duration sibling also resolves through ordinary casting.
+    let text = "Exile target creature card from your graveyard. Create a black Zombie creature token. Its power is equal to that card's power and its toughness is equal to that card's toughness.";
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    let creator = ir
+        .clauses
+        .iter()
+        .find(|clause| matches!(clause.parsed.effect, Effect::Token { .. }))
+        .expect("graveyard-card construction");
+    let definition = ir
+        .clauses
+        .iter()
+        .find(|clause| {
+            matches!(
+                clause.disposition.followup(),
+                Some(ContinuationAst::TokenSourcePowerToughness { .. })
+            )
+        })
+        .expect("complete separate definition");
+    assert_eq!(definition.token_definition_owner, Some(creator.id));
+    assert_eq!(creator.target_reads, TargetReadOrigin::OwnAnnouncement);
+    let lowered = parse_effect_chain(text, AbilityKind::Spell);
+    assert_attachment_chain_has_no_unimplemented(&lowered);
+    let token = lowered.sub_ability.as_deref().expect("Zombie creation");
+    assert!(matches!(
+        token.effect.as_ref(),
+        Effect::Token {
+            power: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative
+                }
+            }),
+            toughness: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative
+                }
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn token_definition_followup_is_complete_and_scoped() {
+    assert!(sequence::parse_token_source_power_toughness_followup("Its power is equal to this creature's power and its toughness is equal to this creature's toughness.").is_some());
+    for fragment in [
+        "Its power is equal to that creature's power.",
+        "Its power is equal to that creature's toughness and its toughness is equal to that creature's power.",
+        "Its power is equal to that creature's power and its toughness is equal to that creature's toughness and flying.",
+        "Its power is equal to target creature's power and its toughness is equal to target creature's toughness.",
+    ] {
+        assert!(sequence::parse_token_source_power_toughness_followup(fragment).is_none(), "{fragment}");
+    }
+    for antecedent in [
+        "Tap target artifact.",
+        "Destroy up to one target creature.",
+        "Destroy up to zero target creatures.",
+        "Destroy X target creatures.",
+        "Destroy two target creatures.",
+        "Destroy all creatures.",
+        "You may destroy target creature.",
+        "If you control an artifact, destroy target creature.",
+        "Tap target creature and draw a card.",
+    ] {
+        let text = format!("{antecedent} Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.");
+        let def = parse_effect_chain(&text, AbilityKind::Spell);
+        assert!(
+            std::iter::successors(Some(&def), |d| d.sub_ability.as_deref())
+                .any(|d| matches!(*d.effect, Effect::Unimplemented { .. })),
+            "must refuse ambiguous antecedent: {text}: {def:#?}"
+        );
+    }
+}
+
+#[test]
+fn token_definition_does_not_leak_across_parse_boundaries_or_cleanup() {
+    let mut context = ParseContext::default();
+    let creator = parse_effect_chain_ir(
+        "Create a 1/2 green Bear creature token.",
+        AbilityKind::Spell,
+        &mut context,
+    );
+    assert!(creator
+        .clauses
+        .iter()
+        .all(|clause| clause.token_definition_owner.is_none()));
+    let orphan = parse_effect_chain_ir("Its power is equal to this creature's power and its toughness is equal to this creature's toughness.", AbilityKind::Spell, &mut context);
+    assert!(orphan
+        .clauses
+        .iter()
+        .all(|clause| clause.token_definition_owner.is_none()));
+    let def = parse_effect_chain("Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.", AbilityKind::Spell);
+    let effects: Vec<_> = std::iter::successors(Some(&def), |d| d.sub_ability.as_deref())
+        .map(|d| d.effect.as_ref())
+        .collect();
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Token { .. })),
+        "creation is represented"
+    );
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::CreateDelayedTrigger { effect, .. } if matches!(effect.effect.as_ref(), Effect::Sacrifice { target: TargetFilter::LastCreated, .. }))), "normal independent cleanup: {def:#?}");
+    assert!(effects
+        .iter()
+        .all(|effect| !matches!(effect, Effect::Unimplemented { .. })));
+}
+
+#[test]
+fn gemini_engine_full_source_definition_keeps_source_scope() {
+    let parsed = parse_oracle_text("Whenever this creature attacks, create a colorless Construct artifact creature token named Twin that's attacking. Its power is equal to this creature's power and its toughness is equal to this creature's toughness. Sacrifice the token at end of combat.", "Gemini Engine", &[], &["Artifact".into(), "Creature".into()], &["Construct".into()]);
+    let trigger = parsed.triggers.first().expect("printed trigger");
+    // SHAPE only: the public synthetic source sibling exercises creation.
+    let execute = trigger.execute.as_deref().expect("token body");
+    let token = std::iter::successors(Some(execute), |definition| {
+        definition.sub_ability.as_deref()
+    })
+    .find(|definition| matches!(*definition.effect, Effect::Token { .. }))
+    .expect("source Token");
+    assert_eq!(token.target_reads, TargetReadOrigin::OwnAnnouncement);
+    assert!(matches!(
+        token.effect.as_ref(),
+        Effect::Token {
+            power: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source
+                }
+            }),
+            toughness: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Source
+                }
+            }),
+            ..
+        }
+    ));
+}
 
 fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAnaphorSource) {
     let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
@@ -32605,7 +33083,8 @@ fn search_filter_permanent_card_of_chosen_kind() {
 
 #[test]
 fn seek_an_elf_card() {
-    let details = parse_seek_details("seek an elf card", &mut ParseContext::default());
+    let details = parse_seek_details("seek an elf card", &mut ParseContext::default())
+        .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.destination, Zone::Hand);
     assert!(!details.enter_tapped);
@@ -32620,7 +33099,8 @@ fn seek_an_elf_card() {
 
 #[test]
 fn seek_two_nonland_cards() {
-    let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default());
+    let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default())
+        .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
     assert_eq!(details.from_top, None);
     assert_eq!(details.destination, Zone::Hand);
@@ -32639,7 +33119,8 @@ fn seek_for_each_card_exiled_from_your_hand_uses_dynamic_count() {
     let details = parse_seek_details(
         "seek an instant or sorcery card for each card exiled from your hand this way",
         &mut ctx,
-    );
+    )
+    .expect("supported seek details");
     assert!(matches!(
         details.count,
         QuantityExpr::Ref {
@@ -32659,7 +33140,8 @@ fn seek_land_and_nonland_cards_splits_filters() {
     let details = parse_seek_details(
         "seek a land card and a nonland card",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.extra_filters.len(), 1);
     let TargetFilter::Typed(primary) = &details.filter else {
@@ -32802,7 +33284,8 @@ fn seek_from_among_top_cards_carries_library_limit() {
     let details = parse_seek_details(
         "seek an artifact card from among the top ten cards of your library, then shuffle",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.from_top, Some(10));
     let TargetFilter::Typed(tf) = &details.filter else {
@@ -32844,7 +33327,8 @@ fn seek_cards_of_chosen_kind() {
     let details = parse_seek_details(
         "seek two cards of the chosen kind",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
     let TargetFilter::Typed(tf) = &details.filter else {
         panic!("Expected Typed filter, got {:?}", details.filter);
@@ -32896,7 +33380,8 @@ fn seek_land_onto_battlefield_tapped() {
     let details = parse_seek_details(
         "seek a land card and put it onto the battlefield tapped",
         &mut ParseContext::default(),
-    );
+    )
+    .expect("supported seek details");
     assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(details.destination, Zone::Battlefield);
     assert!(details.enter_tapped);
@@ -66873,6 +67358,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -67271,6 +67757,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
 /// its invariant is over the lowered tree, not over this list.
 fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
     match effect {
+        Effect::ChooseCounterAdjustment { target, .. } => filter_has_chosen_color(target),
         Effect::BounceAll { target, .. }
         | Effect::DestroyAll { target, .. }
         | Effect::DamageAll { target, .. } => filter_has_chosen_color(target),
@@ -67356,7 +67843,6 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::PutChosenCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
-        | Effect::ChooseCounterAdjustment { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
@@ -88979,5 +89465,292 @@ fn cast_permission_rider_requires_the_lingering_shape() {
             has_unimplemented_rider(&defs),
             "{text:?}: the rider stays an explicit gap, got {abilities:?}"
         );
+    }
+}
+
+#[test]
+fn token_definition_rejects_multiple_creators_and_document_boundary_leaks() {
+    let definition = "Its power is equal to this creature's power and its toughness is equal to this creature's toughness.";
+    for create in [
+        "Create a 1/2 green Bear creature token and a 3/4 red Goblin creature token.",
+        "Create a 1/2 green Bear creature token or a 3/4 red Goblin creature token.",
+    ] {
+        let ir = parse_effect_chain_ir(
+            &format!("{create} {definition}"),
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        assert!(ir
+            .clauses
+            .iter()
+            .all(|clause| clause.token_definition_owner.is_none()));
+        let output = assembly::assemble_effect_chain(&ir);
+        assert!(
+            std::iter::successors(Some(&output), |def| def.sub_ability.as_deref())
+                .any(|def| def.effect.unimplemented_description().is_some())
+        );
+    }
+    let document = crate::parser::oracle::parse_oracle_ir(&format!("Create a 1/2 green Bear creature token. Target creature gets +1/+1 until end of turn.\n{definition}"), "Synthetic paragraph boundary", &[], &["Instant".into()], &[]);
+    let encoded = serde_json::to_value(&document).unwrap();
+    assert!(!encoded.to_string().contains("token_definition_owner"));
+    let lowered = crate::parser::oracle::lower_oracle_ir(&document);
+    assert!(matches!(
+        *lowered.abilities[0].effect,
+        Effect::Token {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(2),
+            ..
+        }
+    ));
+    let modal = crate::parser::oracle::parse_oracle_ir(
+        &format!("Choose one —\n• Create a 1/2 green Bear creature token.\n• {definition}"),
+        "Synthetic mode boundary",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    let encoded = serde_json::to_value(&modal).unwrap();
+    assert!(!encoded.to_string().contains("token_definition_owner"));
+    let lowered = crate::parser::oracle::lower_oracle_ir(&modal);
+    assert_eq!(
+        lowered
+            .modal
+            .as_ref()
+            .expect("two separate modes")
+            .mode_count,
+        2
+    );
+    assert!(lowered.abilities.iter().any(|definition| matches!(
+        *definition.effect,
+        Effect::Token {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(2),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn jev_seek_chain_uses_one_where_x_binding_and_keeps_independent_tail() {
+    // SHAPE: a synthetic grammar fixture exercises both X sites and chaining.
+    let def = parse_effect_chain("Seek X cards with mana value X or less, where X is the number of colors among permanents you control. You gain 3 life.", AbilityKind::Spell);
+    let Effect::Seek {
+        filter: TargetFilter::Typed(typed),
+        count,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("{def:#?}")
+    };
+    assert!(matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong { .. }
+        }
+    ));
+    assert!(typed.properties.contains(&FilterProp::Cmc {
+        comparator: Comparator::LE,
+        value: count.clone()
+    }));
+    assert!(matches!(
+        def.sub_ability.as_deref().unwrap().effect.as_ref(),
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+    let bad = parse_effect_chain(
+        "Seek X cards, where X is the number of mysteries you control.",
+        AbilityKind::Spell,
+    );
+    assert!(std::iter::successors(Some(&bad), |d| d.sub_ability.as_deref()).any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { name, description: Some(fragment) } if name == "where_x_binding" && fragment == "where X is the number of mysteries you control")));
+}
+
+#[test]
+fn jev_sought_cost_subject_variants() {
+    // SHAPE: synthetic grammar twins; runtime coverage lives in jev_seek_perpetual.
+    for subject in ["Those cards", "They"] {
+        for verb in ["gain", "gains"] {
+            let text = format!("Seek two cards. {subject} perpetually {verb} \"This spell costs {{1}} less to cast.\"");
+            let def = parse_effect_chain(&text, AbilityKind::Spell);
+            assert!(matches!(*def.effect, Effect::Seek { .. }), "{def:#?}");
+            let grant = def.sub_ability.as_deref().expect("cost grant");
+            assert!(
+                matches!(grant.effect.as_ref(), Effect::ApplyPerpetual { modification: crate::types::ability::PerpetualModification::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount }, .. } if *amount == ManaCost::generic(1)),
+                "{def:#?}"
+            );
+            assert_eq!(
+                grant.reads_return_result.as_ref().map(|(id, _)| *id),
+                def.declares_return_result
+            );
+        }
+    }
+    for text in [
+        "Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Conjure a card named Divination into your hand. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Choose a creature card in your hand. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast and draw a card.\"",
+        "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.",
+        "Seek two cards. For each mystery among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "You may seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Seek two cards. Draw a card. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(std::iter::successors(Some(&def), |node| node.sub_ability.as_deref()).any(|node| matches!(*node.effect, Effect::Unimplemented { .. })), "must reject complete unsupported reader: {text}: {def:#?}");
+    }
+}
+
+#[test]
+fn sought_standalone_leaf_and_legacy_they_authorities() {
+    // SHAPE: direct leaf parsing has no ClauseId authority to bind.
+    for text in [
+        "Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "They perpetually gain \"This spell costs {1} less to cast.\"",
+    ] {
+        assert!(
+            matches!(parse_effect(text), Effect::Unimplemented { .. }),
+            "{text}"
+        );
+    }
+    for (text, expected) in [
+        ("Conjure two cards named Divination into your hand. They perpetually gain \"This spell costs {1} less to cast.\"", TargetFilter::LastCreated),
+        ("Choose a creature card in your hand. They perpetually gain \"This spell costs {1} less to cast.\"", TargetFilter::ParentTarget),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let grant = def.sub_ability.as_deref().unwrap();
+        assert!(matches!(grant.effect.as_ref(), Effect::ApplyPerpetual { target, modification: PerpetualModification::ModifyCost { .. } } if *target == expected), "{def:#?}");
+        assert!(grant.reads_return_result.is_none());
+    }
+}
+
+#[test]
+fn sought_reader_respects_public_paragraph_modal_and_repeat_boundaries() {
+    // SHAPE: each boundary has a complete same-builder positive twin.
+    let good = parse_effect_chain(
+        "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert!(good
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .reads_return_result
+        .is_some());
+    for text in [
+        "Seek two cards.\nThose cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Choose one —\n• Seek two cards.\n• Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "Seek two cards. Repeat this process any number of times. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+        "If you control a creature, seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
+    ] {
+        let parsed = parse_oracle_text(text, "Labelled binding boundary", &[], &["Instant".into()], &[]);
+        assert!(!parsed.abilities.is_empty(), "{parsed:#?}");
+        let face = CardFace { abilities: parsed.abilities, triggers: parsed.triggers,
+            static_abilities: parsed.statics, replacements: parsed.replacements,
+            additional_cost: parsed.additional_cost, ..Default::default() };
+        assert!(card_face_has_unimplemented_parts(&face), "boundary must retain a strict failure: {face:#?}");
+    }
+}
+
+#[test]
+fn sought_failed_relation_retains_the_complete_reader_fragment() {
+    // SHAPE: supported Seek and scalar-life sisters guard the failing route.
+    let fragment = "Those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    let valid = parse_effect_chain(
+        &format!("Seek two cards. You gain 9 life. {fragment}"),
+        AbilityKind::Spell,
+    );
+    assert!(valid
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .reads_return_result
+        .is_some());
+    let invalid = parse_effect_chain(
+        &format!("Seek two cards. Draw a card. {fragment}"),
+        AbilityKind::Spell,
+    );
+    let gap = invalid
+        .sub_ability
+        .as_ref()
+        .unwrap()
+        .sub_ability
+        .as_ref()
+        .unwrap();
+    assert!(
+        matches!(gap.effect.as_ref(), Effect::Unimplemented { description: Some(description), .. } if description == fragment),
+        "{invalid:#?}"
+    );
+}
+
+#[test]
+fn prior_controller_grammar_boundaries() {
+    // SHAPE: public runtime coverage is jev_prior_controller.
+    let tail = "Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+    for head in [
+        "Exile target creature.",
+        "Destroy target creature. It can't be regenerated.",
+    ] {
+        let chain = parse_effect_chain(&format!("{head} {tail}"), AbilityKind::Spell);
+        let next = chain.sub_ability.as_deref().expect("population");
+        assert_eq!(next.target_reads, TargetReadOrigin::ParentAnnouncement);
+        assert!(
+            matches!(next.effect.as_ref(), Effect::GenericEffect { target: None, static_abilities, .. } if static_abilities[0].modifications.len() >= 2),
+            "{chain:#?}"
+        );
+    }
+    let alternate = parse_effect_chain("Tap target creature. All other Elf creatures that player controls become Cowards in addition to their other types and gain flying until end of turn.", AbilityKind::Spell);
+    assert_eq!(
+        alternate.sub_ability.as_ref().unwrap().target_reads,
+        TargetReadOrigin::ParentAnnouncement
+    );
+    assert_eq!(
+        alternate.sub_ability.as_ref().unwrap().duration,
+        Some(Duration::UntilEndOfTurn)
+    );
+    for head in [
+        "",
+        "Draw a card.",
+        "Destroy all creatures.",
+        "You may destroy target creature.",
+        "Destroy up to one target creature.",
+        "Destroy two target creatures.",
+        "If you control a Wall, destroy target creature.",
+    ] {
+        let chain = parse_effect_chain(&format!("{head} {tail}"), AbilityKind::Spell);
+        let face = CardFace {
+            abilities: vec![chain],
+            ..Default::default()
+        };
+        assert!(
+            card_face_has_unimplemented_parts(&face),
+            "unproved relation: {head}: {face:#?}"
+        );
+    }
+    let own = parse_effect_chain("Other creatures you control become Cowards in addition to their other types until end of turn.", AbilityKind::Spell);
+    assert_eq!(own.target_reads, TargetReadOrigin::OwnAnnouncement);
+    let player = parse_effect_chain(
+        "Target player draws a card. Each other creature that player controls becomes a Coward.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        player.sub_ability.as_ref().unwrap().target_reads,
+        TargetReadOrigin::OwnAnnouncement,
+        "a declared player retains its authority"
+    );
+}
+
+#[test]
+fn prior_controller_paragraph_modal_and_unknown_suffix_refuse() {
+    for text in [
+        "Exile target creature.\n\nEach other creature that player controls becomes a Coward.",
+        "Choose one —\n• Exile target creature.\n• Each other creature that player controls becomes a Coward.",
+        "Exile target creature. Each other creature that player controls blorple becomes a Coward.",
+    ] {
+        let parsed = parse_oracle_text(text, "Synthetic boundary", &[], &["Instant".into()], &[]);
+        let face = CardFace { abilities: parsed.abilities, triggers: parsed.triggers, static_abilities: parsed.statics, ..Default::default() };
+        assert!(card_face_has_unimplemented_parts(&face), "{text}: {face:#?}");
     }
 }

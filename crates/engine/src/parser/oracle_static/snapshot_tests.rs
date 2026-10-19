@@ -7,6 +7,31 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn jev_chosen_quality_haste() {
+    let def = parse_static_line("Each creature with mana value of the chosen quality has haste.")
+        .unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
+fn repeated_population_dismissal() {
+    let def = parse_static_line("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand.").unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
+fn repeated_population_leech() {
+    let def = parse_static_line("This spell costs {1} less to cast for each Cave you control and each Cave card in your graveyard.").unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
+fn coordinated_population_sailors() {
+    let def = parse_static_line("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.").unwrap();
+    insta::assert_json_snapshot!(def);
+}
+
+#[test]
 fn static_continuous_buff() {
     let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
     insta::assert_json_snapshot!(def);
@@ -1274,4 +1299,10 @@ fn neutral_plural_pronoun_they_becomes_creature_static() {
         }),
         "expected AddKeyword(Vigilance) in {mods:?}"
     );
+}
+
+#[test]
+fn locket_name_population() {
+    let def = parse_static_line("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.").unwrap();
+    insta::assert_json_snapshot!("locket_name_population", &def);
 }
