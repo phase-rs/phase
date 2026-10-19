@@ -967,6 +967,7 @@ pub(crate) struct PayableSpellAlternativeCost {
     pub(crate) once_per_turn_source: Option<ObjectId>,
 }
 
+#[cfg(test)]
 pub(crate) fn payable_spell_alternative_cost_details(
     state: &GameState,
     player: PlayerId,
@@ -1132,7 +1133,7 @@ pub(super) fn payable_spell_alternative_cost_details_for_cast_at_index(
     // CR 118.9 + CR 601.2f: select the first PAYABLE SELF grant — an
     // unaffordable earlier grant must not mask an affordable later one. The
     // payability test runs per candidate through the
-    // `spell_alternative_cost_is_payable` authority, preserving
+    // `spell_alternative_cost_is_payable_for_cast` authority, preserving
     // first-among-payable choice behavior.
     let granted_self = obj
         .static_definitions
@@ -1172,7 +1173,7 @@ pub(super) fn payable_spell_alternative_cost_details_for_cast_at_index(
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
     // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
     // CR 118.9 + CR 601.2a (#7575): zone reach is decided INSIDE
-    // `granted_spell_alternative_cost` — hand casts match normally, a non-hand
+    // `granted_spell_alternative_cost_for_cast` — hand casts match normally, a non-hand
     // origin only through an origin-scoped filter branch.
     let granted = super::casting::granted_spell_alternative_cost_for_cast(
         state,
@@ -1243,21 +1244,6 @@ pub(crate) fn payable_spell_alternative_cost_for_timing_for_cast(
         timing_permission: granted.timing_permission,
         once_per_turn_source: granted.once_per_turn_source,
     })
-}
-
-fn spell_alternative_cost_is_payable(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    cost: &AbilityCost,
-) -> bool {
-    spell_alternative_cost_is_payable_for_cast(
-        state,
-        player,
-        object_id,
-        cost,
-        CastSpellContext::for_spell(state, object_id),
-    )
 }
 
 /// CR 601.2b: retain the selected cast through this projection.
@@ -14141,21 +14127,6 @@ pub(super) fn auto_tap_non_sacrificial_mana_sources_for_cast(
 /// `AutoExceptSacrificialMana` without committing its irreversible choices.
 /// A cost that remains unpaid here requires an explicit sacrificial-source
 /// selection rather than the ordinary automatic finalizer.
-pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap(
-    state: &GameState,
-    player: PlayerId,
-    source_id: ObjectId,
-    cost: &ManaCost,
-) -> bool {
-    spell_cost_is_payable_after_non_sacrificial_auto_tap_for_cast(
-        state,
-        player,
-        source_id,
-        cost,
-        CastSpellContext::for_spell(state, source_id),
-    )
-}
-
 /// CR 601.2b: retain the selected cast through this projection.
 pub(crate) fn spell_cost_is_payable_after_non_sacrificial_auto_tap_for_cast(
     state: &GameState,
@@ -15940,31 +15911,6 @@ pub(super) fn largest_x_satisfying_at_most(max: u32, predicate: impl Fn(u32) -> 
 /// helper may pay and the eligible helper players. Returns `None` when assist
 /// does not apply. Shared by the `enter_payment_step` (X / convoke / manual) and
 /// `pay_and_push_adventure` (direct auto-finalize) offer sites.
-///
-/// CR 702.102b + CR 702.132a: THREADED. Assist is a `CastWithKeyword`-grantable
-/// cost keyword whose grant filter may be value-keyed (Cmc/HasColor/ColorCount),
-/// and this read is pre-payment-reachable (before the fuse marker at
-/// `pay_and_push_with_lock`'s payment step) for a FUSED split cast. `fused` projects the
-/// combined MV/colors so a value-keyed assist grant is not silently dropped on the
-/// front half. Callers pass `casting_variant == CastingVariant::Fuse`.
-pub(super) fn assist_offer_params(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    cost: &ManaCost,
-    fused: bool,
-) -> Option<(u32, Vec<PlayerId>)> {
-    let casting_spell = if fused {
-        CastSpellContext {
-            object_id,
-            casting_variant: CastingVariant::Fuse,
-        }
-    } else {
-        CastSpellContext::for_spell(state, object_id)
-    };
-    assist_offer_params_for_cast(state, player, object_id, cost, casting_spell)
-}
-
 /// CR 601.2b: retain the selected cast through this projection.
 pub(super) fn assist_offer_params_for_cast(
     state: &GameState,

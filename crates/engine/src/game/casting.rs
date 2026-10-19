@@ -2813,7 +2813,7 @@ fn granted_spell_keywords_for_cast(
     // (Henzie, "Toolbox" Torre's granted blitz — issue #5435). Resolving at
     // this single exit covers all three grant sources uniformly (the
     // `CastWithKeyword` static loop above, `transient_granted_spell_keywords_for_cast`,
-    // and `apply_pending_next_spell_keyword_grants`) without touching any of
+    // and `apply_pending_next_spell_keyword_grants_for_cast`) without touching any of
     // the individual cost-extraction call sites that read this collector.
     for keyword in &mut keywords {
         *keyword = super::keywords::resolve_self_cost_spell_keyword(state, object_id, keyword);
@@ -3019,35 +3019,6 @@ pub(super) struct GrantedSpellAlternativeCost {
     /// (As Foretold), so the caller records the per-turn slot at `finalize_cast`.
     /// `None` for `Unlimited` grants (Fist of Suns, Rooftop Storm, Jodah).
     pub(super) once_per_turn_source: Option<ObjectId>,
-}
-
-pub(super) fn granted_spell_alternative_cost(
-    state: &GameState,
-    caster: PlayerId,
-    object_id: ObjectId,
-) -> Option<GrantedSpellAlternativeCost> {
-    granted_spell_alternative_cost_for(state, caster, object_id, false)
-}
-
-/// Fuse-aware sibling of [`granted_spell_alternative_cost`]. `fused` projects a
-/// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
-/// so `CastWithAlternativeCost` `affected` filters keyed on mana value / colors
-/// see the fused spell. The non-`_for` entry delegates with `fused = false`.
-pub(super) fn granted_spell_alternative_cost_for(
-    state: &GameState,
-    caster: PlayerId,
-    object_id: ObjectId,
-    fused: bool,
-) -> Option<GrantedSpellAlternativeCost> {
-    let casting_spell = if fused {
-        CastSpellContext {
-            object_id,
-            casting_variant: CastingVariant::Fuse,
-        }
-    } else {
-        CastSpellContext::for_spell(state, object_id)
-    };
-    granted_spell_alternative_cost_for_cast(state, caster, object_id, casting_spell)
 }
 
 /// CR 601.2b: retain the selected cast through this projection.
@@ -3652,6 +3623,7 @@ fn object_type_names(obj: &crate::game::game_object::GameObject) -> Vec<String> 
     names
 }
 
+#[cfg(test)]
 pub(crate) fn effective_spell_keyword_kinds(
     state: &GameState,
     caster: PlayerId,
@@ -3666,6 +3638,7 @@ pub(crate) fn effective_spell_keyword_kinds(
 /// CR 702.8a) is seen for the fused spell rather than only the front half. The
 /// non-`_for` entry delegates with `fused = false` so its non-pre-payment callers
 /// stay byte-identical.
+#[cfg(test)]
 pub(crate) fn effective_spell_keyword_kinds_for(
     state: &GameState,
     caster: PlayerId,
@@ -7601,36 +7574,6 @@ fn pending_next_spell_modifier_index(
             && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry, false)
             && predicate(&entry.modifier)
     })
-}
-
-/// CR 601.2f: Apply keyword/flash grants from matching pending next-spell
-/// modifiers. `fused` projects a pre-payment fused split spell with its COMBINED
-/// characteristics (CR 702.102b) so a filtered next-spell grant matches the fused
-/// spell before its `fused_split_spell` marker is set.
-fn apply_pending_next_spell_keyword_grants(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
-    keywords: &mut Vec<Keyword>,
-    preserve_instances: bool,
-    fused: bool,
-) {
-    let casting_spell = if fused {
-        CastSpellContext {
-            object_id: spell_id,
-            casting_variant: CastingVariant::Fuse,
-        }
-    } else {
-        CastSpellContext::for_spell(state, spell_id)
-    };
-    apply_pending_next_spell_keyword_grants_for_cast(
-        state,
-        caster,
-        spell_id,
-        keywords,
-        preserve_instances,
-        casting_spell,
-    )
 }
 
 /// CR 601.2b: retain the selected cast through this projection.
@@ -22416,23 +22359,6 @@ pub(crate) fn can_pay_pending_cast_after_auto_tap_in_scratch(
 /// contexts, so probing an activation with a spell context can both offer an
 /// unpayable activation (spell-only mana) and suppress a payable one
 /// (activation-only mana).
-pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode(
-    state: &GameState,
-    player: PlayerId,
-    source_id: ObjectId,
-    cost: &crate::types::mana::ManaCost,
-    tap_payment_mode: ConvokeMode,
-) -> bool {
-    can_feasibly_pay_mana_cost_with_tap_payment_mode_for_cast(
-        state,
-        player,
-        source_id,
-        cost,
-        tap_payment_mode,
-        CastSpellContext::for_spell(state, source_id),
-    )
-}
-
 /// CR 601.2b: retain the selected cast through this projection.
 pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode_for_cast(
     state: &GameState,
@@ -22470,7 +22396,7 @@ pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode_for_cast(
 }
 
 /// CR 601.2b + CR 106.6: ACTIVATION-payment sibling of
-/// `can_feasibly_pay_mana_cost_with_tap_payment_mode`. Builds
+/// `can_feasibly_pay_mana_cost_with_tap_payment_mode_for_cast`. Builds
 /// `PaymentContext::Activation` from the source permanent's current types
 /// (mirroring the real payment path's context construction), so the
 /// affordability gate agrees with the later payment step about which
@@ -33107,28 +33033,6 @@ fn is_blocked_by_cant_be_cast_for_cast(
 /// chosen attributes from context, so a prohibition can combine a chosen
 /// attribute with any card-type, controller, or zone axis without a bespoke
 /// per-property matcher here.
-/// `fused` requests the COMBINED-characteristics projection (CR 702.102b) for a
-/// pre-payment fused split spell; payment-time callers pass `false` and rely on
-/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`.
-fn cant_cast_filter_matches_for(
-    state: &GameState,
-    spell_obj: &super::game_object::GameObject,
-    filter: &TargetFilter,
-    source_obj: &super::game_object::GameObject,
-    caster: PlayerId,
-    fused: bool,
-) -> bool {
-    let casting_spell = if fused {
-        CastSpellContext {
-            object_id: spell_obj.id,
-            casting_variant: CastingVariant::Fuse,
-        }
-    } else {
-        CastSpellContext::for_spell(state, spell_obj.id)
-    };
-    cant_cast_filter_matches_for_cast(state, spell_obj, filter, source_obj, caster, casting_spell)
-}
-
 /// CR 601.2b: retain the selected cast through this projection.
 fn cant_cast_filter_matches_for_cast(
     state: &GameState,

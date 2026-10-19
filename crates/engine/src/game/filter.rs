@@ -6824,9 +6824,9 @@ fn matches_target_filter_on_exact_snapshot(
             },
             |source| source.is_token,
         ),
-        combat_status: subject.map_or_else(Default::default, |source| source.combat_status.clone()),
+        combat_status: subject.map_or_else(Default::default, |source| source.combat_status),
         co_departed: Vec::new(),
-        attached_to: subject.and_then(|source| source.attached_to.clone()),
+        attached_to: subject.and_then(|source| source.attached_to),
         entered_incarnation,
         turn_zone_change_index: 0,
         recorded_turn_number: 0,
@@ -11713,6 +11713,7 @@ pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
 ///    zone, so these are semantically not applicable and return `false`.
 /// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
+#[cfg(test)]
 fn zone_change_record_matches_property(
     prop: &FilterProp,
     state: &GameState,

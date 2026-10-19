@@ -919,39 +919,19 @@ pub enum ApplyResult {
 /// keeps an un-dispatchable drain from pinning `has_ready()` true forever. That they
 /// are stashed at all is the real defect (issue #5676). See [`ResidentDrainPolicy`]
 /// for the measured census.
-fn stash_post_replacement_continuation(
-    state: &mut GameState,
-    continuation: PostReplacementContinuation,
-    source: ObjectId,
-    controller: Option<PlayerId>,
-    applied: HashSet<AppliedReplacementKey>,
-    event_source: Option<ObjectId>,
-    event_target: Option<TargetRef>,
-    token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
-) {
-    state.install_post_replacement_drain(
-        PostReplacementDrain {
-            token_creation_parent,
-            status: DrainStatus::Ready(continuation),
-            source: Some(source),
-            applied,
-            event_source,
-            event_target,
-            // CR 109.5: "you" in the continuation is the REPLACING ability's
-            // controller. Carried beside `source` rather than derived from it,
-            // because `source` is the affected object on every zone-change
-            // path.
-            //
-            // Passed through as an `Option` rather than unwrapped at the call
-            // sites: `None` is the drain's own encoding of "no replacing object
-            // to speak of", which `apply_post_replacement_effect` answers by
-            // falling back to the AFFECTED object's controller. Substituting
-            // `active_player` here would stamp a confident wrong answer in
-            // place of that fallback.
-            controller,
-        },
-        ResidentDrainPolicy::KeepResident,
-    );
+fn stash_post_replacement_continuation(state: &mut GameState, drain: PostReplacementDrain) {
+    // CR 109.5: "you" in the continuation is the REPLACING ability's
+    // controller. Carried beside `source` rather than derived from it,
+    // because `source` is the affected object on every zone-change
+    // path.
+    //
+    // Passed through as an `Option` rather than unwrapped at the call
+    // sites: `None` is the drain's own encoding of "no replacing object
+    // to speak of", which `apply_post_replacement_effect` answers by
+    // falling back to the AFFECTED object's controller. Substituting
+    // `active_player` here would stamp a confident wrong answer in
+    // place of that fallback.
+    state.install_post_replacement_drain(drain, ResidentDrainPolicy::KeepResident);
 }
 
 fn token_substitution_parent(
@@ -6524,7 +6504,7 @@ fn is_external_battlefield_entry_tap_modifier(def: &ReplacementDefinition) -> bo
     plain.active_zones = def.active_zones.clone();
     plain.source_object = def.source_object;
     plain.source_controller = def.source_controller;
-    plain.origin = def.origin.clone();
+    plain.origin = def.origin;
     plain.granting_object = def.granting_object;
     plain.expiry = def.expiry.clone();
     def == &plain
@@ -10547,19 +10527,21 @@ fn apply_single_replacement(
                     // continuation had no handle on its own controller).
                     stash_post_replacement_continuation(
                         state,
-                        post,
-                        new_event.affected_object_id().unwrap_or(rid.source),
-                        ability_controller,
-                        replacement_applied.clone(),
-                        None,
-                        // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
-                        // player (the drawing player) so an "any other player may"
-                        // execute (Zur's Weirding) can exclude them from the APNAP
-                        // fan-out. `None` for every other event kind (see the
-                        // `proposed_event_target` match above), so no existing
-                        // continuation's event-target slot changes.
-                        proposed_event_target.clone(),
-                        token_creation_parent,
+                        PostReplacementDrain {
+                            status: DrainStatus::Ready(post),
+                            source: Some(new_event.affected_object_id().unwrap_or(rid.source)),
+                            controller: ability_controller,
+                            applied: replacement_applied.clone(),
+                            event_source: None,
+                            // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
+                            // player (the drawing player) so an "any other player may"
+                            // execute (Zur's Weirding) can exclude them from the APNAP
+                            // fan-out. `None` for every other event kind (see the
+                            // `proposed_event_target` match above), so no existing
+                            // continuation's event-target slot changes.
+                            event_target: proposed_event_target.clone(),
+                            token_creation_parent,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -10588,18 +10570,20 @@ fn apply_single_replacement(
                 if let Some(post) = mandatory_post_effect {
                     stash_post_replacement_continuation(
                         state,
-                        post,
-                        rid.source,
-                        // CR 109.5: same authority as the Modified arm — the
-                        // prevention rider's "you" is the shield's controller.
-                        // Here `source` is already the shield, so this agrees
-                        // with the pre-existing derivation rather than changing
-                        // it.
-                        ability_controller,
-                        replacement_applied.clone(),
-                        proposed_damage_source,
-                        proposed_event_target.clone(),
-                        None,
+                        PostReplacementDrain {
+                            status: DrainStatus::Ready(post),
+                            source: Some(rid.source),
+                            // CR 109.5: same authority as the Modified arm — the
+                            // prevention rider's "you" is the shield's controller.
+                            // Here `source` is already the shield, so this agrees
+                            // with the pre-existing derivation rather than changing
+                            // it.
+                            controller: ability_controller,
+                            applied: replacement_applied.clone(),
+                            event_source: proposed_damage_source,
+                            event_target: proposed_event_target.clone(),
+                            token_creation_parent: None,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {

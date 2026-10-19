@@ -953,12 +953,14 @@ fn apply_pending_counter_post_action(
             remaining_count,
         } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
             state,
-            creation_frame,
-            owner,
-            copy,
-            enter_tapped,
-            enter_with_counters,
-            remaining_count,
+            super::token::LiminalCopyTokenContinuation {
+                creation_frame,
+                owner,
+                copy,
+                enter_tapped,
+                enter_with_counters,
+                remaining_count,
+            },
             events,
         ),
         PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id } => {

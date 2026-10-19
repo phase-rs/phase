@@ -54,7 +54,16 @@ pub fn resolve(
         return Ok(());
     };
     continue_amass_on_army(
-        state, controller, target_id, &subtype, n, ability, None, events,
+        state,
+        AmassArmyContinuation {
+            controller,
+            object_id: target_id,
+            subtype: &subtype,
+            count: n,
+            ability,
+            creation_frame: None,
+        },
+        events,
     );
 
     Ok(())
@@ -98,26 +107,41 @@ pub(crate) fn continue_amass_after_token_creation(
     };
     continue_amass_on_army(
         state,
+        AmassArmyContinuation {
+            controller,
+            object_id,
+            subtype,
+            count,
+            ability,
+            creation_frame,
+        },
+        events,
+    )
+}
+
+/// The selected Army and the amass instruction that must finish on it.
+struct AmassArmyContinuation<'a> {
+    controller: crate::types::player::PlayerId,
+    object_id: ObjectId,
+    subtype: &'a str,
+    count: u32,
+    ability: &'a ResolvedAbility,
+    creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
+}
+
+fn continue_amass_on_army(
+    state: &mut GameState,
+    continuation: AmassArmyContinuation<'_>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let AmassArmyContinuation {
         controller,
         object_id,
         subtype,
         count,
         ability,
         creation_frame,
-        events,
-    )
-}
-
-pub(crate) fn continue_amass_on_army(
-    state: &mut GameState,
-    controller: crate::types::player::PlayerId,
-    object_id: ObjectId,
-    subtype: &str,
-    count: u32,
-    ability: &ResolvedAbility,
-    creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
-    events: &mut Vec<GameEvent>,
-) -> bool {
+    } = continuation;
     // CR 701.47a + CR 614.16: Counter replacement choices interrupt the amass
     // instruction before subtype addition and CR 701.47c binding complete.
     if count > 0

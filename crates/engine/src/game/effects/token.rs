@@ -1571,13 +1571,13 @@ pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
 }
 
 #[derive(Clone)]
-struct LiminalCopyTokenContinuation {
-    creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
-    owner: PlayerId,
-    copy: Box<CopyTokenSpec>,
-    enter_tapped: EtbTapState,
-    enter_with_counters: Vec<(CounterType, u32)>,
-    remaining_count: u32,
+pub(super) struct LiminalCopyTokenContinuation {
+    pub(super) creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
+    pub(super) owner: PlayerId,
+    pub(super) copy: Box<CopyTokenSpec>,
+    pub(super) enter_tapped: EtbTapState,
+    pub(super) enter_with_counters: Vec<(CounterType, u32)>,
+    pub(super) remaining_count: u32,
 }
 
 fn liminal_copy_token_continuation_for_event(
@@ -1662,28 +1662,12 @@ fn liminal_copy_token_continuation_post_action(
     }
 }
 
-pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
+pub(super) fn continue_liminal_copy_token_batch_after_counter_pause(
     state: &mut GameState,
-    creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
-    owner: PlayerId,
-    copy: Box<CopyTokenSpec>,
-    enter_tapped: EtbTapState,
-    enter_with_counters: Vec<(CounterType, u32)>,
-    remaining_count: u32,
+    continuation: LiminalCopyTokenContinuation,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    continue_liminal_copy_token_batch(
-        state,
-        Some(LiminalCopyTokenContinuation {
-            creation_frame,
-            owner,
-            copy,
-            enter_tapped,
-            enter_with_counters,
-            remaining_count,
-        }),
-        events,
-    )
+    continue_liminal_copy_token_batch(state, Some(continuation), events)
 }
 
 /// CR 303.4g / CR 303.4i: undo a token battlefield entry the Aura-entry rules

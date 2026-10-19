@@ -2044,9 +2044,9 @@ fn complete_modification_clause(
     if keyword_complete
         && !keyword_mods.is_empty()
         && !dangling
-        && text.trim_end().chars().last() != Some(',')
-    {
         // allow-noncombinator: terminal punctuation validation, not dispatch.
+        && !text.trim_end().ends_with(',')
+    {
         return Some((keyword_mods, verb));
     }
     if let Ok((_, inner)) = all_consuming(nom::sequence::delimited(

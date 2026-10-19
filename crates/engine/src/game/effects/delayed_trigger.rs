@@ -863,9 +863,8 @@ fn bind_event_subject_nodes(
 /// object. Populating `targets` alone therefore fixes the SINGLE-target effects
 /// and leaves the mass ones silently affecting nothing.
 ///
-/// Rewriting to `ParentTarget` is the technique
-/// `rebind_last_created_to_parent_target` uses for `LastCreated`, and it is the
-/// PIN-AWARE concrete form on this scan path: `filter::matches_target_filter`
+/// Rewriting to `ParentTarget` is the PIN-AWARE concrete form on this scan path:
+/// `filter::matches_target_filter`
 /// resolves `ParentTarget` against `ability.targets` and additionally requires
 /// `target_pin_is_current` (filter.rs), whereas `SpecificObject` is a bare
 /// object-id comparison that never consults `target_incarnations`.
@@ -913,8 +912,7 @@ fn concretize_mass_population_event_subject(effect: &mut Effect, targets: &[Targ
 /// `target_incarnations`. Concretizing to `SpecificObject` would therefore
 /// re-affect a referent that left and returned as a new object.
 ///
-/// This is the same rewrite `rebind_last_created_to_parent_target` performs for
-/// `LastCreated`, and for the same reason: `ParentTarget` reads the delayed
+/// `ParentTarget` reads the delayed
 /// ability's own snapshotted `targets` and pins instead of live event state.
 ///
 /// Traverses exactly the forms `effects::filter_refs_event_subject` inspects, so
@@ -1024,41 +1022,6 @@ fn stamp_triggering_source_origins_in_definition_chain(
     }
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
         stamp_triggering_source_origins_in_definition_chain(else_ability, expected);
-    }
-}
-
-/// CR 603.7c: Rebind a delayed effect's `TargetFilter::LastCreated` target to
-/// `ParentTarget`, freezing it to the tokens snapshotted into the delayed
-/// ability's `targets` at creation time (this is called only after those
-/// `targets` are populated from `last_created_token_ids`). `LastCreated`
-/// resolves live against `state.last_created_token_ids` when the trigger fires
-/// (targeting.rs), which is wrong for a per-win loop (Mirror March #5966) that
-/// overwrites that vector every win — at end-step every per-win delayed exile
-/// would re-resolve to only the final win's token. `ParentTarget` instead reads
-/// the delayed ability's own snapshotted `targets`, so each delayed exile binds
-/// to the token created in its own iteration. Recurses into nested
-/// `CreateDelayedTrigger` definition chains.
-fn rebind_last_created_to_parent_target(effect: &mut Effect) {
-    match effect {
-        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
-            if matches!(target, TargetFilter::LastCreated) =>
-        {
-            *target = TargetFilter::ParentTarget;
-        }
-        Effect::CreateDelayedTrigger { effect, .. } => {
-            rebind_last_created_to_parent_target_in_chain(effect);
-        }
-        _ => {}
-    }
-}
-
-fn rebind_last_created_to_parent_target_in_chain(ability: &mut AbilityDefinition) {
-    rebind_last_created_to_parent_target(&mut ability.effect);
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        rebind_last_created_to_parent_target_in_chain(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        rebind_last_created_to_parent_target_in_chain(else_ability);
     }
 }
 

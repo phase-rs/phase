@@ -2268,10 +2268,8 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 attachment.declares_return_result
                     != Some(crate::types::ability::ReturnResultId(producer.0))
             }) {
-                attachment.effect = Box::new(Effect::unimplemented(
-                    "reflexive_result_owner",
-                    &ir.source_text,
-                ));
+                *attachment.effect =
+                    Effect::unimplemented("reflexive_result_owner", &ir.source_text);
             } else {
                 attachment.sub_ability = Some(Box::new(reflexive_ability));
             }

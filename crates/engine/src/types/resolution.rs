@@ -3733,14 +3733,12 @@ impl ResolutionStack {
                         Some(ResolutionFrame::PostReplacement(drains)) => drains.resident(),
                         _ => None,
                     };
-                    match (tail.context.token_creation_parent, drain) {
+                    !matches!((tail.context.token_creation_parent, drain),
                         (Some(parent), Some(drain)) if drain.token_creation_parent == Some(parent)
                             && matches!(drain.status, crate::types::game_state::DrainStatus::Paused)
                             && drain.source == Some(*source_id) && drain.controller.unwrap_or(*player) == *player
                             && tail.source_id == *source_id && tail.controller == *player && tail.replacement_applied == drain.applied
-                            && self.token_creation(parent.frame).is_some_and(|owner| owner.pending == Some(crate::types::game_state::TokenCreationPending::Substitution)) => false,
-                        _ => true,
-                    }
+                            && self.token_creation(parent.frame).is_some_and(|owner| owner.pending == Some(crate::types::game_state::TokenCreationPending::Substitution)))
                 }
                 None => self.frames.iter().any(|frame| match frame {
                     ResolutionFrame::CopyToken(owner) => owner.creation_id.is_some(),
