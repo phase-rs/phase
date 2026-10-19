@@ -36178,3 +36178,296 @@ fn u14_source_bound_mixed_keyword_verb_documents() {
         }
     }
 }
+
+#[test]
+fn u14_inherited_removal_documents_keep_complete_operations() {
+    let remove = |keyword| ContinuousModification::RemoveKeyword { keyword };
+    let add = |keyword| ContinuousModification::AddKeyword { keyword };
+    let loss = || vec![remove(Keyword::Flying), remove(Keyword::Haste)];
+    let loss_grant = || {
+        vec![
+            remove(Keyword::Flying),
+            remove(Keyword::Haste),
+            add(Keyword::Vigilance),
+        ]
+    };
+    let mut dynamic_doc = parse_oracle_ir(
+        "Creatures have mobilize X, where X is its power.",
+        "Synthetic dynamic companion",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    let dynamic = lower_oracle_ir(&mut dynamic_doc);
+    assert_eq!(dynamic.statics.len(), 1);
+    let mut dynamic_loss = dynamic.statics[0].modifications.clone();
+    assert!(matches!(
+        dynamic_loss.as_slice(),
+        [ContinuousModification::AddDynamicKeyword { .. }]
+    ));
+    dynamic_loss.extend([
+        remove(Keyword::Flying),
+        remove(Keyword::Haste),
+        remove(Keyword::Vigilance),
+    ]);
+    for (predicate, expected) in [
+        (
+            "has mobilize X and loses flying and haste, where X is its power and vigilance",
+            dynamic_loss,
+        ),
+        ("loses flying and haste and has vigilance", loss_grant()),
+        ("lose flying and haste and have vigilance", loss_grant()),
+        ("lose flying and haste and gain vigilance", loss_grant()),
+        ("loses flying, haste, gains vigilance", loss_grant()),
+        ("loses flying, haste, and gains vigilance", loss_grant()),
+        (
+            "loses flying and haste and loses vigilance",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                remove(Keyword::Vigilance),
+            ],
+        ),
+        (
+            "lose flying, haste, and lose vigilance",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                remove(Keyword::Vigilance),
+            ],
+        ),
+        (
+            "loses flying and haste and gets +1/+1",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ],
+        ),
+        (
+            "loses flying, haste, and have base toughness 1",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                ContinuousModification::SetToughness { value: 1 },
+            ],
+        ),
+        (
+            "has vigilance and loses flying and haste",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+            ],
+        ),
+        (
+            "has vigilance and loses flying and haste and gains trample",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "have vigilance, lose flying, haste, and gain trample",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "loses flying and haste and has vigilance and trample",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Vigilance),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "loses flying and has haste and vigilance",
+            vec![
+                remove(Keyword::Flying),
+                add(Keyword::Haste),
+                add(Keyword::Vigilance),
+            ],
+        ),
+        ("loses flying and haste", loss()),
+    ] {
+        // Explicitly synthetic full two-line source, not printed card wording.
+        let line = format!("Each creature with mana value of the chosen quality {predicate}.");
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let mut good = parse_oracle_ir(
+            &text,
+            "Synthetic inherited parity",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(good.source_text, text);
+        assert!(good.items.iter().any(source_parity_chooser));
+        assert!(
+            !good
+                .items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{good:#?}"
+        );
+        let consumer = good
+            .items
+            .iter()
+            .find(|i| matches!(i.node, OracleNodeIr::Static(_)))
+            .unwrap();
+        let consumer_id = consumer.id;
+        assert_eq!(consumer.source.fragment(), Some(line.as_str()));
+        assert_eq!(consumer.source.span().first_line, 2);
+        let parsed = lower_oracle_ir(&mut good);
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(parsed.statics[0].modifications, expected, "{predicate}");
+        assert!(parsed.statics[0].affected.as_ref().is_some_and(|f| {
+            target_filter_uses_filter_prop(f, &|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: ParitySource::SourceChosen
+                    }
+                )
+            })
+        }));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let failed_line = format!("{}{}.", line.trim_end_matches('.'), tail);
+            let bad_text =
+                format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+            let bad = parse_oracle_ir(
+                &bad_text,
+                "Synthetic inherited parity",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(source_parity_chooser));
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            let refused = bad
+                .items
+                .iter()
+                .find(|i| i.id == consumer_id)
+                .expect("same source item");
+            assert_eq!(refused.source.fragment(), Some(failed_line.as_str()));
+            assert_eq!(refused.source.span().first_line, 2);
+            assert!(
+                !bad.items
+                    .iter()
+                    .any(|i| matches!(i.node, OracleNodeIr::Static(_))),
+                "no partial static: {bad:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn u14_inherited_removal_companion_documents() {
+    for companion in [
+        "gets +1/+1",
+        "have base power and toughness 2/2",
+        "gets +1/+0 for each Mountain you control",
+        "are Bears in addition to their other creature types",
+        "has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\"",
+        "has protection from red. This effect doesn't remove this Aura.",
+    ] {
+        let modeled_line = format!("Creatures {}.", companion.trim_end_matches('.'));
+        let mut modeled_doc = parse_oracle_ir(
+            &modeled_line,
+            "Synthetic companion",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        let modeled = lower_oracle_ir(&mut modeled_doc);
+        assert_eq!(modeled.statics.len(), 1, "{modeled_doc:#?}");
+        assert!(!modeled.statics[0].modifications.is_empty());
+        let mut expected = vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Flying,
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Haste,
+            },
+        ];
+        expected.extend(modeled.statics[0].modifications.clone());
+        let line = format!(
+            "Each creature with mana value of the chosen quality loses flying and haste and {}.",
+            companion.trim_end_matches('.')
+        );
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let mut good = parse_oracle_ir(
+            &text,
+            "Synthetic inherited companion",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(good.source_text, text);
+        assert!(good.items.iter().any(source_parity_chooser));
+        assert!(
+            !good
+                .items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{good:#?}"
+        );
+        let consumer = good
+            .items
+            .iter()
+            .find(|i| matches!(i.node, OracleNodeIr::Static(_)))
+            .unwrap();
+        let consumer_id = consumer.id;
+        assert_eq!(consumer.source.fragment(), Some(line.as_str()));
+        assert_eq!(consumer.source.span().first_line, 2);
+        let parsed = lower_oracle_ir(&mut good);
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(parsed.statics[0].modifications, expected, "{companion}");
+        assert!(parsed.statics[0].affected.as_ref().is_some_and(|f| {
+            target_filter_uses_filter_prop(f, &|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: ParitySource::SourceChosen
+                    }
+                )
+            })
+        }));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let failed_line = format!("{}{tail}.", line.trim_end_matches('.'));
+            let bad_text =
+                format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+            let bad = parse_oracle_ir(
+                &bad_text,
+                "Synthetic inherited companion",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(source_parity_chooser));
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            let refused = bad
+                .items
+                .iter()
+                .find(|i| i.id == consumer_id)
+                .expect("same source item");
+            assert_eq!(refused.source.fragment(), Some(failed_line.as_str()));
+            assert_eq!(refused.source.span().first_line, 2);
+            assert!(
+                !bad.items
+                    .iter()
+                    .any(|i| matches!(i.node, OracleNodeIr::Static(_))),
+                "no partial static: {bad:#?}"
+            );
+        }
+    }
+}

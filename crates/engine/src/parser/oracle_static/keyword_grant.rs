@@ -1715,9 +1715,10 @@ pub(crate) fn parse_complete_continuous_modifications(
             (tp, false)
         };
     let (predicate, where_x, remaining) = complete_static_where_x(predicate)?;
-    let mut modifications = complete_modification_clause(predicate.original, where_x)?;
+    let (mut modifications, verb) =
+        complete_modification_clause(predicate.original, where_x, ContinuousVerb::Grant)?;
     if let Some(remaining) = remaining {
-        modifications.extend(complete_modification_clause(remaining, where_x)?);
+        modifications.extend(complete_modification_clause(remaining, where_x, verb)?.0);
     }
     if protection_rider
         && !modifications.iter().any(|m| {
@@ -1804,16 +1805,40 @@ fn complete_protection_rider(text: &str) -> Option<crate::types::ability::Protec
     parse_does_not_remove_object(object)
 }
 
+#[derive(Clone, Copy)]
+enum ContinuousVerb {
+    Pump,
+    Grant,
+    Remove,
+}
+
 fn complete_modification_clause(
     text: &str,
     where_x: Option<&str>,
-) -> Option<Vec<ContinuousModification>> {
+    inherited_verb: ContinuousVerb,
+) -> Option<(Vec<ContinuousModification>, ContinuousVerb)> {
     let text = text.trim().trim_end_matches('.').trim();
     if text.is_empty() {
         return None;
     }
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+    let (body, verb) = match alt((
+        value(
+            ContinuousVerb::Pump,
+            alt((tag::<_, _, OracleError<'_>>("gets "), tag("get "))),
+        ),
+        value(
+            ContinuousVerb::Grant,
+            alt((tag("gains "), tag("gain "), tag("has "), tag("have "))),
+        ),
+        value(ContinuousVerb::Remove, alt((tag("loses "), tag("lose ")))),
+    ))
+    .parse(lower.as_str())
+    {
+        Ok((rest, verb)) => (&text[text.len() - rest.len()..], verb),
+        Err(_) => (text, inherited_verb),
+    };
     // These existing owners expose a complete nom production. Reuse their
     // ordinary lowering only after that production owns the entire clause.
     let complete_loss = all_consuming(parse_loss_enumeration)
@@ -1847,38 +1872,15 @@ fn complete_modification_clause(
         || parse_grant_all_abilities_clause(&lower).is_some()
     {
         let modifications = parse_continuous_modifications(text);
-        return (!modifications.is_empty()).then_some(modifications);
+        return (!modifications.is_empty()).then_some((modifications, verb));
     }
-    #[derive(Clone, Copy)]
-    enum ContinuousVerb {
-        Pump,
-        Grant,
-        Remove,
-    }
-    let (body, verb) = match alt((
-        value(
-            ContinuousVerb::Pump,
-            alt((tag::<_, _, OracleError<'_>>("gets "), tag("get "))),
-        ),
-        value(
-            ContinuousVerb::Grant,
-            alt((tag("gains "), tag("gain "), tag("has "), tag("have "))),
-        ),
-        value(ContinuousVerb::Remove, alt((tag("loses "), tag("lose ")))),
-    ))
-    .parse(lower.as_str())
-    {
-        Ok((rest, verb)) => (&text[text.len() - rest.len()..], verb),
-        Err(_) => (text, ContinuousVerb::Grant),
-    };
     let mut keyword_mods = Vec::new();
     let mut keyword_complete = true;
     let parts = complete_keyword_list_parts(body).unwrap_or_default();
     for part in &parts {
         if matches!(verb, ContinuousVerb::Remove) {
-            // An explicit later grant is a separate clause. Keep its verb so
-            // the transactional connector owner below parses its operation;
-            // only bare keyword legs inherit this removal verb.
+            // Only bare keyword legs inherit this removal verb. Explicit
+            // transitions are owned by the transactional connector below.
             if let Some(keyword) = map_keyword_complete(part) {
                 keyword_mods.push(ContinuousModification::RemoveKeyword { keyword });
             } else {
@@ -1916,7 +1918,7 @@ fn complete_modification_clause(
         && text.trim_end().chars().last() != Some(',')
     {
         // allow-noncombinator: terminal punctuation validation, not dispatch.
-        return Some(keyword_mods);
+        return Some((keyword_mods, verb));
     }
     if let Ok((_, inner)) = all_consuming(nom::sequence::delimited(
         tag::<_, _, OracleError<'_>>("\""),
@@ -1926,7 +1928,7 @@ fn complete_modification_clause(
     .parse(body)
     {
         let mods = classify_quoted_inner(inner);
-        return (!mods.is_empty()).then_some(mods);
+        return (!mods.is_empty()).then_some((mods, verb));
     }
     if matches!(verb, ContinuousVerb::Pump) {
         // CR 613.4c: "an additional" qualifies this additive pump, while the
@@ -1935,10 +1937,13 @@ fn complete_modification_clause(
         let body = nom_tag_lower(body, &body_lower, "an additional ").unwrap_or(body);
         if let Ok((rest, (power, toughness))) = parse_pt_mod_with_remainder(body) {
             if rest.trim().is_empty() {
-                return Some(vec![
-                    ContinuousModification::AddPower { value: power },
-                    ContinuousModification::AddToughness { value: toughness },
-                ]);
+                return Some((
+                    vec![
+                        ContinuousModification::AddPower { value: power },
+                        ContinuousModification::AddToughness { value: toughness },
+                    ],
+                    verb,
+                ));
             }
             if let Some(quantity_text) = nom_tag_lower(rest, &rest.to_lowercase(), " for each ") {
                 if let Some(quantity) =
@@ -1946,7 +1951,7 @@ fn complete_modification_clause(
                 {
                     let mut mods = Vec::new();
                     push_dynamic_pt_modifications(&mut mods, power, toughness, quantity);
-                    return (!mods.is_empty()).then_some(mods);
+                    return (!mods.is_empty()).then_some((mods, verb));
                 }
             }
         }
@@ -1958,7 +1963,8 @@ fn complete_modification_clause(
         .parse(body.to_lowercase().as_str())
         .is_ok()
         {
-            return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x);
+            return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x)
+                .map(|modifications| (modifications, verb));
         }
     }
     // CR 613.4b: setting only one base stat preserves the other axis. The
@@ -1969,7 +1975,7 @@ fn complete_modification_clause(
     ))
     .parse(body.to_lowercase().as_str())
     {
-        return Some(vec![ContinuousModification::SetPower { value }]);
+        return Some((vec![ContinuousModification::SetPower { value }], verb));
     }
     if let Ok((_, BasePtSide::Fixed { value })) = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("base toughness "),
@@ -1977,7 +1983,7 @@ fn complete_modification_clause(
     ))
     .parse(body.to_lowercase().as_str())
     {
-        return Some(vec![ContinuousModification::SetToughness { value }]);
+        return Some((vec![ContinuousModification::SetToughness { value }], verb));
     }
     // The pair owner also consumes both values completely, including an X
     // pair whose expression is owned by the where-X clause.
@@ -1992,27 +1998,31 @@ fn complete_modification_clause(
     .parse(body.to_lowercase().as_str())
     {
         return match (power, toughness) {
-            (BasePtSide::Fixed { value: power }, BasePtSide::Fixed { value: toughness }) => {
-                Some(vec![
+            (BasePtSide::Fixed { value: power }, BasePtSide::Fixed { value: toughness }) => Some((
+                vec![
                     ContinuousModification::SetPower { value: power },
                     ContinuousModification::SetToughness { value: toughness },
-                ])
-            }
+                ],
+                verb,
+            )),
             (power, toughness) => {
                 let quantity = resolve_base_pt_x_ref(where_x)?;
-                Some(vec![
-                    ContinuousModification::SetPowerDynamic {
-                        value: base_pt_side_to_expr(power, &quantity),
-                    },
-                    ContinuousModification::SetToughnessDynamic {
-                        value: base_pt_side_to_expr(toughness, &quantity),
-                    },
-                ])
+                Some((
+                    vec![
+                        ContinuousModification::SetPowerDynamic {
+                            value: base_pt_side_to_expr(power, &quantity),
+                        },
+                        ContinuousModification::SetToughnessDynamic {
+                            value: base_pt_side_to_expr(toughness, &quantity),
+                        },
+                    ],
+                    verb,
+                ))
             }
         };
     }
     if let Some(modification) = parse_all_land_types_modification(text) {
-        return Some(vec![modification]);
+        return Some((vec![modification], verb));
     }
     // Restriction parsing already requires its complete clause.
     if let Some(modes) = parse_restriction_modes(text) {
@@ -2022,7 +2032,7 @@ fn complete_modification_clause(
             .map(|mode| ContinuousModification::AddStaticMode { mode })
             .collect();
         if !mods.is_empty() {
-            return Some(mods);
+            return Some((mods, verb));
         }
     }
     // A type companion ends at its modeled additive suffix. The type grammar
@@ -2039,7 +2049,8 @@ fn complete_modification_clause(
             {
                 let (filter, remainder) = parse_type_phrase_folding(types.original);
                 if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
-                    return parse_additive_type_clause_modifications(text);
+                    return parse_additive_type_clause_modifications(text)
+                        .map(|modifications| (modifications, verb));
                 }
             }
         }
@@ -2073,12 +2084,18 @@ fn complete_modification_clause(
         let right_offset = tp.lower.len() - after.len();
         let left = tp.original[..offset].trim();
         let right = tp.original[right_offset..].trim();
-        if let (Some(mut first), Some(last)) = (
-            complete_modification_clause(left, where_x),
-            complete_modification_clause(right, where_x),
-        ) {
-            first.extend(last);
-            return Some(first);
+        // CR 613.1f: a bare keyword keeps the preceding explicit operation.
+        // Carry the left transaction's final verb into the right transaction;
+        // publish neither vector if the complete right clause is unsupported.
+        if let Some((mut first, left_verb)) =
+            complete_modification_clause(left, where_x, inherited_verb)
+        {
+            if let Some((last, final_verb)) =
+                complete_modification_clause(right, where_x, left_verb)
+            {
+                first.extend(last);
+                return Some((first, final_verb));
+            }
         }
         scan = tp.slice(right_offset, tp.len());
     }

@@ -40752,3 +40752,202 @@ fn u14_keyword_clause_verbs_preserve_each_operation() {
         }
     }
 }
+
+#[test]
+fn u14_keyword_transitions_keep_inherited_removal() {
+    let remove = |keyword| ContinuousModification::RemoveKeyword { keyword };
+    let add = |keyword| ContinuousModification::AddKeyword { keyword };
+    let loss = || vec![remove(Keyword::Flying), remove(Keyword::Haste)];
+    let loss_grant = || {
+        vec![
+            remove(Keyword::Flying),
+            remove(Keyword::Haste),
+            add(Keyword::Vigilance),
+        ]
+    };
+    let mut dynamic_loss =
+        parse_complete_continuous_modifications("has mobilize X, where X is its power").unwrap();
+    assert!(matches!(
+        dynamic_loss.as_slice(),
+        [ContinuousModification::AddDynamicKeyword { .. }]
+    ));
+    dynamic_loss.extend([
+        remove(Keyword::Flying),
+        remove(Keyword::Haste),
+        remove(Keyword::Vigilance),
+    ]);
+    for (predicate, expected) in [
+        (
+            "has mobilize X and loses flying and haste, where X is its power and vigilance",
+            dynamic_loss,
+        ),
+        ("loses flying and haste and has vigilance", loss_grant()),
+        ("lose flying and haste and have vigilance", loss_grant()),
+        ("lose flying and haste and gain vigilance", loss_grant()),
+        ("loses flying, haste, gains vigilance", loss_grant()),
+        ("loses flying, haste, and gains vigilance", loss_grant()),
+        (
+            "loses flying and haste and loses vigilance",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                remove(Keyword::Vigilance),
+            ],
+        ),
+        (
+            "lose flying, haste, and lose vigilance",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                remove(Keyword::Vigilance),
+            ],
+        ),
+        (
+            "loses flying and haste and gets +1/+1",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ],
+        ),
+        (
+            "loses flying, haste, and have base toughness 1",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                ContinuousModification::SetToughness { value: 1 },
+            ],
+        ),
+        (
+            "has vigilance and loses flying and haste",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+            ],
+        ),
+        (
+            "has vigilance and loses flying and haste and gains trample",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "have vigilance, lose flying, haste, and gain trample",
+            vec![
+                add(Keyword::Vigilance),
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "loses flying and haste and has vigilance and trample",
+            vec![
+                remove(Keyword::Flying),
+                remove(Keyword::Haste),
+                add(Keyword::Vigilance),
+                add(Keyword::Trample),
+            ],
+        ),
+        (
+            "loses flying and has haste and vigilance",
+            vec![
+                remove(Keyword::Flying),
+                add(Keyword::Haste),
+                add(Keyword::Vigilance),
+            ],
+        ),
+        ("loses flying and haste", loss()),
+    ] {
+        assert_eq!(
+            parse_complete_continuous_modifications(predicate),
+            Some(expected.clone()),
+            "{predicate}"
+        );
+        let line = format!("Creatures {predicate}.");
+        let direct =
+            parse_subject_continuous_static(&line).expect("complete inherited-operation subject");
+        let public = parse_static_line_multi(&line);
+        assert_eq!(public.len(), 1, "{line}: {public:?}");
+        assert_eq!(direct.modifications, expected, "{line}");
+        assert_eq!(public[0].modifications, expected, "{line}");
+        assert!(!u14_static_residual(&public[0]));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let bad_predicate = format!("{predicate}{tail}");
+            assert!(
+                parse_complete_continuous_modifications(&bad_predicate).is_none(),
+                "{bad_predicate}"
+            );
+            let bad = format!("Creatures {bad_predicate}.");
+            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            let refused = parse_static_line_multi(&bad);
+            assert!(!refused.is_empty(), "terminal refusal: {bad}");
+            assert!(
+                refused.iter().all(u14_static_residual),
+                "{bad}: {refused:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn u14_inherited_removal_preserves_modeled_companions() {
+    for companion in [
+        "gets +1/+1",
+        "have base power and toughness 2/2",
+        "gets +1/+0 for each Mountain you control",
+        "are Bears in addition to their other creature types",
+        "has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\"",
+        "has protection from red. This effect doesn't remove this Aura.",
+    ] {
+        let modeled = parse_complete_continuous_modifications(companion)
+            .expect("independent modeled companion");
+        assert!(!modeled.is_empty());
+        let mut expected = vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Flying,
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Haste,
+            },
+        ];
+        expected.extend(modeled);
+        let predicate = format!("loses flying and haste and {companion}");
+        assert_eq!(
+            parse_complete_continuous_modifications(&predicate),
+            Some(expected.clone()),
+            "{predicate}"
+        );
+        let line = format!("Creatures {}.", predicate.trim_end_matches('.'));
+        assert_eq!(
+            parse_subject_continuous_static(&line)
+                .unwrap()
+                .modifications,
+            expected
+        );
+        let public = parse_static_line_multi(&line);
+        assert_eq!(public.len(), 1, "{line}: {public:?}");
+        assert_eq!(public[0].modifications, expected, "{line}");
+        assert!(!u14_static_residual(&public[0]));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let bad_predicate = format!("{}{tail}", predicate.trim_end_matches('.'));
+            assert!(
+                parse_complete_continuous_modifications(&bad_predicate).is_none(),
+                "{bad_predicate}"
+            );
+            let bad = format!("Creatures {bad_predicate}.");
+            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            let refused = parse_static_line_multi(&bad);
+            assert!(!refused.is_empty());
+            assert!(
+                refused.iter().all(u14_static_residual),
+                "{bad}: {refused:?}"
+            );
+        }
+    }
+}

@@ -409,6 +409,68 @@ fn u14_removal_led_parity_grants_haste_and_enables_attack() {
 }
 
 #[test]
+fn u14_inherited_removal_keeps_matching_creature_sick() {
+    // Explicitly synthetic complete two-line contract, not printed card text.
+    // CR 613.1f + CR 611.3a: Odd creatures lose both Flying and Haste,
+    // then gain Vigilance. CR 302.6 + CR 702.10b distinguish the two attacks.
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    fund(&mut s, P0);
+    let source = standard(&mut s, P0,
+        "As this enchantment enters, choose odd or even.\nEach creature with mana value of the chosen quality loses flying and haste and has vigilance.");
+    let odd = s
+        .add_creature_to_hand(P0, "Synthetic MV3 hasty flyer", 2, 3)
+        .with_keyword(Keyword::Flying)
+        .with_keyword(Keyword::Haste)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let even = s
+        .add_creature_to_hand(P0, "Synthetic MV2 hasty flyer", 2, 3)
+        .with_keyword(Keyword::Flying)
+        .with_keyword(Keyword::Haste)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let mut r = s.build();
+    pause(&mut r, source);
+    assert!(r.state().objects[&source]
+        .static_definitions
+        .iter_all()
+        .any(|d| d.modifications
+            == vec![
+                ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Flying
+                },
+                ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Haste
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Vigilance
+                },
+            ]));
+    answer(&mut r, source, "Odd");
+    assert_eq!(
+        r.state().objects[&source].chosen_attributes,
+        vec![ChosenAttribute::OddOrEven(Parity::Odd)]
+    );
+    r.cast(odd).resolve();
+    r.cast(even).resolve();
+    for (id, matching) in [(odd, true), (even, false)] {
+        let object = &r.state().objects[&id];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert!(object.summoning_sick && !object.tapped);
+        assert_eq!(object.keywords.contains(&Keyword::Flying), !matching);
+        assert_eq!(object.keywords.contains(&Keyword::Haste), !matching);
+        assert_eq!(object.keywords.contains(&Keyword::Vigilance), matching);
+    }
+    r.advance_to_combat();
+    assert!(r
+        .declare_attackers(&[(odd, engine::game::combat::AttackTarget::Player(P1))])
+        .is_err());
+    r.declare_attackers(&[(even, engine::game::combat::AttackTarget::Player(P1))])
+        .expect("opposite-parity Haste creature attacks on the same rejecting board");
+}
+
+#[test]
 fn u14_opposite_sources_are_independent() {
     for remove_odd in [true, false] {
         let mut s = GameScenario::new();
