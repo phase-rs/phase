@@ -4105,6 +4105,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
         | FilterProp::PrepareSpell
+        | FilterProp::Prepared
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
