@@ -170,6 +170,13 @@ fn replacement_ability_controller(
         .unwrap_or(state.active_player)
 }
 
+/// CR 113.7a: the object a replacement's host-relative references name — the
+/// anchored installing source for a floating definition, else the storage id
+/// itself.
+fn replacement_source_host(rid: ReplacementId, def: &ReplacementDefinition) -> ObjectId {
+    def.source_object.unwrap_or(rid.source)
+}
+
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
     ReplacementId {
         source: object_id,
@@ -796,8 +803,13 @@ fn apply_granted_keyword_etb_replacement(
                 continue;
             }
         }
-        let modifiers =
-            event_modifiers_for_ability(definition.execute.as_deref(), state, rid.source, &event);
+        let modifiers = event_modifiers_for_ability(
+            definition.execute.as_deref(),
+            state,
+            rid.source,
+            replacement_ability_controller(state, rid, definition),
+            &event,
+        );
         if !modifiers.etb_counters.is_empty() {
             instance_counter_groups.push(modifiers.etb_counters);
         }
@@ -1635,7 +1647,7 @@ fn replacement_choice_definition(
 /// behavior (empty name) exactly, rather than naming some unrelated object.
 fn replacement_choice_display_source(state: &GameState, rid: ReplacementId) -> ObjectId {
     replacement_choice_definition(state, rid)
-        .and_then(|def| def.source_object)
+        .map(|def| replacement_source_host(rid, def))
         .unwrap_or(rid.source)
 }
 
@@ -7853,6 +7865,7 @@ fn object_replacement_candidate_applies(
             replacement_mode_decline(&repl_def.mode),
             state,
             obj.id,
+            replacement_ability_controller(state, rid, repl_def),
         )
     {
         // CR 614.7: suppress optional replacements whose decline branch would
@@ -8721,7 +8734,7 @@ pub fn find_applicable_replacements(
                 // host-relative filters, exclusions and conditions refer to. Parity rule:
                 // every argument position that `object_replacement_candidate_applies` fills
                 // with `obj.id`, this scan fills with `source_host`.
-                let source_host = repl_def.source_object.unwrap_or(ObjectId(0));
+                let source_host = replacement_source_host(rid, repl_def);
                 if let ProposedEvent::Damage { .. } = event {
                     // CR 615.3: Check combat scope, target filters, and source filters.
                     // CR 614.1a: Damage source filter — matches the damage *source* object
@@ -9235,6 +9248,7 @@ fn extract_etb_counters(
     ability: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     event: &ProposedEvent,
 ) -> Vec<(CounterType, u32)> {
     let mut counters = Vec::new();
@@ -9252,6 +9266,7 @@ fn extract_etb_counters(
             &exec.effect,
             state,
             source_id,
+            controller,
             event,
         ));
         current = exec.sub_ability.as_deref();
@@ -9263,6 +9278,7 @@ fn extract_etb_counters_from_effect(
     effect: &Effect,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     event: &ProposedEvent,
 ) -> Vec<(CounterType, u32)> {
     match effect {
@@ -9292,13 +9308,11 @@ fn extract_etb_counters_from_effect(
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
                 other => {
-                    // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
-                    // is the controller of the permanent as it would exist on the battlefield — the
-                    // resident liminal projection when one is staged.
-                    let controller = state
-                        .entering_or_live_object(source_id)
-                        .map(replacement_source_player)
-                        .unwrap_or(PlayerId(0));
+                    // CR 109.5 + CR 614.12: "you" is the replacing ability's controller,
+                    // supplied by `replacement_ability_controller` (for an entering object's
+                    // own replacement, the controller of the permanent as it would exist on
+                    // the battlefield; for a floating rider, the installing ability's
+                    // controller).
                     crate::game::quantity::resolve_quantity_with_ctx(state, other, controller, ctx)
                         .max(0) as u32
                 }
@@ -9311,13 +9325,11 @@ fn extract_etb_counters_from_effect(
         } => enter_with_counters
             .iter()
             .map(|(counter_type, count)| {
-                // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
-                // is the controller of the permanent as it would exist on the battlefield — the
-                // resident liminal projection when one is staged.
-                let controller = state
-                    .entering_or_live_object(source_id)
-                    .map(replacement_source_player)
-                    .unwrap_or(PlayerId(0));
+                // CR 109.5 + CR 614.12: "you" is the replacing ability's controller,
+                // supplied by `replacement_ability_controller` (for an entering object's
+                // own replacement, the controller of the permanent as it would exist on
+                // the battlefield; for a floating rider, the installing ability's
+                // controller).
                 let ctx = crate::game::quantity::QuantityContext {
                     entering: event.affected_object_id(),
                     ..crate::game::quantity::QuantityContext::new(source_id)
@@ -9427,6 +9439,7 @@ fn event_modifiers_for_ability(
     ability: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     event: &ProposedEvent,
 ) -> EventModifiers {
     let mut etb_tap_state = EtbTapState::Unspecified;
@@ -9460,7 +9473,7 @@ fn event_modifiers_for_ability(
         }
         current = def.sub_ability.as_deref();
     }
-    let counters = extract_etb_counters(ability, state, source_id, event);
+    let counters = extract_etb_counters(ability, state, source_id, controller, event);
     EventModifiers {
         etb_tap_state,
         etb_counters: counters,
@@ -9529,8 +9542,13 @@ pub(super) fn current_self_enter_replacement_modifiers(
             continue;
         }
 
-        let modifiers =
-            event_modifiers_for_ability(replacement.execute.as_deref(), state, source_id, &event);
+        let modifiers = event_modifiers_for_ability(
+            replacement.execute.as_deref(),
+            state,
+            source_id,
+            replacement_ability_controller(state, rid, replacement),
+            &event,
+        );
         match modifiers.etb_tap_state {
             EtbTapState::Unspecified => {}
             EtbTapState::Tapped => result.enter_tapped = Some(true),
@@ -9617,6 +9635,7 @@ fn optional_decline_is_noop(
     decline: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
 ) -> bool {
     let Some(current_tapped) = battlefield_entry_current_tapped(event) else {
         return false;
@@ -9636,7 +9655,7 @@ fn optional_decline_is_noop(
         return false;
     }
 
-    let mods = event_modifiers_for_ability(Some(def), state, source_id, event);
+    let mods = event_modifiers_for_ability(Some(def), state, source_id, controller, event);
     let tap_already = match mods.etb_tap_state {
         EtbTapState::Unspecified => true,
         EtbTapState::Tapped => current_tapped,
@@ -10131,8 +10150,13 @@ fn apply_single_replacement(
                         ProposedEvent::CreateToken { .. } | ProposedEvent::ZoneChange { .. }
                     ) && entry_copy.is_some())
                 });
-                let mut modifiers =
-                    event_modifiers_for_ability(ability, state, rid.source, &proposed);
+                let mut modifiers = event_modifiers_for_ability(
+                    ability,
+                    state,
+                    replacement_source_host(rid, repl_def),
+                    replacement_controller,
+                    &proposed,
+                );
                 // CR 110.2a: A self-ETB controller override is carried directly on the
                 // replacement definition (not derived from `execute`), parallel to the
                 // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
@@ -13284,7 +13308,7 @@ mod tests {
         let event = ProposedEvent::zone_change(ObjectId(1), Zone::Stack, Zone::Battlefield, None);
 
         assert_eq!(
-            extract_etb_counters(Some(&first), &state, ObjectId(1), &event),
+            extract_etb_counters(Some(&first), &state, ObjectId(1), PlayerId(0), &event),
             vec![
                 (CounterType::Plus1Plus1, 1),
                 (CounterType::Generic("shield".to_string()), 1)

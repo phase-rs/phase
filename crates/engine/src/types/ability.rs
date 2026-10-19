@@ -34559,7 +34559,8 @@ pub struct ReplacementDefinition {
     /// `anchor_zones` -- which is exactly the zone set THAT CALLER used to decide
     /// object-hosting before the authority existed: `Zone::Battlefield` for
     /// `prevent_damage::resolve`'s untargeted branch, `Zone::Battlefield |
-    /// Zone::Command` for `push_player_scoped_shield`, and EMPTY for
+    /// Zone::Command` for `push_player_scoped_shield`, `Zone::Battlefield` for
+    /// `add_target_replacement::resolve`'s `TargetFilter::None` arm, and EMPTY for
     /// `create_damage_replacement`'s already-registry arm. A shield created by a
     /// resolving instant never had a host, so it has no host identity to anchor and
     /// keeps `None`; so does an untargeted shield from a Command-zone emblem, which
@@ -34567,9 +34568,11 @@ pub struct ReplacementDefinition {
     /// `None` therefore reproduces the pre-anchor sentinel behavior exactly, for
     /// every replacement that existed before this field.
     ///
-    /// Consumed by the pending scan in `game::replacement::find_applicable_replacements`,
-    /// which fills with `source_object.unwrap_or(ObjectId(0))` every argument
-    /// position that `object_replacement_candidate_applies` fills with `obj.id`.
+    /// Consumed through `game::replacement::replacement_source_host` by the pending
+    /// scan in `find_applicable_replacements`, the CR 616.1 display label, and
+    /// `apply_single_replacement`'s entry-modifier evaluation. The scan fills with
+    /// the host every argument position that `object_replacement_candidate_applies`
+    /// fills with `obj.id`.
     /// `ReplacementId::source` is NOT this field: it stays `ObjectId(0)`, because it
     /// is the STORAGE discriminator that routes ~14 downstream consumers to the
     /// registry rather than to `state.objects`.

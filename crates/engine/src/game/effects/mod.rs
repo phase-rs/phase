@@ -4060,16 +4060,17 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
 /// The single authority for the SOURCE-SCOPED DAMAGE-SHIELD installs it owns —
 /// `prevent_damage`'s untargeted branch and player-scoped arm, and
 /// `create_damage_replacement`'s non-battlefield arm — so those cannot drift.
+/// `add_target_replacement::resolve`'s `TargetFilter::None` arm (floating
+/// riders such as a damage boost or an entry-counter rider) also installs
+/// through it, with `&[Zone::Battlefield]`.
 ///
 /// Scope of that claim, stated precisely: it is NOT the only writer to
-/// `state.pending_damage_replacements`. `add_target_replacement::resolve` still
-/// pushes raw at its `TargetFilter::None` global arm and its `TargetRef::Player`
-/// arm, and neither latches `source_controller`, so a controller-relative gate on
-/// those definitions falls back to `state.active_player` in the pending scan
-/// rather than to the installer (CR 113.8 / CR 109.5 would prefer the installer).
-/// That is PRE-EXISTING behavior, deliberately left alone by issue #8485 rather
-/// than changed late in that work, and this comment is its only record. Routing
-/// those two arms through this authority is the clean end state.
+/// `state.pending_damage_replacements`. `add_target_replacement::resolve`'s
+/// `TargetRef::Player` arm still pushes raw, but it has already latched
+/// `source_controller` through `replacement_with_ability_expiry`, so a
+/// controller-relative gate on that definition resolves to the installer
+/// (CR 113.8 / CR 109.5) rather than to `state.active_player`. Routing that arm
+/// through this authority too is the clean end state.
 ///
 /// CR 113.7a: "Once activated or triggered, an ability exists on the stack
 /// independently of its source. Destruction or removal of the source after that
@@ -4106,6 +4107,13 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
 /// so it is not itself an instance of per-caller parameterization. An EMPTY
 /// slice means "anchor nothing", which is correct for a caller that is only
 /// being refactored onto the authority and moves no shield at all.
+///
+/// `add_target_replacement::resolve`'s `TargetFilter::None` arm passes
+/// `[Battlefield]`: a battlefield-sourced floating rider still refers to its
+/// source ("this enchantment"), and a source not on the battlefield at
+/// resolution keeps the sentinel. The census at the time of that change showed
+/// Communal Brewing's `CountersOn { scope: Source }` count as the only
+/// host-relative member of that install population.
 pub(crate) fn install_floating_damage_replacement(
     state: &mut GameState,
     mut shield: crate::types::ability::ReplacementDefinition,
