@@ -295,7 +295,8 @@ fn handle_replacement_choice_inner(
     let parked_damage_source_context = state
         .pending_replacement
         .as_ref()
-        .and_then(|pending| pending.damage_source_context.clone());
+        .and_then(|pending| pending.damage_source_context.as_deref())
+        .cloned();
     let parked_lifelink_bonus = state
         .pending_replacement
         .as_ref()
@@ -1448,7 +1449,7 @@ fn handle_replacement_choice_inner(
                 state
                     .pending_replacement
                     .as_ref()
-                    .and_then(|pending| pending.damage_source_context.as_ref())
+                    .and_then(|pending| pending.damage_source_context.as_deref())
                     .is_none_or(|carried| carried.identity != source.identity)
             }) {
                 return Err(EngineError::InvalidAction(

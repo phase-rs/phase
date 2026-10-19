@@ -12786,7 +12786,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         if !crate::game::replacement::damage_source_context_coherent(
             state,
             &pending.proposed,
-            pending.damage_source_context.as_ref(),
+            pending.damage_source_context.as_deref(),
         ) {
             return Err("pending damage source authority is missing or incoherent".into());
         }
@@ -26353,8 +26353,9 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 pub struct PendingReplacement {
     /// Private source authority for this exact damage event, established before
     /// any replacement consult, including synchronous replay.
+    /// Box this rare, large parked payload to preserve the GameState stack budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub damage_source_context: Option<TriggerSourceContext>,
+    pub damage_source_context: Option<Box<TriggerSourceContext>>,
     pub proposed: ProposedEvent,
     /// CR 701.21a + CR 614.1: An inner Battlefield→graveyard `ZoneChange`
     /// can pause for a `Moved` replacement after its enclosing sacrifice was

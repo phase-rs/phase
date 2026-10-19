@@ -12162,7 +12162,7 @@ fn pipeline_loop(
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(PendingReplacement {
-                    damage_source_context: damage_source_context.clone(),
+                    damage_source_context: damage_source_context.clone().map(Box::new),
                     proposed,
                     sacrifice_provenance: None,
                     candidates,
@@ -12228,7 +12228,7 @@ fn pipeline_loop(
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
             state.pending_replacement = Some(PendingReplacement {
-                damage_source_context: damage_source_context.clone(),
+                damage_source_context: damage_source_context.clone().map(Box::new),
                 proposed,
                 sacrifice_provenance: None,
                 candidates,
@@ -12515,7 +12515,7 @@ fn continue_replacement_impl(
             });
         }
     };
-    let damage_source_context = pending.damage_source_context.clone();
+    let damage_source_context = pending.damage_source_context.as_deref().cloned();
     if !damage_source_context_coherent(state, &pending.proposed, damage_source_context.as_ref()) {
         return ReplacementResult::Prevented;
     }
