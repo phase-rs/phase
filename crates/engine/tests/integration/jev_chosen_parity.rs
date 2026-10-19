@@ -22,6 +22,9 @@ use engine::types::zones::Zone;
 use engine::types::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
 
 const STANDARD: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
+const HASTE_MODIFICATIONS: &[ContinuousModification] = &[ContinuousModification::AddKeyword {
+    keyword: Keyword::Haste,
+}];
 const ADAPTIVE: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nOther creatures you control of the chosen type get +1/+1.";
 
 fn standard(s: &mut GameScenario, player: PlayerId, text: &str) -> ObjectId {
@@ -78,7 +81,7 @@ fn assert_table(r: &GameRunner, cards: &[(ObjectId, u32)], odd: bool, even: bool
     }
 }
 
-fn pause(r: &mut GameRunner, source: ObjectId) {
+fn pause(r: &mut GameRunner, source: ObjectId, expected_modifications: &[ContinuousModification]) {
     let object = &r.state().objects[&source];
     assert_eq!(object.zone, Zone::Hand);
     assert!(object
@@ -95,11 +98,7 @@ fn pause(r: &mut GameRunner, source: ObjectId) {
     assert!(object
         .static_definitions
         .iter_all()
-        .any(|d| d
-            .modifications
-            .contains(&ContinuousModification::AddKeyword {
-                keyword: Keyword::Haste
-            })
+        .any(|d| d.modifications.as_slice() == expected_modifications
             && d.affected.as_ref().is_some_and(|f| source_parity(f))));
     assert!(object
         .abilities
@@ -186,7 +185,7 @@ fn u14_public_entry_stores_parity_and_grants_haste() {
         let cards = population(&mut s);
         let a = standard(&mut s, P0, STANDARD);
         let mut r = s.build();
-        pause(&mut r, a);
+        pause(&mut r, a, HASTE_MODIFICATIONS);
         answer(&mut r, a, choice);
         assert_table(&r, &cards, choice == "Odd", choice == "Even");
     }
@@ -373,7 +372,18 @@ fn u14_removal_led_parity_grants_haste_and_enables_attack() {
         .with_mana_cost(ManaCost::generic(2))
         .id();
     let mut r = s.build();
-    pause(&mut r, source);
+    pause(
+        &mut r,
+        source,
+        &[
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Flying,
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            },
+        ],
+    );
     assert!(r.state().objects[&source]
         .static_definitions
         .iter_all()
@@ -431,7 +441,21 @@ fn u14_inherited_removal_keeps_matching_creature_sick() {
         .with_mana_cost(ManaCost::generic(2))
         .id();
     let mut r = s.build();
-    pause(&mut r, source);
+    pause(
+        &mut r,
+        source,
+        &[
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Flying,
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Haste,
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Vigilance,
+            },
+        ],
+    );
     assert!(r.state().objects[&source]
         .static_definitions
         .iter_all()
@@ -487,10 +511,10 @@ fn u14_opposite_sources_are_independent() {
             )
             .id();
         let mut r = s.build();
-        pause(&mut r, a);
+        pause(&mut r, a, HASTE_MODIFICATIONS);
         answer(&mut r, a, "Odd");
         next_turn(&mut r, P1);
-        pause(&mut r, b);
+        pause(&mut r, b, HASTE_MODIFICATIONS);
         answer(&mut r, b, "Even");
         assert_table(&r, &cards, true, true);
         let victim = if remove_odd { a } else { b };
@@ -521,7 +545,7 @@ fn u14_unrelated_choices_do_not_retarget_static() {
         .add_spell_to_hand_from_oracle(P0, "Local color", true, "Choose a color.")
         .id();
     let mut r = s.build();
-    pause(&mut r, a);
+    pause(&mut r, a, HASTE_MODIFICATIONS);
     answer(&mut r, a, "Odd");
     for (spell, choice) in [(local, "Even"), (color, "Blue")] {
         r.cast(spell).resolve();
@@ -578,10 +602,10 @@ fn u14_control_and_new_incarnation() {
         )
         .id();
     let mut r = s.build();
-    pause(&mut r, b);
+    pause(&mut r, b, HASTE_MODIFICATIONS);
     answer(&mut r, b, "Even");
     next_turn(&mut r, P1);
-    pause(&mut r, a);
+    pause(&mut r, a, HASTE_MODIFICATIONS);
     answer(&mut r, a, "Odd");
     let incarnation = r.state().objects[&a].incarnation;
     next_turn(&mut r, P0);
@@ -596,7 +620,7 @@ fn u14_control_and_new_incarnation() {
         .assert_zone(&[a], Zone::Hand);
     assert_table(&r, &cards, false, true);
     next_turn(&mut r, P1);
-    pause(&mut r, a);
+    pause(&mut r, a, HASTE_MODIFICATIONS);
     assert_table(&r, &cards, false, true);
     answer(&mut r, a, "Even");
     assert_ne!(r.state().objects[&a].incarnation, incarnation);
@@ -614,7 +638,7 @@ fn u14_absent_source_choice_refuses_global_fallback() {
     let cards = population(&mut s);
     let a = standard(&mut s, P0, STANDARD);
     let mut r = s.build();
-    pause(&mut r, a);
+    pause(&mut r, a, HASTE_MODIFICATIONS);
     for invalid in ["", "Neither"] {
         assert!(r
             .act(GameAction::ChooseOption {
@@ -666,7 +690,7 @@ fn u14_haste_enables_new_creature_attack() {
             r.state_mut().active_player = player;
             r.state_mut().priority_player = player;
             r.state_mut().waiting_for = WaitingFor::Priority { player };
-            pause(&mut r, a);
+            pause(&mut r, a, HASTE_MODIFICATIONS);
             answer(&mut r, a, "Odd");
             assert_eq!(
                 r.state().objects[&creature]
@@ -779,7 +803,7 @@ fn u14_choice_entry_and_static_roundtrips() {
     let cards = population(&mut s);
     let a = standard(&mut s, P0, STANDARD);
     let mut r = s.build();
-    pause(&mut r, a);
+    pause(&mut r, a, HASTE_MODIFICATIONS);
     let pending = r.state().pending_replacement.as_ref().unwrap().clone();
     for route in 0..4 {
         let mut loaded = restored(&r, route);
@@ -825,7 +849,7 @@ fn u14_public_choice_and_private_resume_views() {
         .get_mut(&hidden)
         .unwrap()
         .chosen_attributes = vec![ChosenAttribute::Color(engine::types::mana::ManaColor::Blue)];
-    pause(&mut r, a);
+    pause(&mut r, a, HASTE_MODIFICATIONS);
     assert_eq!(
         restored(&r, 2).state().objects[&hidden].chosen_attributes,
         vec![ChosenAttribute::Color(engine::types::mana::ManaColor::Blue)]
@@ -890,7 +914,7 @@ fn u14_turn_and_controller_subjects_have_public_consumers() {
         };
         let a = standard(&mut s, P0, text);
         let mut r = s.build();
-        pause(&mut r, a);
+        pause(&mut r, a, HASTE_MODIFICATIONS);
         answer(&mut r, a, "Odd");
         assert_table(&r, &cards, true, false);
         next_turn(&mut r, P1);
@@ -932,7 +956,7 @@ fn u14_turn_and_controller_subjects_have_public_consumers() {
                 .collect(),
         );
         let mut r = s.build();
-        pause(&mut r, source);
+        pause(&mut r, source, HASTE_MODIFICATIONS);
         answer(&mut r, source, "Odd");
         assert!(r.state().objects[&own].keywords.contains(&Keyword::Haste));
         assert!(!r.state().objects[&opponent]
