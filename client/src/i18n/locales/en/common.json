@@ -285,7 +285,9 @@
     "loading": "Loading..."
   },
   "turnBanner": {
-    "turn": "Turn {{number}}"
+    "turn": "Turn {{number}}",
+    "yourTurn": "Your turn",
+    "opponentTurn": "{{name}}'s turn"
   },
   "diceRoll": {
     "rollingForFirst": "Rolling for first player",

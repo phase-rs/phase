@@ -3473,11 +3473,14 @@ mod tests {
         }
     }
 
-    /// v152: `GrantAllActivatedAbilitiesOf` gains the optional `kind` selector
-    /// and the loyalty-grant sibling variant is removed. A v151 peer
+    /// v153: `GrantAllActivatedAbilitiesOf` gains the optional `kind` selector
+    /// and the loyalty-grant sibling variant is removed. A v152 peer
     /// drops the defaulted field silently and over-grants, so it must be
-    /// refused before it receives v152 state.
+    /// refused before it receives v153 state.
     ///
+    /// v152: `ShortcutDecisionSchema` gains `suggested_declaration` and
+    /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
+    /// drops them, so it must be refused before it receives v152 state.
     /// v151: populated Bestow form payloads require a versioned full-game peer.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
@@ -3719,8 +3722,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_152_for_kind_selected_grants() {
-        assert_eq!(PROTOCOL_VERSION, 152);
+    fn protocol_version_is_153_for_kind_selected_grants() {
+        assert_eq!(PROTOCOL_VERSION, 153);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3731,7 +3734,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_152_for_kind_selected_grants` stays
+    /// `protocol_version_is_153_for_kind_selected_grants` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

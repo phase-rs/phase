@@ -3508,9 +3508,9 @@ fn hand_term(state: &GameState) -> u32 {
     (8 - state.players[0].hand.len()) as u32
 }
 
-/// CR 504.1 + CR 704.5b: one draw a repetition, and a draw from an empty library loses.
+/// CR 504.1 + CR 704.5b: one draw a repetition, so the caster survives one per card left.
 fn library_term(state: &GameState) -> u32 {
-    state.players[0].library.len() as u32 + 1
+    state.players[0].library.len() as u32
 }
 
 /// CR 500.7 + CR 732.2a: Time Warp on its caster, returned each turn by Archaeomancer through
@@ -3688,10 +3688,10 @@ fn an_archaeomancer_time_warp_period_with_carpet_of_flowers_is_offered_and_taken
     }
 }
 
-/// CR 704.5b + CR 732.2a: with four cards in its library the caster's library binds the count, and
-/// a take decks the caster at its last draw step.
+/// CR 504.1 + CR 704.5b: when the library binds, the offer stops at the caster's last card, because
+/// a further repetition would lose the game by drawing from an empty library.
 #[test]
-fn an_archaeomancer_time_warp_take_decks_its_caster_when_the_library_binds() {
+fn an_archaeomancer_time_warp_take_stops_at_its_casters_last_card_when_the_library_binds() {
     let db = shared_card_db().expect("card db");
     let mut runner = warp_board(4, &[], LoopDetectionMode::Interactive, db);
     let turn = runner.state().turn_number;
@@ -3706,17 +3706,23 @@ fn an_archaeomancer_time_warp_take_decks_its_caster_when_the_library_binds() {
     );
     assert_eq!(n, library_term(&state));
     let events = take(&mut runner, n);
+    let after = runner.state();
+    assert!(eliminated(after).is_empty());
+    assert!(after.players[0].library.is_empty());
     assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::GameOver { winner: Some(P1) }
+        after.players[0].turns_taken,
+        state.players[0].turns_taken + n
     );
-    assert!(events.contains(&GameEvent::GameOver { winner: Some(P1) }));
+    assert!(!matches!(after.waiting_for, WaitingFor::GameOver { .. }));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, GameEvent::GameOver { .. })));
 }
 
-/// CR 704.5b + CR 800.4a: on three seats the same take decks its caster at its last draw step and
-/// ends there, and the game goes on for the other two.
+/// CR 504.1 + CR 704.5b: on three seats the offer also stops at the caster's last card, because a
+/// further repetition would lose the game by drawing from an empty library.
 #[test]
-fn an_archaeomancer_time_warp_take_on_three_seats_decks_its_caster_and_the_game_goes_on() {
+fn an_archaeomancer_time_warp_take_on_three_seats_stops_at_its_casters_last_card() {
     let db = shared_card_db().expect("card db");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.with_library_top(P2, &["Island"; 25]);
@@ -3734,40 +3740,14 @@ fn an_archaeomancer_time_warp_take_on_three_seats_decks_its_caster_and_the_game_
     assert_eq!(n, library_term(&state));
     let events = take(&mut runner, n);
     let after = runner.state();
-    assert_eq!(eliminated(after), [P0]);
-    assert_eq!(eliminations(&events), [P0]);
-    let departure = events
-        .iter()
-        .position(|event| matches!(event, GameEvent::PlayerEliminated { .. }))
-        .expect("reach: the take emits the elimination");
-    let departure_turn = events[..departure]
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            GameEvent::TurnStarted {
-                player_id,
-                turn_number,
-            } => Some((*player_id, *turn_number)),
-            _ => None,
-        });
-    assert_eq!(departure_turn.map(|(seat, _)| seat), Some(P0));
-    assert_eq!(
-        (Some(after.turn_number), after.phase),
-        (departure_turn.map(|(_, turn)| turn), Phase::Draw)
-    );
-    assert!(!events[departure..]
-        .iter()
-        .any(|event| matches!(event, GameEvent::PriorityPassed { .. })));
+    assert!(eliminated(after).is_empty());
+    assert!(eliminations(&events).is_empty());
+    assert!(after.players[0].library.is_empty());
     assert_eq!(
         after.players[0].turns_taken,
         state.players[0].turns_taken + n
     );
-    assert_eq!(after.waiting_for, WaitingFor::Priority { player: P1 });
-    warp_until(&mut runner, |state| state.active_player == P2);
-    assert!(!matches!(
-        runner.state().waiting_for,
-        WaitingFor::GameOver { .. }
-    ));
+    assert!(!matches!(after.waiting_for, WaitingFor::GameOver { .. }));
 }
 
 /// Drives the Time Warp board declining every offer until `turns` turns pass or the game ends; the

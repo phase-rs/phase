@@ -11661,6 +11661,10 @@ fn parse_loyalty_ability_ir(
 /// a -1 on the same planeswalker in one turn and (b) block The Chain Veil's
 /// "as though none of its loyalty abilities have been activated this turn"
 /// cap-raise from ever taking effect.
+///
+/// Loyalty abilities granted through quoted text ("Planeswalkers you control
+/// have "[+1]: Add {R}."") receive the same `AsSorcery` stamp in
+/// `parser::oracle_static::grammar::parse_quoted_ability`.
 fn apply_loyalty_restrictions(shell: &mut AbilityShellIr) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
     if !shell

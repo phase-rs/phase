@@ -40712,3 +40712,91 @@ fn sab_sunen_parity_gate_stays_unrecognized() {
         restrictions[0].condition
     );
 }
+
+/// Every `GrantAbility` definition parsed out of `line`.
+fn granted_ability_definitions(line: &str) -> Vec<crate::types::ability::AbilityDefinition> {
+    parse_static_line_multi(line)
+        .into_iter()
+        .flat_map(|def| def.modifications)
+        .filter_map(|m| match m {
+            ContinuousModification::GrantAbility { definition } => Some(*definition),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 606.2 + CR 606.3: a loyalty ability granted through quoted text carries
+/// the same timing restriction as a printed one — exactly one `AsSorcery`, and
+/// never the per-ability `OnlyOnceEachTurn` (the per-permanent cap is enforced
+/// by the planeswalker activation gate). Verbatim Oracle lines from the
+/// granted-loyalty class (issue #9936), covering `[+N]`, `[0]` and `[−N]`
+/// costs and a nested quoted ability.
+#[test]
+fn granted_loyalty_abilities_carry_cr_606_3_timing() {
+    use crate::types::ability::{is_loyalty_ability_cost, AbilityCost};
+
+    let cases: [(&str, usize); 4] = [
+        // Way of the Pyromancer
+        ("Planeswalkers you control have \"[+1]: Add {R}.\"", 1),
+        // Ichormoon Gauntlet (two grants)
+        (
+            "Planeswalkers you control have \"[0]: Proliferate\" and \"[−12]: Take an extra turn after this one.\"",
+            2,
+        ),
+        // Teferi's Talent
+        (
+            "Enchanted planeswalker has \"[−12]: You get an emblem with 'You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.'\"",
+            1,
+        ),
+        // Way of the Warlord
+        (
+            "Planeswalkers you control have \"[−4]: This planeswalker deals 2 damage to up to one target creature or planeswalker and 2 damage to target player.\"",
+            1,
+        ),
+    ];
+    for (line, expected) in cases {
+        let grants = granted_ability_definitions(line);
+        assert_eq!(grants.len(), expected, "{line}: grants {grants:?}");
+        for def in grants {
+            assert!(
+                def.cost.as_ref().is_some_and(is_loyalty_ability_cost),
+                "reach-guard: {line}: granted cost is a loyalty cost: {:?}",
+                def.cost
+            );
+            assert!(
+                matches!(def.cost, Some(AbilityCost::Loyalty { .. })),
+                "{line}: {:?}",
+                def.cost
+            );
+            let as_sorcery = def
+                .activation_restrictions
+                .iter()
+                .filter(|r| matches!(r, ActivationRestriction::AsSorcery))
+                .count();
+            assert_eq!(
+                as_sorcery, 1,
+                "{line}: exactly one AsSorcery: {:?}",
+                def.activation_restrictions
+            );
+            assert!(
+                !def.activation_restrictions
+                    .contains(&ActivationRestriction::OnlyOnceEachTurn),
+                "{line}: per-permanent cap must not be OnlyOnceEachTurn"
+            );
+        }
+    }
+
+    // Negative: a granted non-loyalty mana ability gains no timing restriction
+    // and stays a mana ability (CR 605.1a).
+    let grants = granted_ability_definitions("Creatures you control have \"{T}: Add {R}.\"");
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    let def = &grants[0];
+    assert_eq!(def.cost, Some(AbilityCost::Tap), "reach-guard: {{T}} cost");
+    assert!(
+        !def.activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "{:?}",
+        def.activation_restrictions
+    );
+    assert!(crate::game::mana_abilities::is_mana_ability(def));
+}

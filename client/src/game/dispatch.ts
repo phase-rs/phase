@@ -38,6 +38,16 @@ import { applySpellPaymentPreference } from "./castPaymentMode";
  */
 const SLAM_DEFERRED_SFX = new Set(["DamageDealt", "GroupedDamageFlurry"]);
 
+/** Localized, upper-cased turn-banner headline. The whole template goes
+ *  through i18n so a translated player name never lands inside an English
+ *  sentence. */
+export function turnBannerText(turnPlayerId: number, isYourTurn: boolean): string {
+  const text = isYourTurn
+    ? i18n.t("turnBanner.yourTurn")
+    : i18n.t("turnBanner.opponentTurn", { name: getOpponentDisplayName(turnPlayerId) });
+  return text.toLocaleUpperCase(i18n.language);
+}
+
 /** Step-synced SFX not yet played; cancelled when the tab is hidden mid-animation. */
 const scheduledSfxTimers = new Set<ReturnType<typeof setTimeout>>();
 
@@ -651,18 +661,12 @@ async function processAction(
   // 5. Flash turn banner directly (bypasses animation queue for reliability)
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
-    const myId = getPlayerId();
-    let bannerText: string;
-    if (turnPlayerId === myId) {
-      bannerText = "YOUR TURN";
-    } else {
-      const oppName = getOpponentDisplayName(turnPlayerId);
-      bannerText = `${oppName.toUpperCase()}'S TURN`;
-    }
+    const isYourTurn = turnPlayerId === getPlayerId();
+    const bannerText = turnBannerText(turnPlayerId, isYourTurn);
     // CR 500: per-player turn count (skipped turns excluded). Engine increments
     // turns_taken before TurnStarted fires, so newState already has the value.
     const turnNumber = newState.players[turnPlayerId]?.turns_taken ?? 1;
-    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber, isYourTurn);
   }
 
   // A hidden tab (e.g. a P2P host whose AI keeps acting in the background)
@@ -1060,17 +1064,11 @@ async function processRemoteUpdateInner(
   const turnEvent = [...events].reverse().find((e) => e.type === "TurnStarted");
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
-    const myId = getPlayerId();
-    let bannerText: string;
-    if (turnPlayerId === myId) {
-      bannerText = "YOUR TURN";
-    } else {
-      const oppName = getOpponentDisplayName(turnPlayerId);
-      bannerText = `${oppName.toUpperCase()}'S TURN`;
-    }
+    const isYourTurn = turnPlayerId === getPlayerId();
+    const bannerText = turnBannerText(turnPlayerId, isYourTurn);
     // CR 500: per-player turn count from the post-update state.
     const turnNumber = state.players[turnPlayerId]?.turns_taken ?? 1;
-    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber, isYourTurn);
   }
 
   // A skipped (hidden or catch-up) batch queues no per-event notices: they would

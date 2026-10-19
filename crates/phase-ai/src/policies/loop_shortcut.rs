@@ -70,8 +70,9 @@
 //! name contradicts — so a count crossing nothing crowns nobody, and a `Fixed(n)` declare is real,
 //! committed board progress needing no crown whoever is latched. A reject that ignored the count
 //! would therefore be wrong for the class. The AI candidate generator itself proposes
-//! `Fixed` at the published SUGGESTION against a bounded offer — the count the offer's own
-//! declaration drives, which is at or below the published capacity and is the same integer
+//! `Fixed` at the published SUGGESTION against a bounded offer — the count the offer's
+//! suggestion (`ShortcutDecisionSchema::suggestion`) drives, which is at or below the published
+//! capacity and is the same integer
 //! wherever a producer's two answers coincide — and offers `UntilLethal` only against an offer
 //! that measured no threshold; `Fixed(n)` is additionally reachable through the public
 //! `GameAction` surface. `handle_declare_shortcut` checks the declared count against the
@@ -80,8 +81,9 @@
 //! never checks is the declared shape against the schema's *suggested* `iteration_count` (the
 //! fail-closed pin firewall validates only `template` pins, and it runs against the RESOLVED
 //! template rather than the payload's: the handler shadows it with
-//! `template.or_else(|| offer.declaration.cloned())` before the `match`, so a payload carrying
-//! `None` against an offer that PUBLISHED a declaration reaches the `Some` arm and IS
+//! `template.or_else(|| offer.schema.suggestion(offer.declaration).cloned())` before the
+//! `match`, so a payload carrying `None` against an offer that PUBLISHED a declaration reaches
+//! the `Some` arm and IS
 //! pin-validated by `declaration_conforms`. The firewall is skipped only when the payload carried
 //! none AND the offer published none — the arm that still refuses unless the proposer controls
 //! the recorded loop period).
@@ -222,10 +224,9 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // unbounded half specifically, and it goes RED via `na()` if this arm is moved back
             // below.
             //
-            // Not reachable from today's generator either way (it emits only the published
-            // capacity, and the load seam refuses a capacity of 0), so no
-            // scoring that can occur today is reordered. The arm states the scoring arm's OWN
-            // precondition rather than leaving it to an invariant maintained a crate away.
+            // No engine producer publishes `Fixed(0)`, so the generator's own candidate never
+            // reaches this arm. The arm states the scoring arm's OWN precondition rather than
+            // leaving it to an invariant maintained a crate away.
             (_, IterationCount::Fixed(0)) => PolicyVerdict::reject(PolicyReason::new(
                 "loop_shortcut_bounded_declare_zero_count",
             )),
@@ -311,7 +312,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // DECIDING side's job, and nothing was doing it: a bounded offer always carries
             // `predicted_winner: None`, so the "hands somebody else the win" arm above is
             // structurally unreachable here, and the AI's only bounded candidate is `Fixed` at
-            // the published SUGGESTION — a count the offer's own declaration drives, at or below
+            // the published SUGGESTION — a count the offer's suggestion drives, at or below
             // the published capacity, which the producer carries all the way to the binding
             // seat's own crossing. A self-mill period whose binding seat is the proposer
             // therefore scored CRITICAL for running the proposer's own library to exactly 0.
@@ -324,16 +325,17 @@ impl TacticalPolicy for LoopShortcutPolicy {
             //
             // IT IS THE WHOLE DISCHARGE ON A BOUNDED OFFER. It charges the proposer's life
             // through the DECLARATION this candidate would propose: a `template: None` declare
-            // is "no override of what the offer published", which is how
-            // `handle_declare_shortcut` resolves it, so the pins charged here are the pins the
-            // drive replays. The offer's own declaration is also the OBSERVATION the charge is
+            // resolves to the offer's suggestion, exactly as `handle_declare_shortcut` resolves
+            // it, so the pins charged here are the pins the drive replays. The offer's own declaration is also the OBSERVATION the charge is
             // measured against: the engine derives it from what the proposer answered in the
             // window the period was certified over. A slot the declaration moves onto the
             // proposer is charged to the proposer even when the observed period drained
             // someone else (CR 119.3). One limit is named rather than hidden: the predicate is
             // proposer-only by construction.
             (_, IterationCount::Fixed(n)) => {
-                let declared = template.as_ref().or(declaration.as_ref());
+                let declared = template
+                    .as_ref()
+                    .or(schema.suggestion(declaration.as_ref()));
                 match cycles_to_proposer_elimination(
                     ctx.state,
                     certificate,

@@ -215,13 +215,16 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 152 — GrantAllActivatedAbilitiesOf gains the optional kind selector
+ * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
  *       (Nicol Bolas, Dragon-God's loyalty grant is kind Loyalty on the
  *       activated authority; the loyalty-grant sibling variant is
- *       removed). A v151 peer drops the defaulted field silently and
+ *       removed). A v152 peer drops the defaulted field silently and
  *       over-grants every activated ability of every other planeswalker,
  *       so the exact-match handshake refuses the pairing. P2P moves in
- *       lockstep (wire 134).
+ *       lockstep (wire 135).
+ * 152 — ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
+ *      ShortcutProposal gains leading_aims; a v151 peer drops them. Wire 134 moves
+ *      with it.
  * 151: Populated GameObject.bestow_form carries the removed creature subtypes
  *      as an object instead of a boolean. Old native readers cannot decode it.
  *      Wire 133 moves with it.
@@ -926,8 +929,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 152;
-
+export const PROTOCOL_VERSION = 153;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
