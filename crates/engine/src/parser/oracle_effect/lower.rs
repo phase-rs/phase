@@ -22,8 +22,8 @@ use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_event_context_quantity_with_context, parse_for_each_clause, parse_for_each_clause_expr,
-    parse_for_each_clause_expr_with_context, parse_for_each_short_of_clause_expr,
-    parse_player_attribute_attr_clause, parse_quantity_ref,
+    parse_for_each_clause_expr_with_context, parse_for_each_grouped_clause_expr,
+    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
@@ -5471,6 +5471,12 @@ pub(crate) fn strip_for_each_prefix_with_difference(
                 let offset = text.len() - remainder.len();
                 return (Some(short_of), None, text[offset..].to_string());
             }
+            // CR 107.1 + CR 608.2c: "for each N <things>" repeats once per
+            // complete group of N (Sage of Hours).
+            if let Some(grouped) = parse_for_each_grouped_clause_expr(clause) {
+                let offset = text.len() - remainder.len();
+                return (Some(grouped), None, text[offset..].to_string());
+            }
             let parsed_clause = parsed_comparison
                 .clone()
                 .map(|(qty, difference)| (qty, Some(difference)))
@@ -8195,46 +8201,31 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
     Some(MultiTargetSpec::up_to(max))
 }
 
+/// CR 601.2c + CR 115.1a / CR 115.1c / CR 115.1d: Recover the announced exact
+/// target count from a targeted imperative spell, activated ability, or triggered ability.
 pub(crate) fn extract_exact_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let mut parser = terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" "));
-        let Ok((after_verb, _)) = parser.parse(lower.as_str()) else {
-            continue;
-        };
-        let (count, _) = strip_exact_target_prefix(after_verb)?;
-        return Some(MultiTargetSpec::exact(count));
-    }
-    None
+    let (after_verb, ()) = parse_required_target_count_verb(&lower).ok()?;
+    let (count, _) = strip_exact_target_prefix(after_verb)?;
+    Some(MultiTargetSpec::exact(count))
 }
 
-/// CR 115.1d: Recover bounded multi-target counts from imperative text where the
-/// verb precedes the count phrase — "return one or two target permanent cards
-/// from your graveyard" (Trystan's Command mode 2). The targeted-action parser
-/// strips the count via `parse_target` but does not attach `MultiTargetSpec`.
+/// CR 601.2c + CR 115.1a / CR 115.1c / CR 115.1d: Recover bounded announced
+/// target counts from imperative spell, activated-ability, or triggered-ability text
+/// where the verb precedes the count phrase — "return one or two target permanent
+/// cards from your graveyard" (Trystan's Command mode 2), or "put one, two, or three
+/// target creature cards" (Aberrant Return). The targeted-action parser strips the
+/// count via `parse_target` but does not attach `MultiTargetSpec`.
 pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let Ok((after_verb, _)) =
-            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
-        else {
-            continue;
-        };
-        for (prefix, min, max) in [
-            ("one or two ", 1usize, 2usize),
-            ("one, two, or three ", 1, 3),
-        ] {
-            if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(after_verb) {
-                if tag::<_, _, OracleError<'_>>("target ")
-                    .parse(after_prefix)
-                    .is_ok()
-                {
-                    return Some(MultiTargetSpec::fixed(min, max));
-                }
-            }
-        }
-    }
-    None
+    let (_, (_, spec, _)) = (
+        parse_required_target_count_verb,
+        parse_bounded_target_cardinality,
+        tag::<_, _, OracleError<'_>>(" target "),
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    Some(spec)
 }
 
 /// CR 115.1d: Recover "up to N target …" from imperative text where the verb
@@ -8604,9 +8595,40 @@ pub(super) fn parse_each_of_up_to_damage_target<'a>(
 /// UpTo(ObjectCount), min_count: 0 }` by `parse_one_or_more_sacrifice` — not a
 /// `MultiTargetSpec`. Routing it through this list would strip the quantifier
 /// and collapse the count to a fixed 1 (issue #458).
+/// `put` is intentionally absent; see `REQUIRED_TARGET_COUNT_ONLY_VERBS`.
 const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
+
+/// CR 601.2c + CR 115.1a: Verbs admitted ONLY to the required announced-count
+/// extractors (`extract_exact_target_multi_target`,
+/// `extract_bounded_target_multi_target`). "put" stays out of
+/// `MULTI_TARGET_VERBS` because that list also drives `strip_any_number_quantifier`
+/// (and through it `extract_verb_up_to_multi_target`), which strips an UNGUARDED
+/// "up to N" / "any number of" — a resource or resolution-choice count on "put"
+/// ("put up to three +1/+1 counters …", "put any number of land cards from your
+/// hand …"). Both required-count extractors demand the "target" article directly
+/// after the count, so "put two +1/+1 counters on target creature" never reads as
+/// a target count. The optional "put up to N target …" form is not admitted: put
+/// already carries that cardinality on its own channel (`ChangeZone.up_to` /
+/// `choice_count` from `parse_put_ast`).
+const REQUIRED_TARGET_COUNT_ONLY_VERBS: &[&str] = &["put"];
+
+/// CR 601.2c: the imperative verb (and its trailing space) opening a clause whose
+/// required announced target count is recovered post-parse — every
+/// `MULTI_TARGET_VERBS` verb plus `REQUIRED_TARGET_COUNT_ONLY_VERBS`.
+fn parse_required_target_count_verb(input: &str) -> OracleResult<'_, ()> {
+    for &verb in MULTI_TARGET_VERBS
+        .iter()
+        .chain(REQUIRED_TARGET_COUNT_ONLY_VERBS)
+    {
+        if let Ok((rest, _)) = terminated(tag::<_, _, OracleError<'_>>(verb), tag(" ")).parse(input)
+        {
+            return Ok((rest, ()));
+        }
+    }
+    Err(oracle_err(input))
+}
 
 /// CR 115.1d + CR 601.2d: The bounded target-cardinality lists. The stem carries
 /// the bare `" or "` that enumerates a target COUNT, never a disjunction of two
@@ -8616,7 +8638,8 @@ const MULTI_TARGET_VERBS: &[&str] = &[
 /// noun it needs off the stem (`" targets"`, `" target "`, `" target"`) rather
 /// than re-spelling the list, so a future cardinality ("one, two, three, or
 /// four …") is added here once. Consumers: `strip_bounded_targets_placeholder`,
-/// `strip_bounded_target_prefix`, `subject::…each-of`, `oracle_target`'s
+/// `strip_bounded_target_prefix`, `extract_bounded_target_multi_target`,
+/// `subject::…each-of`, `oracle_target`'s
 /// bare-count target arm, and the binary-choice splitter's divide/distribute
 /// bail (which keys on this cardinality axis — shared by CR 601.2d's "damage or
 /// counters" halves — rather than on a distribution verb).
@@ -14513,6 +14536,35 @@ mod tests {
         assert_eq!(
             extract_put_counter_multi_target("put a +1/+1 counter on each of those creatures"),
             None
+        );
+    }
+
+    #[test]
+    fn extract_required_target_count_admits_put_only_with_target_article() {
+        assert_eq!(
+            super::extract_exact_target_multi_target(
+                "put two target lands on top of their owners' libraries"
+            ),
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+        );
+        let bounded = "put one, two, or three target creature cards from graveyards onto the battlefield under your control";
+        assert_eq!(
+            super::extract_bounded_target_multi_target(bounded),
+            Some(MultiTargetSpec::fixed(1, 3))
+        );
+        assert_eq!(super::extract_exact_target_multi_target(bounded), None);
+        for text in [
+            "put two +1/+1 counters on target creature",
+            "put two land cards from your hand onto the battlefield",
+        ] {
+            assert_eq!(super::extract_exact_target_multi_target(text), None);
+            assert_eq!(super::extract_bounded_target_multi_target(text), None);
+        }
+        assert_eq!(
+            super::extract_bounded_target_multi_target(
+                "return one or two target permanent cards from your graveyard to your hand"
+            ),
+            Some(MultiTargetSpec::fixed(1, 2))
         );
     }
 

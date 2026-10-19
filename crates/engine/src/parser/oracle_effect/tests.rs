@@ -8306,7 +8306,9 @@ fn whole_hand_discard_cost() -> AbilityCost {
     AbilityCost::Discard {
         count: QuantityExpr::Ref {
             qty: QuantityRef::HandSize {
-                player: PlayerScope::ParentObjectTargetController,
+                player: PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                },
             },
         },
         filter: None,
@@ -23873,6 +23875,311 @@ fn return_one_or_two_target_permanents_from_graveyard_is_multi_targeted() {
         clause.effect
     );
     assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)));
+}
+
+/// CR 601.2c + CR 115.1a: Aberrant Return's "Put one, two, or three target
+/// creature cards from graveyards onto the battlefield under your control"
+/// announces one to three targets. SHAPE: asserts the `MultiTargetSpec` through
+/// both seams that recover it (the clause fixup and the chain assembly). The
+/// runtime proof is `put_target_count_entry_counters.rs`.
+///
+/// `fixed(1, 3)`, not `exact(1)`: "one, two, or three" opens with "one" but the
+/// exact-count grammar needs "one target", so the bounded recovery must win.
+#[test]
+fn put_one_two_or_three_target_creature_cards_is_bounded_multi_target() {
+    let text = "Put one, two, or three target creature cards from graveyards onto the battlefield under your control.";
+
+    let clause = parse_effect_clause(text, &mut ParseContext::default());
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "reach guard: expected a battlefield ChangeZone, got {:?}",
+        clause.effect
+    );
+    assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "reach guard: expected a battlefield ChangeZone, got {:?}",
+        def.effect
+    );
+    assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+}
+
+/// CR 601.2c + CR 115.1a: "Put two target <permanents> on top of their owners'
+/// libraries" (Rebuking Ceremony, Plow Under) announces exactly two targets.
+/// SHAPE; the runtime proof for Rebuking Ceremony is
+/// `put_target_count_entry_counters.rs`. The destination assertion is only a
+/// reach guard that the clause parsed to a library move (the separate
+/// "libraries" plural routing defect is not asserted here).
+///
+/// Paired control on the same entry points: a resource count on a target
+/// ("Put two +1/+1 counters on target creature") is not an announced target
+/// count and must stay without a `MultiTargetSpec`.
+#[test]
+fn put_two_target_permanents_is_exact_multi_target() {
+    let two = MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 });
+    for text in [
+        "Put two target artifacts on top of their owners' libraries.",
+        "Put two target lands on top of their owners' libraries.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    ..
+                }
+            ),
+            "{text:?}: reach guard: expected a library ChangeZone, got {:?}",
+            def.effect
+        );
+        assert_eq!(def.multi_target, Some(two.clone()), "{text:?}");
+    }
+
+    let counters = "Put two +1/+1 counters on target creature.";
+    let def = parse_effect_chain(counters, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::PutCounter { .. }),
+        "reach guard: the control parses to PutCounter, got {:?}",
+        def.effect
+    );
+    assert_eq!(def.multi_target, None, "{counters:?}");
+    let clause = parse_effect_clause(counters, &mut ParseContext::default());
+    assert!(matches!(clause.effect, Effect::PutCounter { .. }));
+    assert_eq!(clause.multi_target, None, "{counters:?}");
+}
+
+/// The entry counters of a battlefield mover (single or mass), `None` for any
+/// other effect.
+fn battlefield_mover_entry_counters(
+    def: &AbilityDefinition,
+) -> Option<&Vec<(CounterType, QuantityExpr)>> {
+    match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            enter_with_counters,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            destination: Zone::Battlefield,
+            enter_with_counters,
+            ..
+        } => Some(enter_with_counters),
+        _ => None,
+    }
+}
+
+/// A declined entry-counter rider stays represented in the chain: as an explicit
+/// `Unimplemented` gap that names the rider, or as a gated entry counter on a
+/// battlefield `ChangeZone` (`conditional_enter_with_counters`). An empty
+/// `enter_with_counters` alone cannot tell a declined rider from a dropped one.
+fn entry_rider_remains_represented(defs: &[&AbilityDefinition]) -> bool {
+    defs.iter().any(|def| match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            conditional_enter_with_counters,
+            ..
+        } => !conditional_enter_with_counters.is_empty(),
+        effect => effect
+            .unimplemented_description()
+            .is_some_and(|text| text.to_lowercase().contains("enters with")),
+    })
+}
+
+/// Like `chain_definitions`, but also descends into a delayed trigger's effect
+/// (Semester's End returns its creatures from a delayed trigger).
+fn chain_definitions_through_delayed(abilities: &[AbilityDefinition]) -> Vec<&AbilityDefinition> {
+    fn walk<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(def);
+        if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+            walk(effect, out);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(else_branch) = def.else_ability.as_deref() {
+            walk(else_branch, out);
+        }
+    }
+    let mut out = Vec::new();
+    for ability in abilities {
+        walk(ability, &mut out);
+    }
+    out
+}
+
+/// SHAPE: CR 614.12 + CR 122.6 + CR 608.2c. Aberrant Return (verbatim): the
+/// unconditional "Each of them enters with an additional -1/-1 counter on it"
+/// rider is the battlefield mover's own entry counters, with the announced
+/// 1..=3 target count on the same mover. No `Unimplemented` clause and no
+/// dangling post-move `PutCounter { ParentTarget }` remains. The runtime proof
+/// is `put_target_count_entry_counters.rs`.
+#[test]
+fn aberrant_return_rider_folds_into_mover_entry_counters() {
+    let abilities = spell_chain_definitions(
+        "Put one, two, or three target creature cards from graveyards onto the battlefield under your control. Each of them enters with an additional -1/-1 counter on it.",
+    );
+    let defs = chain_definitions(&abilities);
+    let mover = defs
+        .iter()
+        .find(|def| battlefield_mover_entry_counters(def).is_some())
+        .unwrap_or_else(|| panic!("reach guard: a battlefield mover parses, got {abilities:?}"));
+    assert_eq!(
+        battlefield_mover_entry_counters(mover),
+        Some(&vec![(
+            CounterType::Minus1Minus1,
+            QuantityExpr::Fixed { value: 1 }
+        )]),
+        "got {abilities:?}"
+    );
+    assert_eq!(mover.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+    assert!(
+        defs.iter()
+            .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
+        "no clause may stay unimplemented, got {abilities:?}"
+    );
+    assert!(
+        !has_parent_target_put(&defs),
+        "no post-move PutCounter, got {abilities:?}"
+    );
+}
+
+/// SHAPE: CR 614.12 + CR 122.6. The same carrier serves the singular and
+/// counted forms of the unconditional rider after any battlefield return:
+/// "It enters with an additional +1/+1 counter on it" and "It enters with two
+/// additional +1/+1 counters on it" patch the mover's entry counters.
+#[test]
+fn unconditional_singular_entry_rider_after_return_folds() {
+    for (text, count) in [
+        (
+            "Return target creature card from your graveyard to the battlefield. It enters with an additional +1/+1 counter on it.",
+            1,
+        ),
+        (
+            "Return target creature card from your graveyard to the battlefield. It enters with two additional +1/+1 counters on it.",
+            2,
+        ),
+    ] {
+        let abilities = spell_chain_definitions(text);
+        let defs = chain_definitions(&abilities);
+        let mover = defs
+            .iter()
+            .find(|def| battlefield_mover_entry_counters(def).is_some())
+            .unwrap_or_else(|| panic!("{text:?}: reach guard: a battlefield mover parses"));
+        assert_eq!(
+            battlefield_mover_entry_counters(mover),
+            Some(&vec![(
+                CounterType::Plus1Plus1,
+                QuantityExpr::Fixed { value: count }
+            )]),
+            "{text:?}: got {abilities:?}"
+        );
+        assert!(
+            defs.iter()
+                .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
+            "{text:?}: no clause may stay unimplemented, got {abilities:?}"
+        );
+        assert!(
+            !has_parent_target_put(&defs),
+            "{text:?}: no post-move PutCounter, got {abilities:?}"
+        );
+    }
+}
+
+/// CR 614.12 + CR 608.2c: riders that are NOT an unconditional whole-sentence
+/// "enters with additional counters" must not patch the battlefield mover.
+/// Each row pairs the emptiness assertion with a positive reach guard (the
+/// battlefield mover parsed), so an unparsed input cannot pass vacuously.
+///
+/// - What Must Be Done (verbatim): trailing "if it's a creature" gate.
+/// - A leading "If it's an artifact, ..." gate.
+/// - A trailing "for each ..." quantity.
+/// - Semester's End (verbatim): a delayed mass return whose rider is gated per
+///   card type ("... if it's a creature and ... if it's a planeswalker").
+/// - A non-battlefield producer (exile): the rider stays an explicit gap.
+#[test]
+fn entry_rider_hostile_shapes_do_not_patch_the_mover() {
+    let battlefield_rows = [
+        (
+            "what_must_be_done",
+            "Return target historic permanent card from your graveyard to the battlefield. It enters with two additional +1/+1 counters on it if it's a creature.",
+        ),
+        (
+            "leading_gate",
+            "Return target artifact card from your graveyard to the battlefield. If it's an artifact, it enters with an additional +1/+1 counter on it.",
+        ),
+        (
+            "trailing_quantity",
+            "Return target creature card from your graveyard to the battlefield. It enters with an additional +1/+1 counter on it for each creature you control.",
+        ),
+        (
+            "semesters_end",
+            "Exile any number of target creatures and/or planeswalkers you control. At the beginning of the next end step, return each of them to the battlefield under its owner's control. Each of them enters with an additional +1/+1 counter on it if it's a creature and an additional loyalty counter on it if it's a planeswalker.",
+        ),
+    ];
+    for (label, text) in battlefield_rows {
+        let abilities = spell_chain_definitions(text);
+        let defs = chain_definitions_through_delayed(&abilities);
+        let movers: Vec<_> = defs
+            .iter()
+            .filter_map(|def| battlefield_mover_entry_counters(def))
+            .collect();
+        assert!(
+            !movers.is_empty(),
+            "{label}: reach guard: a battlefield mover parses, got {abilities:?}"
+        );
+        assert!(
+            movers.iter().all(|counters| counters.is_empty()),
+            "{label}: a declined rider must not patch the mover, got {abilities:?}"
+        );
+        assert!(
+            entry_rider_remains_represented(&defs),
+            "{label}: a declined rider stays represented as a gap or a gated entry counter, got {abilities:?}"
+        );
+    }
+
+    let exile = spell_chain_definitions(
+        "Exile target creature card from your graveyard. It enters with an additional +1/+1 counter on it.",
+    );
+    let exile_defs = chain_definitions(&exile);
+    let exile_movers: Vec<_> = exile_defs
+        .iter()
+        .filter_map(|def| match def.effect.as_ref() {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                enter_with_counters,
+                ..
+            } => Some(enter_with_counters),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !exile_movers.is_empty(),
+        "exile: reach guard: the exile mover parses, got {exile:?}"
+    );
+    assert!(
+        exile_movers.iter().all(|counters| counters.is_empty()),
+        "exile: the rider must not patch a non-battlefield mover, got {exile:?}"
+    );
+    assert!(
+        has_unimplemented_rider(&exile_defs),
+        "exile: the rider stays an explicit gap, got {exile:?}"
+    );
+    assert!(!has_parent_target_put(&exile_defs));
 }
 
 #[test]
@@ -88678,6 +88985,410 @@ fn subject_creatures_not_of_chosen_type_pumps_all_excluding_chosen_type() {
     assert_eq!(pump.duration, Some(Duration::UntilEndOfTurn));
 }
 
+/// The `conditional_enter_with_counters` slot of a battlefield `ChangeZone` head.
+fn battlefield_move_entry_gate(
+    def: &AbilityDefinition,
+) -> &[(TargetFilter, CounterType, QuantityExpr)] {
+    match def.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            conditional_enter_with_counters,
+            ..
+        } => conditional_enter_with_counters,
+        other => panic!("head must be a battlefield ChangeZone, got {other:#?}"),
+    }
+}
+
+fn typed_entry_gate(
+    type_filter: TypeFilter,
+    count: i32,
+) -> Vec<(TargetFilter, CounterType, QuantityExpr)> {
+    vec![(
+        TargetFilter::Typed(TypedFilter::new(type_filter)),
+        CounterType::Plus1Plus1,
+        QuantityExpr::Fixed { value: count },
+    )]
+}
+
+/// CR 614.1c + CR 614.12 (V-L1): What Must Be Done mode 2's trailing anaphoric
+/// rider "It enters with two additional +1/+1 counters on it if it's a creature"
+/// lowers to the battlefield move's entry gate, not a later `PutCounter`.
+#[test]
+fn what_must_be_done_rider_lowers_to_entry_gate() {
+    let def = parse_effect_chain(
+        "Return target historic permanent card from your graveyard to the battlefield. \
+         It enters with two additional +1/+1 counters on it if it's a creature.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        battlefield_move_entry_gate(&def),
+        typed_entry_gate(TypeFilter::Creature, 2).as_slice()
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "the rider must be folded: {def:#?}"
+    );
+}
+
+/// CR 614.1c + CR 614.12 (V-L2): the leading anaphoric voice "If it's an
+/// artifact, it enters with an additional +1/+1 counter on it" lowers the same way.
+#[test]
+fn anaphoric_leading_voice_lowers_to_entry_gate() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield. \
+         If it's an artifact, it enters with an additional +1/+1 counter on it.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        battlefield_move_entry_gate(&def),
+        typed_entry_gate(TypeFilter::Artifact, 1).as_slice()
+    );
+    assert!(def.sub_ability.is_none(), "{def:#?}");
+}
+
+/// CR 608.2c (V-L3): "Put two +1/+1 counters on it if it's a creature" is a
+/// later instruction, not an entry replacement — it keeps its `PutCounter` sub
+/// and the move's entry gate stays empty.
+#[test]
+fn put_counter_if_its_a_type_stays_later_instruction() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield. \
+         Put two +1/+1 counters on it if it's a creature.",
+        AbilityKind::Spell,
+    );
+    assert!(battlefield_move_entry_gate(&def).is_empty(), "{def:#?}");
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the later instruction survives");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "{sub:#?}"
+    );
+    // Reach guard: the "if it's a creature" clause survives as the later
+    // instruction's type gate, so the negative check below cannot pass by the
+    // clause being dropped.
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![CoreType::Creature],
+            additional_filter: None,
+            subtype_filter: None,
+        }),
+        "{sub:#?}"
+    );
+    assert!(
+        !matches!(
+            sub.condition,
+            Some(AbilityCondition::ZoneChangedThisWay { .. })
+        ),
+        "{sub:#?}"
+    );
+}
+
+/// CR 614.1c + CR 614.12 (V-L4): a multi-type anaphoric gate ("if it's an
+/// artifact or creature") folds into the entry as an any-of type gate, so the
+/// counters are part of the entry and no later instruction survives.
+#[test]
+fn multi_type_entry_rider_folds_into_any_of_gate() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield. \
+         It enters with two additional +1/+1 counters on it if it's an artifact or creature.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        battlefield_move_entry_gate(&def),
+        typed_entry_gate(
+            TypeFilter::AnyOf(vec![TypeFilter::Artifact, TypeFilter::Creature]),
+            2
+        )
+        .as_slice(),
+        "{def:#?}"
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "the rider must be folded: {def:#?}"
+    );
+}
+
+/// CR 614.1c + CR 614.12 (V19b): the parse audit treats a folded multi-type
+/// anaphoric rider as represented. Synthetic What Must Be Done with Release Juno's
+/// rider widened to "if it's an artifact or creature" folds the rider into the
+/// battlefield move's any-of entry gate, so no clause is reported swallowed. A
+/// filter-less pronoun rider in the same unit ("If it enters this way, draw a
+/// card.") is not represented and stays reported as `Condition_If`. Verbatim What
+/// Must Be Done (single type) is the positive control.
+#[test]
+fn multi_type_entry_rider_is_represented_not_swallowed() {
+    /// Synthetic: What Must Be Done with Release Juno's rider widened to two types.
+    const MULTI_TYPE_RELEASE_JUNO: &str = "Choose one \u{2014}\n\
+         \u{2022} Let the World Burn \u{2014} Destroy all artifacts and creatures.\n\
+         \u{2022} Release Juno \u{2014} Return target historic permanent card from your graveyard \
+         to the battlefield. It enters with two additional +1/+1 counters on it if it's an artifact \
+         or creature.";
+    /// What Must Be Done {3}{W}{W} Sorcery — verbatim Oracle text.
+    const WHAT_MUST_BE_DONE: &str = "Choose one \u{2014}\n\
+         \u{2022} Let the World Burn \u{2014} Destroy all artifacts and creatures.\n\
+         \u{2022} Release Juno \u{2014} Return target historic permanent card from your graveyard \
+         to the battlefield. It enters with two additional +1/+1 counters on it if it's a creature. \
+         (Artifacts, legendaries, and Sagas are historic.)";
+    let parse = |text: &str| {
+        parse_oracle_text(
+            text,
+            "What Must Be Done",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        )
+    };
+    let swallowed = |result: &ParsedAbilities| -> Vec<String> {
+        result
+            .parse_warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause { detector, .. } => Some(detector.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let release_juno = |result: &ParsedAbilities| -> AbilityDefinition {
+        result
+            .abilities
+            .iter()
+            .find(|ability| {
+                matches!(
+                    ability.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("Release Juno mode must parse: {:#?}", result.abilities))
+    };
+    let any_of_gate = typed_entry_gate(
+        TypeFilter::AnyOf(vec![TypeFilter::Artifact, TypeFilter::Creature]),
+        2,
+    );
+
+    // (i) The folded multi-type rider is represented: nothing is swallowed.
+    let result = parse(MULTI_TYPE_RELEASE_JUNO);
+    let mode = release_juno(&result);
+    assert_eq!(
+        battlefield_move_entry_gate(&mode),
+        any_of_gate.as_slice(),
+        "reach: the rider opens the entry-gate slot: {mode:#?}"
+    );
+    assert!(
+        mode.sub_ability.is_none(),
+        "the rider must be folded: {mode:#?}"
+    );
+    assert_eq!(
+        swallowed(&result),
+        Vec::<String>::new(),
+        "{:?}",
+        result.parse_warnings
+    );
+
+    // (ii) A pronoun rider sharing the unit stays visible.
+    let result = parse(&format!(
+        "{MULTI_TYPE_RELEASE_JUNO} If it enters this way, draw a card."
+    ));
+    assert_eq!(
+        battlefield_move_entry_gate(&release_juno(&result)),
+        any_of_gate.as_slice(),
+        "reach: the folded rider still opens the slot"
+    );
+    assert!(
+        swallowed(&result)
+            .iter()
+            .any(|detector| detector == "Condition_If"),
+        "the unrepresented pronoun rider must stay reported: {:?}",
+        result.parse_warnings
+    );
+
+    // (iii) Verbatim What Must Be Done: the single-type rider is represented.
+    let result = parse(WHAT_MUST_BE_DONE);
+    assert_eq!(
+        battlefield_move_entry_gate(&release_juno(&result)),
+        typed_entry_gate(TypeFilter::Creature, 2).as_slice()
+    );
+    assert_eq!(
+        swallowed(&result),
+        Vec::<String>::new(),
+        "{:?}",
+        result.parse_warnings
+    );
+}
+
+/// CR 614.1c (V-L4b): after a token creation (not a battlefield move) the
+/// anaphoric rider is not converted — the token path is untouched.
+#[test]
+fn anaphoric_rider_after_token_is_not_converted() {
+    let def = parse_effect_chain(
+        "Create a 1/1 white Ally creature token. \
+         It enters with an additional +1/+1 counter on it if it's a creature.",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the rider stays a sub-ability");
+    assert!(
+        !matches!(
+            sub.condition,
+            Some(AbilityCondition::ZoneChangedThisWay { .. })
+        ),
+        "{sub:#?}"
+    );
+}
+
+/// CR 614.1c + CR 608.2c (V-L4c): the conversion's parent precondition — the
+/// chain's latest clause is a battlefield `ChangeZone` with no compound sub of
+/// its own, the shape `fold_enters_this_way_counter_rider` folds under.
+#[test]
+fn previous_clause_requires_bare_battlefield_move() {
+    use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
+    use crate::parser::oracle_ir::effect_chain::ClauseIrBuilder;
+
+    let battlefield_move = || Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: TargetFilter::Any,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+    };
+    let clauses_with = |parsed| {
+        let mut builder = ClauseIrBuilder::new("");
+        builder
+            .clause(
+                "",
+                parsed,
+                Some(ClauseBoundary::Sentence),
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+        builder.finish()
+    };
+
+    assert!(previous_clause_moves_to_battlefield(&clauses_with(
+        parsed_clause(battlefield_move())
+    )));
+
+    let mut compound = parsed_clause(battlefield_move());
+    compound.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )));
+    assert!(!previous_clause_moves_to_battlefield(&clauses_with(
+        compound
+    )));
+
+    let token = parse_effect_chain(
+        "Create a 1/1 white Ally creature token.",
+        AbilityKind::Spell,
+    );
+    assert!(!previous_clause_moves_to_battlefield(&clauses_with(
+        parsed_clause(*token.effect)
+    )));
+    assert!(!previous_clause_moves_to_battlefield(&[]));
+}
+
+/// CR 614.1c + CR 122.1 (V-L5): the shared rider grammar accepts both subjects,
+/// both count shapes and both P/T counter kinds, and rejects other verbs,
+/// counter kinds and entry modifiers. The producer accepts the rider with and
+/// without its final period.
+#[test]
+fn moved_object_enters_with_counters_combinator() {
+    let parse = |text: &str| {
+        all_consuming(parse_moved_object_enters_with_counters)
+            .parse(text)
+            .ok()
+            .map(|(_, parsed)| parsed)
+    };
+    assert_eq!(
+        parse("it enters with an additional +1/+1 counter on it"),
+        Some((CounterType::Plus1Plus1, 1))
+    );
+    assert_eq!(
+        parse("that creature enters with two additional -1/-1 counters on it"),
+        Some((CounterType::Minus1Minus1, 2))
+    );
+    assert_eq!(parse("put two +1/+1 counters on it"), None);
+    assert_eq!(
+        parse("it enters with an additional loyalty counter on it"),
+        None
+    );
+    assert_eq!(parse("it enters tapped"), None);
+
+    // The distributive plural subject (Aberrant Return) is part of the rider grammar,
+    // but the anaphoric "if it's a <type>" gate admits only the singular subjects.
+    assert_eq!(
+        try_parse_enters_this_way_additional_counter(
+            "each of them enters with an additional -1/-1 counter on it."
+        ),
+        Some(Effect::PutCounter {
+            counter_type: CounterType::Minus1Minus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        })
+    );
+    let creature = AbilityCondition::RevealedHasCardType {
+        card_types: vec![CoreType::Creature],
+        additional_filter: None,
+        subtype_filter: None,
+    };
+    assert!(conditions::anaphoric_entry_counter_gate(
+        &creature,
+        "It enters with an additional +1/+1 counter on it."
+    )
+    .is_some());
+    assert_eq!(
+        conditions::anaphoric_entry_counter_gate(
+            &creature,
+            "Each of them enters with an additional +1/+1 counter on it."
+        ),
+        None
+    );
+
+    for text in [
+        "it enters with two additional +1/+1 counters on it",
+        "it enters with two additional +1/+1 counters on it.",
+    ] {
+        assert_eq!(
+            try_parse_enters_this_way_additional_counter(text),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTarget,
+            }),
+            "{text}"
+        );
+    }
+}
+
 // ── #9658: producer-bound entry-counter riders (CR 608.2c + CR 614.1c) ──────
 
 /// Every ability definition reachable from `def` (sub and else branches).
@@ -88831,12 +89542,13 @@ fn entry_counter_riders_are_producer_bound() {
     }
 }
 
-/// CR 608.2c + CR 614.1c: What Must Be Done's second mode (verbatim, MTGJSON).
-/// The rider is gated on a trailing "if it's a creature" (a card-type
-/// condition, not "enters this way"), so the battlefield-mover arm refuses it
-/// and the rider stays an explicit gap. It is never a post-move
-/// `PutCounter { ParentTarget }`, which would put counters after the entry
-/// rather than as the permanent enters.
+/// CR 608.2c + CR 614.1c + CR 614.12: What Must Be Done's second mode (verbatim,
+/// MTGJSON). The rider's trailing "if it's a creature" gate is converted to the
+/// entry-this-way gate after the battlefield move
+/// (`conditions::anaphoric_entry_counter_gate`), so the battlefield-mover arm
+/// reads it and it folds into the move's entry counters. It is never a
+/// post-move `PutCounter { ParentTarget }`, which would put counters after the
+/// entry rather than as the permanent enters.
 #[test]
 fn what_must_be_done_rider_is_not_a_post_move_put() {
     let abilities = spell_chain_definitions(
@@ -88848,10 +89560,12 @@ fn what_must_be_done_rider_is_not_a_post_move_put() {
             &*def.effect,
             Effect::ChangeZone {
                 destination: Zone::Battlefield,
+                conditional_enter_with_counters,
                 ..
-            }
+            } if conditional_enter_with_counters.as_slice()
+                == typed_entry_gate(TypeFilter::Creature, 2).as_slice()
         )),
-        "reach guard: the battlefield ChangeZone exists, got {abilities:?}"
+        "the rider folds into the battlefield ChangeZone's entry gate, got {abilities:?}"
     );
     assert!(
         !has_parent_target_put(&defs),
@@ -88866,7 +89580,7 @@ fn what_must_be_done_rider_is_not_a_post_move_put() {
                 )),
         "no RevealedHasCardType-gated put, got {abilities:?}"
     );
-    assert!(has_unimplemented_rider(&defs), "got {abilities:?}");
+    assert!(!has_unimplemented_rider(&defs), "got {abilities:?}");
 }
 
 /// CR 608.2c + CR 614.1c: the cast-this-way entry rider is read only under a
@@ -88979,5 +89693,521 @@ fn cast_permission_rider_requires_the_lingering_shape() {
             has_unimplemented_rider(&defs),
             "{text:?}: the rider stays an explicit gap, got {abilities:?}"
         );
+    }
+}
+
+/// CR 601.2c + CR 115.1 + CR 608.2c + CR 608.2d: the "target opponent
+/// `<player-action>`" bare-`and` clause boundary (Unit 1) and the
+/// targeted-optional representation for "target opponent may draw …" (Unit 2).
+/// SHAPE tests: they assert the parsed clause structure that the runtime
+/// cast/activate discriminators (`tests/integration/tataru_taru.rs`) then drive
+/// through the real pipeline.
+mod targeted_opponent_optional_tests {
+    use super::*;
+    use crate::parser::oracle_effect::sequence::starts_bare_and_clause;
+
+    /// CR 115.1: `"target opponent"` lowers to a type-less `Typed` filter whose
+    /// only distinguishing property is `controller: Opponent` (one announced
+    /// player), matching the mandatory sibling's shape.
+    fn is_targeted_opponent(filter: &TargetFilter) -> bool {
+        matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && tf.controller == Some(ControllerRef::Opponent)
+        )
+    }
+
+    fn changes_zone_execute(parsed: &crate::parser::oracle::ParsedAbilities) -> &AbilityDefinition {
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("a ChangesZone (enters) trigger");
+        trigger.execute.as_deref().expect("trigger execute")
+    }
+
+    /// V1 (SHAPE) — CR 601.2c + CR 115.1 + CR 608.2c: a bare-`" and "` conjunct
+    /// headed by `target opponent` + a player-action predicate (third-person verb
+    /// or the optional `may draw` modal) is a clause boundary.
+    ///
+    /// Discriminators: the new arm must return true for the third-person verb and
+    /// the may-modal, and must stay false for a target-opponent noun phrase with
+    /// no predicate (`"target opponent"`), a sibling subject (`"that opponent"`),
+    /// and a set-scoped noun phrase (`"all other creatures"`). The paired positive
+    /// is the pre-existing continuous arm (`"target opponent gains 3 life"`),
+    /// proving the fixture reaches the splitter rather than short-circuiting.
+    #[test]
+    fn targeted_opponent_player_action_conjunct_is_a_bare_and_clause_boundary() {
+        // Paired positive reach guard: the pre-existing continuous arm still fires.
+        assert!(
+            starts_bare_and_clause("target opponent gains 3 life"),
+            "reach-guard: the continuous sibling arm must still split"
+        );
+        // The new third-person player-action arm.
+        assert!(starts_bare_and_clause("target opponent discards two cards"));
+        assert!(starts_bare_and_clause(
+            "target opponent discards their hand"
+        ));
+        assert!(starts_bare_and_clause("target opponent draws a card"));
+        // The may-axis (optional modal) arm.
+        assert!(starts_bare_and_clause("target opponent may draw a card"));
+        // Hostile negatives: no predicate, a different subject, a set-scoped noun.
+        assert!(!starts_bare_and_clause("target opponent"));
+        assert!(!starts_bare_and_clause("that opponent discards a card"));
+        assert!(!starts_bare_and_clause("all other creatures"));
+    }
+
+    /// V2 (SHAPE) — CR 608.2c: the targeted-optional conjunct splits off as its
+    /// own clause, while a compound-subject-each body stays one clause.
+    #[test]
+    fn targeted_opponent_optional_conjunct_splits_the_sequence() {
+        let chunks = split_clause_sequence("you draw a card and target opponent may draw a card");
+        assert_eq!(
+            chunks.len(),
+            2,
+            "Tataru's clause must split into its two instructions: {chunks:?}"
+        );
+
+        // Hostile: the compound-subject-each body is ONE instruction.
+        let compound = split_clause_sequence("you and target opponent each draw a card");
+        assert_eq!(
+            compound.len(),
+            1,
+            "a compound-subject-each body must stay one clause: {compound:?}"
+        );
+    }
+
+    /// V3 (SHAPE) — CR 608.2d + CR 115.1: Tataru Taru's ETB lowers with no
+    /// `Unimplemented`; the controller draws, and the second clause is a TARGETED
+    /// optional (`Draw{Typed{Opponent}}`, `optional: true`) whose head declares the
+    /// announced player group and names it as the may's actor through
+    /// `optional_player` (the engine's actor authority), with NO `player_scope` —
+    /// the chain's controller must not be rebound to the opponent's seat.
+    #[test]
+    fn tataru_etb_lowers_to_a_targeted_optional_draw() {
+        const TATARU: &str =
+            "When Tataru Taru enters, you draw a card and target opponent may draw a card.";
+        let parsed = parse_named_face(TATARU, "Tataru Taru", &["Creature"]);
+        let execute = changes_zone_execute(&parsed);
+
+        // Reach guard: every clause lowered (no `Unimplemented`).
+        assert!(
+            chain_nodes(execute)
+                .iter()
+                .all(|node| unimplemented_name(node).is_none()),
+            "Tataru's ETB must lower every clause: {execute:#?}"
+        );
+
+        // The controller's own draw is the head, mandatory.
+        let Effect::Draw { count, target } = &*execute.effect else {
+            panic!(
+                "expected the controller Draw head, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(*target, TargetFilter::Controller);
+        assert!(!execute.optional, "the controller's draw is mandatory");
+
+        // The targeted optional half.
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("the targeted optional half");
+        let Effect::Draw { count, target } = &*sub.effect else {
+            panic!("expected the targeted Draw, got {:?}", sub.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert!(
+            is_targeted_opponent(target),
+            "the optional half must target a single opponent, got {target:?}"
+        );
+        assert!(sub.optional, "CR 608.2d: the opponent's draw is optional");
+        assert!(
+            sub.declares_chosen_group.is_some(),
+            "the targeted-optional head must declare the announced player group"
+        );
+        assert_eq!(
+            sub.optional_player,
+            Some(TargetFilter::DeclaredPlayer {
+                group: sub.declares_chosen_group.expect("declared group"),
+            }),
+            "CR 608.2d: the declared target opponent announces the may"
+        );
+        assert_eq!(
+            sub.player_scope, None,
+            "the chain's controller must NOT be rebound to the opponent's seat"
+        );
+
+        // Sibling: Mindculling's mandatory pair lowers to TWO independent draws /
+        // discards (same targeted family, no optional).
+        let mindculling = parse_named_face(
+            "You draw two cards and target opponent discards two cards.",
+            "Mindculling",
+            &["Sorcery"],
+        );
+        let root = mindculling
+            .abilities
+            .first()
+            .expect("Mindculling's spell chain");
+        assert!(matches!(
+            &*root.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            }
+        ));
+        let discard = root
+            .sub_ability
+            .as_deref()
+            .expect("Mindculling's targeted discard");
+        assert!(
+            matches!(
+                &*discard.effect,
+                Effect::Discard {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target,
+                    ..
+                } if is_targeted_opponent(target)
+            ),
+            "got {:?}",
+            discard.effect
+        );
+    }
+
+    /// V7 (SHAPE, preservation) — CR 115.1 + CR 121.1: the mandatory sibling
+    /// `"target opponent draws a card"` is byte-identical: one targeted Draw, not
+    /// optional, no announcer, no per-seat scope.
+    #[test]
+    fn mandatory_target_opponent_draw_shape_is_unchanged() {
+        let parsed = parse_named_face(
+            "When ~ enters, target opponent draws a card.",
+            "Mandatory Opponent Draw",
+            &["Creature"],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("ETB trigger");
+        assert_eq!(
+            trigger.valid_target,
+            Some(TargetFilter::Player),
+            "the trigger announces one player target (CR 603.3d)"
+        );
+        let execute = trigger.execute.as_deref().expect("execute");
+        let Effect::Draw { count, target } = &*execute.effect else {
+            panic!("expected the targeted Draw, got {:?}", execute.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert!(is_targeted_opponent(target), "got {target:?}");
+        assert!(!execute.optional);
+        assert_eq!(execute.optional_player, None);
+        assert_eq!(execute.player_scope, None);
+
+        // Sibling instant form: the spell's own targeted Draw, unchanged.
+        let instant = parse_named_face(
+            "Target opponent draws a card.",
+            "Mandatory Opponent Draw Instant",
+            &["Instant"],
+        );
+        let root = instant.abilities.first().expect("spell chain");
+        let Effect::Draw { target, .. } = &*root.effect else {
+            panic!("expected the targeted Draw, got {:?}", root.effect);
+        };
+        assert!(is_targeted_opponent(target), "got {target:?}");
+        assert!(!root.optional);
+        assert_eq!(root.optional_player, None);
+        assert_eq!(root.player_scope, None);
+    }
+
+    /// V8 (SHAPE, preservation) — CR 608.2d: the causative `"target opponent may
+    /// have you draw a card"` keeps the CONTROLLER as the DRAWER (`Draw` targets
+    /// `OriginalController`) and the TARGETED OPPONENT as the decider: the
+    /// opponent announces the may, and the controller draws only if they accept.
+    ///
+    /// `optional_player: None` here is a DEFERRED representation detail of this
+    /// untouched shape, not evidence that the controller decides. Under this
+    /// field's shipped meaning ("the announcer is this ability's controller"),
+    /// leaving it unset names the wrong actor for the causative, and its surviving
+    /// per-seat `player_scope` is the same not-yet-correct fan-out the class fix
+    /// corrects for the `may draw` shapes — which is why this row asserts neither
+    /// of those as correct behaviour.
+    ///
+    /// What the row DOES pin is that the whole-clause discriminator must not
+    /// reroute this shape: it stays optional, its draw targets
+    /// `OriginalController`, and its `optional_player` keeps the value the
+    /// targeted-optional shape does not have.
+    #[test]
+    fn causative_target_opponent_may_have_is_unchanged() {
+        let parsed = parse_named_face(
+            "When ~ enters, target opponent may have you draw a card.",
+            "Causative Opponent May",
+            &["Creature"],
+        );
+        let execute = changes_zone_execute(&parsed);
+        let Effect::Draw { count, target } = &*execute.effect else {
+            panic!("expected the causative Draw, got {:?}", execute.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            *target,
+            TargetFilter::OriginalController,
+            "CR 608.2d: the CONTROLLER draws (the causative names WHO acts on you)"
+        );
+        assert!(execute.optional);
+        assert_eq!(
+            execute.optional_player, None,
+            "no announcer is stamped for the causative"
+        );
+
+        // Hostile class sibling: "you may have target opponent draw a card" (the
+        // CONTROLLER decides) must also keep `optional_player: None`, so the
+        // whole-clause discriminator cannot mis-claim it.
+        let controller_decides = parse_named_face(
+            "When ~ enters, you may have target opponent draw a card.",
+            "Controller Decides",
+            &["Creature"],
+        );
+        let execute = changes_zone_execute(&controller_decides);
+        assert!(
+            execute.optional,
+            "reach guard: the controller-decides clause is an optional effect"
+        );
+        assert_eq!(
+            execute.optional_player, None,
+            "the controller-decides shape must not be stamped with an opponent announcer"
+        );
+    }
+
+    /// V10 (SHAPE) — CR 601.2c + CR 402.1 + CR 608.2c: Brink of Madness's
+    /// `"… sacrifice ~ and target opponent discards their hand."` newly splits at
+    /// the sequence layer; the tail is its own targeted clause whose whole-hand
+    /// count names the announced target (`PlayerScope::Target`), NOT a per-seat
+    /// `ScopedPlayer` and not the controller.
+    #[test]
+    fn brink_of_madness_tail_splits_to_a_targeted_whole_hand_discard() {
+        assert_eq!(
+            split_clause_sequence("sacrifice ~ and target opponent discards their hand").len(),
+            2,
+            "Brink's tail must split at the bare \" and \""
+        );
+
+        const BRINK: &str = "At the beginning of your upkeep, if you have no cards in hand, \
+             sacrifice this enchantment and target opponent discards their hand.";
+        let parsed = parse_named_face(BRINK, "Brink of Madness", &["Enchantment"]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::Phase)
+            .expect("upkeep trigger");
+        let execute = trigger.execute.as_deref().expect("execute");
+
+        // First clause: sacrifice is unchanged (SelfRef) in both readings.
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "got {:?}",
+            execute.effect
+        );
+
+        let discard = execute
+            .sub_ability
+            .as_deref()
+            .expect("the targeted discard tail");
+        let Effect::Discard { count, target, .. } = &*discard.effect else {
+            panic!("expected the targeted Discard, got {:?}", discard.effect);
+        };
+        assert!(
+            is_targeted_opponent(target),
+            "CR 115.1: the discard targets the announced opponent, got {target:?}"
+        );
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            },
+            "CR 402.1 + CR 608.2c: \"their hand\" is the announced target's hand"
+        );
+        assert_eq!(
+            discard.player_scope, None,
+            "the targeted tail must not carry a per-seat opponent scope"
+        );
+    }
+
+    /// V10b (SHAPE) — CR 601.2c + CR 115.1. Arm-level: the NEW bare-`and` arm
+    /// claims a `target opponent <conjugated player-action verb>` conjunct (its
+    /// predicate is `draws`, which the pre-existing continuous arm does not own);
+    /// this assertion fails on revert. Card-level is a REGRESSION guard: Lord of
+    /// Tresserhorn prints `"…, and target opponent draws two cards."` and its
+    /// comma path already split that conjunct, so the card's parse is
+    /// **byte-identical to base** (it is NOT in the changed-card set — measured —
+    /// and this row cannot detect a change to the card). Sibling control:
+    /// Armistice's `gains` conjunct is claimed by
+    /// `starts_target_continuous_clause_lower` (registered earlier) → unchanged.
+    #[test]
+    fn lord_of_tresserhorn_draw_conjunct_is_unchanged_regression_guard() {
+        assert!(
+            starts_bare_and_clause("target opponent draws two cards"),
+            "the new arm must claim the conjugated `draws` conjunct"
+        );
+        // Reach-guard positive: the pre-existing continuous arm still claims `gains`.
+        assert!(starts_bare_and_clause("target opponent gains 3 life"));
+
+        const LORD_OF_TRESSERHORN: &str = "When Lord of Tresserhorn enters, you lose 2 life, you \
+             sacrifice two creatures, and target opponent draws two cards.\n{B}: Regenerate Lord \
+             of Tresserhorn.";
+        let parsed = parse_named_face(LORD_OF_TRESSERHORN, "Lord of Tresserhorn", &["Creature"]);
+        let execute = changes_zone_execute(&parsed);
+        let nodes = chain_nodes(execute);
+        assert_eq!(
+            nodes.len(),
+            3,
+            "lose life, sacrifice, targeted draw: {execute:#?}"
+        );
+        assert!(matches!(
+            &*nodes[0].effect,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        assert!(matches!(&*nodes[1].effect, Effect::Sacrifice { .. }));
+        let Effect::Draw { count, target } = &*nodes[2].effect else {
+            panic!("expected the targeted draw tail, got {:?}", nodes[2].effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+        assert!(is_targeted_opponent(target), "got {target:?}");
+        assert!(
+            nodes[2].declares_chosen_group.is_some(),
+            "the tail declares the announced player"
+        );
+
+        // Sibling control: Armistice is claimed by the earlier continuous arm.
+        let armistice = parse_named_face(
+            "{3}{W}{W}: You draw a card and target opponent gains 3 life.",
+            "Armistice",
+            &["Enchantment"],
+        );
+        let root = armistice
+            .abilities
+            .first()
+            .expect("Armistice's activated ability");
+        assert!(matches!(
+            &*root.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+        let gain = root.sub_ability.as_deref().expect("the gains conjunct");
+        assert!(
+            matches!(
+                &*gain.effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player,
+                } if is_targeted_opponent(player)
+            ),
+            "got {:?}",
+            gain.effect
+        );
+    }
+
+    /// V14 (SHAPE) — CR 115.1 + CR 608.2d: the targeted-optional head routes the
+    /// may through the engine's optional-actor authority (`optional_player`) as the
+    /// clause's own DECLARED-player reference — never a `player_scope`, which would
+    /// rebind the whole chain's controller to the opponent's seat. The Draw keeps
+    /// its announced `Typed{controller: Opponent}` player target, so the seat that
+    /// announces the may and the seat that draws are the same announced opponent.
+    #[test]
+    fn targeted_optional_stamps_the_declared_player_actor() {
+        // Head contract on the ETB class member.
+        let tat = parse_named_face(
+            "When Tataru Taru enters, you draw a card and target opponent may draw a card.",
+            "Tataru Taru",
+            &["Creature"],
+        );
+        let execute = changes_zone_execute(&tat);
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("the targeted optional half");
+        let group = sub
+            .declares_chosen_group
+            .expect("the targeted-optional head declares the announced player group");
+        assert_eq!(
+            sub.optional_player,
+            Some(TargetFilter::DeclaredPlayer { group }),
+            "CR 608.2d: the actor is the clause's declared target opponent"
+        );
+        assert_eq!(
+            sub.player_scope, None,
+            "the chain's controller must NOT be rebound to the opponent's seat"
+        );
+
+        // Class coverage: every single-sentence member stamps the declared-player
+        // actor on the head and carries no per-seat scope. VERBATIM Oracle text.
+        for (text, name, types) in [
+            (
+                "When Tataru Taru enters, you draw a card and target opponent may draw a card.",
+                "Tataru Taru",
+                &["Creature"][..],
+            ),
+            (
+                "{G}: This creature gets +1/+1 until end of turn. Target opponent creates a \
+                 1/1 green Hippo creature token.\n{W}: This creature gains protection from \
+                 black and from red until end of turn. Target opponent gains 2 life.\n{U}: This \
+                 creature gains flying until end of turn. Target opponent may draw a card.",
+                "Questing Phelddagrif",
+                &["Creature"][..],
+            ),
+            (
+                "{G}: Phelddagrif gains trample until end of turn. Target opponent creates a \
+                 1/1 green Hippo creature token.\n{W}: Phelddagrif gains flying until end of \
+                 turn. Target opponent gains 2 life.\n{U}: Return Phelddagrif to its owner's \
+                 hand. Target opponent may draw a card.",
+                "Phelddagrif",
+                &["Creature"][..],
+            ),
+            (
+                "{W}, {T}: Prevent the next 2 damage that would be dealt to target creature \
+                 this turn. Target opponent may draw a card.",
+                "Soldevi Heretic",
+                &["Creature"][..],
+            ),
+        ] {
+            let parsed = parse_named_face(text, name, types);
+            let mut stamped_head = false;
+            let roots = parsed
+                .abilities
+                .iter()
+                .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()));
+            for ability in roots {
+                for node in chain_nodes(ability) {
+                    let Some(group) = node.declares_chosen_group else {
+                        continue;
+                    };
+                    if node.optional_player == Some(TargetFilter::DeclaredPlayer { group })
+                        && node.player_scope.is_none()
+                    {
+                        stamped_head = true;
+                    }
+                }
+            }
+            assert!(
+                stamped_head,
+                "{name}: reach guard: the declared-player actor is stamped on the head"
+            );
+        }
     }
 }

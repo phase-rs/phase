@@ -1207,6 +1207,12 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
 }
 
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+    // replacement subtree has retired resumes before any further resolution
+    // work; every frame left on top of it is outer work.
+    if state.counter_cost_root_is_due() {
+        return;
+    }
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
     counters::drain_pending_counter_additions(state, events);
@@ -1349,9 +1355,13 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     // CR 608.2c: Preserve the completed result when pruning resumes at an independent sibling.
                     remaining.context.forwarded_result_context =
                         chain.context.forwarded_result_context.clone();
+                    // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
+                    settle_entries_before_instruction(state, events, &remaining, None);
                     chain_progress = resolve_ability_chain_step(state, &remaining, events, 1).ok();
                 }
             } else {
+                // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
+                settle_entries_before_instruction(state, events, &chain, None);
                 chain_progress = resolve_ability_chain_step(state, &chain, events, 1).ok();
             }
         }
@@ -1369,6 +1379,8 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         {
             if let Some(mut scope) = completed_scope {
                 bind_resolution_exile_batch_paths(&mut scope.after_scope, &scope.batch);
+                // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
+                settle_entries_before_instruction(state, events, &scope.after_scope, None);
                 chain_progress =
                     resolve_ability_chain_step(state, &scope.after_scope, events, 1).ok();
             }
@@ -1387,7 +1399,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             drain_pending_continuation(state, events);
             resume_resolution_frames(state, events);
         }
-        if !waits_for_resolution_choice(&state.waiting_for) {
+        // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+        // replacement subtree has retired resumes before any further resolution
+        // work; every frame left on top of it is outer work. Once the subtree
+        // retired with the continuation that just ran, the paused dispatch on top
+        // belongs to an outer owner and stays paused.
+        if !waits_for_resolution_choice(&state.waiting_for) && !state.counter_cost_root_is_due() {
             // CR 615.5: a resumed continuation completes its own paused
             // resident drain only after it has not raised another choice.
             state.finish_active_paused_post_replacement_dispatch();
@@ -1400,6 +1417,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 drain_pending_continuation(state, events);
             }
         }
+    }
+    // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+    // replacement subtree has retired resumes before any further resolution
+    // work; every frame left on top of it is outer work.
+    if state.counter_cost_root_is_due() {
+        return;
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
     // choice resolves. Must run after change_zone_iteration (which may be
@@ -1657,6 +1680,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         if waits_for_resolution_choice(&state.waiting_for) {
             state.resolution_stack.note_repeat_until_descendant_choice();
         }
+        return;
+    }
+    // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+    // replacement subtree has retired resumes before any further resolution
+    // work; every frame left on top of it is outer work.
+    if state.counter_cost_root_is_due() {
         return;
     }
 
@@ -2174,18 +2203,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             origin,
             destination,
             enter_transformed,
-            enter_tapped,
             enters_under_player,
-            enters_attacking,
-            enter_with_counters,
-            conditional_enter_with_counters,
             duration,
             track_exiled_by_source,
             face_down_in_exile,
             mut moved_count,
             face_down_profile,
             library_placement,
-            enters_modified_if,
             enter_attached_to,
             effect_kind,
         } = pending;
@@ -2239,26 +2263,18 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // members moved in this resume join the logical co-departed group and
         // their observer triggers are collected with earlier pause segments.
         let events_before_drain = events.len();
-        for (i, obj_id) in remaining.iter().enumerate() {
-            let per_obj_enter_counters =
-                crate::game::effects::change_zone::enter_with_counters_for_pending_object(
-                    state,
-                    source_id,
-                    *obj_id,
-                    &enter_with_counters,
-                    &conditional_enter_with_counters,
-                );
+        // CR 603.6a + CR 614.12: each member applies the entry modifications
+        // resolved before the event's first member moved; never recompute
+        // against the partly-moved board.
+        for (i, member) in remaining.iter().enumerate() {
+            let obj_id = &member.object_id;
             let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
                 source_id,
                 controller,
                 origin,
                 destination,
                 enter_transformed,
-                enter_tapped,
                 enters_under_player,
-                enters_attacking,
-                enter_with_counters: per_obj_enter_counters,
-                conditional_enter_with_counters: vec![],
                 duration: duration.clone(),
                 track_exiled_by_source,
                 face_down_in_exile,
@@ -2267,13 +2283,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // per-permanent replacement-ordering / as-enters choice resumes
                 // FACE DOWN with the same characteristics (Yedora-style return),
                 // instead of exposing the real object face up. Mirrors the
-                // `enter_tapped`/`enter_transformed`/`enters_under_player` carry-through.
+                // `enter_transformed`/`enters_under_player` carry-through.
                 face_down_profile: face_down_profile.clone(),
                 library_placement: library_placement.clone(),
-                // CR 614.12: thread the moved-object type gate into the per-object
-                // resume ctx so a resumed member is still gated on its type
-                // (Summoner's Grimoire), matching the synchronous move path.
-                enters_modified_if: enters_modified_if.clone(),
                 enter_attached_to,
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
@@ -2299,7 +2311,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             let delivery_start = events.len();
             let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
-                state, &ctx, *obj_id, events,
+                state, &ctx, member, events,
             ) {
                 crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                     logical_zone_change_group
@@ -2353,12 +2365,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             origin: ctx.origin,
                             destination: ctx.destination,
                             enter_transformed: ctx.enter_transformed,
-                            enter_tapped: ctx.enter_tapped,
                             enters_under_player: ctx.enters_under_player,
-                            enters_attacking: ctx.enters_attacking,
-                            enter_with_counters: enter_with_counters.clone(),
-                            conditional_enter_with_counters: conditional_enter_with_counters
-                                .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             face_down_in_exile: ctx.face_down_in_exile,
@@ -2367,9 +2374,6 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
                             library_placement: ctx.library_placement.clone(),
-                            // CR 614.12: preserve the moved-object type gate
-                            // across a further pause.
-                            enters_modified_if: ctx.enters_modified_if.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         },
@@ -2414,12 +2418,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             origin: ctx.origin,
                             destination: ctx.destination,
                             enter_transformed: ctx.enter_transformed,
-                            enter_tapped: ctx.enter_tapped,
                             enters_under_player: ctx.enters_under_player,
-                            enters_attacking: ctx.enters_attacking,
-                            enter_with_counters: enter_with_counters.clone(),
-                            conditional_enter_with_counters: conditional_enter_with_counters
-                                .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             face_down_in_exile: ctx.face_down_in_exile,
@@ -2429,9 +2428,6 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
                             library_placement: ctx.library_placement.clone(),
-                            // CR 614.12: preserve the moved-object type gate
-                            // across a further pause.
-                            enters_modified_if: ctx.enters_modified_if.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         },
@@ -2508,7 +2504,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // landed us back at Priority (no further replacement choice), B1-drain the
         // deferred observer triggers parked during earlier pause segments plus the
         // ones this resume produced; otherwise leave them parked for the next drain.
-        let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+        //
+        // CR 601.2h + CR 603.3: a live announcement takes custody of the span it
+        // owns; only the rest is collected here.
+        let owned = crate::game::announcement_triggers::take_inline_trigger_span(
+            state,
+            events,
+            events_before_drain,
+        );
+        let trigger_events: Vec<GameEvent> = events[owned]
             .iter()
             .filter(|ev| {
                 !matches!(
@@ -4774,6 +4778,349 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     )
 }
 
+/// CR 603.10 + CR 608.2c: `next` is about to run inline. When it begins a later instruction,
+/// every entry an earlier instruction completed is observed now, before `next` can change the
+/// entrant (counters a later instruction puts on it, CR 608.2c; "then attach", CR 702.92a).
+/// Not a boundary when `next` is an entering resolution step of the completed instruction
+/// (`SubAbilityLink::ContinuationStep`; its entrants and the earlier ones are one entry event,
+/// CR 603.6a). Nothing is observed while an entry may still be in progress — a resolution
+/// choice or a parked replacement is pending (CR 614.12a), so `next` is parked and its resume
+/// is its own boundary — or while `entry_observation_deferred` holds (CR 611.2e / CR 303.4f /
+/// CR 603.6a + CR 101.4).
+fn settle_entries_before_instruction(
+    state: &mut GameState,
+    events: &[GameEvent],
+    next: &ResolvedAbility,
+    completed: Option<&ResolvedAbility>,
+) {
+    // CR 603.6a: an entering resolution step of the same instruction is a co-entrant of the
+    // same entry event, so this is not an instruction boundary (B0).
+    if matches!(next.sub_link, SubAbilityLink::ContinuationStep)
+        && effect_enters_battlefield(&next.effect)
+    {
+        return;
+    }
+    // CR 614.12a: an entry may still be in progress while a resolution choice or a parked
+    // replacement is pending (G1).
+    if waits_for_resolution_choice(&state.waiting_for) || state.pending_replacement.is_some() {
+        return;
+    }
+    if entry_observation_deferred(state, next, completed) {
+        return;
+    }
+    crate::game::zones::settle_battlefield_entry_observations(state, events);
+}
+
+/// CR 603.6a: is `effect` one of the battlefield-entering instruction kinds that the generated
+/// card data links to an earlier entry as a same-instruction resolution step
+/// (`SubAbilityLink::ContinuationStep`)? The membership is that measured co-entry set, not every
+/// effect that can put a permanent onto the battlefield (for example `Seek`, `RevealUntil`,
+/// `Myriad` and `Encore` reach no such link today). `ChooseFromZone` selects cards and moves
+/// nothing itself, so it is not a member.
+fn effect_enters_battlefield(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Token { .. }
+            | Effect::CopyTokenOf { .. }
+            | Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+            | Effect::ChangeZoneAll {
+                destination: Zone::Battlefield,
+                ..
+            }
+            | Effect::Dig {
+                destination: Some(Zone::Battlefield),
+                ..
+            }
+            | Effect::Conjure {
+                destination: Zone::Battlefield,
+                ..
+            }
+            | Effect::DraftFromSpellbook {
+                destination: Zone::Battlefield,
+                ..
+            }
+            | Effect::Investigate
+            | Effect::Amass { .. }
+            | Effect::Incubate { .. }
+            | Effect::Populate
+            | Effect::Manifest { .. }
+            | Effect::ManifestDread
+            | Effect::Cloak { .. }
+    )
+}
+
+/// CR 611.2e: a resolving spell or ability that puts a nontoken permanent onto the battlefield
+/// and says it "is" or "has" a characteristic applies that effect as the permanent enters. These
+/// are the instruction kinds that can carry such a rider, as measured over the generated card
+/// data (`GenericEffect`, `Animate`, `ReturnAsAura`, `ApplyPerpetual`). The lowered
+/// AST does not carry the rider's onset ("is/has" vs "gains/becomes"; see the
+/// `parser/oracle_ir/ast.rs` / `parser/oracle_effect/imperative.rs` comments), so every member
+/// is treated as one that may apply with the entry.
+fn effect_may_apply_with_entry(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect { .. }
+            | Effect::Animate { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::ApplyPerpetual { .. }
+    )
+}
+
+/// CR 611.2e: does any node of this resolved chain (its `sub_ability` / `else_ability`
+/// subtree) carry an instruction kind that may apply with the entry?
+fn resolved_chain_may_apply_with_entry(root: &ResolvedAbility) -> bool {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if effect_may_apply_with_entry(&node.effect) {
+            return true;
+        }
+        stack.extend(node.sub_ability.as_deref());
+        stack.extend(node.else_ability.as_deref());
+    }
+    false
+}
+
+/// CR 611.2e: the `AbilityDefinition` form of [`resolved_chain_may_apply_with_entry`], for
+/// frame-held templates that have not been resolved yet.
+fn definition_chain_may_apply_with_entry(root: &AbilityDefinition) -> bool {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if effect_may_apply_with_entry(&node.effect) {
+            return true;
+        }
+        stack.extend(node.sub_ability.as_deref());
+        stack.extend(node.else_ability.as_deref());
+    }
+    false
+}
+
+/// CR 611.2e: the chain a paused library-search delivery resumes into, if any.
+fn library_search_resume_may_apply_with_entry(
+    resume: &crate::types::game_state::LibrarySearchDeliveryResume,
+) -> bool {
+    use crate::types::game_state::LibrarySearchDeliveryResume;
+    match resume {
+        LibrarySearchDeliveryResume::Standard { .. } => false,
+        LibrarySearchDeliveryResume::Scoped { after_scope, .. } => after_scope
+            .as_deref()
+            .is_some_and(resolved_chain_may_apply_with_entry),
+    }
+}
+
+/// CR 611.2e: the chain a batch delivery's completion resumes into, if any. Exhaustive so a
+/// new completion that carries a chain forces a decision here.
+fn batch_completion_may_apply_with_entry(
+    completion: &crate::types::game_state::BatchCompletion,
+) -> bool {
+    use crate::types::game_state::BatchCompletion;
+    match completion {
+        BatchCompletion::CastFromZoneExileDeliveryComplete { ability, .. }
+        | BatchCompletion::ForEachCategoryExileComplete { ability, .. } => {
+            resolved_chain_may_apply_with_entry(ability)
+        }
+        BatchCompletion::LibrarySearchDeliverySettled { resume }
+        | BatchCompletion::SearchPartitionPrimaryDelivered { resume, .. } => {
+            library_search_resume_may_apply_with_entry(resume)
+        }
+        // CR 608.2c: a settled contest round resumes into the contest ability and, once
+        // decided, the winner's instruction.
+        BatchCompletion::TopCardContestRoundComplete { ability, .. } => {
+            resolved_chain_may_apply_with_entry(ability)
+                || matches!(
+                    &ability.effect,
+                    Effect::ExileTopCardContest { winner_effect }
+                        if definition_chain_may_apply_with_entry(winner_effect)
+                )
+        }
+        BatchCompletion::RecordInstructionZoneResult { .. }
+        | BatchCompletion::ReturnAsAuraNoTargetComplete { .. }
+        | BatchCompletion::ExploreLandDeliveryComplete { .. }
+        | BatchCompletion::CloakExileDeliveryComplete { .. }
+        | BatchCompletion::ExileFaceDownPileDeliveryComplete { .. }
+        | BatchCompletion::ExileFaceDownPileReturnComplete { .. }
+        | BatchCompletion::CascadeExileLoopComplete { .. }
+        | BatchCompletion::CascadeBottomComplete { .. }
+        | BatchCompletion::RippleTerminalComplete { .. }
+        | BatchCompletion::DiscoverBottomComplete { .. }
+        | BatchCompletion::DiscoverPlacementComplete { .. }
+        | BatchCompletion::DiscoverDeclined { .. }
+        | BatchCompletion::ResolutionCastRejectedToHand { .. }
+        | BatchCompletion::DiscoverDeclinedComplete { .. }
+        | BatchCompletion::ResolutionCastRejectionComplete { .. }
+        | BatchCompletion::PutOnTopComplete { .. }
+        | BatchCompletion::TopOrBottomComplete { .. }
+        | BatchCompletion::EffectZonePutAtLibraryPositionComplete { .. }
+        | BatchCompletion::DrawnThisTurnTopdeckComplete { .. }
+        | BatchCompletion::SurveilKeepOnTop { .. }
+        | BatchCompletion::ManifestDreadCleanup { .. }
+        | BatchCompletion::RevealRestPile { .. }
+        | BatchCompletion::DigMassPutAllRestComplete { .. }
+        | BatchCompletion::DigMassPutAllComplete { .. }
+        | BatchCompletion::DigPriorLookRestComplete { .. }
+        | BatchCompletion::RemoveExileLinks { .. }
+        | BatchCompletion::NinjutsuPlacement { .. }
+        | BatchCompletion::AttractionOpenRemainder { .. }
+        | BatchCompletion::ContraptionAssembleRemainder { .. }
+        | BatchCompletion::SearchFoundZoneDelivery { .. }
+        | BatchCompletion::MeldExile { .. }
+        | BatchCompletion::MeldEntry { .. }
+        | BatchCompletion::MeldRedirect { .. }
+        | BatchCompletion::MilledDeliveryComplete { .. } => false,
+    }
+}
+
+/// CR 611.2e: does a frame-held later instruction of this resolution (an outer continuation, a
+/// paused iteration's remainder, or any other parked chain) carry an instruction kind that may
+/// apply with the entry? Exhaustive over `ResolutionFrame` so a new frame kind forces a decision.
+fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
+    use crate::types::ability::PostReplacementContinuation;
+    match frame {
+        ResolutionFrame::AbilityContinuation(frame) => {
+            let pending = &frame.pending;
+            resolved_chain_may_apply_with_entry(&pending.chain)
+                || pending
+                    .attachment_choice
+                    .as_ref()
+                    .is_some_and(|choice| resolved_chain_may_apply_with_entry(&choice.operation))
+                || pending
+                    .attachment_remainder
+                    .as_ref()
+                    .is_some_and(|remainder| {
+                        resolved_chain_may_apply_with_entry(&remainder.producer)
+                    })
+                || pending
+                    .player_scope_linked_exile
+                    .as_ref()
+                    .is_some_and(|scope| resolved_chain_may_apply_with_entry(&scope.after_scope))
+        }
+        ResolutionFrame::RepeatFor(pending) => {
+            resolved_chain_may_apply_with_entry(&pending.ability)
+        }
+        ResolutionFrame::RepeatUntil(pending) => {
+            resolved_chain_may_apply_with_entry(&pending.ability)
+        }
+        ResolutionFrame::RepeatedOptionalPayment(frame) => {
+            frame.pending.as_deref().is_some_and(|pending| {
+                resolved_chain_may_apply_with_entry(&pending.payment_unit)
+                    || resolved_chain_may_apply_with_entry(&pending.reflexive)
+            })
+        }
+        ResolutionFrame::BatchDelivery(batch) => batch
+            .completion
+            .as_ref()
+            .is_some_and(batch_completion_may_apply_with_entry),
+        ResolutionFrame::ChooseOneOf(pending) => {
+            pending
+                .branches
+                .iter()
+                .any(definition_chain_may_apply_with_entry)
+                || pending
+                    .continuation
+                    .as_deref()
+                    .is_some_and(resolved_chain_may_apply_with_entry)
+        }
+        ResolutionFrame::VoteBallot(pending) => {
+            definition_chain_may_apply_with_entry(&pending.ability_template)
+        }
+        ResolutionFrame::PerPlayerZoneChoice(pending) => {
+            resolved_chain_may_apply_with_entry(&pending.ability)
+        }
+        ResolutionFrame::PerCategoryZoneChoice(frame) => {
+            resolved_chain_may_apply_with_entry(&frame.pending.ability)
+        }
+        ResolutionFrame::OptionalEffect(frame) => {
+            resolved_chain_may_apply_with_entry(&frame.ability)
+        }
+        ResolutionFrame::CoinFlip(pending) => {
+            pending
+                .win_effect
+                .as_deref()
+                .is_some_and(definition_chain_may_apply_with_entry)
+                || pending
+                    .lose_effect
+                    .as_deref()
+                    .is_some_and(definition_chain_may_apply_with_entry)
+        }
+        ResolutionFrame::DieRoll(pending) => pending
+            .results_table
+            .iter()
+            .any(|branch| definition_chain_may_apply_with_entry(&branch.effect)),
+        ResolutionFrame::PostReplacement(stack) => {
+            stack
+                .drains()
+                .any(|drain| match drain.ready_continuation() {
+                    Some(PostReplacementContinuation::Template(definition)) => {
+                        definition_chain_may_apply_with_entry(definition)
+                    }
+                    Some(PostReplacementContinuation::Resolved(resolved)) => {
+                        resolved_chain_may_apply_with_entry(resolved)
+                    }
+                    None => false,
+                })
+        }
+        ResolutionFrame::ChangeZone(_)
+        | ResolutionFrame::CounterMoves(_)
+        | ResolutionFrame::CounterRemovals(_)
+        | ResolutionFrame::CounterAdditions(_)
+        | ResolutionFrame::CopyToken(_)
+        | ResolutionFrame::DebugCardEntries(_)
+        | ResolutionFrame::EachPlayerCopyChosen(_)
+        | ResolutionFrame::Proliferate(_)
+        | ResolutionFrame::MultiDraw(_)
+        | ResolutionFrame::Discard(_)
+        | ResolutionFrame::ConniveReentry(_)
+        | ResolutionFrame::LifeTotalAssignment(_)
+        | ResolutionFrame::SpellResolution(_)
+        | ResolutionFrame::MutateMerge(_)
+        | ResolutionFrame::CipherEncode(_) => false,
+    }
+}
+
+/// The deferral predicate D: at this boundary, is settling the earlier instructions' entries
+/// unsafe because the remaining chain may still change what entered, as part of its entry?
+///
+/// - **D1 (CR 611.2e):** any node of the remaining chain — `next`'s subtree plus every
+///   frame-held later instruction on the resolution stack and a parked library-search resume —
+///   is an instruction kind that may apply with the entry.
+/// - **D2 (CR 303.4f, conservative):** `next` is an `Attach` following a forwarded result, or
+///   following no known completed instruction.
+/// - **D3 (CR 603.6a + CR 101.4):** `next` is a `player_scope` seat leg; the seats may form one
+///   simultaneous entry event.
+///
+/// Carriers held only in chain-driver locals are measured over the generated card data, not
+/// walked: the `after_scope` tail is covered by D3 (every seat leg carries `scoped_player`); a
+/// multi-target-player fan-out's `after_fanout` tail reaches no entering leg; and no entering
+/// `repeat_for` / nested driver carries a later candidate outside its iterated subtree.
+fn entry_observation_deferred(
+    state: &GameState,
+    next: &ResolvedAbility,
+    completed: Option<&ResolvedAbility>,
+) -> bool {
+    // D3 — CR 603.6a + CR 101.4.
+    if next.scoped_player.is_some() {
+        return true;
+    }
+    // D2 — CR 303.4f.
+    if matches!(next.effect, Effect::Attach { .. })
+        && completed.is_none_or(|completed| completed.forward_result)
+    {
+        return true;
+    }
+    // D1 — CR 611.2e.
+    resolved_chain_may_apply_with_entry(next)
+        || state
+            .resolution_stack
+            .iter()
+            .any(frame_may_apply_with_entry)
+        || state
+            .pending_library_search_delivery
+            .as_ref()
+            .is_some_and(library_search_resume_may_apply_with_entry)
+}
+
 pub(super) fn resolve_optional_effect_decision(
     state: &mut GameState,
     ability: ResolvedAbility,
@@ -5320,6 +5667,26 @@ fn declined_search_parent_controller_available(
     }
 }
 
+// CR 108.3 + CR 608.2h: mirror `parent_target_owner` — the first object target
+// whose owner is known (live or LKI), else the propagated effect-context object.
+fn declined_search_parent_owner_available(state: &GameState, ability: &ResolvedAbility) -> bool {
+    ability
+        .target_occurrences()
+        .into_iter()
+        .enumerate()
+        .find_map(|(position, (target, _))| match target {
+            TargetRef::Object(id)
+                if state.objects.contains_key(&id) || state.lki_cache.contains_key(&id) =>
+            {
+                Some(declined_search_selected_object(
+                    state, ability, position, id,
+                ))
+            }
+            TargetRef::Object(_) | TargetRef::Player(_) => None,
+        })
+        .unwrap_or_else(|| ability.effect_context_object.is_some())
+}
+
 // CR 608.2c: each scope keeps the identity/fallback its ordinary reader consumes.
 fn declined_search_player_scope_dependency(
     state: &GameState,
@@ -5340,8 +5707,12 @@ fn declined_search_player_scope_dependency(
                 })
                 .unwrap_or(false)
         }),
-        PlayerScope::ParentObjectTargetController => !context
-            .is_some_and(|ability| declined_search_parent_controller_available(state, ability)),
+        PlayerScope::ParentObjectTarget { possession } => match possession {
+            PossessionAxis::Controller => !context
+                .is_some_and(|ability| declined_search_parent_controller_available(state, ability)),
+            PossessionAxis::Owner => !context
+                .is_some_and(|ability| declined_search_parent_owner_available(state, ability)),
+        },
         PlayerScope::RecipientController => context.is_some_and(|ability| {
             ability
                 .target_occurrences()
@@ -6632,7 +7003,7 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
             }
             | PlayerScope::RecipientController
             | PlayerScope::DefendingPlayer
-            | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { id: _ } => false,
@@ -16267,9 +16638,17 @@ pub(crate) fn resolve_ability_chain_step(
     // before it begins a new resolution; nested producers replace the context
     // after this node's effect completes.
     let root_context_owned;
-    let ability = if depth == 0 && ability.context.forwarded_result_context.is_some() {
+    let mut cost_removed_seed = None;
+    let ability = if depth == 0
+        && (ability.context.forwarded_result_context.is_some()
+            || ability.context.cost_removed_counter_amount.is_some())
+    {
         let mut owned = ability.clone();
         owned.context.forwarded_result_context = None;
+        // CR 602.2b + CR 601.2h + CR 608.2h: the cost-removed count is a
+        // root-only input; take it off the root so no hand-off or handler-local
+        // context clone carries it into a continuation that could reseed.
+        cost_removed_seed = owned.context.cost_removed_counter_amount.take();
         root_context_owned = owned;
         &root_context_owned
     } else {
@@ -16284,6 +16663,12 @@ pub(crate) fn resolve_ability_chain_step(
     // across unrelated ability resolutions.
     if depth == 0 {
         reset_top_level_resolution_state(state);
+        // CR 602.2b + CR 601.2h + CR 608.2h: counters removed to pay this
+        // activation's cost are the preceding "this way" amount its instructions
+        // read; a later producer re-stamps per CR 608.2c.
+        if let Some(n) = cost_removed_seed {
+            state.last_effect_amount = Some(crate::game::arithmetic::u32_to_i32_saturating(n));
+        }
     }
 
     // CR 700.2 ("each of those options is a mode") + CR 608.2c (instructions in
@@ -19546,9 +19931,20 @@ fn resolve_chain_body(
         // chain that is pure metadata resolves nothing.
         let Some(sub) = cast_from_zone::cast_metadata_continuation(ability, sub) else {
             // The consumed metadata run left no next written instruction: the
-            // chain is finished, so surface the parent's own progress.
+            // chain is finished, so surface the parent's own progress. No later
+            // instruction of this chain can change an earlier entrant, so — as at
+            // any chain end — nothing is settled here; an unsettled entry is read
+            // live, and a parked outer instruction's resume is its own boundary.
             return Ok(progress);
         };
+        // CR 603.10 + CR 608.2c: the parent instruction completed; its entries are observed
+        // before the next instruction can change the entrant (S-a). The boundary is the next
+        // WRITTEN instruction, judged after the metadata splice: a consumed rider modifies only
+        // the cast spell's own later entry (the enters-with-counter rider is a CR 614.1c
+        // replacement), never an entrant of this resolution, so the
+        // deferral predicate and the co-entry / attach checks read the instruction that
+        // actually runs next, with the cast parent as the completed instruction.
+        settle_entries_before_instruction(state, events, sub, Some(ability));
         // CR 614.1a + CR 608.2c: CastFromZone consumes the Torrential/Kylox
         // graveyard-redirect rider by stamping the granted casting permission. Do
         // not also execute the parser's structural rider (`ChangeZone` /
@@ -22988,7 +23384,7 @@ fn resolve_grant_next_spell_ability(
     // ("the next spell you cast"). Exhaustive over PlayerScope (no `_`), so any
     // future variant forces a maintainer to re-confirm its next-spell semantics.
     let player = match player_scope {
-        PlayerScope::Target => ability.target_player(),
+        PlayerScope::Target => Some(ability.target_player()),
         // CR 513.1: `AnyTurn` is a duration-timing referent that never reaches a
         // next-spell player-selection position; default to the controller.
         PlayerScope::Controller
@@ -23001,17 +23397,27 @@ fn resolve_grant_next_spell_ability(
         // from a value/quantity/player-selection position.
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTargetController
-        | PlayerScope::SourceChosenPlayer => ability.controller,
+        | PlayerScope::SourceChosenPlayer => Some(ability.controller),
+        // CR 109.4 + CR 108.3: the controller/owner of the parent object target.
+        PlayerScope::ParentObjectTarget { possession } => match possession {
+            PossessionAxis::Controller => {
+                crate::game::ability_utils::parent_target_controller(ability, state)
+            }
+            PossessionAxis::Owner => crate::game::ability_utils::parent_target_owner(ability, state),
+        },
     };
-    state
-        .pending_next_spell_modifiers
-        .push(crate::types::game_state::PendingNextSpellModifier {
-            player,
-            modifier,
-            spell_filter,
-            source_id: Some(ability.source_id),
-        });
+    // CR 609.3: with no resolvable parent referent there is no recipient, so
+    // the grant does nothing rather than defaulting to the controller.
+    if let Some(player) = player {
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player,
+                modifier,
+                spell_filter,
+                source_id: Some(ability.source_id),
+            },
+        );
+    }
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::GrantNextSpellAbility,
         source_id: ability.source_id,
@@ -24160,7 +24566,9 @@ mod tests {
                 player: PlayerScope::Target,
             },
             QuantityRef::HandSize {
-                player: PlayerScope::ParentObjectTargetController,
+                player: PlayerScope::ParentObjectTarget {
+                    possession: PossessionAxis::Controller,
+                },
             },
             QuantityRef::TargetControllerCounter {
                 kind: crate::types::player::PlayerCounterKind::Poison,
@@ -24448,7 +24856,9 @@ mod tests {
             },
         ]));
         let attr = QuantityRef::BattlefieldEntriesThisTurn {
-            player: PlayerScope::ParentObjectTargetController,
+            player: PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
             filter,
         };
         assert_eq!(
@@ -24876,14 +25286,18 @@ mod tests {
                 exclude: Some(Box::new(PlayerScope::RecipientController)),
             },
             PlayerScope::Target,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
             PlayerScope::AllPlayers {
                 aggregate: crate::types::ability::AggregateFunction::Sum,
                 exclude: Some(Box::new(PlayerScope::Target)),
             },
             PlayerScope::AllPlayers {
                 aggregate: crate::types::ability::AggregateFunction::Sum,
-                exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                exclude: Some(Box::new(PlayerScope::ParentObjectTarget {
+                    possession: PossessionAxis::Controller,
+                })),
             },
         ] {
             let needs_parent = match &scope {
@@ -51762,6 +52176,539 @@ mod dandan_read_sweep_tests {
             "reach: Standard counts the seat's own pile"
         );
         assert_eq!(read(&standard, 0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod entry_observation_settlement_tests {
+    //! U2 — the instruction-boundary settlement helper (B0, G1, G2, S-b) and the deferral
+    //! predicate D (D1 over the subtree, frame-held and nested carriers; D2; D3).
+    use super::*;
+    use crate::game::zones::{create_object, record_and_emit_entry_from_no_zone};
+    use crate::types::ability::{AttachSelection, PerpetualModification};
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::{
+        BatchCompletion, LibrarySearchDeliveryResume, PendingAttachmentRemainder,
+        PendingBatchDeliveries, PendingChooseOneOf, PendingRepeatIteration,
+        ZoneDeliveryExileTracking,
+    };
+    use crate::types::identifiers::CardId;
+    use crate::types::resolution::PendingDieRoll;
+    use crate::types::zones::EtbTapState;
+
+    fn node(effect: Effect) -> ResolvedAbility {
+        ResolvedAbility::new(effect, Vec::new(), ObjectId(100), PlayerId(0))
+    }
+
+    fn put_counter() -> Effect {
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        }
+    }
+
+    fn generic() -> Effect {
+        Effect::GenericEffect {
+            static_abilities: Vec::new(),
+            duration: None,
+            target: None,
+            end_cost: None,
+        }
+    }
+
+    fn animate() -> Effect {
+        Effect::Animate {
+            power: None,
+            toughness: None,
+            types: vec!["Artifact".to_string()],
+            remove_types: Vec::new(),
+            target: TargetFilter::Any,
+            keywords: Vec::new(),
+        }
+    }
+
+    fn return_as_aura() -> Effect {
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Any,
+            grants: Vec::new(),
+        }
+    }
+
+    fn apply_perpetual() -> Effect {
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Any,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 1,
+                toughness: 1,
+            },
+        }
+    }
+
+    fn attach() -> Effect {
+        Effect::Attach {
+            attachment: TargetFilter::Any,
+            target: TargetFilter::Any,
+            selection: AttachSelection::Targeted,
+        }
+    }
+
+    fn return_to_battlefield() -> Effect {
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    }
+
+    fn deferred(
+        state: &GameState,
+        next: &ResolvedAbility,
+        completed: Option<&ResolvedAbility>,
+    ) -> bool {
+        entry_observation_deferred(state, next, completed)
+    }
+
+    /// A completed battlefield entry (no row yet) and its events.
+    fn entered(state: &mut GameState, card: u64) -> (ObjectId, Vec<GameEvent>) {
+        let mut events = Vec::new();
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            format!("Entrant {card}"),
+            Zone::Battlefield,
+        );
+        record_and_emit_entry_from_no_zone(state, id, &mut events).expect("entered");
+        (id, events)
+    }
+
+    #[test]
+    fn deferral_predicate_subtree_kinds() {
+        let state = GameState::new_two_player(3);
+        let completed = node(return_to_battlefield());
+        assert!(!deferred(&state, &node(put_counter()), Some(&completed)));
+        assert!(deferred(&state, &node(generic()), Some(&completed)));
+        assert!(deferred(
+            &state,
+            &node(put_counter()).sub_ability(node(generic())),
+            Some(&completed)
+        ));
+        assert!(deferred(&state, &node(animate()), Some(&completed)));
+        assert!(deferred(&state, &node(return_as_aura()), Some(&completed)));
+        assert!(deferred(&state, &node(apply_perpetual()), Some(&completed)));
+        assert!(deferred(
+            &state,
+            &node(put_counter()).else_ability(node(generic())),
+            Some(&completed)
+        ));
+    }
+
+    #[test]
+    fn deferral_predicate_attach_and_scoped_seat() {
+        let state = GameState::new_two_player(3);
+        let mut forwarded = node(return_to_battlefield());
+        forwarded.forward_result = true;
+        let mut not_forwarded = node(return_to_battlefield());
+        not_forwarded.forward_result = false;
+        assert!(
+            deferred(&state, &node(attach()), Some(&forwarded)),
+            "D2 forwarded"
+        );
+        assert!(
+            !deferred(&state, &node(attach()), Some(&not_forwarded)),
+            "D2 negative"
+        );
+        assert!(
+            deferred(&state, &node(attach()), None),
+            "D2 unknown completion"
+        );
+        let mut seat = node(put_counter());
+        seat.scoped_player = Some(PlayerId(1));
+        assert!(deferred(&state, &seat, Some(&not_forwarded)), "D3");
+        assert!(
+            !deferred(&state, &node(put_counter()), Some(&not_forwarded)),
+            "D3 positive pair"
+        );
+    }
+
+    #[test]
+    fn deferral_predicate_walks_frame_carriers() {
+        let head = node(put_counter());
+        let completed = node(return_to_battlefield());
+
+        // AbilityContinuation frame.
+        let mut state = GameState::new_two_player(3);
+        assert!(!deferred(&state, &head, Some(&completed)), "no frame");
+        let pending = PendingContinuation::new(Box::new(node(generic())), &state);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::AbilityContinuation(
+                AbilityContinuationFrame {
+                    pending,
+                    choose_zone_trigger_context: None,
+                },
+            ));
+        assert!(
+            deferred(&state, &head, Some(&completed)),
+            "continuation chain"
+        );
+
+        // RepeatFor frame.
+        let repeat = |effect: Effect| PendingRepeatIteration {
+            ability: Box::new(node(effect)),
+            tracked_members: Vec::new(),
+            iterated_counter_kinds: Vec::new(),
+            next_iteration: 1,
+            total_iterations: 2,
+            copy_order_fixed: None,
+        };
+        let mut state = GameState::new_two_player(3);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::RepeatFor(repeat(put_counter())));
+        assert!(
+            !deferred(&state, &head, Some(&completed)),
+            "repeat positive pair"
+        );
+        let mut state = GameState::new_two_player(3);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::RepeatFor(repeat(generic())));
+        assert!(
+            deferred(&state, &head, Some(&completed)),
+            "repeat remainder"
+        );
+
+        // ChooseOneOf frame whose branches hold an Animate.
+        let choose = |effect: Effect| PendingChooseOneOf {
+            controller: PlayerId(0),
+            source_id: ObjectId(100),
+            branches: vec![AbilityDefinition::new(AbilityKind::Spell, effect)],
+            parent_occurrences: Default::default(),
+            context: Box::default(),
+            continuation: None,
+            replacement_applied: HashSet::new(),
+            remaining_players: Vec::new(),
+            trigger_context: None,
+        };
+        let mut state = GameState::new_two_player(3);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::ChooseOneOf(choose(put_counter())));
+        assert!(
+            !deferred(&state, &head, Some(&completed)),
+            "branch positive pair"
+        );
+        let mut state = GameState::new_two_player(3);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::ChooseOneOf(choose(animate())));
+        assert!(deferred(&state, &head, Some(&completed)), "branch template");
+    }
+
+    #[test]
+    fn deferral_predicate_walks_nested_carriers() {
+        let head = node(put_counter());
+        let completed = node(return_to_battlefield());
+
+        // (a) attachment_remainder.producer
+        let with_remainder = |effect: Effect| {
+            let mut state = GameState::new_two_player(3);
+            let mut pending = PendingContinuation::new(Box::new(node(put_counter())), &state);
+            pending.attachment_remainder = Some(PendingAttachmentRemainder {
+                producer: Box::new(node(effect)),
+            });
+            state
+                .resolution_stack
+                .push_inner(ResolutionFrame::AbilityContinuation(
+                    AbilityContinuationFrame {
+                        pending,
+                        choose_zone_trigger_context: None,
+                    },
+                ));
+            state
+        };
+        assert!(deferred(
+            &with_remainder(return_as_aura()),
+            &head,
+            Some(&completed)
+        ));
+        assert!(!deferred(
+            &with_remainder(put_counter()),
+            &head,
+            Some(&completed)
+        ));
+
+        // (b) DieRoll results_table
+        let with_die = |effect: Effect| {
+            let mut state = GameState::new_two_player(3);
+            state
+                .resolution_stack
+                .push_inner(ResolutionFrame::DieRoll(Box::new(PendingDieRoll {
+                    source_id: ObjectId(100),
+                    controller: PlayerId(0),
+                    roller: PlayerId(0),
+                    targets: Vec::new(),
+                    sides: 6,
+                    results: vec![3, 4],
+                    ignore_rules: Vec::new(),
+                    results_table: vec![crate::types::ability::DieResultBranch {
+                        min: 1,
+                        max: 6,
+                        effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)),
+                    }],
+                    modifier: None,
+                    die_result: None,
+                    next_index: 0,
+                    running_total: 0,
+                    rolled_any: false,
+                    forced_ignored: Vec::new(),
+                    chain_root_targets: Vec::new(),
+                })));
+            state
+        };
+        assert!(deferred(
+            &with_die(apply_perpetual()),
+            &head,
+            Some(&completed)
+        ));
+        assert!(!deferred(&with_die(put_counter()), &head, Some(&completed)));
+
+        // (c) BatchDelivery completion carrying a scoped library-search resume.
+        let with_batch = |effect: Effect| {
+            let mut state = GameState::new_two_player(3);
+            let mut logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+            logical_zone_change_group
+                .latch_immediately_before(Vec::new(), Vec::new())
+                .expect("empty batch group retains its pre-delivery latch");
+            let pending = PendingBatchDeliveries {
+                logical_zone_change_group,
+                paused_current: None,
+                remaining: Vec::new(),
+                destination: Zone::Battlefield,
+                source_id: None,
+                enter_tapped: EtbTapState::Unspecified,
+                exile_tracking: ZoneDeliveryExileTracking::None,
+                library_placement: None,
+                completion: Some(BatchCompletion::LibrarySearchDeliverySettled {
+                    resume: LibrarySearchDeliveryResume::Scoped {
+                        player: PlayerId(0),
+                        source_id: ObjectId(100),
+                        search_keys: Vec::new(),
+                        grants: Vec::new(),
+                        after_scope: Some(Box::new(node(effect))),
+                    },
+                }),
+                replacement_applied: HashSet::new(),
+                requests: Vec::new(),
+                attempted: Vec::new(),
+                zone_change_record_start: state.zone_changes_this_turn.len(),
+                deferred_events: Vec::new(),
+            };
+            state
+                .resolution_stack
+                .push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
+            state
+        };
+        assert!(deferred(&with_batch(generic()), &head, Some(&completed)));
+        assert!(!deferred(
+            &with_batch(put_counter()),
+            &head,
+            Some(&completed)
+        ));
+    }
+
+    /// B0: an entering `ContinuationStep` is a co-entrant, not a boundary.
+    #[test]
+    fn boundary_skips_same_instruction_co_entry() {
+        let completed = node(return_to_battlefield());
+        let mut co_entry = node(return_to_battlefield());
+        co_entry.sub_link = SubAbilityLink::ContinuationStep;
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &co_entry, Some(&completed));
+        assert!(state.battlefield_entry_observations.is_empty(), "B0");
+
+        let mut sibling = co_entry.clone();
+        sibling.sub_link = SubAbilityLink::SequentialSibling;
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &sibling, Some(&completed));
+        assert_eq!(
+            state.battlefield_entry_observations.len(),
+            1,
+            "B0 positive pair"
+        );
+    }
+
+    /// G1: nothing is settled while a resolution choice is pending.
+    #[test]
+    fn boundary_waits_for_pending_resolution_choice() {
+        let completed = node(return_to_battlefield());
+        let next = node(put_counter());
+        let mut state = GameState::new_two_player(3);
+        let (id, events) = entered(&mut state, 1);
+        state.waiting_for = WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: vec![id],
+        };
+        settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
+        assert!(state.battlefield_entry_observations.is_empty(), "G1");
+
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
+        assert_eq!(
+            state.battlefield_entry_observations.len(),
+            1,
+            "G1 positive pair"
+        );
+    }
+
+    /// G2: a parked mid-entry entry is skipped by its ledger key, even under a
+    /// `CopyTargetChoice` (which `waits_for_resolution_choice` does not cover) and even when
+    /// the parked copy's record differs in an unrelated field.
+    #[test]
+    fn boundary_skips_parked_mid_entry_by_key() {
+        let completed = node(return_to_battlefield());
+        let next = node(put_counter());
+        for perturb in [false, true] {
+            let mut state = GameState::new_two_player(3);
+            let (parked, mut events) = entered(&mut state, 1);
+            let (other, more) = entered(&mut state, 2);
+            events.extend(more);
+            let mut parked_event = events[0].clone();
+            if perturb {
+                if let GameEvent::ZoneChanged { record, .. } = &mut parked_event {
+                    record.co_departed.push(ObjectId(999));
+                }
+            }
+            state.deferred_entry_events = vec![parked_event];
+            state.waiting_for = WaitingFor::CopyTargetChoice {
+                player: PlayerId(0),
+                source_id: parked,
+                valid_targets: vec![other],
+                max_mana_value: None,
+                purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
+            };
+            settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
+            let observed: Vec<ObjectId> = state
+                .battlefield_entry_observations
+                .values()
+                .map(|row| row.identity.reference.object_id)
+                .collect();
+            assert_eq!(
+                observed,
+                vec![other],
+                "only the unparked entry (perturb={perturb})"
+            );
+        }
+    }
+
+    /// S-b: the resume call (`completed = None`) settles a completed entry before a resumed
+    /// chain that leaves the entrant alone, and defers before one carrying a D1 kind.
+    #[test]
+    fn resume_boundary_settles_completed_entry() {
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &node(put_counter()), None);
+        assert_eq!(state.battlefield_entry_observations.len(), 1, "S-b settles");
+
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(
+            &mut state,
+            &events,
+            &node(put_counter()).sub_ability(node(generic())),
+            None,
+        );
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "S-b defers on D1"
+        );
+    }
+
+    /// CR 603.10 + CR 608.2c: under a cast parent the boundary is the next WRITTEN instruction
+    /// after the consumed metadata run (`cast_from_zone::cast_metadata_continuation`). An earlier
+    /// entrant is observed before a written instruction beneath a gains rider changes it, and a
+    /// pure-metadata chain completes without a boundary of its own (its entries are read live, as
+    /// at any chain end).
+    ///
+    /// REVERT: dropping the walker's `settle_entries_before_instruction` call leaves no row in
+    /// the first case; settling on the raw sub (before the splice) records a row in the second.
+    #[test]
+    fn cast_metadata_rider_boundary_is_the_next_written_instruction() {
+        let cast_parent = |sub: ResolvedAbility| {
+            let mut parent = node(
+                serde_json::from_str(
+                    r#"{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"}"#,
+                )
+                .expect("cast parent"),
+            );
+            parent.sub_ability = Some(Box::new(sub));
+            parent
+        };
+        let gains_rider = || {
+            let mut rider = node(Effect::AddPendingEntersModifications {
+                rider: Default::default(),
+            });
+            rider.sub_link = SubAbilityLink::SequentialSibling;
+            rider
+        };
+
+        // Rider → "put a +1/+1 counter on it": observed before the written instruction.
+        let mut state = GameState::new_two_player(3);
+        let (id, mut events) = entered(&mut state, 1);
+        let mut counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        counter.sub_link = SubAbilityLink::SequentialSibling;
+        let mut rider = gains_rider();
+        rider.sub_ability = Some(Box::new(counter));
+        resolve_ability_chain(&mut state, &cast_parent(rider), &mut events, 0)
+            .expect("the chain must resolve");
+        assert_eq!(
+            state.objects[&id].counters.get(&CounterType::Plus1Plus1),
+            Some(&1),
+            "reach guard: the written instruction beneath the rider resolved"
+        );
+        let rows: Vec<_> = state.battlefield_entry_observations.values().collect();
+        assert_eq!(rows.len(), 1, "the earlier entrant is observed");
+        assert_eq!(rows[0].identity.reference.object_id, id);
+        assert!(
+            rows[0].lki.counters.is_empty(),
+            "observed before the written instruction changed it: {:?}",
+            rows[0].lki.counters
+        );
+
+        // Pure metadata: the chain completes and no boundary settles the entry.
+        let mut state = GameState::new_two_player(3);
+        let (_, mut events) = entered(&mut state, 1);
+        resolve_ability_chain(&mut state, &cast_parent(gains_rider()), &mut events, 0)
+            .expect("a pure-metadata chain must complete");
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "a pure-metadata chain has no next written instruction"
+        );
     }
 }
 

@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::game::combat;
 use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
+use crate::game::keywords::HeldObject;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
     resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
@@ -5068,6 +5069,75 @@ pub(crate) fn matches_target_filter_on_departure(
     )
 }
 
+/// CR 603.10 + CR 603.6a + CR 611.3c: evaluate an enters observer's subject filter against the
+/// entrant as it existed immediately after its entry event. A settled observation
+/// (`GameState::battlefield_entry_observation`) is authoritative: it is laid over the exact live
+/// entrant (or, when that incarnation is gone — CR 400.7 — over a skeleton) and evaluated by the
+/// full object filter. With no observation the entry was never settled — no instruction boundary
+/// followed it, settlement was deferred (`entry_observation_deferred`, a same-instruction
+/// co-entry, or a pending choice), or it was mid-entry — so the reading is exactly today's: the
+/// live entrant while it is the entered incarnation, otherwise its record (CR 400.7).
+/// Distinct from the CR 614.12 would-be-entrant authorities (`BattlefieldEntrantProjection`,
+/// `matches_target_filter_on_battlefield_entry`): observers read the realized entrant.
+pub(crate) fn matches_target_filter_on_entry_observation(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    licensed: Option<Zone>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let Some(observation) = state.battlefield_entry_observation(record) else {
+        // CR 400.7: the live arm lends only the entered incarnation; a later object
+        // at the same storage id is a new object, so the record answers instead.
+        return match state.objects.get(&record.object_id).filter(|live| {
+            record
+                .entered_incarnation
+                .is_none_or(|incarnation| live.incarnation == incarnation)
+        }) {
+            Some(_) => matches_target_filter(state, record.object_id, filter, ctx),
+            None => matches_target_filter_on_zone_change_record_licensed(
+                state, record, licensed, filter, ctx,
+            ),
+        };
+    };
+    // CR 400.7: only the exact observed incarnation lends its live object (and so its
+    // abilities) to the view; otherwise the projection stands alone on a skeleton.
+    let mut view = match state.objects.get(&record.object_id) {
+        Some(live) if ObjectIncarnationRef::from_object(live) == observation.identity.reference => {
+            live.clone()
+        }
+        _ => GameObject::new(
+            record.object_id,
+            observation.card_id,
+            observation.lki.owner,
+            observation.lki.name.clone(),
+            observation.identity.expected_zone,
+        ),
+    };
+    view.overlay_source_projection(observation);
+    // CR 702.26b: a phased-out permanent is treated as though it does not exist.
+    if view.is_phased_out() {
+        return false;
+    }
+    filter_inner_for_object(
+        state,
+        &view,
+        record.object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.trigger_source,
+        ctx.recipient_id,
+        ctx.scoped_iteration_player,
+        ctx.triggering_object,
+        ctx.declared_slot_view,
+        ctx.granting_object,
+        ControllerLookup::LiveOrLki,
+        HeldObject::Detached,
+    )
+}
+
 /// CR 701.20e + CR 608.2c: Look-then-cast chains publish cards via
 /// `last_revealed_ids` while the parser still binds later steps to
 /// `ExiledBySource`. When resolving those steps against library cards,
@@ -5353,6 +5423,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
+        HeldObject::Live,
     )
 }
 
@@ -5692,6 +5763,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.declared_slot_view,
             ctx.granting_object,
             ControllerLookup::OwnerZone,
+            HeldObject::Live,
         );
     }
 
@@ -5712,6 +5784,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::OwnerZone,
+        HeldObject::Live,
     )
 }
 
@@ -5840,6 +5913,86 @@ impl EntryProjection {
         let mut entered = entered.clone();
         apply_entrant_own_statics(state, &mut entered);
         Some(entered)
+    }
+}
+
+/// CR 614.12 + CR 400.7 + CR 110.2a + CR 613.1: an entrant "as it would exist on
+/// the battlefield" for an effect-carried entry gate. Built on a detached scratch
+/// copy of the state: the entrant is placed onto the scratch battlefield as the
+/// new object it becomes, under the controller it will enter under, and the full
+/// layer pass runs there, so its own statics that would apply once it is there
+/// and every continuous effect that already exists both apply. Only this entrant
+/// is placed. Nothing reaches the live game: the input is `&GameState`.
+/// Population- and origin-zone-reading condition leaves of every static the
+/// scratch can apply (printed on any object, copied by a layer-1 copy effect,
+/// or granted by a `GrantStaticAbility`, per recipient) and of every transient
+/// are evaluated against the pre-entry state
+/// (`layers::pin_entry_population_conditions`); the live game, triggers and
+/// entry observations keep the realized battlefield. `state` must be the board
+/// before the entry event's first member moved (CR 603.6a); multi-object callers
+/// resolve every member first (`change_zone::resolve_change_zone_member_entries`).
+pub(crate) struct BattlefieldEntrantProjection {
+    scratch: GameState,
+    entrant: ObjectId,
+}
+
+impl BattlefieldEntrantProjection {
+    /// `None` when the entrant can't be projected: it does not resolve through
+    /// `GameState::entering_or_live_object`, it is a liminal entry, or the scratch
+    /// placement leaves it off the battlefield (CR 614.1d / CR 400.4a / CR 111.8 /
+    /// CR 712.14a refusals inside `zones::move_to_zone_with_entry_flags`). The caller then
+    /// keeps today's pre-move read. With `enter_transformed`, the scratch entrant
+    /// is turned to its back face after placement (CR 712.14a), as the real
+    /// delivery does.
+    pub(crate) fn new(
+        state: &GameState,
+        entrant: ObjectId,
+        controller_override: Option<PlayerId>,
+        enter_transformed: bool,
+    ) -> Option<Self> {
+        let origin = state.entering_or_live_object(entrant)?.zone;
+        if state.liminal_entries.contains_key(&entrant) {
+            return None;
+        }
+        let mut scratch = state.clone();
+        let mut events = Vec::new();
+        // CR 400.7 + CR 613.7d: the zone-move primitive makes the new object and draws its timestamp on the scratch.
+        crate::game::zones::move_to_zone_with_entry_flags(
+            &mut scratch,
+            entrant,
+            Zone::Battlefield,
+            &mut events,
+            enter_transformed,
+            None,
+        );
+        let placed = scratch.objects.get(&entrant)?;
+        if placed.zone != Zone::Battlefield {
+            return None;
+        }
+        // CR 712.14a + CR 701.27a: a transformed entry is turned to its back face after placement, as delivery does.
+        if enter_transformed && placed.back_face.is_some() && !placed.transformed {
+            let _ = crate::game::transform::transform_permanent(&mut scratch, entrant, &mut events);
+        }
+        // CR 110.2a: the controller the real move installs.
+        if let Some(controller) = controller_override {
+            crate::game::zones::apply_battlefield_entry_controller_override(
+                &mut scratch,
+                &mut events,
+                entrant,
+                controller,
+            );
+        }
+        // CR 614.12 + CR 700.5: conditions count the pre-entry population (Heliod ruling 2020-01-24); the entrant's own statics still apply.
+        crate::game::layers::pin_entry_population_conditions(&mut scratch, state, Some(origin));
+        // CR 613.1: the full layer pass, so CR 614.12's own statics and existing effects both apply.
+        crate::game::layers::mark_layers_full(&mut scratch);
+        crate::game::layers::flush_layers(&mut scratch);
+        Some(Self { scratch, entrant })
+    }
+
+    /// CR 614.12: whether the projected entrant matches `filter` under `ctx`.
+    pub(crate) fn matches(&self, filter: &TargetFilter, ctx: &FilterContext<'_>) -> bool {
+        matches_target_filter(&self.scratch, self.entrant, filter, ctx)
     }
 }
 
@@ -6036,6 +6189,7 @@ pub(crate) fn matches_target_filter_on_object(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        HeldObject::Detached,
     )
 }
 
@@ -6045,6 +6199,7 @@ pub(crate) fn matches_target_filter_on_object(
 fn entry_filter_matches_staged(
     state: &GameState,
     staged: &crate::game::game_object::GameObject,
+    staged_held: HeldObject,
     object_id: ObjectId,
     entry_choices: &[ChosenAttribute],
     controller_override: Option<PlayerId>,
@@ -6058,9 +6213,14 @@ fn entry_filter_matches_staged(
         controller_override,
         filter,
     );
+    let (obj, held) = projected
+        .as_ref()
+        .map_or((staged, staged_held), |projected| {
+            (projected, HeldObject::Detached)
+        });
     filter_inner_for_object(
         state,
-        projected.as_ref().unwrap_or(staged),
+        obj,
         object_id,
         filter,
         ctx.source_id,
@@ -6073,6 +6233,7 @@ fn entry_filter_matches_staged(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        held,
     )
 }
 
@@ -6119,6 +6280,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
+                    HeldObject::Detached,
                 );
             }
             if let Some(copy) = enter_as_copy {
@@ -6135,6 +6297,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 entry_filter_matches_staged(
                     state,
                     &obj,
+                    HeldObject::Detached,
                     *object_id,
                     crate::types::proposed_event::EntryChoices::of(enter_with_choices),
                     *controller_override,
@@ -6145,6 +6308,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 entry_filter_matches_staged(
                     state,
                     entry.object.projected(),
+                    HeldObject::Detached,
                     *object_id,
                     crate::types::proposed_event::EntryChoices::of(enter_with_choices),
                     *controller_override,
@@ -6161,6 +6325,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 entry_filter_matches_staged(
                     state,
                     live,
+                    HeldObject::Live,
                     *object_id,
                     crate::types::proposed_event::EntryChoices::of(enter_with_choices),
                     *controller_override,
@@ -6188,6 +6353,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
+                    HeldObject::Detached,
                 )
             })
         }
@@ -6213,6 +6379,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.declared_slot_view,
                 ctx.granting_object,
                 ControllerLookup::LiveOrLki,
+                HeldObject::Detached,
             )
         }
         _ => false,
@@ -6289,6 +6456,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        HeldObject::Detached,
     )
 }
 
@@ -6337,6 +6505,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        HeldObject::Detached,
     )
 }
 
@@ -6389,6 +6558,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        HeldObject::Detached,
     )
 }
 
@@ -6634,6 +6804,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
+        HeldObject::Detached,
     )
 }
 
@@ -6807,6 +6978,7 @@ fn filter_inner_with_lookup(
         ctx.declared_slot_view,
         ctx.granting_object,
         controller_lookup,
+        HeldObject::Live,
     )
 }
 
@@ -6826,6 +6998,7 @@ fn filter_inner_for_object(
     declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
     granting_object: Option<ObjectIncarnationRef>,
     controller_lookup: ControllerLookup,
+    held: HeldObject,
 ) -> bool {
     match filter {
         TargetFilter::None => false,
@@ -7112,7 +7285,7 @@ fn filter_inner_for_object(
                         owned_axis_admits(state, &source_ctx, controller, owner)
                     })
                 }
-                _ => matches_filter_prop(p, state, obj, object_id, &source_ctx),
+                _ => matches_filter_prop(p, state, obj, object_id, held, &source_ctx),
             })
         }
         TargetFilter::Not { filter: inner } => !filter_inner_for_object(
@@ -7130,6 +7303,7 @@ fn filter_inner_for_object(
             declared_slot_view,
             granting_object,
             controller_lookup,
+            held,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
             filter_inner_for_object(
@@ -7147,6 +7321,7 @@ fn filter_inner_for_object(
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
+                held,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|f| {
@@ -7165,6 +7340,7 @@ fn filter_inner_for_object(
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
+                held,
             )
         }),
         // CR 405.1 + CR 115.9b: stack-target predicates can be composed inside
@@ -7389,6 +7565,7 @@ fn filter_inner_for_object(
                     declared_slot_view,
                     granting_object,
                     controller_lookup,
+                    held,
                 )
         }
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
@@ -9734,6 +9911,7 @@ fn matches_filter_prop(
     state: &GameState,
     obj: &GameObject,
     object_id: ObjectId,
+    held: HeldObject,
     source: &SourceContext<'_>,
 ) -> bool {
     match prop {
@@ -9871,13 +10049,16 @@ fn matches_filter_prop(
                     )
                 })
         }),
+        // CR 603.10 + CR 608.2i: the kind answer comes from the object this door
+        // holds, the same object WithKeyword reads; a Live door adds the live
+        // object's off-zone grants.
         FilterProp::HasKeywordKind { value } => {
-            crate::game::keywords::object_has_effective_keyword_kind(state, object_id, *value)
+            crate::game::keywords::effective_keyword_kind_of(state, obj, held, *value)
         }
         // CR 702: "without [keyword]" — negated keyword filter.
         FilterProp::WithoutKeyword { value } => !obj.has_keyword(value),
         FilterProp::WithoutKeywordKind { value } => {
-            !crate::game::keywords::object_has_effective_keyword_kind(state, object_id, *value)
+            !crate::game::keywords::effective_keyword_kind_of(state, obj, held, *value)
         }
         // CR 122.1: Counter count threshold over `counters` (a specific type or
         // any type, summed). Dynamic thresholds (`QuantityRef::Variable { "X" }`)
@@ -10297,9 +10478,9 @@ fn matches_filter_prop(
         // Disjunctive composite: any inner prop matches.
         FilterProp::AnyOf { props } => props
             .iter()
-            .any(|p| matches_filter_prop(p, state, obj, object_id, source)),
+            .any(|p| matches_filter_prop(p, state, obj, object_id, held, source)),
         // CR 608.2c: Logical negation — the object matches iff the inner prop does NOT.
-        FilterProp::Not { prop } => !matches_filter_prop(prop, state, obj, object_id, source),
+        FilterProp::Not { prop } => !matches_filter_prop(prop, state, obj, object_id, held, source),
         // CR 509.1b: Object's power is strictly greater than the source object's power.
         FilterProp::PowerGTSource => obj.power.unwrap_or(0) > source.lki.power.unwrap_or(0),
         // CR 709.4b: A split card off the stack counts its combined colors.
@@ -10412,7 +10593,7 @@ fn matches_filter_prop(
                 || obj.card_types.subtypes.iter().any(|s| s == "Saga")
         }
         FilterProp::NotHistoric => {
-            !matches_filter_prop(&FilterProp::Historic, state, obj, object_id, source)
+            !matches_filter_prop(&FilterProp::Historic, state, obj, object_id, held, source)
         }
         // CR 510.1c: Match creatures whose toughness exceeds their power.
         FilterProp::ToughnessGTPower => {
@@ -12526,7 +12707,9 @@ mod tests {
         let attribute = PlayerFilter::PlayerAttribute {
             relation: crate::types::ability::PlayerRelation::All,
             attr: Box::new(QuantityRef::BattlefieldEntriesThisTurn {
-                player: PlayerScope::ParentObjectTargetController,
+                player: PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                },
                 filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::Cmc {
                         comparator: Comparator::GE,
@@ -13228,6 +13411,283 @@ mod tests {
             filter,
             &FilterContext::from_source(state, source_id),
         )
+    }
+
+    /// March of the Machines — verbatim Oracle text.
+    const MARCH_OF_THE_MACHINES: &str = "Each noncreature artifact is an artifact creature with \
+         power and toughness each equal to its mana value. (Equipment that's a creature can't \
+         equip a creature.)";
+
+    /// A card in `owner`'s graveyard with exactly `core_types`.
+    fn graveyard_card(state: &mut GameState, name: &str, core_types: &[CoreType]) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = core_types.to_vec();
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        id
+    }
+
+    fn creature_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
+    }
+
+    fn march_board() -> GameState {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario.add_enchantment_from_oracle(
+            PlayerId(0),
+            "March of the Machines",
+            MARCH_OF_THE_MACHINES,
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().clone()
+    }
+
+    /// CR 614.12 (V-P3): building a battlefield projection is a read — the live
+    /// state is unchanged. Positive control first: the projection really ran the
+    /// scratch placement and layer pass (the March-projected artifact is a
+    /// creature while the live graveyard card is not), so the equality below is
+    /// not vacuous.
+    #[test]
+    fn battlefield_entrant_projection_leaves_live_state_untouched() {
+        use rand::Rng as _;
+        let mut state = march_board();
+        let artifact = graveyard_card(&mut state, "Sol Ring", &[CoreType::Artifact]);
+        let ctx = FilterContext::from_source(&state, ObjectId(100));
+        let before = serde_json::to_value(&state).expect("GameState serializes");
+        let next_timestamp = state.next_timestamp;
+        let zone_changes = state.zone_changes_this_turn.len();
+        let rng_draw = state
+            .rng
+            .clone()
+            .draw(crate::types::game_state::RandomDraw::Outcome)
+            .random::<u64>();
+
+        let projection = BattlefieldEntrantProjection::new(&state, artifact, None, false)
+            .expect("a graveyard artifact can be projected onto the battlefield");
+        assert!(
+            projection.matches(&creature_filter(), &ctx),
+            "the projected artifact is a creature under March of the Machines"
+        );
+        assert!(
+            !super::matches_target_filter(&state, artifact, &creature_filter(), &ctx),
+            "the live graveyard card is not a creature"
+        );
+        drop(projection);
+
+        assert_eq!(
+            serde_json::to_value(&state).expect("GameState serializes"),
+            before,
+            "the projection must not mutate the live state"
+        );
+        assert_eq!(state.next_timestamp, next_timestamp);
+        assert_eq!(state.zone_changes_this_turn.len(), zone_changes);
+        assert_eq!(
+            state
+                .rng
+                .clone()
+                .draw(crate::types::game_state::RandomDraw::Outcome)
+                .random::<u64>(),
+            rng_draw
+        );
+        assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
+    }
+
+    /// CR 614.12 + CR 712.14a + CR 400.4a (V-P6): the projection applies (a)
+    /// another permanent's continuous effect, (b) the entrant's own static that
+    /// would apply on the battlefield, (c) a transformed entry's back face; it
+    /// declines (c′) a single-faced card entering transformed and (d) an
+    /// instant card, so the caller keeps its pre-move read.
+    #[test]
+    fn battlefield_entrant_projection_cases() {
+        let ctx_for = |state: &GameState| FilterContext::from_source(state, ObjectId(100));
+
+        // (a) March of the Machines: a noncreature artifact is projected as a creature.
+        let mut state = march_board();
+        let artifact = graveyard_card(&mut state, "Sol Ring", &[CoreType::Artifact]);
+        let ctx = ctx_for(&state);
+        assert!(
+            BattlefieldEntrantProjection::new(&state, artifact, None, false)
+                .expect("projectable")
+                .matches(&creature_filter(), &ctx)
+        );
+
+        // (b) Heliod-shaped own static: "As long as your devotion to white is
+        // less than five, ~ isn't a creature." Pre-entry devotion is 0: its
+        // own {W} is not counted (CR 614.12 + CR 700.5, Heliod ruling
+        // 2020-01-24), so on the battlefield it is not a creature, while the
+        // graveyard card is.
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let heliod = scenario
+            .add_creature_to_graveyard(PlayerId(0), "Heliod, Sun-Crowned", 5, 5)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::White],
+            })
+            .from_oracle_text(
+                "As long as your devotion to white is less than five, Heliod isn't a creature.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut().clone();
+        let ctx = ctx_for(&state);
+        assert!(
+            super::matches_target_filter(&state, heliod, &creature_filter(), &ctx),
+            "control: the graveyard card is a creature card"
+        );
+        assert!(
+            !BattlefieldEntrantProjection::new(&state, heliod, None, false)
+                .expect("projectable")
+                .matches(&creature_filter(), &ctx)
+        );
+
+        // (c) A double-faced card: front face a noncreature enchantment, back
+        // face a creature. Entering transformed projects the back face.
+        let mut state = GameState::new_two_player(42);
+        let dfc = graveyard_card(&mut state, "Front Face", &[CoreType::Enchantment]);
+        state.objects.get_mut(&dfc).unwrap().back_face =
+            Some(crate::game::game_object::BackFaceData {
+                name: "Back Face".to_string(),
+                power: Some(3),
+                toughness: Some(3),
+                card_types: crate::types::card_type::CardType {
+                    core_types: vec![CoreType::Creature],
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let ctx = ctx_for(&state);
+        assert!(
+            BattlefieldEntrantProjection::new(&state, dfc, None, true)
+                .expect("a DFC can enter transformed")
+                .matches(&creature_filter(), &ctx),
+            "entering transformed reads the back face (CR 712.14a)"
+        );
+        assert!(
+            !BattlefieldEntrantProjection::new(&state, dfc, None, false)
+                .expect("projectable")
+                .matches(&creature_filter(), &ctx),
+            "entering front face up reads the front face"
+        );
+
+        // (c′) A single-faced card can't enter transformed (CR 712.14a): no projection.
+        let single = graveyard_card(&mut state, "Single Face", &[CoreType::Artifact]);
+        assert!(BattlefieldEntrantProjection::new(&state, single, None, true).is_none());
+        // Reach guard: the same card entering normally is projectable.
+        assert!(BattlefieldEntrantProjection::new(&state, single, None, false).is_some());
+
+        // (d) An instant card can't enter the battlefield (CR 400.4a): no projection.
+        let instant = graveyard_card(&mut state, "Instant", &[CoreType::Instant]);
+        assert!(BattlefieldEntrantProjection::new(&state, instant, None, false).is_none());
+    }
+
+    /// CR 614.12 + CR 700.5 + CR 109.5 + CR 110.2a: an entrant owned by P1 entering
+    /// under P0's control counts P0's population before the entry. Heliod (P0 devotion
+    /// 4, P1 devotion 6) and Rusted Relic (P0 two artifacts, P1 three) are not creatures
+    /// as they would enter; a pin keyed to the owner, or a scratch that counted the
+    /// entrant, would make both creatures. Sibling: with P0 devotion 5 / three P0
+    /// artifacts before entry, both are creatures.
+    #[test]
+    fn battlefield_entrant_projection_reads_new_controllers_pre_entry_population() {
+        const HELIOD: &str =
+            "As long as your devotion to white is less than five, Heliod isn't a creature.";
+        const RUSTED_RELIC: &str = "Metalcraft \u{2014} This artifact is a 5/5 Golem artifact \
+             creature as long as you control three or more artifacts.";
+        let white = |count: usize| ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White; count],
+        };
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        let heliod_projects_creature = |p0_ww: usize, p0_w: usize| {
+            let mut scenario = crate::game::scenario::GameScenario::new();
+            let heliod = scenario
+                .add_creature_to_graveyard(p1, "Heliod, Sun-Crowned", 5, 5)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![ManaCostShard::White],
+                })
+                .from_oracle_text(HELIOD)
+                .id();
+            for i in 0..p0_ww {
+                scenario
+                    .add_enchantment_from_oracle(p0, &format!("P0 WW {i}"), "")
+                    .with_mana_cost(white(2));
+            }
+            for i in 0..p0_w {
+                scenario
+                    .add_enchantment_from_oracle(p0, &format!("P0 W {i}"), "")
+                    .with_mana_cost(white(1));
+            }
+            for i in 0..3 {
+                scenario
+                    .add_enchantment_from_oracle(p1, &format!("P1 WW {i}"), "")
+                    .with_mana_cost(white(2));
+            }
+            let mut runner = scenario.build();
+            let state = runner.state_mut().clone();
+            let ctx = FilterContext::from_source(&state, ObjectId(100));
+            BattlefieldEntrantProjection::new(&state, heliod, Some(p0), false)
+                .expect("projectable")
+                .matches(&creature_filter(), &ctx)
+        };
+        assert!(
+            !heliod_projects_creature(2, 0),
+            "P0 pre-entry devotion 4: not a creature"
+        );
+        assert!(
+            heliod_projects_creature(2, 1),
+            "P0 pre-entry devotion 5: a creature"
+        );
+
+        let relic_projects_creature = |p0_artifacts: usize| {
+            let mut scenario = crate::game::scenario::GameScenario::new();
+            let relic = scenario
+                .add_creature_to_graveyard(p1, "Rusted Relic", 0, 0)
+                .with_mana_cost(ManaCost::generic(4))
+                .from_oracle_text(RUSTED_RELIC)
+                .id();
+            for i in 0..p0_artifacts {
+                scenario.add_artifact_from_oracle(p0, &format!("P0 Artifact {i}"), "");
+            }
+            for i in 0..3 {
+                scenario.add_artifact_from_oracle(p1, &format!("P1 Artifact {i}"), "");
+            }
+            let mut runner = scenario.build();
+            {
+                let obj = runner.state_mut().objects.get_mut(&relic).unwrap();
+                obj.card_types.core_types = vec![CoreType::Artifact];
+                obj.base_card_types = obj.card_types.clone();
+                obj.power = None;
+                obj.toughness = None;
+                obj.base_power = None;
+                obj.base_toughness = None;
+            }
+            let state = runner.state_mut().clone();
+            let ctx = FilterContext::from_source(&state, ObjectId(100));
+            BattlefieldEntrantProjection::new(&state, relic, Some(p0), false)
+                .expect("projectable")
+                .matches(&creature_filter(), &ctx)
+        };
+        assert!(
+            !relic_projects_creature(2),
+            "two P0 artifacts before entry: not a creature"
+        );
+        assert!(
+            relic_projects_creature(3),
+            "three P0 artifacts before entry: a creature"
+        );
     }
 
     /// Explicit-controller variant used by tests that exercise stack-resolving
@@ -25259,5 +25719,394 @@ mod entry_projection_tests {
         ));
         unrelated.inherit_delivery_boundary(&original);
         assert!(!unrelated.parks_delivery(&original));
+    }
+}
+
+#[cfg(test)]
+mod entry_observation_tests {
+    //! U3 — CR 603.10 + CR 603.6a + CR 611.3c: the enters-observer evaluator reads the settled
+    //! entry observation, not the live entrant; with no observation it is exactly today's
+    //! live / record reading.
+    use super::*;
+    use crate::game::layers::{flush_layers, mark_layers_full};
+    use crate::game::zones::{
+        create_object, record_and_emit_entry_from_no_zone, settle_battlefield_entry_observations,
+    };
+    use crate::types::ability::{
+        Comparator, ControllerRef, PtStat, PtValueScope, QuantityExpr, TypeFilter, TypedFilter,
+    };
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    struct Fixture {
+        state: GameState,
+        source: ObjectId,
+        entrant: ObjectId,
+        record: ZoneChangeRecord,
+    }
+
+    /// A 1/1 Bear creature under P0 enters from no zone; `settle` decides whether the entry
+    /// is observed at once.
+    fn fixture(settle: bool) -> Fixture {
+        fixture_with_keywords(settle, &[])
+    }
+
+    /// [`fixture`] whose entrant has `keywords` when it enters.
+    fn fixture_with_keywords(settle: bool, keywords: &[Keyword]) -> Fixture {
+        let mut state = GameState::new_two_player(11);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Entrant".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&entrant).expect("created");
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec!["Bear".to_string()];
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.keywords = keywords.to_vec();
+            obj.base_keywords = keywords.to_vec();
+        }
+        mark_layers_full(&mut state);
+        flush_layers(&mut state);
+        let mut events = Vec::new();
+        let record =
+            record_and_emit_entry_from_no_zone(&mut state, entrant, &mut events).expect("entered");
+        if settle {
+            settle_battlefield_entry_observations(&mut state, &events);
+            assert!(
+                state.battlefield_entry_observation(&record).is_some(),
+                "precondition: the entry is observed"
+            );
+        }
+        Fixture {
+            state,
+            source,
+            entrant,
+            record,
+        }
+    }
+
+    fn creature_with(props: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().properties(props))
+    }
+
+    fn power_at_least(n: i32) -> TargetFilter {
+        creature_with(vec![FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: n },
+        }])
+    }
+
+    /// (through the evaluator, through the live object)
+    fn both(f: &Fixture, record: &ZoneChangeRecord, filter: &TargetFilter) -> (bool, bool) {
+        let ctx = FilterContext::from_source(&f.state, f.source);
+        (
+            matches_target_filter_on_entry_observation(&f.state, record, None, filter, &ctx),
+            matches_target_filter(&f.state, f.entrant, filter, &ctx),
+        )
+    }
+
+    fn add_counters(state: &mut GameState, id: ObjectId, n: u32) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, n);
+        mark_layers_full(state);
+        flush_layers(state);
+    }
+
+    #[test]
+    fn entry_observation_overrides_later_counters() {
+        let mut f = fixture(true);
+        add_counters(&mut f.state, f.entrant, 2);
+        assert_eq!(f.state.objects[&f.entrant].power, Some(3), "precondition");
+        let record = f.record.clone();
+        assert_eq!(both(&f, &record, &power_at_least(3)), (false, true));
+    }
+
+    #[test]
+    fn entry_observation_answers_for_departed_entrant() {
+        let mut f = fixture_with_keywords(true, &[Keyword::Flying]);
+        add_counters(&mut f.state, f.entrant, 2);
+        // CR 400.7: the entrant left; its storage id now names a new graveyard object,
+        // which has none of the entrant's keywords.
+        {
+            let obj = f.state.objects.get_mut(&f.entrant).unwrap();
+            obj.incarnation += 1;
+            obj.zone = Zone::Graveyard;
+            obj.keywords.clear();
+            obj.base_keywords.clear();
+        }
+        let ctx = FilterContext::from_source(&f.state, f.source);
+        // CR 603.10 + CR 400.7: kind-level keyword reads answer from the observation the
+        // skeleton carries, as `WithKeyword` does, not from the new graveyard object.
+        let flying_kind = creature_with(vec![FilterProp::HasKeywordKind {
+            value: KeywordKind::Flying,
+        }]);
+        let first_strike_kind = creature_with(vec![FilterProp::HasKeywordKind {
+            value: KeywordKind::FirstStrike,
+        }]);
+        assert!(
+            matches_target_filter_on_entry_observation(
+                &f.state,
+                &f.record,
+                None,
+                &flying_kind,
+                &ctx
+            ),
+            "moved: the observation recorded flying"
+        );
+        assert!(!matches_target_filter_on_entry_observation(
+            &f.state,
+            &f.record,
+            None,
+            &first_strike_kind,
+            &ctx
+        ));
+        let at_most_one = creature_with(vec![FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 1 },
+        }]);
+        assert!(matches_target_filter_on_entry_observation(
+            &f.state,
+            &f.record,
+            None,
+            &at_most_one,
+            &ctx
+        ));
+        assert!(!matches_target_filter_on_entry_observation(
+            &f.state,
+            &f.record,
+            None,
+            &power_at_least(3),
+            &ctx
+        ));
+        // Gone entirely (a token that ceased to exist): the skeleton view still answers.
+        f.state.objects.remove(&f.entrant);
+        let ctx = FilterContext::from_source(&f.state, f.source);
+        assert!(matches_target_filter_on_entry_observation(
+            &f.state,
+            &f.record,
+            None,
+            &at_most_one,
+            &ctx
+        ));
+        assert!(
+            matches_target_filter_on_entry_observation(
+                &f.state,
+                &f.record,
+                None,
+                &flying_kind,
+                &ctx
+            ),
+            "removed: the observation recorded flying"
+        );
+        assert!(!matches_target_filter_on_entry_observation(
+            &f.state,
+            &f.record,
+            None,
+            &first_strike_kind,
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn entry_observation_ignores_reentered_incarnation() {
+        let mut f = fixture(true);
+        // CR 400.7: the same storage id re-enters as a new object with counters.
+        f.state.objects.get_mut(&f.entrant).unwrap().incarnation += 1;
+        add_counters(&mut f.state, f.entrant, 2);
+        let mut events = Vec::new();
+        let reentry = record_and_emit_entry_from_no_zone(&mut f.state, f.entrant, &mut events)
+            .expect("re-entered");
+        assert!(f.state.battlefield_entry_observation(&reentry).is_none());
+        // The re-entry has no observation, so it reads live; the original entry keeps its own.
+        assert_eq!(both(&f, &reentry, &power_at_least(3)), (true, true));
+        let original = f.record.clone();
+        assert!(!both(&f, &original, &power_at_least(3)).0);
+        // A record claiming the original index for the new incarnation never matches the row.
+        let mut forged = original.clone();
+        forged.entered_incarnation = reentry.entered_incarnation;
+        assert!(f.state.battlefield_entry_observation(&forged).is_none());
+    }
+
+    #[test]
+    fn entry_observation_absent_matches_todays_arms() {
+        let mut f = fixture(false);
+        add_counters(&mut f.state, f.entrant, 2);
+        let record = f.record.clone();
+        for filter in [power_at_least(3), power_at_least(4)] {
+            let (evaluated, live) = both(&f, &record, &filter);
+            assert_eq!(evaluated, live, "live arm");
+        }
+        assert!(
+            both(&f, &record, &power_at_least(3)).0,
+            "reach: the live arm admits"
+        );
+        f.state.objects.remove(&f.entrant);
+        let ctx = FilterContext::from_source(&f.state, f.source);
+        for filter in [power_at_least(1), power_at_least(2)] {
+            assert_eq!(
+                matches_target_filter_on_entry_observation(&f.state, &record, None, &filter, &ctx),
+                matches_target_filter_on_zone_change_record_licensed(
+                    &f.state, &record, None, &filter, &ctx
+                ),
+                "record arm"
+            );
+        }
+        assert!(
+            matches_target_filter_on_entry_observation(
+                &f.state,
+                &record,
+                None,
+                &power_at_least(1),
+                &ctx
+            ),
+            "reach: the record arm admits"
+        );
+    }
+
+    /// CR 400.7: with no observation, the live arm lends only the entered incarnation. A
+    /// later object at the same storage id is a new object, so the entry record answers:
+    /// the 1/1 Bear as it entered, not the live object's counters.
+    #[test]
+    fn entry_observation_absent_rejects_later_incarnation() {
+        let mut f = fixture(false);
+        add_counters(&mut f.state, f.entrant, 2);
+        f.state.objects.get_mut(&f.entrant).unwrap().incarnation += 1;
+        let record = f.record.clone();
+        assert!(
+            f.state.battlefield_entry_observation(&record).is_none(),
+            "precondition: the entry is unobserved"
+        );
+        let (evaluated, live) = both(&f, &record, &power_at_least(3));
+        assert!(live, "reach: the later live object has power 3");
+        assert!(
+            !evaluated,
+            "the later incarnation does not answer for the entry"
+        );
+        let ctx = FilterContext::from_source(&f.state, f.source);
+        for filter in [power_at_least(1), power_at_least(3)] {
+            assert_eq!(
+                matches_target_filter_on_entry_observation(&f.state, &record, None, &filter, &ctx),
+                matches_target_filter_on_zone_change_record_licensed(
+                    &f.state, &record, None, &filter, &ctx
+                ),
+                "record arm"
+            );
+        }
+        assert!(
+            matches_target_filter_on_entry_observation(
+                &f.state,
+                &record,
+                None,
+                &power_at_least(1),
+                &ctx
+            ),
+            "reach: the record arm admits the entry-time Bear"
+        );
+    }
+
+    /// Shape coverage: each filter shape enter observers use reads the projection, not
+    /// `state.objects`, when the live entrant differs from it in exactly that field.
+    #[test]
+    fn entry_observation_shapes_read_the_projection() {
+        let shape = |mutate: fn(&mut GameObject), filter: TargetFilter| {
+            let mut f = fixture(true);
+            mutate(f.state.objects.get_mut(&f.entrant).unwrap());
+            let record = f.record.clone();
+            both(&f, &record, &filter)
+        };
+        assert_eq!(
+            shape(
+                |o| o.keywords.push(Keyword::Flying),
+                creature_with(vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }])
+            ),
+            (false, true),
+            "WithKeyword"
+        );
+        // CR 603.10 + CR 608.2i: the kind-level siblings read the same object, both polarities.
+        assert_eq!(
+            shape(
+                |o| o.keywords.push(Keyword::Flying),
+                creature_with(vec![FilterProp::HasKeywordKind {
+                    value: KeywordKind::Flying
+                }])
+            ),
+            (false, true),
+            "HasKeywordKind"
+        );
+        assert_eq!(
+            shape(
+                |o| o.keywords.push(Keyword::Flying),
+                creature_with(vec![FilterProp::WithoutKeywordKind {
+                    value: KeywordKind::Flying
+                }])
+            ),
+            (true, false),
+            "WithoutKeywordKind"
+        );
+        assert_eq!(
+            shape(
+                |o| o.card_types.subtypes.push("Zombie".to_string()),
+                TargetFilter::Typed(TypedFilter::creature().subtype("Zombie".to_string()))
+            ),
+            (false, true),
+            "Subtype"
+        );
+        assert_eq!(
+            shape(
+                |o| o.card_types.core_types.push(CoreType::Artifact),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))
+            ),
+            (false, true),
+            "core type"
+        );
+        assert_eq!(
+            shape(
+                |o| o.controller = PlayerId(1),
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+            ),
+            (true, false),
+            "controller"
+        );
+        assert_eq!(
+            shape(|o| o.tapped = true, creature_with(vec![FilterProp::Tapped])),
+            (false, true),
+            "Tapped"
+        );
+        // `Another` reads the view's identity against the observer: the entrant is
+        // "another" creature for a different observer, and not for itself.
+        let f = fixture(true);
+        let another = creature_with(vec![FilterProp::Another]);
+        let other_ctx = FilterContext::from_source(&f.state, f.source);
+        assert!(matches_target_filter_on_entry_observation(
+            &f.state, &f.record, None, &another, &other_ctx
+        ));
+        let self_ctx = FilterContext::from_source(&f.state, f.entrant);
+        assert!(!matches_target_filter_on_entry_observation(
+            &f.state, &f.record, None, &another, &self_ctx
+        ));
     }
 }

@@ -445,7 +445,7 @@ fn finalize_loyalty_activation(
     player: PlayerId,
     pw_id: ObjectId,
     loyalty_cost: i32,
-    resolved: ResolvedAbility,
+    mut resolved: ResolvedAbility,
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -462,6 +462,7 @@ fn finalize_loyalty_activation(
         pw_id,
         &cost,
         Some(ability_index),
+        &mut resolved.context.cost_removed_counter_amount,
         events,
     )
     .expect("loyalty validation passed in handle_activate_loyalty")

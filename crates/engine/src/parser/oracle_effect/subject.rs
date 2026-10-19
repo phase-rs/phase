@@ -112,6 +112,36 @@ fn subject_phrase_ast(application: Option<SubjectApplication>) -> SubjectPhraseA
     }
 }
 
+/// CR 121.1 + CR 608.2c: the may-axis player-action verb for a `target opponent
+/// may <verb>` clause whose actor is the announced target opponent. Pinned to the
+/// corpus-proven `draw` (five cards: Tataru Taru, Kuroki, Thief of Talents,
+/// Phelddagrif, Questing Phelddagrif, Soldevi Heretic). The axis is deliberately
+/// draw-only. The other corpus `target opponent may <verb>` shapes (`may have you …`,
+/// `may sacrifice …`, `may choose …`, `may pay …`, `may exile …`, …) keep the base
+/// `player_scope: Opponent` fan-out (they are the same announced-actor class but are
+/// NOT part of this change; two of them, Gravestorm and Rakdos, Patron of Chaos, still
+/// fan the "may" out to every opponent). Widening the axis requires a real card AND a
+/// verified subject-path lowering for its actor.
+pub(crate) fn parse_player_action_verb(input: &str) -> OracleResult<'_, ()> {
+    value((), tag("draw")).parse(input)
+}
+
+/// CR 608.2d + CR 115.1: true when `lower` begins with the
+/// `"target opponent may <player-action verb>"` shape whose actor is the announced
+/// target opponent. The single authority for the clause-shell peel discriminator
+/// (`clause_shell::try_peel_opponent_may_prefix`), the subject witness in
+/// `try_parse_subject_predicate_ast`, and the
+/// `optional_player = TargetFilter::DeclaredPlayer { group }` stamp in
+/// `assembly::assemble_effect_chain` — so the three cannot drift.
+pub(crate) fn targeted_opponent_may_player_action(lower: &str) -> bool {
+    preceded(
+        tag::<_, _, OracleError<'_>>("target opponent may "),
+        parse_player_action_verb,
+    )
+    .parse(lower)
+    .is_ok()
+}
+
 pub(super) fn try_parse_subject_predicate_ast(
     text: &str,
     ctx: &mut ParseContext,
@@ -322,7 +352,21 @@ pub(super) fn try_parse_subject_predicate_ast(
         // permanent; see `SubjectPhraseAst::affected`. This is the arm that
         // matters — `ImperativeFallback` is the only predicate kind that applies
         // the subject filter, so it is the one that fails closed on `None`.
-        let application = parse_subject_application(&subject_text, ctx);
+        let mut application = parse_subject_application(&subject_text, ctx);
+        // CR 608.2d + CR 115.1: "target opponent may <action>" names the
+        // announced target opponent as the actor, so this clause is optional for
+        // THAT player (CR 608.2d). The subject text alone cannot separate it from
+        // the causative "target opponent may have you …" (both present the
+        // identical subject `"target opponent may"` to `parse_subject_application`),
+        // so the witness reads the WHOLE printed clause through the shared
+        // `targeted_opponent_may_player_action` authority. `is_optional` is only
+        // ever raised here, never cleared, so a pre-existing optional subject
+        // stays optional.
+        if targeted_opponent_may_player_action(&text.to_lowercase()) {
+            if let Some(application) = application.as_mut() {
+                application.is_optional = true;
+            }
+        }
         // Diagnostics: when the subject is unbound the whole clause is the gap,
         // so carry the WHOLE printed clause as the fragment. The stripped
         // predicate alone would hide the subject that actually failed, which is

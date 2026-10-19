@@ -3286,7 +3286,41 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // provably arrives here unstamped. Stated explicitly because the
             // helper no longer refuses a stamped node (it now READS the stamp),
             // so precedence belongs at the writer, not at the classifier.
-            if def.optional_for.is_none() && def.optional_player.is_none() {
+            // CR 115.1 + CR 608.2d: a `"target opponent may draw …"` clause names
+            // the ANNOUNCED target opponent as the actor — the targeted opponent
+            // announces the may. Provenance is the clause's own printed grammar,
+            // never the lowered shape: "you may have target opponent draw a card"
+            // (the CONTROLLER decides) lowers to a byte-identical
+            // `Draw{Typed{Opponent}}, optional:true` node, which is why
+            // `subject_anchored_optional_actor` refuses that slot by design and the
+            // clause provenance picks the actor here instead.
+            //
+            // The stamped ref is the clause's own DECLARED-player reference: the
+            // group this node declares, whose announced player target
+            // `declared_group_player_slot` reads back. `TargetFilter::DeclaredPlayer`
+            // is a context ref, so it claims no target slot of its own and
+            // fail-closes to nobody when that player is illegal (CR 608.2b). The
+            // Draw keeps its announced `Typed{controller: Opponent}` player target,
+            // so the seat that announces the may and the seat that draws are the
+            // same announced opponent WITHOUT rebinding the chain's controller —
+            // `player_scope` would rebind it, and every later "you" in the chain
+            // would then be read from the opponent's seat.
+            let fragment_lower = clause_ir
+                .source
+                .fragment()
+                .unwrap_or_default()
+                .to_lowercase();
+            if super::subject::targeted_opponent_may_player_action(&fragment_lower) {
+                // The clause always carries an explicit player target (the Draw's
+                // `Typed { controller: Opponent }`), so `tag_player_declarations`
+                // stamps the group. `TargetFilter::Opponent` is the fail-soft
+                // spelling if that stamp is ever absent (its resolver also prefers
+                // the announced player).
+                def.optional_player = Some(match def.declares_chosen_group {
+                    Some(group) => TargetFilter::DeclaredPlayer { group },
+                    None => TargetFilter::Opponent,
+                });
+            } else if def.optional_for.is_none() && def.optional_player.is_none() {
                 def.optional_player =
                     subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution);
             }

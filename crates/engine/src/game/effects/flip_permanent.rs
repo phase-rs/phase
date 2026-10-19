@@ -15,32 +15,33 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    match &ability.effect {
-        Effect::FlipPermanent { .. } => {}
+    let target = match &ability.effect {
+        Effect::FlipPermanent { target } => target.clone(),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected FlipPermanent effect".to_string(),
             ))
         }
-    }
+    };
+
+    // CR 201.5 + CR 710.4: "flip this creature" / "flip it" / "flip <name>"
+    // resolves against the source permanent itself, never against an off-battlefield
+    // target inherited from an earlier chained instruction (e.g. Nezumi Graverobber
+    // exiling a card from a graveyard before flipping).
+    // Mirroring `transform_effect.rs`: resolve subjects via `resolved_effect_object_ids`
+    // which delegates to `targeting::resolved_targets`, prioritizing SelfRef before
+    // reading `ability.targets`.
+    let subjects = super::resolved_effect_object_ids(state, ability, &target);
 
     // CR 400.7 + CR 603.7c: a delayed flip whose pinned referent became a new
-    // object flips nothing. PLACEMENT IS LOAD-BEARING — this MUST sit ABOVE the
-    // `as_slice()` match below, and the match itself is deliberately left
-    // reading the RAW `ability.targets`.
-    //
-    // Substituting `live_object_targets` into that match would be actively
-    // WRONG rather than merely redundant: a filtered-to-empty list matches the
-    // `[]` arm, which binds `object_id` to `ability.source_id` — a SOURCE
-    // FALLBACK that flips the ability's own source instead of doing nothing.
-    // The two states must stay distinguishable: `[]` means "no target was ever
-    // declared" (the printed "flip this creature" shape), while an all-stale
-    // pin means "a referent was declared and it is gone".
-    //
-    // After this guard, any surviving single target is by definition live, so a
-    // substitution below would be a no-op. Early return alone is the complete
-    // shape here.
-    if ability.pinned_object_targets_all_stale(state) {
+    // object flips nothing — but that guard governs ONLY a referent this ability
+    // actually took from `ability.targets`. After the resolution above, a `SelfRef`
+    // subject comes from `ability.source_id`, so a foreign chain-injected target
+    // whose pin went stale must not veto it.
+    let subject_came_from_declared_targets = subjects
+        .iter()
+        .all(|id| ability.targets.contains(&TargetRef::Object(*id)));
+    if subject_came_from_declared_targets && ability.pinned_object_targets_all_stale(state) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipPermanent,
             source_id: ability.source_id,
@@ -51,8 +52,8 @@ pub fn resolve(
 
     // CR 710.1: if the named permanent isn't represented by a flip card, or
     // isn't on the battlefield, `flip_permanent` no-ops (CR 710.2).
-    let object_id = match ability.targets.as_slice() {
-        [TargetRef::Object(object_id)] => *object_id,
+    let object_id = match subjects.as_slice() {
+        [object_id] => *object_id,
         [] => ability.source_id,
         _ => {
             return Err(EffectError::InvalidParam(
@@ -291,5 +292,35 @@ mod tests {
             !state.objects[&source_id].flipped,
             "CR 400.7: a stale self-flip must not affect the re-entered source"
         );
+    }
+
+    /// CR 201.5 + CR 710.4: an inherited object target from an earlier instruction
+    /// in the chain (e.g. an exiled card) must not displace the printed self-reference.
+    #[test]
+    fn self_flip_ignores_inherited_foreign_object_target() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = setup_flip_card(&mut state);
+        let exiled_card_id = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::FlipPermanent {
+                target: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(exiled_card_id)],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let object = &state.objects[&source_id];
+        assert!(object.flipped);
+        assert_eq!(object.name, "Stabwhisker the Odious");
     }
 }
