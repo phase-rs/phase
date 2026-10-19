@@ -1378,6 +1378,12 @@ fn full_broken_result(b: &mut Board, expected: usize) -> Vec<ObjectIncarnationRe
         .mana_pool
         .total() as u32;
     let outcome = b.runner.cast(b.spell).target_object(b.b).resolve();
+    assert!(matches!(
+        outcome.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
     outcome.assert_zone(&[b.spell, b.b], Zone::Graveyard);
     assert_eq!(
         before - outcome.mana_pool_total(P0),
@@ -3587,4 +3593,106 @@ fn full_broken_jinnie_cat_dog_decline_and_current_choice_reload_bind_only_actual
             assert_eq!(b.runner.state().objects[&b.c].zone, Zone::Battlefield);
         }
     }
+}
+
+#[test]
+fn broken_visage_initial_target_prompt_keeps_all_printed_qualifiers() {
+    // CR 115.1a: the whole printed noun phrase restricts the announced target.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let legal = scenario
+        .add_creature(P1, "Legal attacking nonartifact", 7, 8)
+        .id();
+    let artifact = scenario
+        .add_creature(P1, "Attacking artifact creature", 2, 2)
+        .as_artifact_creature()
+        .id();
+    let idle = scenario
+        .add_creature(P1, "Idle nonartifact creature", 2, 2)
+        .id();
+    let noncreature = scenario
+        .add_artifact_from_oracle(P1, "Noncreature artifact", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Broken Visage", true, FULL_BROKEN)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![engine::types::mana::ManaCostShard::Black],
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (legal, AttackTarget::Player(P0)),
+            (artifact, AttackTarget::Player(P0)),
+        ])
+        .unwrap();
+    runner.advance_to_priority_window();
+    if runner.state().priority_player != P0 {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    for kind in [
+        ManaType::Black,
+        ManaType::Colorless,
+        ManaType::Colorless,
+        ManaType::Colorless,
+        ManaType::Colorless,
+    ] {
+        let _ = runner
+            .state_mut()
+            .add_mana_to_pool(P0, ManaUnit::new(kind, ObjectId(0), false, vec![]));
+    }
+    // Inspect the actual announcement prompt on an independent scenario snapshot.
+    let mut announcement = GameRunner::from_state(runner.state().clone());
+    let card_id = announcement.state().objects[&spell].card_id;
+    announcement
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .unwrap();
+    let WaitingFor::TargetSelection {
+        player,
+        target_slots,
+        selection,
+        ..
+    } = &announcement.state().waiting_for
+    else {
+        panic!(
+            "required initial target prompt: {:?}",
+            announcement.state().waiting_for
+        )
+    };
+    assert_eq!(*player, P0);
+    let candidates = &target_slots[selection.current_slot].legal_targets;
+    assert!(candidates.contains(&TargetRef::Object(legal)));
+    for excluded in [artifact, idle, noncreature] {
+        assert!(!candidates.contains(&TargetRef::Object(excluded)));
+    }
+    announcement
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(legal)),
+        })
+        .unwrap();
+    announcement.advance_until_stack_empty();
+    assert_eq!(announcement.state().objects[&legal].zone, Zone::Graveyard);
+    assert!(matches!(
+        announcement.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(announcement.state().stack.is_empty());
+    assert!(announcement.state().resolution_stack.is_empty());
+    let outcome = runner.cast(spell).target_object(legal).resolve();
+    outcome.assert_zone(&[legal, spell], Zone::Graveyard);
+    assert_created(outcome.state(), outcome.events(), spell, 1, (7, 8));
+    assert!(matches!(
+        outcome.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
 }

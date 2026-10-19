@@ -2178,21 +2178,48 @@ fn valid_sought_cost_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {
     else {
         return false;
     };
-    let (repeat, difference, body) = super::lower::strip_for_each_prefix_with_difference(
-        reader.source.fragment().unwrap_or_default(),
-    );
-    let parameters = super::parse_sought_perpetual_cost(&body.to_lowercase())
-        .ok()
-        .map(|(_, parameters)| parameters);
-    parameters.as_ref() == Some(&(amount.clone(), *mode))
-        && repeat == reader.repeat_for
-        && difference.is_none()
+    reader.sought_cost_reader_parameters().as_ref() == Some(&(amount.clone(), *mode))
         && spec.destination == *destination
         && spec.recipient == ControllerRef::You
         && spec.noun
             == TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                 crate::types::ability::TypeFilter::Card,
             ))
+}
+
+#[cfg(test)]
+mod sought_reader_assembly_tests {
+    use super::*;
+
+    #[test]
+    fn sought_assembly_proves_constant_source_even_with_a_stored_relation() {
+        // SHAPE: a forged relation cannot make an X-bearing quoted cost constant.
+        let text =
+            "Seek two cards. Those cards perpetually gain \"This spell costs {X} less to cast.\"";
+        let mut ir =
+            super::super::parse_effect_chain_ir(text, AbilityKind::Spell, &mut Default::default());
+        assert!(matches!(ir.clauses[0].parsed.effect, Effect::Seek { .. }));
+        let id = ir.clauses[0].id;
+        let reader = &mut ir.clauses[1];
+        reader.parsed.effect = Effect::ApplyPerpetual {
+            target: TargetFilter::None,
+            modification: crate::types::ability::PerpetualModification::ModifyCost {
+                amount: crate::types::mana::ManaCost::generic(1),
+                mode: crate::types::statics::CostModifyMode::Reduce,
+            },
+        };
+        reader.reads_return_result = Some((
+            id,
+            ReturnResultReadSpec {
+                noun: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                    crate::types::ability::TypeFilter::Card,
+                )),
+                destination: crate::types::zones::Zone::Hand,
+                recipient: ControllerRef::You,
+            },
+        ));
+        assert!(!valid_sought_cost_reader(&ir, &ir.clauses[1]));
+    }
 }
 
 fn valid_all_revealed_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {

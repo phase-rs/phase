@@ -1163,6 +1163,27 @@ impl ClauseIr {
             recipient: ControllerRef::ParentTargetOwner,
         })
     }
+    /// CR 107.3c: inherited text-defined X is harmless only after the complete
+    /// printed reader proves a constant cost and its exact repeat/empty shell.
+    pub(crate) fn sought_cost_reader_parameters(
+        &self,
+    ) -> Option<(
+        crate::types::mana::ManaCost,
+        crate::types::statics::CostModifyMode,
+    )> {
+        let (repeat, difference, body) =
+            crate::parser::oracle_effect::lower::strip_for_each_prefix_with_difference(
+                self.source.fragment()?,
+            );
+        let (_, (amount, mode)) =
+            crate::parser::oracle_effect::parse_sought_perpetual_cost(&body.to_lowercase()).ok()?;
+        (self.sought_result_shell_is_empty()
+            && self.repeat_for == repeat
+            && difference.is_none()
+            && !amount.has_x())
+        .then_some((amount, mode))
+    }
+
     /// Empty structural shell shared by the producer, corridor and reader proof.
     pub(crate) fn sought_result_shell_is_empty(&self) -> bool {
         matches!(
@@ -1689,7 +1710,7 @@ impl ClauseIrBuilder {
         {
             return;
         }
-        let (repeat, difference, body) =
+        let (_, _, body) =
             crate::parser::oracle_effect::lower::strip_for_each_prefix_with_difference(
                 reader.source.fragment().unwrap_or_default(),
             );
@@ -1703,11 +1724,8 @@ impl ClauseIrBuilder {
         let producer = prior.find(|clause| !clause.is_transparent_sought_corridor());
         let selected = producer
             .filter(|producer| {
-                reader.sought_result_shell_is_empty()
+                reader.sought_cost_reader_parameters().is_some()
                     && producer.sought_result_shell_is_empty()
-                    && reader.repeat_for == repeat
-                    && difference.is_none()
-                    && reader.where_x_expression.is_none()
                     && producer.repeat_for.is_none()
                     && producer.reads_return_result.is_none()
                     && matches!(producer.parsed.effect, Effect::Seek { .. })
@@ -2958,6 +2976,34 @@ mod sought_cost_tests {
     const GRANT: &str = "Those cards perpetually gain \"This spell costs {1} less to cast.\"";
     fn parse(text: &str) -> EffectChainIr {
         parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default())
+    }
+    #[test]
+    fn sought_constant_reader_proof_distinguishes_inherited_x_from_cost_x() {
+        // SHAPE: text-defined X remains on the reader, but its quoted cost is constant.
+        let text = format!("Seek X cards, where X is the number of colors among permanents you control. For each color among permanents you control, {GRANT}");
+        let ir = parse(&text);
+        let reader = ir.clauses.last().unwrap();
+        assert!(reader.where_x_expression.is_some());
+        assert!(reader.sought_cost_reader_parameters().is_some(), "{ir:#?}");
+        assert!(reader.reads_return_result.is_some(), "{ir:#?}");
+        let lowered = crate::parser::oracle_effect::assembly::assemble_effect_chain(&ir);
+        assert!(lowered
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .reads_return_result
+            .is_some());
+        for cost in ["{X}", "{1}{X}"] {
+            let bad = parse(&text.replace("{1}", cost));
+            let reader = bad.clauses.last().unwrap();
+            assert!(matches!(bad.clauses[0].parsed.effect, Effect::Seek { .. }));
+            assert!(reader.sought_cost_reader_parameters().is_none());
+            assert!(reader.reads_return_result.is_none());
+            assert!(
+                matches!(reader.parsed.effect, Effect::Unimplemented { .. }),
+                "{bad:#?}"
+            );
+        }
     }
     #[test]
     fn jev_sought_cost_reader_binds_named_clause() {

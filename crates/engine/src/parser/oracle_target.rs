@@ -52,6 +52,96 @@ mod u14_quality_tests {
 }
 
 #[cfg(test)]
+mod qualified_adjective_tests {
+    use super::*;
+
+    #[test]
+    fn qualified_adjectives_compose_in_either_order_with_complete_nouns() {
+        // SHAPE: the same typed predicates survive adjective reordering.
+        for phrase in [
+            "nonartifact attacking creature",
+            "attacking nonartifact creature",
+        ] {
+            let (TargetFilter::Typed(filter), rest) = parse_type_phrase_folding(phrase) else {
+                panic!("typed qualified noun")
+            };
+            assert!(rest.is_empty(), "{phrase}: {rest}");
+            assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            assert!(filter
+                .type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+            assert!(filter
+                .properties
+                .contains(&FilterProp::Attacking { defender: None }));
+        }
+        for phrase in [
+            "nontoken attacking blue legendary creature you control",
+            "blue legendary attacking nontoken creature you control",
+            "legendary nontoken blue attacking creature you control",
+        ] {
+            let (TargetFilter::Typed(filter), rest) = parse_type_phrase_folding(phrase) else {
+                panic!("typed qualified noun")
+            };
+            assert!(rest.is_empty(), "{phrase}: {rest}");
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+            for property in [
+                FilterProp::NonToken,
+                FilterProp::Attacking { defender: None },
+                FilterProp::HasColor {
+                    color: ManaColor::Blue,
+                },
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary,
+                },
+            ] {
+                assert!(
+                    filter.properties.contains(&property),
+                    "{phrase}: {filter:?}"
+                );
+            }
+        }
+        for phrase in ["modified attacking", "nonartifact attacking mysteryword"] {
+            let (_, rest) = parse_type_phrase_folding(phrase);
+            assert_eq!(
+                rest, phrase,
+                "an incomplete noun cannot publish its adjectives"
+            );
+        }
+        let (TargetFilter::Or { filters }, rest) =
+            parse_type_phrase_folding("nontoken attacking or blocking blue creature you control")
+        else {
+            panic!("property disjunction")
+        };
+        assert!(rest.is_empty());
+        assert_eq!(filters.len(), 2);
+        for filter in filters {
+            let TargetFilter::Typed(filter) = filter else {
+                panic!("typed disjunct")
+            };
+            assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            assert!(filter.properties.contains(&FilterProp::NonToken));
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+        }
+        for phrase in ["outlaw attacking creature", "attacking outlaw creature"] {
+            let (TargetFilter::Typed(filter), rest) = parse_type_phrase_folding(phrase) else {
+                panic!("typed outlaw noun")
+            };
+            assert!(rest.is_empty(), "{phrase}: {rest}");
+            assert!(filter
+                .type_filters
+                .iter()
+                .any(|kind| matches!(kind, TypeFilter::AnyOf(_))));
+            assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            assert!(filter
+                .properties
+                .contains(&FilterProp::Attacking { defender: None }));
+        }
+        let (_, rest) = parse_type_phrase_folding("nonartifact, nonblack attacking creature");
+        assert!(rest.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod prior_controller_population_tests {
     use super::*;
 
@@ -2706,6 +2796,127 @@ pub(crate) fn parse_mass_type_union<'a>(
     (acc, rest)
 }
 
+/// One progress-making adjective atom. A property disjunction remains one
+/// group while independent adjectives are conjoined with every branch.
+fn parse_qualified_type_adjective(
+    input: &str,
+) -> OracleResult<'_, (Vec<FilterProp>, Vec<TypeFilter>, Option<usize>)> {
+    fn status(input: &str) -> OracleResult<'_, FilterProp> {
+        let (property, consumed) = parse_combat_status_prefix(input)
+            .ok_or_else(|| super::oracle_nom::error::oracle_err(input))?;
+        Ok((&input[consumed..], property))
+    }
+    if let Ok((rest, (first, others))) = (status, many0(preceded(tag("or "), status))).parse(input)
+    {
+        let mut properties = vec![first];
+        properties.extend(others);
+        let disjunction = (properties.len() > 1).then_some(properties.len());
+        return Ok((rest, (properties, vec![], disjunction)));
+    }
+    if let Ok((rest, supertype)) = nom_target::parse_supertype_prefix(input) {
+        return Ok((
+            rest,
+            (
+                vec![FilterProp::HasSupertype { value: supertype }],
+                vec![],
+                None,
+            ),
+        ));
+    }
+    if let Ok((rest, property)) = alt((
+        value(
+            FilterProp::EnchantedBy,
+            tag::<_, _, OracleError<'_>>("enchanted "),
+        ),
+        value(FilterProp::EquippedBy, tag("equipped ")),
+        value(FilterProp::Modified, tag("modified ")),
+        value(FilterProp::Renowned, tag("renowned ")),
+        value(FilterProp::Goaded, tag("goaded ")),
+        value(FilterProp::Historic, tag("historic ")),
+    ))
+    .parse(input)
+    {
+        return Ok((rest, (vec![property], vec![], None)));
+    }
+    if let Ok((rest, _)) = (
+        tag::<_, _, OracleError<'_>>("your "),
+        peek(alt((tag("commanders"), tag("commander")))),
+    )
+        .parse(input)
+    {
+        return Ok((
+            rest,
+            (
+                vec![FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }],
+                vec![],
+                None,
+            ),
+        ));
+    }
+    if let Ok((rest, _)) = terminated(
+        alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))),
+        alt((
+            value((), space1),
+            value((), eof),
+            value((), peek(one_of(",."))),
+        )),
+    )
+    .parse(input)
+    {
+        return Ok((rest, (vec![FilterProp::IsCommander], vec![], None)));
+    }
+    if let Some((power, toughness, consumed)) = parse_leading_pt_designation(input) {
+        return Ok((
+            &input[consumed..],
+            (
+                vec![
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: power },
+                    },
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: toughness },
+                    },
+                ],
+                vec![],
+                None,
+            ),
+        ));
+    }
+    if let Some((property, consumed)) =
+        parse_color_prefix(input).or_else(|| parse_color_quality_prefix(input))
+    {
+        return Ok((&input[consumed..], (vec![property], vec![], None)));
+    }
+    if let Ok((rest, type_filter @ TypeFilter::AnyOf(_))) =
+        nom_target::parse_type_filter_word(input)
+    {
+        if let Ok((after_space, _)) = space1::<_, OracleError<'_>>(rest) {
+            if starts_with_type_phrase_lead(after_space) {
+                return Ok((after_space, (vec![], vec![type_filter], None)));
+            }
+        }
+    }
+    let (rest, (_, _, negated, _)) = (
+        tag("non"),
+        opt(tag("-")),
+        take_till1(|c: char| c.is_whitespace() || c == ','),
+        alt((value((), (tag(", "), peek(tag("non")))), value((), space1))),
+    )
+        .parse(input)?;
+    match classify_negation(negated) {
+        NegationResult::Type(type_filter) => Ok((rest, (vec![], vec![type_filter], None))),
+        NegationResult::Prop(property) => Ok((rest, (vec![property], vec![], None))),
+    }
+}
+
 /// Context-aware variant of `parse_type_phrase_folding`. Enables relative-player scope
 /// resolution via `ctx.relative_player_scope`.
 pub fn parse_type_phrase_folding_with_ctx<'a>(
@@ -2822,320 +3033,28 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         }
     }
 
-    // GAP B (DEFERRED — strict-failure tag, DynQty subgroup D follow-up): the leading
-    // adjective handlers here run as a fixed positional cascade (combat-status →
-    // enchanted/equipped → modified → renowned → goaded → historic → … → nontoken at
-    // ~:2310). A phrase whose adjectives appear in a different order — notably "nontoken
-    // attacking creature" (Sophina, Spearsage Deserter) — is only partly stripped:
-    // "nontoken" leads, so THIS combat-status loop never sees "attacking"; by the time
-    // "nontoken " is consumed further down, the combat-status loop has already passed, so
-    // "attacking creature" fails the type parse and `parse_for_each_clause` returns None
-    // (NO false lift — Sophina's Investigate stays bare and coverage stays honestly RED).
-    // The fix is to collapse this cascade into a single order-free many0-style property
-    // loop, but that is the hottest shared parser path (high CI-regression blast radius)
-    // and is out of scope here. Tripwire: the Sophina branch of
-    // `object_for_each_investigate_is_lifted` asserts the bare-Investigate state and
-    // FLIPS to fail when this gap is closed.
-    //
-    // CR 509.1h: Consume combat status prefixes (unblocked, attacking, blocking).
-    // Handles "or" compound as a property disjunction: "attacking or blocking
-    // creature" means attacking creature OR blocking creature, not both.
-    while let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
-        let disjunction_start = properties.len();
-        properties.push(prop);
-        pos += consumed;
-        // Check for "or " followed by another combat status prefix
-        if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[pos..]) {
-            if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
-                properties.push(next_prop);
-                property_disjunction_ranges.push((disjunction_start, 2));
-                pos += "or ".len() + next_consumed;
-            }
+    // Adjectives compose independently of their printed order. Commit their
+    // properties only with the noun below; an adjective-only fragment is not
+    // a creature antecedent or a complete counted population.
+    let (after_adjectives, adjectives) = many0(parse_qualified_type_adjective)
+        .parse(&lower[pos..])
+        .expect("many0 over progress-making adjective atoms");
+    let mut neg_type_filters = Vec::new();
+    let mut adjective_type_filters = Vec::new();
+    for (props, types, disjunction) in adjectives {
+        if let Some(length) = disjunction {
+            property_disjunction_ranges.push((properties.len(), length));
         }
-    }
-
-    // CR 205.4a: Parse supertype prefix: "legendary", "basic", "snow"
-    // Must come BEFORE color prefix so "legendary white creature" works:
-    // supertype consumed first, then color at the new position.
-    if let Ok((rest, supertype)) = nom_target::parse_supertype_prefix(&lower[pos..]) {
-        properties.push(FilterProp::HasSupertype { value: supertype });
-        pos += lower[pos..].len() - rest.len();
-    }
-
-    // CR 303.4 + CR 301.5: "enchanted" / "equipped" attachment adjective prefix.
-    // Attach the property; runtime evaluation degrades "EnchantedBy" to
-    // "has any Aura attached" when the trigger source itself is not the Aura
-    // (Hateful Eidolon). Source-relative sources (Auras, Equipment) retain the
-    // CR 702.5a semantics via the same FilterProp.
-    if let Ok((rest, prop)) = alt((
-        value(
-            FilterProp::EnchantedBy,
-            tag::<_, _, OracleError<'_>>("enchanted "),
-        ),
-        value(
-            FilterProp::EquippedBy,
-            tag::<_, _, OracleError<'_>>("equipped "),
-        ),
-    ))
-    .parse(&lower[pos..])
-    {
-        // Only consume if a type word follows (so "enchanted forest" also works,
-        // as does "enchanted creature", but bare "enchanted" alone does not).
-        if starts_with_type_phrase_lead(rest) {
-            properties.push(prop);
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    // CR 700.9: "modified" adjective prefix. A permanent is modified
-    // if it has counters on it, is equipped, or is enchanted by an Aura its
-    // controller controls. Emits FilterProp::Modified (a first-class typed
-    // predicate — see `FilterProp::Modified` in types/ability.rs). Mirrors the
-    // "enchanted " / "equipped " adjective handling above: only consume when a
-    // type word follows, so bare "modified" alone doesn't hijack other
-    // contexts.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("modified ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) {
-            properties.push(FilterProp::Modified);
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    // CR 702.112b: "renowned" is a permanent designation used as an adjective
-    // in filters like "renowned creature you control".
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) {
-            properties.push(FilterProp::Renowned);
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    // CR 701.15b/c: "goaded" is a permanent designation used as an adjective in
-    // filters like "goaded creature you control". Mirrors the "renowned" strip:
-    // only consume when a type word follows, so the "goad target creature" verb
-    // path is untouched.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("goaded ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) {
-            properties.push(FilterProp::Goaded);
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    // CR 700.6: "historic" adjective prefix. An object is historic if it has
-    // the legendary supertype, the artifact card type, or the Saga subtype.
-    // Emits FilterProp::Historic (a first-class typed predicate — see
-    // `FilterProp::Historic` in types/ability.rs). Mirrors the "modified"
-    // adjective handling above: only consume when a type word follows, so
-    // bare "historic" alone doesn't hijack other contexts.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("historic ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) {
-            properties.push(FilterProp::Historic);
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    // CR 903.3 + CR 109.5: "your commander" is owner-scoped, not merely
-    // controller-scoped. Consume only the possessive determiner here; the
-    // commander atom below still supplies `IsCommander` and leaves suffix
-    // parsing centralized for zones, counters, and control clauses.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("your ").parse(&lower[pos..]) {
-        if alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander")))
-            .parse(rest)
-            .is_ok()
-        {
-            properties.push(FilterProp::Owned {
-                controller: ControllerRef::You,
-            });
-            pos += "your ".len();
-        }
-    }
-
-    // CR 903.3 + CR 108.3: "commander[s]" is a class identified by the
-    // `IsCommander` flag, not by a card type or subtype. Treat the bare word
-    // as a typed-phrase atom so the subsequent grammar (ownership/control
-    // suffix, counter suffix, "with X", combinator separators) composes
-    // uniformly. Three shapes:
-    //   - bare "commander" / "commanders" (Witch's Clinic, Sanctum of Eternity)
-    //   - "commander[s] <suffix>" (you own / they control / target player controls)
-    //   - "commander <type-word>" (Drillworks Mole: "commander creature you control")
-    // For the first two, no type word follows — the prefix sets `IsCommander`
-    // and downstream suffix machinery does the rest. For the third, advance
-    // past "commander " and let the normal color/subtype/core-type loop
-    // consume the trailing type word.
-    if let Ok((after_commander_word, _)) = alt((
-        tag::<_, _, OracleError<'_>>("commanders "),
-        tag("commander "),
-    ))
-    .parse(&lower[pos..])
-    {
-        properties.push(FilterProp::IsCommander);
-        pos += lower[pos..].len() - after_commander_word.len();
-    } else if let Ok((after_commander_word, _)) =
-        alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(&lower[pos..])
-    {
-        // Bare end-of-phrase "commander" with no trailing space (e.g.,
-        // "target commander." or "target commander").
-        if after_commander_word.is_empty() || after_commander_word.starts_with([',', '.']) {
-            properties.push(FilterProp::IsCommander);
-            pos += lower[pos..].len() - after_commander_word.len();
-        }
-    }
-
-    // CR 208.1 (#2912): a leading "N/M" power/toughness designation ("a 1/1
-    // creature", "two 2/2 creatures") constrains the object's current power and
-    // toughness — it is NOT a subtype. Emit a `PtComparison` for each side and
-    // let the trailing type word ("creature") parse normally; previously the
-    // whole "1/1 creature" fused into `Subtype("1/1 Creature")`, so e.g. Sword
-    // of the Meek never matched 1/1 tokens.
-    if let Some((power, toughness, consumed)) = parse_leading_pt_designation(&lower[pos..]) {
-        properties.push(FilterProp::PtComparison {
-            stat: PtStat::Power,
-            scope: PtValueScope::Current,
-            comparator: Comparator::EQ,
-            value: QuantityExpr::Fixed { value: power },
-        });
-        properties.push(FilterProp::PtComparison {
-            stat: PtStat::Toughness,
-            scope: PtValueScope::Current,
-            comparator: Comparator::EQ,
-            value: QuantityExpr::Fixed { value: toughness },
-        });
-        pos += consumed;
-    }
-
-    // CR 105.1 + CR 105.2: Handle color adjective prefixes:
-    // "white creature", "red spell", "colorless creature", "multicolored card", etc.
-    let color_prop =
-        parse_color_prefix(&lower[pos..]).or_else(|| parse_color_quality_prefix(&lower[pos..]));
-    if let Some((ref prop, color_len)) = color_prop {
-        properties.push(prop.clone());
-        pos += color_len;
-    }
-
-    // CR 109.3: Parse one or more comma-separated negation prefixes. A `non-`
-    // prefix negates exactly one characteristic — card type, subtype, supertype,
-    // or color — and `classify_negation` routes it to the layer that owns it.
-    // "noncreature, nonland permanent" → [Non(Creature), Non(Land)] in type_filters
-    // "nonartifact, nonblack creature" → Non(Artifact) in type_filters, NotColor("Black") in properties
-    //
-    // parse_non_prefix uses whitespace as word boundary, but in stacked negation the
-    // separator is ", " (comma-space). We must strip the trailing comma from the negated
-    // word when the ", non" continuation pattern follows.
-    let mut neg_type_filters: Vec<TypeFilter> = Vec::new();
-    loop {
-        let remaining = &lower[pos..];
-        let Ok((after_non, _)) = tag::<_, _, OracleError<'_>>("non").parse(remaining) else {
-            break;
-        };
-        // Optional hyphen: "non-" or "non"
-        let after_non = match tag::<_, _, OracleError<'_>>("-").parse(after_non) {
-            Ok((r, _)) => r,
-            Err(_) => after_non,
-        };
-        let prefix_len = remaining.len() - after_non.len(); // "non" or "non-"
-
-        // Find the negated word: ends at comma or whitespace
-        let end = after_non
-            .find(|c: char| c.is_whitespace() || c == ',')
-            .unwrap_or(after_non.len());
-        if end == 0 {
-            break;
-        }
-        let negated = &after_non[..end];
-        match classify_negation(negated) {
-            NegationResult::Type(tf) => neg_type_filters.push(tf),
-            NegationResult::Prop(prop) => properties.push(prop),
-        }
-        pos += prefix_len + end;
-
-        // Check for ", non" continuation (stacked negation)
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(", ").parse(&lower[pos..]) {
-            if tag::<_, _, OracleError<'_>>("non").parse(rest).is_ok() {
-                pos += ", ".len();
-                continue;
-            }
-        }
-        // Consume trailing whitespace after the negated word
-        if pos < lower.len() && lower.as_bytes()[pos] == b' ' {
-            pos += 1;
-        }
-        break;
-    }
-
-    // CR 205.4a: A supertype adjective can also appear AFTER a `non-`
-    // token-identity/type negation prefix (e.g. "nontoken legendary permanent"
-    // in Cadric, Soul Kindler / issue #3677 class). The pre-negation arm above
-    // only fires when the supertype word leads the phrase, so a leading
-    // "nontoken " left it unparsed, dropping the legendary restriction entirely.
-    // Mirrors the post-negation `historic` re-check directly below.
-    if let Ok((rest, supertype)) = nom_target::parse_supertype_prefix(&lower[pos..]) {
-        if !properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::HasSupertype { .. }))
-        {
-            properties.push(FilterProp::HasSupertype { value: supertype });
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    // CR 105.1 + CR 105.2: A color adjective can also appear AFTER a `non-`
-    // token-identity/type negation prefix (e.g. "nontoken blue creature",
-    // Flare of Denial / issue #3677). The pre-negation arm above only fires
-    // when the color word leads the phrase, so a leading "nontoken " left the
-    // color word — and therefore the entire creature-type filter behind it —
-    // unparsed, silently degrading the cost to "sacrifice a nontoken
-    // permanent" (which a land never is, so any permanent paid the alt cost).
-    // Mirrors the post-negation `historic` re-check directly below.
-    if color_prop.is_none() {
-        if let Some((prop, color_len)) =
-            parse_color_prefix(&lower[pos..]).or_else(|| parse_color_quality_prefix(&lower[pos..]))
-        {
-            properties.push(prop);
-            pos += color_len;
-        }
-    }
-
-    // CR 700.9: A "modified" adjective can also appear AFTER a
-    // `non-` token-identity/type negation prefix (e.g. "nontoken modified
-    // creature" in Akki Ember-Keeper / issue #3677 class). The pre-negation
-    // arm above only fires when "modified" leads the phrase. Mirrors the
-    // post-negation `historic` re-check directly below.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("modified ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) && !properties.contains(&FilterProp::Modified) {
-            properties.push(FilterProp::Modified);
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    let mut adjective_type_filters: Vec<TypeFilter> = Vec::new();
-
-    // CR 700.6: "historic" adjective prefix can appear AFTER negation prefixes
-    // (e.g. "nontoken historic permanent" in Arbaaz Mir). The pre-negation arm
-    // above handles the bare-prefix case ("historic permanent"); this arm
-    // handles the post-negation case so the adjective composes with `non`
-    // negation. Mirrors the structural reasoning that produced
-    // `is_adjective_prefix_prop` — the predicate is leg-local but its position
-    // in surface text varies relative to negation.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("historic ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) && !properties.contains(&FilterProp::Historic) {
-            properties.push(FilterProp::Historic);
-            pos += lower[pos..].len() - rest.len();
-        }
-    }
-
-    // CR 700.12: "outlaw creature[s]" uses the outlaw subtype disjunction as
-    // an adjective before the concrete Creature type.
-    if let Ok((rest, type_filter)) = nom_target::parse_type_filter_word(&lower[pos..]) {
-        if matches!(type_filter, TypeFilter::AnyOf(_)) {
-            let rest_trimmed = rest.trim_start();
-            let ws = rest.len() - rest_trimmed.len();
-            if ws > 0 && starts_with_type_phrase_lead(rest_trimmed) {
+        properties.extend(props);
+        for type_filter in types {
+            if matches!(type_filter, TypeFilter::Non(_)) {
+                neg_type_filters.push(type_filter);
+            } else {
                 adjective_type_filters.push(type_filter);
-                pos += lower[pos..].len() - rest_trimmed.len();
             }
         }
     }
-
+    pos = lower.len() - after_adjectives.len();
     // Parse the core type, falling back to subtype recognition
     let (card_type, subtype, type_len) = parse_core_type(&lower[pos..]);
     pos += type_len;
@@ -3152,6 +3071,16 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     } else {
         subtype
     };
+
+    if card_type.is_none()
+        && subtype.is_none()
+        && !properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::IsCommander))
+        && parse_token_suffix(&lower[pos..]).is_none()
+    {
+        return (TargetFilter::Typed(TypedFilter::default()), text);
+    }
 
     // CR 205.3a: "[Subtype] [CoreType]" patterns like "Wizard creatures",
     // "Goblin creatures", "Elf Warriors" — when parse_core_type (via parse_type_filter_word)

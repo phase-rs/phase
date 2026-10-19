@@ -744,6 +744,12 @@ fn circadian_runner() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId, Ob
         ],
     );
     let outcome = runner.cast(spell).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_hand_drawn(P0, 2);
     outcome.assert_zone(&[divination, disperse], Zone::Hand);
     outcome.assert_zone(&[spell], Zone::Graveyard);
@@ -777,9 +783,21 @@ fn jev_circadian_seek_grant_future_cast() {
         &[ManaType::Colorless, ManaType::Colorless, ManaType::Blue],
     );
     let paid_control = control.cast(untouched).resolve();
+    assert!(matches!(
+        control.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(control.state().stack.is_empty());
+    assert!(control.state().resolution_stack.is_empty());
     paid_control.assert_hand_drawn(P0, 2);
     paid_control.assert_zone(&[untouched], Zone::Graveyard);
     let outcome = runner.cast(divination).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_hand_drawn(P0, 2);
     outcome.assert_zone(&[divination], Zone::Graveyard);
     assert!(
@@ -794,6 +812,12 @@ fn jev_circadian_perpetual_survives_zone_changes_and_reload() {
     let (mut runner, divination, untouched, call, source, _) = circadian_runner();
     pool(&mut runner, &[ManaType::Blue]);
     let first = runner.cast(divination).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     first.assert_hand_drawn(P0, 2);
     first.assert_zone(&[divination, source], Zone::Graveyard);
     let old_incarnation = runner.state().objects[&divination].incarnation;
@@ -805,11 +829,23 @@ fn jev_circadian_perpetual_survives_zone_changes_and_reload() {
         &[ManaType::Colorless, ManaType::Colorless, ManaType::Blue],
     );
     let returned = runner.cast(call).target_object(divination).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     returned.assert_zone(&[divination], Zone::Hand);
     assert_eq!(grants(runner.state(), divination), 2);
     assert!(runner.state().objects[&divination].incarnation > old_incarnation);
     pool(&mut runner, &[ManaType::Blue]);
     let recast = runner.cast(divination).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     recast.assert_hand_drawn(P0, 2);
     recast.assert_zone(&[divination], Zone::Graveyard);
     assert_eq!(grants(runner.state(), untouched), 0);
@@ -838,6 +874,12 @@ fn jev_circadian_empty_result_replaces_prior_producer() {
         let source = seek_spell(&mut scenario, P0, &text);
         let mut runner = scenario.build();
         let outcome = runner.cast(source).resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
         outcome.assert_zone(&[first], Zone::Hand);
         outcome.assert_life_delta(P0, 4);
         assert_eq!(
@@ -867,6 +909,12 @@ fn jev_circadian_empty_result_replaces_prior_producer() {
     let source = seek_spell(&mut scenario, P0, &text);
     let mut runner = scenario.build();
     let outcome = runner.cast(source).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_zone(&[card], Zone::Hand);
     outcome.assert_life_delta(P0, 4);
     assert_eq!(grants(runner.state(), card), 1);
@@ -956,6 +1004,12 @@ fn sought_replacement_run(two: bool, reload_at: Option<usize>) -> (Vec<ObjectId>
         events.extend(runner.act(action).unwrap().events);
     }
     assert_eq!(prompts, if two { 2 } else { 0 });
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
         runner.state().waiting_for,
@@ -1070,6 +1124,12 @@ fn jev_sought_entry_pause_finishes_before_grant() {
                 WaitingFor::Priority { .. }
             ));
         }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
     }
 }
 
@@ -1089,6 +1149,12 @@ fn jev_sought_grant_uses_grant_start_color_count() {
     let source = seek_spell(&mut scenario, P0, text);
     let mut runner = scenario.build();
     let outcome = runner.cast(source).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_zone(&[card], Zone::Battlefield);
     assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Battlefield, .. } if *object_id == card)).count(), 1);
     assert_eq!(
@@ -1122,6 +1188,12 @@ fn jev_perpetual_recipient_authorities_remain_distinct() {
         .id();
     let mut runner = scenario.build();
     let outcome = runner.cast(source).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_hand_drawn(P0, 3);
     outcome.assert_zone(&cards, Zone::Hand);
     for card in cards.into_iter().chain([existing]) {
@@ -1163,6 +1235,12 @@ fn jev_sought_same_clause_distinct_occurrences() {
     for source in [first_source, first_source, second_source] {
         let expected = *runner.state().library_of(P0).front().unwrap();
         let outcome = runner.activate(source, 0).resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
         assert_eq!(outcome.state().objects[&expected].zone, Zone::Hand);
         assert!(
             runner.state().next_return_result_occurrence_id > allocator,
@@ -1202,6 +1280,12 @@ fn jev_sought_activated_grant_survives_source_departure() {
     );
     let mut runner = scenario.build();
     let outcome = runner.activate(source, 0).pay_with(&[source]).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     assert_eq!(outcome.state().objects[&source].zone, Zone::Graveyard);
     assert_eq!(outcome.state().objects[&card].zone, Zone::Hand);
     assert_eq!(grants(runner.state(), card), 1);
@@ -1224,6 +1308,12 @@ fn jev_perpetual_legacy_they_conjure_chosen_and_self_public() {
     let decoy = scenario.add_spell_to_hand(P0, "Unselected card", true).id();
     let mut runner = scenario.build();
     let outcome = runner.cast(conjure).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_hand_drawn(P0, 2);
     let conjured: Vec<_> = runner
         .state()
@@ -1252,7 +1342,19 @@ fn jev_perpetual_legacy_they_conjure_chosen_and_self_public() {
         runner.act(GameAction::PassPriority).unwrap();
     }
     assert_eq!(grants(runner.state(), creature), 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     runner.cast(self_grant).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     assert_eq!(grants(runner.state(), self_grant), 1);
     for id in [conjure, chosen, decoy] {
         assert_eq!(grants(runner.state(), id), 0);
@@ -1277,6 +1379,12 @@ fn jev_perpetual_event_recipient_remains_distinct() {
         .id();
     let mut runner = scenario.build();
     let outcome = runner.cast(draw).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_hand_drawn(P0, 2);
     outcome.assert_zone(&[dragon, other], Zone::Hand);
     assert_eq!(runner.state().objects[&dragon].perpetual_mods.len(), 1);
@@ -1296,6 +1404,12 @@ fn jev_sought_grant_preserves_independently_targeted_tail() {
     let source = seek_spell(&mut scenario, P0, &text);
     let mut runner = scenario.build();
     let outcome = runner.cast(source).target_object(target).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
     outcome.assert_zone(&[card], Zone::Hand);
     outcome.assert_power_toughness(target, 3, 3);
     assert_eq!(grants(runner.state(), card), 1);

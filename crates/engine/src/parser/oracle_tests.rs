@@ -820,6 +820,20 @@ fn broken_visage_complete_public_chain() {
             ..
         }
     ));
+    let Effect::Destroy {
+        target: TargetFilter::Typed(target),
+        ..
+    } = chain[0].effect.as_ref()
+    else {
+        panic!("complete qualified target: {chain:#?}")
+    };
+    assert!(target.type_filters.contains(&TypeFilter::Creature));
+    assert!(target
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+    assert!(target
+        .properties
+        .contains(&FilterProp::Attacking { defender: None }));
     assert!(matches!(*chain[1].effect, Effect::Token { .. }));
     let Effect::CreateDelayedTrigger {
         condition, effect, ..

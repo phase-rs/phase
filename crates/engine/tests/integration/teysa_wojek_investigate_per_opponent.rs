@@ -15,13 +15,14 @@
 //! the comparative operand binds the controller (CR 109.5) and the attr binds
 //! per-candidate.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     Comparator, ControllerRef, Effect, FilterProp, PlayerFilter, PlayerRelation, PlayerScope,
     QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
 };
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -389,8 +390,7 @@ fn teysa_runtime_no_clue_when_no_opponent_lost_life() {
 // std corpus whose for-each ranges over OBJECTS (not a player set): Serene Sleuth
 // ("for each goaded creature you control") and Sophina ("for each nontoken attacking
 // creature"). The parameterized gate-widen + Gap A (`FilterProp::Goaded`) now lift
-// Serene Sleuth to an `ObjectCount` repeat_for; Sophina stays a bare Investigate
-// (Gap B deferred — parse_type_phrase_folding leading-adjective order-dependence). Both
+// Serene Sleuth and Sophina to scoped `ObjectCount` repeat_for quantities. Both
 // branches drive the real seam and pair their `repeat_for` assertion with a positive
 // `Effect::Investigate` reach-guard so neither is vacuous.
 const SERENE_SLEUTH: &str = "When this creature enters, investigate. (Create a Clue token. It's \
@@ -401,7 +401,8 @@ const SERENE_SLEUTH: &str = "When this creature enters, investigate. (Create a C
 const SOPHINA: &str = "Menace\n\
     Whenever Sophina, Spearsage Deserter attacks, investigate once for each nontoken attacking \
     creature. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this \
-    artifact: Draw a card.\")";
+    artifact: Draw a card.\")\n\
+    Partner—Friends forever (You can have two commanders if both have this ability.)";
 
 // Serene Sleuth's combat-trigger sentence in isolation — the runtime creature carries
 // ONLY the object for-each Investigate (not the ETB Investigate, not the un-goad sibling)
@@ -557,12 +558,7 @@ fn object_for_each_investigate_is_lifted() {
         typed.controller
     );
 
-    // Sophina's attack trigger: object for-each ("nontoken attacking creature") —
-    // Gap B (DEFERRED). parse_type_phrase_folding's leading-adjective order-dependence means
-    // this for-each does NOT yet parse to a member-count, so the seam leaves it a bare
-    // Investigate. Deferred-gap tripwire: paired with a positive `Effect::Investigate`
-    // reach-guard (non-vacuous), it asserts the CURRENT bare-Investigate state and
-    // FLIPS to fail when Gap B lands — the signal to update this expectation.
+    // Sophina counts each nontoken attacking creature, with no controller qualifier.
     let sophina = parse_oracle_text(SOPHINA, "Sophina, Spearsage Deserter", &[], &[], &[]);
     let attack = sophina
         .triggers
@@ -574,10 +570,61 @@ fn object_for_each_investigate_is_lifted() {
         matches!(attack.effect.as_ref(), Effect::Investigate),
         "reach-guard: Sophina's clause must parse to Investigate"
     );
-    assert!(
-        attack.repeat_for.is_none(),
-        "Gap B deferred (parse_type_phrase_folding leading-adjective order-dependence): \
-         'nontoken attacking creature' does not yet lift — flip this guard when Gap B lands: {:?}",
-        attack.repeat_for
-    );
+    let Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        },
+    }) = &attack.repeat_for
+    else {
+        panic!("complete Sophina count: {attack:#?}")
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Creature));
+    assert!(typed.properties.contains(&FilterProp::NonToken));
+    assert!(typed
+        .properties
+        .contains(&FilterProp::Attacking { defender: None }));
+    assert_eq!(typed.controller, None);
+}
+
+#[test]
+fn sophina_runtime_counts_only_nontoken_attackers() {
+    // CR 508.1a + CR 508.1k: normal attack declaration makes the chosen creatures attackers.
+    for second_attacker in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let sophina = scenario
+            .add_creature_from_oracle(P0, "Sophina, Spearsage Deserter", 4, 3, SOPHINA)
+            .id();
+        let other = scenario
+            .add_creature(P0, "Other nontoken attacker", 2, 2)
+            .id();
+        let token = scenario
+            .add_creature(P0, "Attacking token decoy", 2, 2)
+            .id();
+        scenario.add_creature(P0, "Idle nontoken decoy", 2, 2);
+        scenario.add_creature(P1, "Opponent idle nontoken decoy", 2, 2);
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+        runner.advance_to_combat();
+        let mut attackers = vec![
+            (sophina, AttackTarget::Player(P1)),
+            (token, AttackTarget::Player(P1)),
+        ];
+        if second_attacker {
+            attackers.push((other, AttackTarget::Player(P1)));
+        }
+        let clues = count_clues(runner.state(), P0);
+        runner.declare_attackers(&attackers).unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            count_clues(runner.state(), P0) - clues,
+            if second_attacker { 2 } else { 1 }
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+    }
 }

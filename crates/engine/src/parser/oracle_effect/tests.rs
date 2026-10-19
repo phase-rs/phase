@@ -89590,6 +89590,8 @@ fn jev_sought_cost_subject_variants() {
         "Conjure a card named Divination into your hand. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
         "Choose a creature card in your hand. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
         "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast and draw a card.\"",
+        "Seek two cards. Those cards perpetually gain \"This spell costs {X} less to cast.\"",
+        "Seek two cards. Those cards perpetually gain \"This spell costs {1}{X} less to cast.\"",
         "Seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.",
         "Seek two cards. For each mystery among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"",
         "You may seek two cards. Those cards perpetually gain \"This spell costs {1} less to cast.\"",
