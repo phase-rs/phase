@@ -36001,3 +36001,180 @@ fn u14_complete_where_x_and_companion_documents() {
         assert!(!doc.items.iter().any(|i| matches!(i.node, OracleNodeIr::Static(_))), "no supported partial static: {doc:#?}");
     }
 }
+
+#[test]
+fn u14_base_stat_documents_preserve_each_axis_and_full_maha() {
+    for (predicate, expected) in [
+        (
+            "have base toughness 1",
+            vec![ContinuousModification::SetToughness { value: 1 }],
+        ),
+        (
+            "have base power 3",
+            vec![ContinuousModification::SetPower { value: 3 }],
+        ),
+        (
+            "have base power and toughness 2/2",
+            vec![
+                ContinuousModification::SetPower { value: 2 },
+                ContinuousModification::SetToughness { value: 2 },
+            ],
+        ),
+    ] {
+        let line = format!("Creatures your opponents control {predicate}.");
+        // Only the toughness form is Maha's actual full Oracle. The other
+        // two documents are explicitly synthetic grammar preservation cases.
+        let (name, text) = if predicate == "have base toughness 1" {
+            (
+                "Maha, Its Feathers Night",
+                format!("Flying, trample\nWard—Discard a card.\n{line}"),
+            )
+        } else {
+            ("Synthetic base stat", line.clone())
+        };
+        let mut doc = parse_oracle_ir(&text, name, &[], &["Creature".into()], &[]);
+        assert_eq!(doc.source_text, text);
+        assert!(
+            !doc.items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{doc:#?}"
+        );
+        let parsed = lower_oracle_ir(&mut doc);
+        let static_def = parsed
+            .statics
+            .iter()
+            .find(|s| s.modifications == expected)
+            .expect("exact base-stat modifications");
+        assert_eq!(
+            static_def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent)
+            ))
+        );
+        for tail in [" and draw two cards", ", draw two cards", " unexplained"] {
+            let failed_line = format!("Creatures your opponents control {predicate}{tail}.");
+            let bad_text = text.replace(&line, &failed_line);
+            let bad = parse_oracle_ir(&bad_text, name, &[], &["Creature".into()], &[]);
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert!(!bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Static(ir) if ir.definition.modifications.iter().any(|m| matches!(m, ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. })))), "no partial base setter: {bad:#?}");
+        }
+    }
+}
+
+#[test]
+fn u14_source_bound_mixed_keyword_verb_documents() {
+    let remove_flying = ContinuousModification::RemoveKeyword {
+        keyword: Keyword::Flying,
+    };
+    let add_haste = ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste,
+    };
+    let remove_haste = ContinuousModification::RemoveKeyword {
+        keyword: Keyword::Haste,
+    };
+    let add_vigilance = ContinuousModification::AddKeyword {
+        keyword: Keyword::Vigilance,
+    };
+    for (predicate, expected) in [
+        (
+            "loses flying and has haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "lose flying and gain haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "loses flying, has haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "loses flying, and gains haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "has haste and loses flying",
+            vec![add_haste.clone(), remove_flying.clone()],
+        ),
+        (
+            "gains haste, loses flying",
+            vec![add_haste.clone(), remove_flying.clone()],
+        ),
+        (
+            "loses flying and loses haste",
+            vec![remove_flying.clone(), remove_haste.clone()],
+        ),
+        (
+            "loses flying and haste",
+            vec![remove_flying.clone(), remove_haste],
+        ),
+        (
+            "loses flying and has haste and gains vigilance",
+            vec![
+                remove_flying.clone(),
+                add_haste.clone(),
+                add_vigilance.clone(),
+            ],
+        ),
+        (
+            "loses flying, has haste, vigilance",
+            vec![remove_flying, add_haste, add_vigilance],
+        ),
+    ] {
+        // Complete explicitly synthetic supplier/consumer contract.
+        let line = format!("Each creature with mana value of the chosen quality {predicate}.");
+        let text = format!("As this enchantment enters, choose odd or even.\n{line}");
+        let mut good = parse_oracle_ir(
+            &text,
+            "Synthetic mixed parity",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(good.source_text, text);
+        assert!(good.items.iter().any(source_parity_chooser));
+        assert!(
+            !good
+                .items
+                .iter()
+                .any(|i| matches!(i.node, OracleNodeIr::Unsupported { .. })),
+            "{good:#?}"
+        );
+        let parsed = lower_oracle_ir(&mut good);
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(parsed.statics[0].modifications, expected, "{predicate}");
+        assert!(parsed.statics[0].affected.as_ref().is_some_and(|f| {
+            target_filter_uses_filter_prop(f, &|p| {
+                matches!(
+                    p,
+                    FilterProp::ManaValueParity {
+                        parity: ParitySource::SourceChosen
+                    }
+                )
+            })
+        }));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let failed_line = format!("{}{}.", line.trim_end_matches('.'), tail);
+            let bad_text =
+                format!("As this enchantment enters, choose odd or even.\n{failed_line}");
+            let bad = parse_oracle_ir(
+                &bad_text,
+                "Synthetic mixed parity",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            assert_eq!(bad.source_text, bad_text);
+            assert!(bad.items.iter().any(source_parity_chooser));
+            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert!(
+                !bad.items
+                    .iter()
+                    .any(|i| matches!(i.node, OracleNodeIr::Static(_))),
+                "no partial static: {bad:#?}"
+            );
+        }
+    }
+}

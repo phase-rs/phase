@@ -1875,29 +1875,34 @@ fn complete_modification_clause(
     let mut keyword_complete = true;
     let parts = complete_keyword_list_parts(body).unwrap_or_default();
     for part in &parts {
-        let part_lower = part.to_lowercase();
-        let part = nom_tag_lower(part, &part_lower, "has ")
-            .or_else(|| nom_tag_lower(part, &part_lower, "have "))
-            .or_else(|| nom_tag_lower(part, &part_lower, "gains "))
-            .or_else(|| nom_tag_lower(part, &part_lower, "gain "))
-            .unwrap_or(part);
         if matches!(verb, ContinuousVerb::Remove) {
+            // An explicit later grant is a separate clause. Keep its verb so
+            // the transactional connector owner below parses its operation;
+            // only bare keyword legs inherit this removal verb.
             if let Some(keyword) = map_keyword_complete(part) {
                 keyword_mods.push(ContinuousModification::RemoveKeyword { keyword });
             } else {
                 keyword_complete = false;
                 break;
             }
-        } else if push_grant_clause_modifications_with_policy(
-            &mut keyword_mods,
-            part,
-            where_x,
-            super::oracle_keyword::KeywordRemainderPolicy::RequireAllConsuming,
-        )
-        .is_none()
-        {
-            keyword_complete = false;
-            break;
+        } else {
+            let part_lower = part.to_lowercase();
+            let part = nom_tag_lower(part, &part_lower, "has ")
+                .or_else(|| nom_tag_lower(part, &part_lower, "have "))
+                .or_else(|| nom_tag_lower(part, &part_lower, "gains "))
+                .or_else(|| nom_tag_lower(part, &part_lower, "gain "))
+                .unwrap_or(part);
+            if push_grant_clause_modifications_with_policy(
+                &mut keyword_mods,
+                part,
+                where_x,
+                super::oracle_keyword::KeywordRemainderPolicy::RequireAllConsuming,
+            )
+            .is_none()
+            {
+                keyword_complete = false;
+                break;
+            }
         }
     }
     // The legacy list helper intentionally removes dangling punctuation for its
@@ -1956,8 +1961,26 @@ fn complete_modification_clause(
             return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x);
         }
     }
-    // CR 613.4b: the base-P/T owner must consume both values completely,
-    // including an X pair whose expression is owned by the where-X clause.
+    // CR 613.4b: setting only one base stat preserves the other axis. The
+    // shared numeric owner must consume the whole value before publication.
+    if let Ok((_, BasePtSide::Fixed { value })) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("base power "),
+        super::anthem::parse_base_pt_side,
+    ))
+    .parse(body.to_lowercase().as_str())
+    {
+        return Some(vec![ContinuousModification::SetPower { value }]);
+    }
+    if let Ok((_, BasePtSide::Fixed { value })) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("base toughness "),
+        super::anthem::parse_base_pt_side,
+    ))
+    .parse(body.to_lowercase().as_str())
+    {
+        return Some(vec![ContinuousModification::SetToughness { value }]);
+    }
+    // The pair owner also consumes both values completely, including an X
+    // pair whose expression is owned by the where-X clause.
     if let Ok((_, (power, _, toughness))) = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("base power and toughness "),
         (

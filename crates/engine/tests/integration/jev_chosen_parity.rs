@@ -317,6 +317,98 @@ fn u14_divine_sacrament_full_oracle_threshold_consumer() {
 }
 
 #[test]
+fn u14_maha_full_oracle_sets_only_opposing_toughness() {
+    // CR 613.4b + CR 611.3a + CR 611.3b: a live base-toughness setter
+    // preserves power and ends when its source leaves the battlefield.
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let own = s.add_creature(P0, "Own base-stat control", 4, 5).id();
+    let opposing = s
+        .add_creature(P1, "Opposing base-stat recipient", 4, 5)
+        .id();
+    let source = s.add_creature_to_hand(P0, "Maha, Its Feathers Night", 6, 5)
+        .from_oracle_text_with_keywords(&["Flying", "Trample"],
+            "Flying, trample\nWard—Discard a card.\nCreatures your opponents control have base toughness 1.")
+        .with_mana_cost(ManaCost::zero()).id();
+    let removal = s
+        .add_spell_to_hand(P0, "Synthetic source removal", true)
+        .from_oracle_text("Destroy target creature.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut r = s.build();
+    r.cast(source).resolve();
+    assert_eq!(r.state().objects[&source].zone, Zone::Battlefield);
+    for (id, toughness) in [(own, 5), (opposing, 1)] {
+        let object = &r.state().objects[&id];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert_eq!((object.power, object.toughness), (Some(4), Some(toughness)));
+    }
+    // Its own controller's removal does not invoke the opponent-only ward.
+    r.cast(removal).target_object(source).resolve();
+    assert_eq!(r.state().objects[&source].zone, Zone::Graveyard);
+    for id in [own, opposing] {
+        let object = &r.state().objects[&id];
+        assert_eq!((object.power, object.toughness), (Some(4), Some(5)));
+    }
+}
+
+#[test]
+fn u14_removal_led_parity_grants_haste_and_enables_attack() {
+    // Explicitly synthetic complete Oracle contract, not printed card wording.
+    // CR 613.1f + CR 611.3a: the matching creature loses Flying and gains
+    // Haste; CR 302.6 + CR 702.10b then permit its actual new-creature attack.
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    fund(&mut s, P0);
+    let source = standard(&mut s, P0,
+        "As this enchantment enters, choose odd or even.\nEach creature with mana value of the chosen quality loses flying and has haste.");
+    let odd = s
+        .add_creature_to_hand(P0, "Synthetic MV3 flyer", 2, 3)
+        .with_keyword(Keyword::Flying)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let even = s
+        .add_creature_to_hand(P0, "Synthetic MV2 flyer", 2, 3)
+        .with_keyword(Keyword::Flying)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let mut r = s.build();
+    pause(&mut r, source);
+    assert!(r.state().objects[&source]
+        .static_definitions
+        .iter_all()
+        .any(|d| d.modifications
+            == vec![
+                ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Flying
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste
+                },
+            ]));
+    answer(&mut r, source, "Odd");
+    assert_eq!(
+        r.state().objects[&source].chosen_attributes,
+        vec![ChosenAttribute::OddOrEven(Parity::Odd)]
+    );
+    r.cast(odd).resolve();
+    r.cast(even).resolve();
+    for (id, matching) in [(odd, true), (even, false)] {
+        let object = &r.state().objects[&id];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert!(object.summoning_sick && !object.tapped);
+        assert_eq!(object.keywords.contains(&Keyword::Flying), !matching);
+        assert_eq!(object.keywords.contains(&Keyword::Haste), matching);
+    }
+    r.advance_to_combat();
+    assert!(r
+        .declare_attackers(&[(even, engine::game::combat::AttackTarget::Player(P1))])
+        .is_err());
+    r.declare_attackers(&[(odd, engine::game::combat::AttackTarget::Player(P1))])
+        .expect("matching newly cast creature can attack on the same rejecting board");
+}
+
+#[test]
 fn u14_opposite_sources_are_independent() {
     for remove_odd in [true, false] {
         let mut s = GameScenario::new();

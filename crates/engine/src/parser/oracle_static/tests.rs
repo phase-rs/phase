@@ -40607,3 +40607,148 @@ fn u14_additional_pump_keeps_strict_tail_and_base_pt_grammar() {
     );
     assert!(super::grammar::parse_pt_mod_with_remainder("an additional +1/+1").is_err());
 }
+
+#[test]
+fn u14_complete_base_stat_axes_preserve_scope_and_refuse_tail() {
+    for (predicate, expected) in [
+        (
+            "have base toughness 1",
+            vec![ContinuousModification::SetToughness { value: 1 }],
+        ),
+        (
+            "have base power 3",
+            vec![ContinuousModification::SetPower { value: 3 }],
+        ),
+        (
+            "have base power and toughness 2/2",
+            vec![
+                ContinuousModification::SetPower { value: 2 },
+                ContinuousModification::SetToughness { value: 2 },
+            ],
+        ),
+    ] {
+        assert_eq!(
+            parse_complete_continuous_modifications(predicate),
+            Some(expected.clone())
+        );
+        let line = format!("Creatures your opponents control {predicate}.");
+        let direct = parse_subject_continuous_static(&line).expect("complete base-stat subject");
+        let public = parse_static_line_multi(&line);
+        assert_eq!(public.len(), 1, "{line}: {public:?}");
+        for definition in [&direct, &public[0]] {
+            assert_eq!(definition.modifications, expected, "{line}");
+            assert_eq!(
+                definition.affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent)
+                ))
+            );
+            assert!(!u14_static_residual(definition));
+        }
+        for tail in [" and draw two cards", ", draw two cards", " unexplained"] {
+            let bad_predicate = format!("{predicate}{tail}");
+            assert!(
+                parse_complete_continuous_modifications(&bad_predicate).is_none(),
+                "{bad_predicate}"
+            );
+            let bad = format!("Creatures your opponents control {bad_predicate}.");
+            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            let refused = parse_static_line_multi(&bad);
+            assert!(!refused.is_empty(), "terminal refusal: {bad}");
+            assert!(
+                refused.iter().all(u14_static_residual),
+                "{bad}: {refused:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn u14_keyword_clause_verbs_preserve_each_operation() {
+    let remove_flying = ContinuousModification::RemoveKeyword {
+        keyword: Keyword::Flying,
+    };
+    let add_haste = ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste,
+    };
+    let remove_haste = ContinuousModification::RemoveKeyword {
+        keyword: Keyword::Haste,
+    };
+    let add_vigilance = ContinuousModification::AddKeyword {
+        keyword: Keyword::Vigilance,
+    };
+    for (predicate, expected) in [
+        (
+            "loses flying and has haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "lose flying and gain haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "loses flying, has haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "loses flying, and gains haste",
+            vec![remove_flying.clone(), add_haste.clone()],
+        ),
+        (
+            "has haste and loses flying",
+            vec![add_haste.clone(), remove_flying.clone()],
+        ),
+        (
+            "gains haste, loses flying",
+            vec![add_haste.clone(), remove_flying.clone()],
+        ),
+        (
+            "loses flying and loses haste",
+            vec![remove_flying.clone(), remove_haste.clone()],
+        ),
+        (
+            "loses flying and haste",
+            vec![remove_flying.clone(), remove_haste.clone()],
+        ),
+        (
+            "loses flying and has haste and gains vigilance",
+            vec![
+                remove_flying.clone(),
+                add_haste.clone(),
+                add_vigilance.clone(),
+            ],
+        ),
+        (
+            "loses flying, has haste, vigilance",
+            vec![remove_flying, add_haste, add_vigilance],
+        ),
+    ] {
+        assert_eq!(
+            parse_complete_continuous_modifications(predicate),
+            Some(expected.clone()),
+            "{predicate}"
+        );
+        let line = format!("Creatures {predicate}.");
+        let direct = parse_subject_continuous_static(&line).expect("complete mixed-verb subject");
+        let public = parse_static_line_multi(&line);
+        assert_eq!(public.len(), 1, "{line}: {public:?}");
+        assert_eq!(direct.modifications, expected, "{line}");
+        assert_eq!(public[0].modifications, expected, "{line}");
+        assert!(!u14_static_residual(&public[0]));
+        for tail in [" and draw two cards", ", unexplained", " unexplained"] {
+            let bad_predicate = format!("{predicate}{tail}");
+            assert!(
+                parse_complete_continuous_modifications(&bad_predicate).is_none(),
+                "{bad_predicate}"
+            );
+            let bad = format!("Creatures {bad_predicate}.");
+            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            let refused = parse_static_line_multi(&bad);
+            assert!(!refused.is_empty());
+            assert!(
+                refused.iter().all(u14_static_residual),
+                "{bad}: {refused:?}"
+            );
+        }
+    }
+}
