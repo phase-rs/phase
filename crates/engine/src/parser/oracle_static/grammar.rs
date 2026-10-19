@@ -1931,7 +1931,6 @@ pub(crate) fn strip_trailing_keyword_clause(clause: &str) -> &str {
 
 pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
     let body = nom_primitives::scan_at_word_boundaries(lower.as_str(), |candidate| {
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gains "),
@@ -1947,11 +1946,11 @@ pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
                 nom::error::ErrorKind::Fail,
             )));
         }
-        Ok((rest, tp.slice(lower.len() - rest.len(), lower.len())))
+        Ok((rest, &text[lower.len() - rest.len()..]))
     })?;
     // Return the entire suffix: the complete companion owner must consume
     // every following clause before it can publish either definition.
-    Some(body.original.trim())
+    Some(body.trim())
 }
 
 /// Extract the keyword text from "lose [keyword]" / "loses [keyword]" clauses.

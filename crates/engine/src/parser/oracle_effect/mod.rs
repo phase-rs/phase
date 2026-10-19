@@ -13642,15 +13642,13 @@ pub(crate) fn parse_sought_perpetual_cost(
 pub(crate) fn sought_corridor_life_amount(text: &str) -> Option<QuantityExpr> {
     let text = strip_leading_sequence_connector(text).trim();
     let lower = text.to_lowercase();
-    let ((_, amount, _, _), _) = nom_on_lower(text, &lower, |input| {
-        all_consuming((
-            tag("you gain "),
-            nom_quantity::parse_quantity_expr_number,
-            tag(" life"),
-            opt(nom::character::complete::char('.')),
-        ))
-        .parse(input)
-    })?;
+    let (_, amount) = all_consuming(nom::sequence::delimited(
+        tag::<_, _, OracleError<'_>>("you gain "),
+        nom_quantity::parse_quantity_expr_number,
+        (tag(" life"), opt(nom::character::complete::char('.'))),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
     Some(amount)
 }
 
@@ -47315,7 +47313,7 @@ fn parse_effect_chain_ir_body(
                     normalized_text,
                     chunk.boundary_after,
                 );
-                continue;
+                continue 'chunks;
             }
             let clause_declared_group = chunk_ctx.clause_declared_group.take();
             if let Some(group) = clause_declared_group {

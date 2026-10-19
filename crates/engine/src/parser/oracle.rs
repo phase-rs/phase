@@ -1902,7 +1902,7 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
             let mut complete = true;
             rewrite_filter_props(
                 &mut filter,
-                &mut |_| {},
+                &mut |_, _, _| {},
                 &mut |prop| {
                     if let FilterProp::ManaValueParity {
                         parity: parity @ ParitySource::LastNamedChoice,
@@ -1911,7 +1911,10 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
                         *parity = ParitySource::SourceChosen;
                     }
                 },
+                &mut |_| {},
                 &mut complete,
+                true,
+                None,
             );
             if !complete || source_parity_static_reader(&filter) {
                 return None;

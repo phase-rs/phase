@@ -4359,7 +4359,7 @@ fn try_materialize_reflexive_trigger_inner(
             let pending = build_reflexive_pending_trigger(state, reflexive, parent);
             crate::game::triggers::defer_pending_trigger(state, pending);
         }
-        return Ok(true);
+        return Ok(Some(ResolutionProgress::Complete));
     }
     if reflexive.modal.is_some() && !reflexive.mode_abilities.is_empty() {
         let pending = build_reflexive_pending_trigger(state, reflexive, parent);

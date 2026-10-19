@@ -3201,7 +3201,7 @@ pub fn resolve_each_source_deals_damage(
         match recipient {
             EachDamageRecipient::Shared(_) => {
                 for recip in &shared_recipients {
-                    entries.push((source_id, ctx, recip.clone(), amt));
+                    entries.push((source_id, ctx.clone(), recip.clone(), amt));
                 }
             }
             // CR 109.4 + CR 120.3a: each source deals to the player that

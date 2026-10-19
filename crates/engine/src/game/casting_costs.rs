@@ -15956,7 +15956,7 @@ pub(super) fn assist_offer_params(
 ) -> Option<(u32, Vec<PlayerId>)> {
     let casting_spell = if fused {
         CastSpellContext {
-            object_id: object_id,
+            object_id,
             casting_variant: CastingVariant::Fuse,
         }
     } else {

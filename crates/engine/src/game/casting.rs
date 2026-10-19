@@ -2740,7 +2740,7 @@ pub(super) fn exile_cast_pays_printed_mana_cost(
 /// mana value / colors see the fused spell; the payment-time / on-stack callers
 /// pass `false` and rely on the `fused_split_spell` marker OR-gate inside
 /// `spell_cast_record_for`.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn granted_spell_keywords_for_cast(
     state: &GameState,
@@ -2840,7 +2840,7 @@ fn granted_spell_keyword_instances_for(
 ) -> Vec<Keyword> {
     let casting_spell = if fused {
         CastSpellContext {
-            object_id: object_id,
+            object_id,
             casting_variant: CastingVariant::Fuse,
         }
     } else {
@@ -2929,7 +2929,6 @@ fn granted_spell_keyword_instances_for_cast(
 /// projects a pre-payment fused split spell with its COMBINED characteristics
 /// (CR 702.102b); see [`granted_spell_keywords_for_cast`] for the rationale.
 #[allow(clippy::too_many_arguments)]
-
 /// CR 601.2b: retain the selected cast through this projection.
 fn transient_granted_spell_keywords_for_cast(
     state: &GameState,
@@ -3042,7 +3041,7 @@ pub(super) fn granted_spell_alternative_cost_for(
 ) -> Option<GrantedSpellAlternativeCost> {
     let casting_spell = if fused {
         CastSpellContext {
-            object_id: object_id,
+            object_id,
             casting_variant: CastingVariant::Fuse,
         }
     } else {
@@ -3149,7 +3148,7 @@ pub(super) fn granted_spell_alternative_cost_for_cast(
 /// Exhaustive by design — no wildcard arm: a future filter variant that can
 /// nest a zone constraint must be classified here explicitly instead of
 /// silently falling into the hand-only default.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn matches_via_origin_scoped_branch_for_cast(
     state: &GameState,
@@ -3371,7 +3370,7 @@ pub(crate) fn effective_spell_keywords_for(
 ) -> Vec<Keyword> {
     let casting_spell = if fused {
         CastSpellContext {
-            object_id: object_id,
+            object_id,
             casting_variant: CastingVariant::Fuse,
         }
     } else {
@@ -3675,7 +3674,7 @@ pub(crate) fn effective_spell_keyword_kinds_for(
 ) -> Vec<KeywordKind> {
     let casting_spell = if fused {
         CastSpellContext {
-            object_id: object_id,
+            object_id,
             casting_variant: CastingVariant::Fuse,
         }
     } else {
@@ -9211,17 +9210,10 @@ fn prepare_spell_cast_announced(
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-    // CR 702.102b + CR 202.3d: Pre-payment fused discriminator. Invariant: a fused
-    // split cast is reachable at this seam ONLY through an explicit
-    // `variant_override == Some(CastingVariant::Fuse)`. Fuse is constructed in
-    // exactly one place (`casting_variant_candidates`, pushed for a fuse-capable
-    // split card) and prepared with `Some(Fuse)`; it is never inferred by the
-    // alternative-cost closure below (which resolves `casting_variant` at ~4374,
-    // after the prohibition block). The `fused_split_spell` marker is not set until
-    // finalization (payment time), so pre-payment prohibition / keyword-grant /
-    // cost seams must derive fusion from this override. If a future change ever
-    // infers Fuse elsewhere, this discriminator must be revisited.
-    let is_fuse_variant = variant_override == Some(CastingVariant::Fuse);
+    // CR 702.102b + CR 202.3d: Fuse is selected explicitly by the cast override.
+    // The `fused_split_spell` marker is set only at payment finalization, so
+    // pre-payment prohibition, keyword-grant and cost projections use this
+    // selected casting variant.
     let casting_spell = CastSpellContext {
         object_id,
         casting_variant: variant_override.unwrap_or(CastingVariant::Normal),
@@ -11866,7 +11858,7 @@ pub(super) fn apply_all_cost_modifiers(
             object_id,
             mana_cost,
             CastSpellContext {
-                object_id: object_id,
+                object_id,
                 casting_variant: casting_variant.unwrap_or_else(|| {
                     CastSpellContext::for_spell(state, object_id).casting_variant
                 }),
@@ -12790,7 +12782,7 @@ impl PreTargetCostFilterAnalysis {
 /// CR 601.2f: Classify a cost filter before targets are chosen. Fixed `Or` and
 /// `Not` outcomes remain fixed even when an unreachable branch mentions a
 /// target; only a result that chosen targets can still change is target-dependent.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn analyze_cost_filter_before_targets_for_cast(
     state: &GameState,
@@ -13992,7 +13984,7 @@ pub(super) fn apply_cost_floor(
 /// `ModifyCost { Minimum }` floor's `spell_filter` keyed on mana value / colors
 /// matches the fused spell. Payment-time callers use [`apply_cost_floor`] and rely
 /// on the `fused_split_spell` marker OR-gate.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn apply_cost_floor_for_cast(
     state: &GameState,
@@ -14035,7 +14027,7 @@ pub(super) fn apply_cost_floor_with_selected_targets(
 
 /// CR 601.2f: A cost floor is relevant before target selection only after its
 /// production source, caster, condition, and non-target spell gates hold.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn battlefield_cost_floor_applies_before_targets_for_cast(
     state: &GameState,
@@ -14144,7 +14136,7 @@ fn apply_cost_floor_inner_for_cast(
 /// or of the CR 601.2f reduction order. That is what lets
 /// [`analyze_cost_reduction_order`] collect the floors once and re-apply them to
 /// every candidate order without re-walking `battlefield_functioning_statics`.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn collect_cost_floors_for_cast(
     state: &GameState,
@@ -14522,7 +14514,7 @@ fn apply_cost_mod_to_mana(
 /// characteristics so a `CastWithKeyword`-granted Affinity keyed on the combined
 /// mana value / colors is granted to the fused spell before its marker is set.
 /// Payment-time / non-fused callers pass `false` and rely on the marker.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn collect_affinity_reduction_units_for_cast(
     state: &GameState,
@@ -14569,7 +14561,7 @@ fn collect_affinity_reduction_units_for_cast(
 /// characteristics so a `CastWithKeyword`-granted Undaunted keyed on the combined
 /// mana value / colors is granted to the fused spell before its marker is set.
 /// Payment-time / non-fused callers pass `false` and rely on the marker.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn collect_undaunted_reduction_units_for_cast(
     state: &GameState,
@@ -14601,7 +14593,7 @@ fn collect_undaunted_reduction_units_for_cast(
 /// characteristics so a filtered reduction ("the next spell with mana value 5 or
 /// greater you cast costs {1} less") keyed on mana value / colors matches the fused
 /// spell. Payment-time callers pass `false` and rely on the marker OR-gate.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn collect_pending_spell_cost_reduction_units_for_cast(
     state: &GameState,
@@ -21702,6 +21694,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
 struct AutoTapProbeOptions<'a> {
     source_cache: Option<&'a casting_costs::AutoTapSourceCache>,
     explicit_tap_payment_mode: Option<ConvokeMode>,
+    casting_spell: Option<CastSpellContext>,
 }
 
 fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
@@ -21769,7 +21762,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
                                 cost,
                                 Some(ctx),
                                 permissions,
-                                options.explicit_tap_payment_mode,
+                                &options,
                             )
                         })
                 })
@@ -21820,18 +21813,15 @@ pub(super) fn spell_tap_payment_mode_for_cast(
     if !state.objects.contains_key(&source_id) {
         return None;
     }
-    let kinds = effective_spell_keyword_kinds_for_cast(state, player, source_id, casting_spell);
-    spell_tap_payment_mode_from_kinds(&kinds)
-}
-fn spell_tap_payment_mode_from_kinds(kinds: &[KeywordKind]) -> Option<ConvokeMode> {
+    let keywords = effective_spell_keywords_for_cast(state, player, source_id, casting_spell);
     [
-        (KeywordKind::Convoke, ConvokeMode::Convoke),
-        (KeywordKind::Waterbend, ConvokeMode::Waterbend),
-        (KeywordKind::Improvise, ConvokeMode::Improvise),
-        (KeywordKind::Delve, ConvokeMode::Delve),
+        (Keyword::Convoke, ConvokeMode::Convoke),
+        (Keyword::Waterbend, ConvokeMode::Waterbend),
+        (Keyword::Improvise, ConvokeMode::Improvise),
+        (Keyword::Delve, ConvokeMode::Delve),
     ]
     .into_iter()
-    .find_map(|(kind, mode)| kinds.contains(&kind).then_some(mode))
+    .find_map(|(keyword, mode)| keywords.contains(&keyword).then_some(mode))
 }
 
 /// CR 702.66a: Delve is an independent generic-payment permission. It composes
@@ -22049,11 +22039,17 @@ fn can_pay_with_spell_tap_payments(
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     permissions: crate::types::mana::CostPermissionContext,
-    explicit_mode: Option<ConvokeMode>,
+    options: &AutoTapProbeOptions<'_>,
 ) -> bool {
-    let Some(mode) = explicit_mode.or_else(|| match ctx {
-        Some(PaymentContext::Spell(meta)) => spell_tap_payment_mode_from_kinds(&meta.keyword_kinds),
-        _ => spell_tap_payment_mode(state, player, source_id),
+    let Some(mode) = options.explicit_tap_payment_mode.or_else(|| {
+        spell_tap_payment_mode_for_cast(
+            state,
+            player,
+            source_id,
+            options
+                .casting_spell
+                .unwrap_or_else(|| CastSpellContext::for_spell(state, source_id)),
+        )
     }) else {
         return false;
     };
@@ -22363,6 +22359,7 @@ pub fn can_pay_cost_after_auto_tap_with_probe_for_cast(
         AutoTapProbeOptions {
             source_cache,
             explicit_tap_payment_mode: None,
+            casting_spell: Some(casting_spell),
         },
     )
 }
@@ -22401,6 +22398,10 @@ pub(crate) fn can_pay_pending_cast_after_auto_tap_in_scratch(
         AutoTapProbeOptions {
             source_cache: None,
             explicit_tap_payment_mode: None,
+            casting_spell: Some(CastSpellContext {
+                object_id: pending.object_id,
+                casting_variant: pending.casting_variant,
+            }),
         },
     )
 }
@@ -22539,6 +22540,7 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
         AutoTapProbeOptions {
             source_cache: None,
             explicit_tap_payment_mode: Some(tap_payment_mode),
+            casting_spell: None,
         },
     ) {
         return true;
@@ -22654,7 +22656,7 @@ pub(crate) fn spell_payment_manual_route(
 /// Pool-payable costs may finish automatically; a cost whose only currently
 /// activatable mana sources are sacrificial must preserve the explicit source
 /// choice instead of consuming an irreversible resource during offer probing.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 pub(crate) fn payment_mode_for_prepared_spell_cost_for_cast(
     state: &GameState,
@@ -23097,7 +23099,7 @@ fn controls_costed_tap_mana_source(state: &GameState, player: PlayerId) -> bool 
 /// payable under the ordinary exact auto-tap authority. With a matching
 /// `probe`, the routes come from its per-pass memo instead of being re-walked
 /// for every spell.
-
+///
 /// CR 601.2b: retain the selected cast through this projection.
 fn has_exact_filter_land_payment_witness_for_cast(
     state: &GameState,

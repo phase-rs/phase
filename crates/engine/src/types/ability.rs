@@ -30786,6 +30786,7 @@ impl AbilityCondition {
             | AbilityCondition::WasStartingPlayer { .. }
             | AbilityCondition::SpellCastWithVariantThisTurn { .. }
             | AbilityCondition::ZoneChangedThisWay { .. }
+            | AbilityCondition::CounterRemovedThisWay { .. }
             | AbilityCondition::CostPaidObjectMatchesFilter { .. }
             | AbilityCondition::ConditionInstead { .. }
             | AbilityCondition::Or { .. }

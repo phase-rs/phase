@@ -1811,16 +1811,17 @@ pub(crate) fn find_refused_loyalty_grant_sentence(static_line: &str) -> Option<S
     }
     for sentence in split_static_sentences(static_line) {
         let sentence_lower = sentence.to_lowercase();
-        let Some(subject_end) = find_continuous_predicate_start(&sentence_lower) else {
-            continue;
-        };
-        let predicate = sentence[subject_end + 1..].trim();
-        let probe = grant_clause_probe_lower(predicate);
-        if let Some((kinds, _)) = parse_grant_all_abilities_clause(&probe) {
+        let tp = TextPair::new(&sentence, &sentence_lower);
+        if parse_continuous_subject_predicate(&tp, |subject, predicate| {
+            parse_continuous_subject_filter(subject)?;
+            let probe = grant_clause_probe_lower(predicate);
+            let (kinds, _) = parse_grant_all_abilities_clause(&probe)?;
             // Same expression as the `:1360` early return — grep-able coupling.
-            if matches!(kinds, GrantedAbilityKinds::Loyalty) {
-                return Some(sentence);
-            }
+            matches!(kinds, GrantedAbilityKinds::Loyalty).then_some(())
+        })
+        .is_some()
+        {
+            return Some(sentence);
         }
     }
     None
@@ -1886,9 +1887,11 @@ fn complete_static_where_x<'a>(
     let (expression, _) = marker(rest).ok()?;
     let expression = tp
         .slice(tp.len() - expression.len(), tp.len())
-        .trim()
+        .trim_start()
+        .trim_end()
         .trim_end_matches('.')
-        .trim();
+        .trim_start()
+        .trim_end();
     let (remaining, _) = super::oracle_nom::quantity::parse_quantity
         .parse(expression.lower)
         .ok()?;
@@ -2056,11 +2059,13 @@ fn complete_modification_clause(
         let mods = classify_quoted_inner(inner);
         return (!mods.is_empty()).then_some((mods, verb));
     }
+    let body_lower = body.to_lowercase();
     if matches!(verb, ContinuousVerb::Pump) {
         // CR 613.4c: "an additional" qualifies this additive pump, while the
         // base-P/T numeric production retains its separate grammar contract.
         let body_lower = body.to_lowercase();
         let body = nom_tag_lower(body, &body_lower, "an additional ").unwrap_or(body);
+        let body_lower = body.to_lowercase();
         if let Ok((rest, (power, toughness))) = parse_pt_mod_with_remainder(body) {
             if rest.trim().is_empty() {
                 return Some((
@@ -2086,12 +2091,12 @@ fn complete_modification_clause(
             tag::<_, _, OracleError<'_>>("/"),
             super::anthem::parse_base_pt_side,
         ))
-        .parse(body.to_lowercase().as_str())
+        .parse(body_lower.as_str())
         .is_ok()
         {
             return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x)
                 .map(|modifications| (modifications, verb));
-        }
+        };
     }
     // CR 613.4b: setting only one base stat preserves the other axis. The
     // shared numeric owner must consume the whole value before publication.
@@ -2099,7 +2104,7 @@ fn complete_modification_clause(
         tag::<_, _, OracleError<'_>>("base power "),
         super::anthem::parse_base_pt_side,
     ))
-    .parse(body.to_lowercase().as_str())
+    .parse(body_lower.as_str())
     {
         return Some((vec![ContinuousModification::SetPower { value }], verb));
     }
@@ -2107,7 +2112,7 @@ fn complete_modification_clause(
         tag::<_, _, OracleError<'_>>("base toughness "),
         super::anthem::parse_base_pt_side,
     ))
-    .parse(body.to_lowercase().as_str())
+    .parse(body_lower.as_str())
     {
         return Some((vec![ContinuousModification::SetToughness { value }], verb));
     }
@@ -2121,7 +2126,7 @@ fn complete_modification_clause(
             super::anthem::parse_base_pt_side,
         ),
     ))
-    .parse(body.to_lowercase().as_str())
+    .parse(body_lower.as_str())
     {
         return match (power, toughness) {
             (BasePtSide::Fixed { value: power }, BasePtSide::Fixed { value: toughness }) => Some((

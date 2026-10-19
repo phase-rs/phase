@@ -7,7 +7,7 @@ use crate::game::quantity::{
     quantity_expr_recipient_read, resolve_quantity_with_targets,
     resolve_quantity_with_targets_and_recipient, RecipientRead,
 };
-use crate::game::replacement::{self, ReplacementResult};
+use crate::game::replacement;
 use crate::game::zones;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachCardinality,

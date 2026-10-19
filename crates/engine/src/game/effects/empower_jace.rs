@@ -1,6 +1,5 @@
 use crate::game::effects::counters::{
-    add_counter_with_replacement, append_pending_counter_post_actions,
-    stash_pending_counter_completion, stash_pending_counter_post_actions,
+    add_counter_with_replacement, stash_pending_counter_completion,
 };
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
@@ -11,7 +10,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;

@@ -25623,6 +25623,7 @@ impl PostReplacementDrain {
     pub fn ready(continuation: crate::types::ability::PostReplacementContinuation) -> Self {
         Self {
             status: DrainStatus::Ready(continuation),
+            token_creation_parent: None,
             source: None,
             applied: HashSet::new(),
             event_source: None,

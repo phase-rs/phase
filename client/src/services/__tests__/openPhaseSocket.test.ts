@@ -454,10 +454,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v153 kind-selected activated-grant protocol", async () => {
+  it("accepts the literal Full v159 source-bound chosen-parity protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 153 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 159 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();

@@ -10,6 +10,7 @@ use super::{
 };
 use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use crate::types::statics::ProhibitionScope;
+use nom::character::complete::multispace0;
 
 /// CR 201.5: Consume a self-reference subject — `~` (produced by
 /// `normalize_card_name_refs` for "text that refers to the object it's on by

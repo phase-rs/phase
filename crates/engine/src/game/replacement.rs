@@ -6515,7 +6515,7 @@ fn is_external_battlefield_entry_tap_modifier(def: &ReplacementDefinition) -> bo
     {
         return false;
     }
-    let mut plain = ReplacementDefinition::new(def.event);
+    let mut plain = ReplacementDefinition::new(def.event.clone());
     plain.execute = def.execute.clone();
     plain.valid_card = def.valid_card.clone();
     plain.destination_zone = def.destination_zone;
