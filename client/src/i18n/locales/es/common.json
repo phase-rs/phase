@@ -285,7 +285,9 @@
     "loading": "Cargando..."
   },
   "turnBanner": {
-    "turn": "Turno {{number}}"
+    "turn": "Turno {{number}}",
+    "yourTurn": "Tu turno",
+    "opponentTurn": "Turno de {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Tirada para ver quién empieza",

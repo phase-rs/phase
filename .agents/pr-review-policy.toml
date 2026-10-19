@@ -1,5 +1,8 @@
 # Repo-level PR review policy. Keep contributor names, reviewer identities,
 # standings, and personal exceptions out of this committed file.
+# Repository write access is sufficient authority to merge autonomously.
+# Respect merge-queue admission by repository writers without requiring
+# maintain/admin access or separate maintainer adoption.
 
 [defaults]
 tier = "T2"

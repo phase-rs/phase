@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 
 import { HostControlTile } from "../HostControlTile";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
 import type { DeckChoice, PlayerSlot } from "../../../stores/multiplayerStore";
 import { emptySeatDeck } from "../../../services/pileSource";
+import { usePreferencesStore } from "../../../stores/preferencesStore";
+import { UNFILED_POOL_GROUP, emptyPoolSelection } from "../../../services/randomPoolSelection";
 
 const catalogMocks = vi.hoisted(() => ({
   candidates: [] as unknown[],
@@ -14,6 +16,7 @@ const catalogMocks = vi.hoisted(() => ({
 vi.mock("../../../services/aiDeckCatalog", () => ({
   useAiDeckCatalog: () => ({
     candidates: catalogMocks.candidates,
+    allCandidates: catalogMocks.candidates,
     loading: false,
     error: null,
   }),
@@ -133,6 +136,70 @@ describe("HostControlTile", () => {
         data: { main_deck: ["Forest"], sideboard: [], commander: [] },
       });
       expect(onDeckList).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("AI pool fallback warning", () => {
+    const EXCLUDED_DECK = {
+      id: "saved:Excluded Deck",
+      name: "Excluded Deck",
+      source: { type: "saved" },
+      deck: { main: [{ count: 1, name: "Forest" }], sideboard: [] },
+      coveragePct: null,
+      archetype: null,
+      bracket: null,
+    };
+
+    it("warns and still assigns a deck when the AI pool selection matches nothing", async () => {
+      catalogMocks.candidates = [EXCLUDED_DECK];
+      const seatMutateAsync = vi.fn().mockResolvedValue(undefined);
+      const restoreSelection = usePreferencesStore.getState().aiPoolSelection;
+      act(() => {
+        usePreferencesStore.setState({
+          // The only legal deck is excluded: live assignments fall back to
+          // the full catalog.
+          aiPoolSelection: { ...emptyPoolSelection(), excludedGroups: [UNFILED_POOL_GROUP] },
+        });
+      });
+      try {
+        useMultiplayerStore.setState({
+          hostGameCode: "ABCD1",
+          hostingStatus: "waiting",
+          hostSession: {
+            formatConfig: FORMAT_DEFAULTS.Standard,
+            timerSeconds: null,
+            matchType: "Bo1",
+          },
+          playerSlots: [
+            { playerId: 0, name: "Host", kind: { type: "HostHuman" } },
+            { playerId: 1, name: "", kind: { type: "WaitingHuman" } },
+          ] as PlayerSlot[],
+          serverInfo: null,
+          seatMutate: vi.fn(),
+          seatMutateAsync,
+        });
+        render(
+          <MemoryRouter initialEntries={["/multiplayer"]}>
+            <HostControlTile />
+          </MemoryRouter>,
+        );
+
+        // The tile warns that Fill with AI draws from the full catalog …
+        expect(screen.getByRole("status")).toHaveTextContent(/Everything is excluded/);
+
+        // … and the fallback assignment still succeeds with the excluded deck.
+        fireEvent.click(screen.getByRole("button", { name: /fill with ai/i }));
+        await vi.waitFor(() => expect(seatMutateAsync).toHaveBeenCalled());
+        const assignment = seatMutateAsync.mock.calls[0][0];
+        expect(assignment.type).toBe("SetKind");
+        expect(assignment.data.kind.type).toBe("Ai");
+        expect(assignment.data.kind.data.deck.type).toBe("DeckList");
+        expect(assignment.data.kind.data.deck.data.main_deck).toContain("Forest");
+      } finally {
+        act(() => {
+          usePreferencesStore.setState({ aiPoolSelection: restoreSelection });
+        });
+      }
     });
   });
 

@@ -438,6 +438,84 @@ mod tests {
         );
     }
 
+    /// CR 608.2h: `Intensity` is information from a specific object read through
+    /// the same `ObjectScope` machinery as power, so an event-scoped intensity
+    /// must be snapshotted to a fixed `SetPower` at resolution rather than left
+    /// as a `SetPowerDynamic` the layer system cannot re-resolve.
+    #[test]
+    fn animate_snapshots_event_scoped_intensity_to_fixed_set_power() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Entering".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.intensity = 3;
+        }
+        // The trigger-event source is the entering permanent, so
+        // `Intensity { CostPaidObject }` resolves (trigger-event fallback) to its intensity.
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                entering,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+
+        let event_intensity = QuantityExpr::Ref {
+            qty: QuantityRef::Intensity {
+                scope: crate::types::ability::ObjectScope::CostPaidObject,
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Animate {
+                power: Some(PtValue::Quantity(event_intensity)),
+                toughness: None,
+                types: vec![],
+                remove_types: vec![],
+                keywords: vec![],
+                target: TargetFilter::None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let tce = &state.transient_continuous_effects[0];
+        assert!(
+            tce.modifications
+                .contains(&ContinuousModification::SetPower { value: 3 }),
+            "event-scoped intensity must be snapshotted to a fixed SetPower(3), got {:?}",
+            tce.modifications
+        );
+        assert!(
+            !tce.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetPowerDynamic { .. })),
+            "must not leave a dynamic SetPowerDynamic for a resolution-only intensity scope"
+        );
+    }
+
     /// Guard: a `Source`-scoped dynamic base power must stay `SetPowerDynamic`
     /// so CDA-style "becomes an X/X where X is its power" set effects remain
     /// layer-resolvable (no snapshot).

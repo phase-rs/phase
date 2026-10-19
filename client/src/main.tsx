@@ -13,6 +13,7 @@ import "mana-font/css/mana.css";
 import "./index.css";
 import "./i18n"; // initialize i18next before any component renders
 import { App } from "./App";
+import { installHiddenDocumentMotion } from "./animation/hiddenDocumentMotion";
 import { registerServiceWorker } from "./pwa/registerServiceWorker";
 import { registerTauriUpdater } from "./pwa/tauriUpdater";
 import { installChunkReloadHandler } from "./pwa/chunkReloadHandler";
@@ -23,6 +24,10 @@ import { initializeHostPlatform } from "./services/platform";
 import { initializeConnectivity } from "./stores/connectivityStore";
 
 export async function bootstrap(): Promise<void> {
+  // Before anything renders: a tab opened in the background must not start
+  // CSS animations it can never finish (see animation/hiddenDocumentMotion).
+  installHiddenDocumentMotion();
+
   await initializeHostPlatform();
 
   // Cloud-sync restores its Supabase session from an App effect, so migration

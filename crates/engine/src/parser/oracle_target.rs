@@ -7421,11 +7421,12 @@ fn rebind_compound_slot_referent_in_prop(prop: &mut FilterProp) {
     }
 }
 
-/// Rewrite `scope: CostPaidObject` to `scope: Target` on every
-/// `QuantityRef` leaf that carries an `ObjectScope`, recursing through every
-/// `QuantityExpr` composition arm. Matches `quantity_expr_contains_scope`'s
-/// (`quantity.rs:834-865`) arm set exactly, so detection and rewrite cannot
-/// drift.
+/// Rewrite `scope: CostPaidObject` to `scope: Target` on the `QuantityRef`
+/// leaves listed below, recursing through every `QuantityExpr` composition
+/// arm. This list is NOT exhaustive: it omits `Intensity`, which the parser
+/// only emits as `Intensity { Source }`. The exhaustive object-scope
+/// classification is `game::quantity::quantity_ref_object_scope_read`, which
+/// backs `quantity_expr_contains_scope`.
 fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
     fn rebind_ref(qty: &mut QuantityRef) {
         let scope = match qty {

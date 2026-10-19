@@ -353,6 +353,7 @@ fn exile_morph_with_competing_permissions(
             single_use: false,
             cast_cost_modifier: Some(CastCostModifier::raise(ManaCost::generic(2))),
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         });
     (runner, morph)

@@ -2,10 +2,15 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
+import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
+import { gameStateFactory } from "../../test/factories/gameStateFactory";
 
 type NativeAdapterEvent =
   | { type: "reconnectFailed" }
   | { type: "error"; message: string }
+  | { type: "operationFailed"; message: string }
+  | { type: "reconnected"; inGame: boolean }
+  | { type: "aiDriverFault"; id: number; revision: number; message: string }
   // Non-terminal: the server refused a fire-and-forget request. Listed here
   // alongside the two terminal events precisely because `handleNativeEvent`
   // must treat it differently from both.
@@ -201,7 +206,8 @@ const {
   };
 });
 
-vi.mock("../../adapter/ws-adapter", () => ({
+vi.mock("../../adapter/ws-adapter", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../adapter/ws-adapter")>(),
   NativeEngineVersionMismatchError,
   WebSocketAdapter,
 }));
@@ -448,6 +454,7 @@ describe("GameProvider native AI routing", () => {
     vi.mocked(buildLegalAiDeckCatalog).mockReset();
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("ai-deck", ["Mountain"], null)],
+      allCandidates: [aiCandidate("ai-deck", ["Mountain"], null)],
     });
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
@@ -1572,6 +1579,10 @@ describe("GameProvider native AI routing", () => {
         aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
         aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
       ],
+      allCandidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
+      ],
     });
 
     render(
@@ -1610,6 +1621,10 @@ describe("GameProvider native AI routing", () => {
         aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
         aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
       ],
+      allCandidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
+      ],
     });
 
     render(
@@ -1639,6 +1654,10 @@ describe("GameProvider native AI routing", () => {
         aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
         aiCandidate("saved:cEDH Deck", ["B5-Card"], 5),
       ],
+      allCandidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:cEDH Deck", ["B5-Card"], 5),
+      ],
     });
 
     render(
@@ -1662,6 +1681,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [1];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 
@@ -1694,6 +1714,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 
@@ -1724,6 +1745,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 
@@ -1754,6 +1776,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [1];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 
@@ -1814,6 +1837,107 @@ describe("GameProvider native AI routing", () => {
     });
 
     expect(nativeAdapters[0]!.nativeAiOptions?.formatConfig?.starting_life).toBe(25);
+  });
+
+  async function connectedWireAdapter() {
+    const { WebSocketAdapter: WireAdapter, PROTOCOL_VERSION } =
+      await vi.importActual<typeof import("../../adapter/ws-adapter")>("../../adapter/ws-adapter");
+    const socket: PhaseSocketTransport = {
+      readyState: 1, onopen: null, onmessage: null, onerror: null, onclose: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(), send: vi.fn(), close: vi.fn(),
+    };
+    const adapter = new WireAdapter(
+      "native-engine", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, "Player",
+      { nativeAi: { socketFactory: () => socket, playerCount: 2, aiSeats: [] } },
+    );
+    const initialized = adapter.initialize();
+    await Promise.resolve();
+    socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({
+      type: "ServerHello", data: {
+        server_version: "test", build_commit: "test", protocol_version: PROTOCOL_VERSION, mode: "Full",
+      },
+    }) }));
+    await Promise.resolve();
+    await Promise.resolve();
+    socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({
+      type: "GameStarted", data: {
+        state: gameStateFactory.withPlayers(0, 1).priority(0).build(), your_player: 0,
+        state_revision: 1, player_token: "native-session-token", full_key: { game_code: "GAME01", generation: 1 },
+      },
+    }) }));
+    await initialized;
+    return { adapter, socket };
+  }
+
+  it.each(["ai", "online"] as const)("keeps %s connected after an unsolicited wire ActionFailed", async (mode) => {
+    let connectionStatus = "connected";
+    multiplayerState.setConnectionStatus.mockImplementation((status: string) => { connectionStatus = status; });
+    const onWsEvent = vi.fn();
+    render(<GameProvider gameId="operation-survives" mode={mode} joinCode={mode === "online" ? "GAME01" : undefined} onWsEvent={onWsEvent}><div /></GameProvider>);
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+      expect(gameStoreState.adapter).toBe(nativeAdapters[0]);
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith(mode === "ai" ? "native-ai" : "online");
+    });
+    const nativeAdapter = nativeAdapters[0]!;
+    const wire = await connectedWireAdapter();
+    wire.adapter.onEvent((event) => nativeAdapter.emit(event as NativeAdapterEvent));
+    try {
+      act(() => wire.socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({
+        type: "ActionFailed", data: { message: "Operation declined" },
+      }) })));
+      expect(connectionStatus).toBe("connected");
+      expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+      expect(gameStoreState.adapter).toBe(nativeAdapter);
+      expect(onWsEvent).toHaveBeenCalledWith({ type: "operationFailed", message: "Operation declined" });
+    } finally {
+      wire.adapter.dispose();
+      multiplayerState.setConnectionStatus.mockReset();
+    }
+  });
+
+  it.each(["ai", "online"] as const)("treats a wire AiDriverFault as terminal for %s", async (mode) => {
+    const onWsEvent = vi.fn();
+    render(<GameProvider gameId="ai-fault-terminal" mode={mode} joinCode={mode === "online" ? "GAME01" : undefined} onWsEvent={onWsEvent}><div /></GameProvider>);
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+      expect(gameStoreState.adapter).toBe(nativeAdapters[0]);
+    });
+    const nativeAdapter = nativeAdapters[0]!;
+    const wire = await connectedWireAdapter();
+    wire.adapter.onEvent((event) => nativeAdapter.emit(event as NativeAdapterEvent));
+    try {
+      act(() => wire.socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({
+        type: "AiDriverFault", data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+      }) })));
+      expect(onWsEvent).toHaveBeenCalledWith({
+        type: "error",
+        message: "Native AI driver stopped; this game can no longer advance.",
+      });
+      if (mode === "ai") {
+        // The native session is torn down so GamePage's terminal banner owns the screen.
+        expect(nativeAdapter.dispose).toHaveBeenCalledOnce();
+        expect(gameStoreState.adapter).toBeNull();
+      }
+    } finally {
+      wire.adapter.dispose();
+    }
+  });
+
+  it("switches to battlefield audio only when a reconnect resumes into a game", async () => {
+    const { audioManager } = await import("../../audio/AudioManager");
+    render(<GameProvider gameId="reconnect-audio" mode="online" joinCode="GAME01"><div /></GameProvider>);
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+      expect(gameStoreState.adapter).toBe(nativeAdapters[0]);
+    });
+    const setContext = vi.mocked(audioManager.setContext);
+    setContext.mockClear();
+    act(() => nativeAdapters[0]!.emit({ type: "reconnected", inGame: false }));
+    expect(setContext).not.toHaveBeenCalledWith("battlefield");
+    act(() => nativeAdapters[0]!.emit({ type: "reconnected", inGame: true }));
+    expect(setContext).toHaveBeenCalledWith("battlefield");
   });
 
   async function expectNativeTerminalEvent(event: NativeAdapterEvent) {

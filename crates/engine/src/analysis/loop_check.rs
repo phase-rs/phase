@@ -56,8 +56,8 @@
 
 use crate::analysis::decision_template::{DecisionTemplate, IterationCount};
 use crate::analysis::resource::{
-    loop_states_cover_modulo_growth, loop_states_equal_modulo_resources, BoardDelta, CounterClass,
-    ObjectClass, ResourceAxis, ResourceVector,
+    loop_states_cover_modulo_growth, loop_states_equal_modulo_resources, BoardDelta, ResourceAxis,
+    ResourceVector,
 };
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
@@ -120,10 +120,18 @@ pub enum WinKind {
 pub struct LoopCertificate {
     /// The resource axes that grew (or, for a mill loop, shrank) each cycle — the
     /// unbounded resources, as named by [`ResourceVector::unbounded_components`].
-    /// A non-empty vector is an invariant of a returned certificate.
+    /// Non-empty on every certificate but a counted offer's, whose take repeats nothing without
+    /// bound.
     pub unbounded: Vec<ResourceAxis>,
-    /// The classified win condition derived from `unbounded`.
-    pub win_kind: WinKind,
+    /// The classified win condition, derived from `unbounded`, or for a counted offer from what
+    /// its counting replay performed; `None` when that take does not end the game with its
+    /// proposer the winner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub win_kind: Option<WinKind>,
+    /// CR 732.2a: the count whose take `win_kind` is the outcome of, for an outcome a smaller
+    /// take does not reach; `None` for an outcome stated of the loop as a whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub win_kind_at: Option<u32>,
     /// CR 732.5 / CR 732.2b: whether NO living player has a meaningful priority action
     /// that could break the loop — the producer's own measurement, not a property of the
     /// cycle's contents. (`game::engine::interactive_loop_bridge` assigns it from
@@ -141,12 +149,13 @@ pub struct LoopCertificate {
     /// populates it with no further change. NOT a `ResourceAxis` — concrete permanents.
     pub residual_board_delta: BoardDelta,
     /// CR 732.2a: the measured resource signature of ONE repetition, published only by a
-    /// producer that narrowed the CR 704 repetition bound (the bounded cycle offer).
+    /// producer that bounded the repetitions (the threshold authority's offer, or the counting
+    /// replay's).
     /// `None` for every other offer, and for every save written before this field existed
     /// — in which case a drive falls back to the recurrence disjunct, i.e. exactly shipped
     /// behaviour. `skip_serializing_if` keeps the existing payload byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
+    pub per_cycle: Option<crate::analysis::resource::PeriodSignature>,
 }
 
 impl LoopCertificate {
@@ -194,7 +203,11 @@ pub struct ShortcutProposal {
     /// The confirmed unbounded axes (from the certificate) — display only.
     pub unbounded: Vec<ResourceAxis>,
     /// How the loop wins (from the certificate) — display only.
-    pub win_kind: WinKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub win_kind: Option<WinKind>,
+    /// The count `win_kind` is decided at (from the certificate) — display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub win_kind_at: Option<u32>,
     /// PR-7 Phase 4b: an optional CR 732.2a decision template pinning the loop's
     /// free choices for `IterationCount::Fixed(N)` finite materialization. `None`
     /// for a choice-free drain (every existing offer/test) or an `UntilLethal`
@@ -206,7 +219,7 @@ pub struct ShortcutProposal {
     /// authority for what a conformant cycle looks like. `None` for every offer whose
     /// producer states no per-period signature (see [`LoopCertificate::per_cycle`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
+    pub per_cycle: Option<crate::analysis::resource::PeriodSignature>,
     /// CR 732.2b/c: the responder whose named place is this proposal's current ending point.
     /// CR 732.2b makes the place they named "the new ending point of the proposed sequence",
     /// and CR 732.2c's third sentence owes the different game choice to the player who then
@@ -232,6 +245,10 @@ pub struct ShortcutProposal {
         skip_serializing_if = "crate::game::period_confirm::ConfirmedPeriod::is_empty"
     )]
     pub period: crate::game::period_confirm::ConfirmedPeriod,
+    /// CR 603.3d + CR 601.2c: the offer's `ShortcutDecisionSchema::leading_aims`, copied at declare
+    /// so a responder's preview splits the declaration by the lead the proposer's preview used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
     /// CR 732.2a: the declaration the offer PUBLISHED — `game::engine::build_bounded_declaration`'s
     /// validated output, copied off the offer at declare — beside `template`, the declaration the
     /// drive replays. The two differ wherever the declarer overrode the published aim, and
@@ -351,10 +368,11 @@ pub fn detect_loop(
         return None;
     }
 
-    let win_kind = classify_win_kind(controller, delta, Some(cycle_end));
+    let win_kind = Some(classify_win_kind(controller, delta, Some(cycle_end)));
     Some(LoopCertificate {
         unbounded,
         win_kind,
+        win_kind_at: None,
         mandatory,
         // Empty by construction of the `:162` equal-board gate
         // (`loop_states_equal_modulo_resources` guarantees `cycle_start`/`cycle_end`
@@ -660,8 +678,8 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
 /// opponent loss condition; the corpus rows are two-player, so any non-controller
 /// player is the opponent.
 ///
-/// `state` supplies the library storage authority (`GameState::zone_storage_seat`);
-/// `None` is the stateless static analysis, whose seats are their own storage.
+/// `state` supplies the library storage authority (`GameState::zone_storage_seat`).
+/// With no state, each seat is its own storage.
 pub(crate) fn classify_win_kind(
     controller: PlayerId,
     delta: &ResourceVector,
@@ -689,17 +707,8 @@ pub(crate) fn classify_win_kind(
     {
         return WinKind::LethalDamage;
     }
-    // CR 704.5c: unbounded poison counters on any player. The live path feeds poison
-    // via `delta.poison`; the static `candidate_cycles_from_nodes` path feeds it via
-    // `delta.counters[(Poison, Player)]` (ability_graph.rs `add_counter`). This is a
-    // shared single-authority classifier, so honor BOTH sources — reading only one
-    // would silently degrade the other path's poison SCC to `Advantage`.
-    if delta.poison.values().any(|&n| n > 0)
-        || delta
-            .counters
-            .get(&(CounterClass::Poison, ObjectClass::Player))
-            .is_some_and(|&n| n > 0)
-    {
+    // CR 704.5c: unbounded poison counters on any player.
+    if delta.poison.values().any(|&n| n > 0) {
         return WinKind::PoisonLoss;
     }
     // CR 104.3c / CR 121.4: an unbounded *downward* library delta on a player
@@ -729,7 +738,7 @@ pub(crate) fn classify_win_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::resource::ResourceVector;
+    use crate::analysis::resource::{CounterClass, ObjectClass, ResourceVector};
     use crate::game::game_object::GameObject;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -780,7 +789,7 @@ mod tests {
 
         let cert =
             detect_loop(&start, &end, &delta, pid(0), true).expect("net-progress loop confirmed");
-        assert_eq!(cert.win_kind, WinKind::LethalDamage);
+        assert_eq!(cert.win_kind, Some(WinKind::LethalDamage));
         assert!(
             cert.covers(&[ResourceAxis::DamageDealt(pid(1))]),
             "certificate must name unbounded damage to the opponent"
@@ -808,7 +817,7 @@ mod tests {
 
         let cert =
             detect_loop(&start, &end, &delta, pid(0), false).expect("trigger-only loop confirmed");
-        assert_eq!(cert.win_kind, WinKind::Advantage);
+        assert_eq!(cert.win_kind, Some(WinKind::Advantage));
         assert!(
             cert.covers(&[ResourceAxis::Trigger(
                 crate::analysis::resource::TriggerKind::Proliferate
@@ -833,7 +842,7 @@ mod tests {
         delta.library_delta.insert(pid(1), -2); // opponent milled 2 each cycle
 
         let cert = detect_loop(&start, &end, &delta, pid(0), false).expect("mill loop confirmed");
-        assert_eq!(cert.win_kind, WinKind::Decking);
+        assert_eq!(cert.win_kind, Some(WinKind::Decking));
         assert!(cert.covers(&[ResourceAxis::LibraryDelta(pid(1))]));
     }
 
@@ -849,7 +858,7 @@ mod tests {
         delta.mana[5] = 1; // +1 colorless each cycle
 
         let cert = detect_loop(&start, &end, &delta, pid(0), false).expect("mana loop confirmed");
-        assert_eq!(cert.win_kind, WinKind::Advantage);
+        assert_eq!(cert.win_kind, Some(WinKind::Advantage));
         assert!(cert.covers(&[ResourceAxis::Mana(ManaType::Colorless)]));
     }
 
@@ -866,7 +875,7 @@ mod tests {
         };
 
         let cert = detect_loop(&start, &end, &delta, pid(0), false).expect("token loop confirmed");
-        assert_eq!(cert.win_kind, WinKind::Advantage);
+        assert_eq!(cert.win_kind, Some(WinKind::Advantage));
         assert!(cert.covers(&[ResourceAxis::TokensCreated]));
     }
 
@@ -882,7 +891,7 @@ mod tests {
         delta.poison.insert(pid(1), 1);
 
         let cert = detect_loop(&start, &end, &delta, pid(0), false).expect("poison loop confirmed");
-        assert_eq!(cert.win_kind, WinKind::PoisonLoss);
+        assert_eq!(cert.win_kind, Some(WinKind::PoisonLoss));
     }
 
     /// An extra-turns loop classifies `ExtraTurns`.
@@ -899,7 +908,7 @@ mod tests {
 
         let cert =
             detect_loop(&start, &end, &delta, pid(0), false).expect("extra-turns loop confirmed");
-        assert_eq!(cert.win_kind, WinKind::ExtraTurns);
+        assert_eq!(cert.win_kind, Some(WinKind::ExtraTurns));
         assert!(cert.covers(&[ResourceAxis::ExtraTurns]));
     }
 
@@ -1025,7 +1034,7 @@ mod tests {
             detect_loop(&start, &end, &delta, pid(0), false).expect("self-mill is still a loop");
         assert_eq!(
             cert.win_kind,
-            WinKind::Advantage,
+            Some(WinKind::Advantage),
             "milling your own library is advantage, not a deck-out win"
         );
     }
@@ -1065,7 +1074,7 @@ mod tests {
         let end = start.clone();
         let cert = detect_loop(&start, &end, &delta, pid(0), false)
             .expect("a pile-draining cycle is still a loop");
-        assert_eq!(cert.win_kind, WinKind::Advantage);
+        assert_eq!(cert.win_kind, Some(WinKind::Advantage));
     }
 
     /// `covers` is a superset test: a certificate naming more axes than expected
@@ -1077,7 +1086,8 @@ mod tests {
                 ResourceAxis::DamageDealt(pid(1)),
                 ResourceAxis::Life(pid(0)),
             ],
-            win_kind: WinKind::LethalDamage,
+            win_kind: Some(WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: true,
             residual_board_delta: BoardDelta::default(),
             per_cycle: None,
@@ -1142,7 +1152,7 @@ mod tests {
             .expect("opponent drain with controller=P0 is a confirmed lethal loop");
         assert_eq!(
             cert.win_kind,
-            WinKind::LethalDamage,
+            Some(WinKind::LethalDamage),
             "P1 life-loss with controller=P0 is an opponent loss, not self-advantage"
         );
 
@@ -1175,7 +1185,7 @@ mod tests {
 
         let cert = detect_loop(&start, &end, &delta, pid(0), false)
             .expect("opponent mill with controller=P0 is a confirmed decking loop");
-        assert_eq!(cert.win_kind, WinKind::Decking);
+        assert_eq!(cert.win_kind, Some(WinKind::Decking));
         assert!(cert.covers(&[ResourceAxis::LibraryDelta(pid(1))]));
 
         // LOAD-BEARING: same delta, victim-as-controller is self-mill => Advantage.
@@ -1235,7 +1245,7 @@ mod tests {
         let end = start.clone();
         let cert = detect_loop(&start, &end, &self_dmg, pid(0), false)
             .expect("controller-only damage is still a confirmed (advantage) loop");
-        assert_eq!(cert.win_kind, WinKind::Advantage);
+        assert_eq!(cert.win_kind, Some(WinKind::Advantage));
         assert!(
             cert.covers(&[ResourceAxis::DamageDealt(pid(0))]),
             "certificate names the controller's damage axis (the unbounded resource), \

@@ -2,6 +2,8 @@ import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
   AiProposalSubmission,
+  ContestClickInput,
+  ContestDriveResult,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -45,6 +47,7 @@ import {
   type NativeSessionAttachment,
 } from "./ws-adapter";
 import { dialPeer, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
+import { ContestClickBuffer, isContestSequence } from "../network/contestClickBuffer";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
@@ -107,6 +110,7 @@ export type P2PAdapterEvent =
   | { type: "terminalResult"; result: P2PTerminalResult }
   | { type: "terminalUnavailable"; message: string }
   | { type: "error"; message: string }
+  | { type: "operationFailed"; message: string }
   /**
    * Pre-game setup failure on the host side. Distinct from the catch-all
    * `error` event because it carries a typed `reason` for the UI to render
@@ -220,6 +224,21 @@ type NativeViewerUpdate = {
   logEntries?: GameLogEntry[];
 };
 
+/** The view a reattached seat is sent, with the engine revision it belongs to. */
+type NativeResumedView = { revision: number; snapshot: EngineSnapshot };
+
+/** How long a reattached native seat may take to receive its first view. */
+const NATIVE_RESUME_VIEW_TIMEOUT_MS = 10_000;
+
+/** Reject with `onTimeout()` if `promise` has not settled within `ms`. */
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Local-only multiplexor for a native authoritative P2P host. There is one
  * loopback socket for every human P2P seat; the server authenticates each
@@ -231,6 +250,11 @@ class NativeP2PBridge {
   private readonly latestViews = new Map<PlayerId, NativeViewerUpdate>();
   private readonly pendingViews = new Map<number, Map<PlayerId, NativeViewerUpdate>>();
   private readonly startWaiters: Array<(update: NativeViewerUpdate) => void> = [];
+  /** Suspended seats being reattached, each waiting for its first view of the game. */
+  private readonly resumeWaiters = new Map<
+    PlayerId,
+    { promise: Promise<NativeResumedView>; resolve: (view: NativeResumedView) => void }
+  >();
   /** Preserve the server's revision order while asynchronous PeerJS frame
    * encoding runs; a terminal commitment must follow its final state frame. */
   private revisionQueue: Promise<void> = Promise.resolve();
@@ -364,6 +388,7 @@ class NativeP2PBridge {
   }
 
   async submitAction(action: GameAction, playerId: PlayerId): Promise<SubmitResult> {
+    await this.ensureAttached(playerId);
     return this.clientFor(playerId).submitAction(action, playerId);
   }
 
@@ -371,7 +396,24 @@ class NativeP2PBridge {
     submission: InteractionSubmission,
     playerId: PlayerId,
   ): Promise<SubmitResult> {
+    await this.ensureAttached(playerId);
     return this.clientFor(playerId).submitInteraction(submission, playerId);
+  }
+
+  /** A suspended seat that must act (the host conceding for it, say) reattaches first:
+   *  the engine accepts an action only on the seat's own authenticated socket. */
+  private async ensureAttached(playerId: PlayerId): Promise<void> {
+    if (this.clients.has(playerId) || !this.playerTokens.has(playerId)) return;
+    try {
+      await this.reattachGuest(playerId);
+    } catch (cause) {
+      // Nothing was sent: callers treat this as a definite non-commit and may retry.
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        `Native seat ${playerId} could not be reattached: ${cause instanceof Error ? cause.message : String(cause)}`,
+        false,
+      );
+    }
   }
 
   async previewManaPayment(action: GameAction, playerId: PlayerId): Promise<ObjectId[]> {
@@ -414,6 +456,66 @@ class NativeP2PBridge {
     if (host) await host.sendAbandonGame();
   }
 
+  /**
+   * A guest's PeerJS channel dropped, but the seat is still in the game. Close the
+   * seat's loopback socket so the engine authority sees it go away (a contest pauses
+   * its clock and starts that seat's reconnect grace), while keeping the seat's token and
+   * last view so it can return. Unlike `detachGuest`, which removes the seat for good.
+   */
+  suspendGuest(playerId: PlayerId): void {
+    if (playerId === 0) return;
+    const client = this.clients.get(playerId);
+    if (!client) return;
+    this.clients.delete(playerId);
+    client.dispose();
+    // The seat can no longer hold back a revision the rest have all reported.
+    this.flushCompletedRevisions();
+  }
+
+  /** Whether the seat is attached to the engine authority (not suspended or removed). */
+  isGuestAttached(playerId: PlayerId): boolean {
+    return this.clients.has(playerId);
+  }
+
+  /**
+   * Reattach a suspended seat to the engine authority on its own token, without waiting
+   * for the view it is sent. A no-op for a seat that is attached or unknown.
+   */
+  async reattachGuest(playerId: PlayerId): Promise<void> {
+    if (this.clients.has(playerId)) return;
+    const token = this.playerTokens.get(playerId);
+    if (token === undefined) {
+      throw new AdapterError("P2P_ERROR", `No token to resume native seat ${playerId}`, false);
+    }
+    await this.reconnectClient(playerId, token);
+  }
+
+  /**
+   * [`reattachGuest`], then the current view the engine sent the seat on its return,
+   * with the revision it belongs to. A failed return leaves the seat suspended.
+   */
+  async resumeGuest(playerId: PlayerId): Promise<NativeResumedView> {
+    const existing = this.resumeWaiters.get(playerId);
+    if (existing) return existing.promise;
+    let resolve!: (view: NativeResumedView) => void;
+    const promise = new Promise<NativeResumedView>((settle) => {
+      resolve = settle;
+    });
+    this.resumeWaiters.set(playerId, { promise, resolve });
+    try {
+      await this.reattachGuest(playerId);
+      return await withTimeout(promise, NATIVE_RESUME_VIEW_TIMEOUT_MS, () =>
+        new AdapterError("P2P_ERROR", `Native seat ${playerId} sent no view on resume`, true),
+      );
+    } catch (error) {
+      // A half-attached client must not linger: the seat stays suspended.
+      this.suspendGuest(playerId);
+      throw error;
+    } finally {
+      this.resumeWaiters.delete(playerId);
+    }
+  }
+
   detachGuest(playerId: PlayerId): void {
     if (playerId === 0) return;
     this.clients.get(playerId)?.dispose();
@@ -430,6 +532,7 @@ class NativeP2PBridge {
     this.playerTokens.clear();
     this.latestViews.clear();
     this.pendingViews.clear();
+    this.resumeWaiters.clear();
   }
 
   private async attachClient(client: WebSocketAdapter): Promise<NativeSessionAttachment> {
@@ -464,10 +567,36 @@ class NativeP2PBridge {
         logEntries: event.logEntries,
       };
       this.latestViews.set(playerId, update);
+      const resume = this.resumeWaiters.get(playerId);
+      if (resume) {
+        this.resumeWaiters.delete(playerId);
+        resume.resolve({ revision, snapshot: event.snapshot });
+        // A returning seat's snapshot is the current state, not a revision the other
+        // seats are about to report: it must not wait for them.
+        if (revision <= this.deliveredRevision) return;
+      }
       const views = this.pendingViews.get(revision) ?? new Map<PlayerId, NativeViewerUpdate>();
       views.set(playerId, update);
       this.pendingViews.set(revision, views);
-      if (views.size !== this.clients.size) return;
+      this.flushCompletedRevisions();
+    });
+    this.pending.add(client);
+    const attachment = await client.initializePregame().finally(() => this.pending.delete(client));
+    if (this.disposed) {
+      throw new AdapterError("P2P_ERROR", "Native bridge disposed during attachment", true);
+    }
+    this.clients.set(attachment.playerId, client);
+    this.playerTokens.set(attachment.playerId, attachment.playerToken);
+    return attachment;
+  }
+
+  /** Hand every revision that each currently attached seat has now reported to the
+   * fan-out, oldest first. A seat that detached no longer holds a revision back. */
+  private flushCompletedRevisions(): void {
+    const complete = [...this.pendingViews.entries()]
+      .filter(([, views]) => [...this.clients.keys()].every((seat) => views.has(seat)))
+      .sort(([a], [b]) => a - b);
+    for (const [revision, views] of complete) {
       this.pendingViews.delete(revision);
       this.revisionQueue = this.revisionQueue
         .then(async () => {
@@ -482,15 +611,7 @@ class NativeP2PBridge {
       if (hostUpdate) {
         for (const resolve of this.startWaiters.splice(0)) resolve(hostUpdate);
       }
-    });
-    this.pending.add(client);
-    const attachment = await client.initializePregame().finally(() => this.pending.delete(client));
-    if (this.disposed) {
-      throw new AdapterError("P2P_ERROR", "Native bridge disposed during attachment", true);
     }
-    this.clients.set(attachment.playerId, client);
-    this.playerTokens.set(attachment.playerId, attachment.playerToken);
-    return attachment;
   }
 
   private enqueueFaultBarrier(): void {
@@ -550,6 +671,11 @@ class NativeP2PBridge {
       throw new AdapterError("P2P_ERROR", "Native reconnect returned the wrong player seat", false);
     }
     return attachment;
+  }
+
+  /** One contest click for `playerId`, sent on that seat's own authenticated socket. */
+  submitContestClick(playerId: PlayerId, contest: number, seq: number): void {
+    this.clients.get(playerId)?.submitContestClick(contest, seq);
   }
 
   private clientFor(playerId: PlayerId): WebSocketAdapter {
@@ -860,12 +986,20 @@ let sharedEngineHost: symbol | null = null;
 
 /**
  * Cadence of the host's per-guest state redelivery sweep — deliberately the
- * same 5s as the transport keepalive (`network/peer.ts`). The keepalive bounds
- * detection of a DEAD channel (pong timeout, disconnect, `reconnect_ack`
- * resync on rejoin); this sweep bounds recovery from failures the host can
- * SEE on a live channel: a rejected viewer snapshot or a refused send.
+ * same 5s as transport latency sampling (`network/peer.ts`). WebRTC close/error
+ * detects channel loss; stale pongs only clear the latency display. This sweep
+ * heals unacknowledged state on a live channel, one queued/in-flight resend
+ * per seat, without replaying the missed frame's events or logs.
  */
 const STATE_REDELIVERY_TICK_MS = 5_000;
+
+/**
+ * Cadence of the host's own publication retry. A host snapshot read that failed after
+ * the engine accepted a transition leaves that transition owed to the host's store;
+ * this bounds how long the host screen can stay behind its engine with nobody else to
+ * deliver it. Short, because the host screen is the one a player is staring at.
+ */
+const HOST_PUBLICATION_RETRY_TICK_MS = 1_000;
 
 /**
  * Fail-loud contract for a disposed host. With a private worker, `dispose()`
@@ -922,6 +1056,30 @@ export class P2PHostAdapter implements EngineAdapter {
   private readonly engineClaim = Symbol("p2p-host-engine-claim");
 
   private guestSessions = new Map<PlayerId, PeerSession>();
+  /** Guests' contest clicks awaiting the next `driveContest` tick, gated to the
+   *  running contest's seats and bounded per seat. */
+  private readonly guestContestClicks = new ContestClickBuffer();
+  /**
+   * Accepted transitions whose state/events never reached the host's own store
+   * because the snapshot read failed. The engine has already moved on, so nothing
+   * can recreate them: they are held here and delivered, in order and exactly once,
+   * with the next successful host publication.
+   */
+  private unpublishedHostTransitions: SubmitResult[] = [];
+  /** A settled contest's AI follow-up is owed once its resolution has been published. */
+  private aiFollowUpOwedAfterPublication = false;
+  /**
+   * The terminal statement of a game whose retained transitions could not be published
+   * when it closed. The host's `terminalResult` emit unmounts the board, so it waits
+   * until the host's store has seen every accepted transition.
+   */
+  private pendingHostTerminalEmit: P2PTerminalResult | null = null;
+  /** Serializes host publications, so a retry never interleaves with another publisher. */
+  private hostPublicationQueue: Promise<void> = Promise.resolve();
+  /** The in-flight settlement of owed host publications; concurrent callers share it. */
+  private hostSettlement: Promise<boolean> | null = null;
+  /** Owned by the adapter, not by any overlay: armed whenever a publication fails. */
+  private hostPublicationTimer: ReturnType<typeof setInterval> | null = null;
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
@@ -1003,6 +1161,7 @@ export class P2PHostAdapter implements EngineAdapter {
    */
   private terminalDelivered = new Set<PlayerId>();
   private redeliveryTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingRedeliveries = new Set<PlayerId>();
   /** First committed terminal statement fences every subsequent action and
    * reconnect. Its id is immutable for this adapter incarnation. */
   private terminalResult: P2PTerminalResult | null = null;
@@ -1956,6 +2115,11 @@ export class P2PHostAdapter implements EngineAdapter {
     // first message before wrapping in a PeerSession with full handlers.
     let identified = false;
     const session = createPeerSession(conn, {
+      onStateAck: (msg) => {
+        if (!identified) return false;
+        this.handleGuestStateAck(session, msg);
+        return true;
+      },
       onLatency: (latencyMs) => {
         if (![...this.guestSessions.values()].includes(session)) return;
         this.sessionLatencies.set(session, latencyMs);
@@ -2445,6 +2609,97 @@ export class P2PHostAdapter implements EngineAdapter {
       return transition.result;
   }
 
+  /**
+   * The host seat's own contest click. A native host's contest runs on its server, so
+   * the click goes out the seat's authenticated loopback socket exactly as a server
+   * client's does (and the adapter reports it took the click). Otherwise this engine
+   * hosts the contest itself and the caller stamps the click for `driveContest`.
+   */
+  submitContestClick(contest: number, seq: number): boolean {
+    if (!this.nativeBridge) return false;
+    if (isContestSequence(seq) && Number.isSafeInteger(contest)) {
+      this.nativeBridge.submitContestClick(0, contest, seq);
+    }
+    return true;
+  }
+
+  /**
+   * Host a running Eye to Eye / Mouth to Mouth contest. Guests' clicks arrive as
+   * `contest_click` frames and wait here until the next tick; the AI seats are the
+   * engine's own `Ai` seats (the caller's `aiPlayers` guess cannot know which
+   * non-host seats are human guests). A step that changes the contest is broadcast to
+   * the guests like any other transition, and a settle hands the AI its turn back.
+   */
+  async driveContest(
+    nowMs: number,
+    _aiPlayers: PlayerId[],
+    clicks: ContestClickInput[],
+  ): Promise<ContestDriveResult> {
+    this.assertNotDisposed();
+    const idle: ContestDriveResult = {
+      step: "NotInContest",
+      events: [],
+      log_entries: [],
+      contest: null,
+    };
+    // A native host's contest is driven by its server; its clicks travel through
+    // `submitContestClick`. A seat dropping pauses the game, NOT the contest: the
+    // engine owns that clock and must keep ticking so it can pause for the absentee
+    // and forfeit them once the reconnect grace lapses.
+    const contestRunnable =
+      this.gameRunState === "running" || this.gameRunState === "paused-disconnect";
+    if (!this.ownsAuthority() || this.nativeBridge || !contestRunnable) {
+      return idle;
+    }
+    const aiPlayers = this.pregameSeatState.seats.flatMap((seat, index) =>
+      seat.type === "Ai" ? [index] : [],
+    );
+    // A settled contest whose resolution never reached the host screen is delivered
+    // (and its AI follow-up run) before the engine is driven any further: the
+    // engine reports NotInContest from here on and cannot recreate its events.
+    if (!(await this.settleOwedHostPublication())) {
+      throw new Error("Contest drive paused: owed host publication could not settle");
+    }
+    const awayPlayers = [...this.disconnectedSeats.keys()];
+    const guestClicks = this.guestContestClicks.drain();
+    const ordered = [...clicks, ...guestClicks].sort((a, b) => a.at_ms - b.at_ms);
+    let result: ContestDriveResult;
+    try {
+      result = await this.wasm.driveContest(nowMs, aiPlayers, ordered, awayPlayers);
+    } catch (error) {
+      // The engine may never have seen the guests' clicks; keep them for the next
+      // tick (the host seat's own clicks are the caller's to keep). One the engine did
+      // accept is rejected there as a stale sequence, so a retry never counts it twice.
+      this.guestContestClicks.restore(guestClicks);
+      throw error;
+    }
+    this.guestContestClicks.setContest(result.contest);
+    if (result.step !== "Updated" && result.step !== "Settled") return result;
+    const transition = this.stampBrowserMutation({
+      events: result.events,
+      log_entries: result.log_entries,
+    });
+    // The host screen first, then the guests (see `publishHostSnapshot`), and before any
+    // follow-up AI play: the AI's own snapshots unmount the contest, and a transition
+    // published after them would never reach the host's store, resolution events included.
+    // The adapter owns this commit, so the caller must not repeat it.
+    const hostPublished = await this.publishHostSnapshot(transition.result);
+    // The AI's own snapshots would unmount the contest before its resolution was
+    // shown: when the host's store is still behind, hold the follow-up for the
+    // adapter's retry. Recorded in the same turn as the failure, so that retry cannot
+    // see the transition delivered without also seeing the follow-up it owes.
+    if (result.step === "Settled" && !hostPublished) this.aiFollowUpOwedAfterPublication = true;
+    await this.broadcastStateUpdate(transition);
+    if (result.step === "Settled" && hostPublished) {
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
+    }
+    // The adapter owns this commit either way: when the host's snapshot read failed,
+    // the transition is retained and delivered by the adapter's own retry, so the
+    // caller must not commit (and so double-deliver) it.
+    return { ...result, published: true };
+  }
+
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     // Host's own UI submissions: `actor` is the host's local PlayerId (the
     // caller — gameStore — derived it from `getPlayerId()`). The host is
@@ -2697,6 +2952,15 @@ export class P2PHostAdapter implements EngineAdapter {
       // nominates it, and `redeliverGuestState` re-sends the final state plus a
       // freshly committed, recipient-bound statement on the next sweep.
     }));
+    // The host's `terminalResult` emit unmounts the board, and with it anything that
+    // could still deliver an accepted transition's events and log entries — so they go
+    // out first. While the host's store is still behind, the statement waits for the
+    // adapter's own retry rather than overtaking them.
+    if (!(await this.publishRetainedHostTransitions())) {
+      this.pendingHostTerminalEmit = result;
+      return true;
+    }
+    if (!this.hostPublicationOwed()) this.disarmHostPublicationRetry();
     this.emit({ type: "terminalResult", result });
     return true;
   }
@@ -2896,13 +3160,20 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Sweep entry — runs outside the delivery queue, so it only nominates
    * seats; the actual send happens inside `enqueueDelivery`, which re-checks
    * the lag (a broadcast queued ahead may already have healed the seat, and
-   * a second nomination then settles as a no-op). */
+   * a nominated seat stays single-flight through queueing and transmission). */
   private queueLaggingRedeliveries(): void {
     if (this.disposed || !this.ownsAuthority()) return;
     for (const pid of this.guestSessions.keys()) {
       if (this.disconnectedSeats.has(pid)) continue;
-      if (!this.shouldRedeliver(pid)) continue;
-      void this.enqueueDelivery(() => this.redeliverGuestState(pid));
+      if (!this.shouldRedeliver(pid) || this.pendingRedeliveries.has(pid)) continue;
+      this.pendingRedeliveries.add(pid);
+      void this.enqueueDelivery(async () => {
+        try {
+          await this.redeliverGuestState(pid);
+        } finally {
+          this.pendingRedeliveries.delete(pid);
+        }
+      });
     }
   }
 
@@ -2988,20 +3259,124 @@ export class P2PHostAdapter implements EngineAdapter {
    * missed its frame belongs to the ledger and sweep. Naming it rather than
    * changing a public adapter contract in this PR.
    *
+   * A failed publication is not a dropped one: the engine has already accepted
+   * the transition, so nothing could recreate its events. It is retained and goes
+   * out, in order and exactly once, with the next successful publication — which the
+   * adapter's own retry (`armHostPublicationRetry`) guarantees even when nothing else
+   * happens, and which a terminal close waits for before the host's board unmounts.
+   * Resolves `true` once the host's store has been told, `false` while it is still
+   * behind.
+   *
    * No-op under `nativeBridge`, which publishes its own revisions.
    */
-  private async publishHostSnapshot(result: SubmitResult): Promise<void> {
-    if (this.nativeBridge) return;
+  private publishHostSnapshot(result: SubmitResult): Promise<boolean> {
+    if (this.nativeBridge) return Promise.resolve(true);
+    const published = this.hostPublicationQueue.then(() => this.publishHostSnapshotInner(result));
+    this.hostPublicationQueue = published.then(() => undefined);
+    return published;
+  }
+
+  private async publishHostSnapshotInner(result: SubmitResult): Promise<boolean> {
+    // Anything an earlier failed publication left behind goes out first and in the
+    // same frame, so the host's store sees every accepted transition's events once.
+    const transitions = [...this.unpublishedHostTransitions, result];
     try {
       this.emit({
         type: "stateChanged",
         snapshot: await this.wasm.getSnapshot(),
-        events: result.events,
-        logEntries: result.log_entries,
+        events: transitions.flatMap((t) => t.events),
+        logEntries: transitions.some((t) => t.log_entries)
+          ? transitions.flatMap((t) => t.log_entries ?? [])
+          : undefined,
       });
+      this.unpublishedHostTransitions = [];
+      return true;
     } catch (err) {
       console.error("[P2PHost] host snapshot publication failed:", err);
+      this.unpublishedHostTransitions = transitions;
+      // Whoever published may be the last thing to touch the host this session (an
+      // AI or guest action that enters a contest, or the action that ends the game),
+      // so the retry cannot be left to a later tick of some mounted component.
+      this.armHostPublicationRetry();
+      return false;
     }
+  }
+
+  /** Whether the host's store or the AI is still owed something from a failed publication. */
+  private hostPublicationOwed(): boolean {
+    return this.unpublishedHostTransitions.length > 0
+      || this.aiFollowUpOwedAfterPublication
+      || this.pendingHostTerminalEmit !== null;
+  }
+
+  private armHostPublicationRetry(): void {
+    if (this.hostPublicationTimer !== null || this.disposed) return;
+    this.hostPublicationTimer = setInterval(
+      () => void this.retryOwedHostPublication(),
+      HOST_PUBLICATION_RETRY_TICK_MS,
+    );
+  }
+
+  private disarmHostPublicationRetry(): void {
+    if (this.hostPublicationTimer === null) return;
+    clearInterval(this.hostPublicationTimer);
+    this.hostPublicationTimer = null;
+  }
+
+  private async retryOwedHostPublication(): Promise<void> {
+    if (this.disposed || !this.ownsAuthority()) {
+      // A superseded or torn-down host has no screen left to catch up.
+      this.unpublishedHostTransitions = [];
+      this.aiFollowUpOwedAfterPublication = false;
+      this.pendingHostTerminalEmit = null;
+      this.disarmHostPublicationRetry();
+      return;
+    }
+    try {
+      await this.settleOwedHostPublication();
+    } catch (err) {
+      console.error("[P2PHost] retrying an owed host publication failed:", err);
+    }
+    if (!this.hostPublicationOwed()) this.disarmHostPublicationRetry();
+  }
+
+  /**
+   * Settle what a failed host publication left owed, in the order it was owed: the
+   * retained transitions, then the terminal statement or the AI follow-up they were
+   * holding back. `false` while the host screen is still behind the engine. Safe to
+   * call from anywhere — concurrent callers share one settlement.
+   */
+  private settleOwedHostPublication(): Promise<boolean> {
+    this.hostSettlement ??= this.settleOwedHostPublicationInner().finally(() => {
+      this.hostSettlement = null;
+    });
+    return this.hostSettlement;
+  }
+
+  private async settleOwedHostPublicationInner(): Promise<boolean> {
+    if (!(await this.publishRetainedHostTransitions())) return false;
+    const terminal = this.pendingHostTerminalEmit;
+    if (terminal !== null) {
+      this.pendingHostTerminalEmit = null;
+      this.emit({ type: "terminalResult", result: terminal });
+    }
+    // A finished game has no AI turn left to give.
+    if (this.terminalResult !== null) this.aiFollowUpOwedAfterPublication = false;
+    // A paused game keeps its follow-up: the engine must not be driven from here, and
+    // nothing else knows the AI is owed a turn.
+    if (this.aiFollowUpOwedAfterPublication && this.gameRunState === "running") {
+      this.aiFollowUpOwedAfterPublication = false;
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
+    }
+    if (!this.hostPublicationOwed()) this.disarmHostPublicationRetry();
+    return true;
+  }
+
+  /** Deliver the retained transitions, if any, on their own. */
+  private async publishRetainedHostTransitions(): Promise<boolean> {
+    if (this.unpublishedHostTransitions.length === 0) return true;
+    return this.publishHostSnapshot({ events: [] });
   }
 
   async getState(): Promise<GameState> {
@@ -3153,11 +3528,16 @@ export class P2PHostAdapter implements EngineAdapter {
     this.aiDecks.clear();
     this.nativeDeliveredViews.clear();
     this.guestAckedRevisions.clear();
+    this.pendingRedeliveries.clear();
     this.terminalDelivered.clear();
     if (this.redeliveryTimer !== null) {
       clearInterval(this.redeliveryTimer);
       this.redeliveryTimer = null;
     }
+    this.disarmHostPublicationRetry();
+    this.unpublishedHostTransitions = [];
+    this.aiFollowUpOwedAfterPublication = false;
+    this.pendingHostTerminalEmit = null;
     try {
       this.hostPeer.destroy();
     } catch {
@@ -3244,28 +3624,36 @@ export class P2PHostAdapter implements EngineAdapter {
     return null;
   }
 
+  private authenticatedGuestPlayerId(sourceSession: PeerSession, msg: P2PMessage): PlayerId | null {
+    // Resolve the current seat: mutations can compact the map while a channel stays open.
+    const pid = this.guestPlayerIdForSession(sourceSession);
+    if (pid === null) return null;
+    const session = this.guestSessions.get(pid);
+    // Pre-ACK reconnect channels are not installed and cannot advance a seat.
+    if (session !== sourceSession) return null;
+    if (!this.ownsAuthority()) {
+      this.rejectSuperseded(session);
+      return null;
+    }
+    if (msg.authority && !hasExactP2PAuthority(msg.authority, this.authority)) {
+      this.rejectSuperseded(session);
+      return null;
+    }
+    return pid;
+  }
+
+  private handleGuestStateAck(sourceSession: PeerSession, msg: Extract<P2PMessage, { type: "state_ack" }>): void {
+    const pid = this.authenticatedGuestPlayerId(sourceSession, msg);
+    if (pid !== null) this.recordGuestAck(pid, msg.revision);
+  }
+
   private async handleGuestMessage(
     sourceSession: PeerSession,
     msg: P2PMessage,
   ): Promise<void> {
-    // Seat mutations can compact the guest map while the PeerJS channel stays
-    // open. Resolve the actor from the current session map at receive time;
-    // the seat captured when the callback was installed may now be stale.
-    const pid = this.guestPlayerIdForSession(sourceSession);
+    const pid = this.authenticatedGuestPlayerId(sourceSession, msg);
     if (pid === null) return;
-    const session = this.guestSessions.get(pid);
-    // A reconnecting channel is intentionally not installed in
-    // `guestSessions` until its ACK has been delivered. Keep every control
-    // frame bound to the exact installed channel, not merely its player id.
-    if (session !== sourceSession) return;
-    if (!this.ownsAuthority()) {
-      if (session) this.rejectSuperseded(session);
-      return;
-    }
-    if (msg.authority && !hasExactP2PAuthority(msg.authority, this.authority)) {
-      if (session) this.rejectSuperseded(session);
-      return;
-    }
+    const session = sourceSession;
     if (this.concedingSeats.has(pid) && (msg.type === "action" || msg.type === "interaction")) {
       void this.send(sourceSession, { type: "action_failed", message: "Player departure is in progress" });
       return;
@@ -3385,6 +3773,24 @@ export class P2PHostAdapter implements EngineAdapter {
         }
         break;
       }
+      case "contest_click": {
+        // Fire-and-forget, never answered. The seat is the authenticated session's
+        // (`pid`), the instant is this host's own clock, and the engine's state
+        // machine rejects anything stale, duplicate, early or late — so a guest can
+        // claim neither a win nor a timestamp. An eliminated or paused seat's click
+        // is simply dropped.
+        if (this.eliminatedSeats.has(pid)) return;
+        if (this.nativeBridge) {
+          // The native server owns the contest: relay on the seat's own authenticated
+          // loopback socket, after the same well-formedness gate the engine relies on.
+          if (isContestSequence(msg.seq) && Number.isSafeInteger(msg.contest)) {
+            this.nativeBridge.submitContestClick(pid, msg.contest, msg.seq);
+          }
+          return;
+        }
+        this.guestContestClicks.offer(pid, msg, performance.now());
+        break;
+      }
       case "preview_mana_payment": {
         const session = this.guestSessions.get(pid);
         if (!session) return;
@@ -3489,9 +3895,6 @@ export class P2PHostAdapter implements EngineAdapter {
         this.requestBoundMatchConcede(pid);
         break;
       }
-      case "state_ack":
-        this.recordGuestAck(pid, msg.revision);
-        break;
       default:
         break;
     }
@@ -3551,6 +3954,11 @@ export class P2PHostAdapter implements EngineAdapter {
       timer: null,
     });
     this.gameRunState = "paused-disconnect";
+    // A native host's engine authority is the server: it must see this seat go away too,
+    // or a running contest would treat the absentee as present and decide it on the
+    // ordinary inactivity timeout instead of pausing for the reconnect grace.
+    // A concession already in flight owns the seat's socket until it settles.
+    if (!this.concedingSeats.has(pid)) this.nativeBridge?.suspendGuest(pid);
 
     // Notify remaining guests.
     for (const [otherPid, session] of this.guestSessions) {
@@ -3725,6 +4133,11 @@ export class P2PHostAdapter implements EngineAdapter {
    * local revision while its viewer snapshot is resolving. */
   private async reconnectHandoff(pid: PlayerId): Promise<{ revision: number; snapshot: EngineSnapshot }> {
     if (this.nativeBridge) {
+      // A returning seat reattaches to the engine authority first (it was suspended when
+      // its channel dropped), and its handoff is the view that reattachment returned.
+      if (!this.nativeBridge.isGuestAttached(pid)) {
+        this.nativeDeliveredViews.set(pid, await this.nativeBridge.resumeGuest(pid));
+      }
       const delivered = this.nativeDeliveredViews.get(pid);
       if (!delivered) throw new AdapterError("P2P_ERROR", `No delivered native snapshot for seat ${pid}`, true);
       return delivered;
@@ -3751,6 +4164,9 @@ export class P2PHostAdapter implements EngineAdapter {
   private failPendingReconnect(pid: PlayerId, session: PeerSession, reason: string): void {
     if (this.pendingReconnectSessions.get(pid) !== session) return;
     this.pendingReconnectSessions.delete(pid);
+    // The seat is still away: if its reattachment to a native engine authority had
+    // begun, undo it, so that authority keeps seeing the seat as gone.
+    this.nativeBridge?.suspendGuest(pid);
     // An otherwise open guest needs an explicit terminal response; a bare
     // close is treated as a transient transport loss and starts its retry loop.
     // `PeerSession.close` preserves already-queued sends, so this rejection is
@@ -3853,6 +4269,8 @@ export class P2PHostAdapter implements EngineAdapter {
             || isActionRejection(err.rejection)
           )
         ) {
+          // A dropped seat that was reattached only to send this Concede is still away.
+          if (this.disconnectedSeats.has(pid)) this.nativeBridge?.suspendGuest(pid);
           this.resumeIfUnblocked();
           return "definite_non_commit";
         }
@@ -4169,6 +4587,14 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   async initializeGame(): Promise<SubmitResult> {
     return this.gameSetupPromise;
+  }
+
+  /** One click in the running contest; the host stamps it on arrival. Never queued. */
+  submitContestClick(contest: number, seq: number): boolean {
+    if (this.session && this.assignedPlayerId !== null) {
+      this.send({ type: "contest_click", contest, seq });
+    }
+    return true;
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
@@ -4614,14 +5040,14 @@ export class P2PGuestAdapter implements EngineAdapter {
             true,
           );
         if (!this.settlePendingSubmission({ kind: "reject", error })) {
-          this.emit({ type: "error", message: error.message });
+          this.emit({ type: "operationFailed", message: error.message });
         }
         break;
       }
       case "action_failed": {
         const failure = new AdapterError("P2P_ERROR", msg.message, true);
         if (!this.settlePendingSubmission({ kind: "reject", error: failure })) {
-          this.emit({ type: "error", message: msg.message });
+          this.emit({ type: "operationFailed", message: msg.message });
         }
         break;
       }

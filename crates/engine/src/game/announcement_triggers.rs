@@ -36,9 +36,41 @@ fn live_spell_announcement(state: &GameState) -> Option<ObjectId> {
         .then_some(pending.object_id)
 }
 
+/// Whether an ACTIVATION is announced right now, so its cost events have one
+/// custodian: [`end_action`], which stages them into the carrier of the
+/// action's resulting prompt.
+///
+/// CR 602.2a + CR 602.2b: an activated ability is announced like a spell and
+/// its costs are paid in the announcement. CR 603.3b: every ability that
+/// triggered since a player last received priority goes on the stack in one
+/// APNAP batch, so an activation's cost triggers wait for the activation's own
+/// and are put on the stack with them. A cost-payment step that parks those
+/// events itself (publicly, or in a carrier the action boundary then
+/// overwrites) splits that batch or loses them. A spell is deliberately not
+/// covered: its paid-cost events stay parked publicly and survive a cancel;
+/// routing them into a spell carrier would drop them on cancel, which needs the
+/// announcement-reversal machinery and is out of scope here. (Engine policy,
+/// compare CR 733.1: an activation is not offered a cancel once a cost is paid,
+/// so its carrier is not dropped with paid-cost events in it.)
+///
+/// `next_wait` is the prompt the paying step is about to return; the live
+/// announcement is read from the state and from that prompt, since a step that
+/// pauses on the activation's first action has not stored it yet.
+pub(crate) fn activation_announcement_is_live(state: &GameState, next_wait: &WaitingFor) -> bool {
+    state
+        .pending_trigger_carrier_owner()
+        .and_then(|owner| state.pending_cast_at(owner))
+        .or_else(|| next_wait.pending_cast_ref())
+        .is_some_and(|pending| pending.activation_ability_index.is_some())
+}
+
 /// The unscanned events in `events[start..]`, after occurrence claims and the
 /// queued zone-change witness (CR 603.2c: one trigger per occurrence).
-fn unclaimed_events(state: &GameState, events: &[GameEvent], start: usize) -> Vec<GameEvent> {
+pub(crate) fn unclaimed_events(
+    state: &GameState,
+    events: &[GameEvent],
+    start: usize,
+) -> Vec<GameEvent> {
     triggers::filter_already_collected_trigger_events_from(
         state,
         events,
@@ -101,16 +133,21 @@ pub(crate) fn claim_ordinary_collected_span(
 fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
     let mut retained = super::engine_priority::retained_logical_zone_events(state);
     match state.pending_cost_move_resume.as_ref() {
-        Some(PendingCostMoveResume::SacrificeForCost {
-            deferred_cost_events,
-            ..
-        }) => retained.extend(deferred_cost_events.iter().cloned()),
+        Some(
+            PendingCostMoveResume::Cast {
+                deferred_cost_events,
+                ..
+            }
+            | PendingCostMoveResume::SacrificeForCost {
+                deferred_cost_events,
+                ..
+            },
+        ) => retained.extend(deferred_cost_events.iter().cloned()),
         Some(PendingCostMoveResume::ManaAbilityPayment { cursor, .. }) => {
             retained.extend(cursor.deferred_cost_events.iter().cloned());
         }
         Some(
-            PendingCostMoveResume::Cast { .. }
-            | PendingCostMoveResume::WardSacrificePayment { .. }
+            PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::CollectEvidencePayment { .. }
@@ -359,21 +396,74 @@ pub(crate) fn end_activation_announcement(state: &mut GameState) {
 /// dropped; contexts controlled by a departed player are retired by
 /// `commit_into` (CR 800.4d).
 pub(crate) fn publish_abandoned_announcement(state: &mut GameState, owner: PendingCastOwner) {
+    // CR 603.2 + CR 800.4a: the departures a replacement-paused cost already
+    // completed still occurred. The Cast root withholds them from announcement
+    // staging (they wait for the group to finish), and abandoning the unpaid
+    // current move retires that root, so they are drained and collected here,
+    // once, before it goes.
+    let raw_completed_prefix = take_completed_cast_prefix(state, owner);
+    let completed_prefix = triggers::filter_already_collected_trigger_events_from(
+        state,
+        &raw_completed_prefix,
+        0,
+        &[],
+    );
     let Some(pending) = state.pending_cast_at_mut(owner) else {
         return;
     };
     let object_id = pending.object_id;
     let is_spell = pending.activation_ability_index.is_none();
+    if !completed_prefix.is_empty() && !is_spell {
+        pending.begin_activation_trigger_collection();
+    }
     let mut collection = pending.activation_trigger_collection.take();
     if is_spell {
         if let Some(carried) = take_announcing(state, object_id) {
             collection = Some(carried);
         }
+        if collection.is_none() && !completed_prefix.is_empty() {
+            collection = Some(Box::new(PendingActivationTriggerCollection::for_spell()));
+        }
     }
-    let Some(collection) = collection else {
+    // CR 603.2 + CR 603.7 + CR 800.4d: completed events also belong to
+    // surviving delayed observers, independently of the ordinary projection
+    // or carrier. The old prefix has no occurrence ordinal in this action.
+    triggers::collect_delayed_trigger_contexts_into_deferred(state, &raw_completed_prefix);
+    let Some(mut collection) = collection else {
         return;
     };
+    if !completed_prefix.is_empty() {
+        collection.collect(state, &completed_prefix);
+    }
     let mut deferred = std::mem::take(&mut state.deferred_triggers);
     collection.commit_into(state, &mut deferred);
     state.deferred_triggers = deferred;
+}
+
+/// Drains the completed-prefix ledger of the typed Cast cost root owned by
+/// `owner`, if that root is the one being abandoned.
+fn take_completed_cast_prefix(state: &mut GameState, owner: PendingCastOwner) -> Vec<GameEvent> {
+    if owner != PendingCastOwner::CostMove {
+        return Vec::new();
+    }
+    match state.pending_cost_move_resume.as_mut() {
+        Some(PendingCostMoveResume::Cast {
+            deferred_cost_events,
+            ..
+        }) => std::mem::take(deferred_cost_events),
+        Some(
+            PendingCostMoveResume::SacrificeForCost { .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::CollectEvidencePayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_),
+        )
+        | None => Vec::new(),
+    }
 }

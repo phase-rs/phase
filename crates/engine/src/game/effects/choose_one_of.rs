@@ -3,11 +3,12 @@ use std::collections::HashSet;
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::players;
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
+    AbilityDefinition, ChooseOneOfKind, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ParentTargetOccurrences, PendingChooseOneOf, WaitingFor,
+    GameState, ParentTargetOccurrences, PendingChooseOneOf, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -22,7 +23,9 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let (chooser, branches) = match &ability.effect {
-        Effect::ChooseOneOf { chooser, branches } => (chooser, branches.clone()),
+        Effect::ChooseOneOf {
+            chooser, branches, ..
+        } => (chooser, branches.clone()),
         _ => return Err(EffectError::MissingParam("ChooseOneOf".to_string())),
     };
 
@@ -44,6 +47,10 @@ pub fn resolve(
             "ChooseOneOf: no eligible player for chooser {chooser:?}"
         )));
     }
+    // CR 608.2 (run boon-blockers-20261010): capture the live trigger-event
+    // context ONCE at prompt time — the pause below destroys
+    // resolution-scoped context, and at branch time the event is already None.
+    let trigger_context = ResolvingTriggerContext::capture(state);
     prompt_next(
         state,
         PromptRequest {
@@ -55,6 +62,7 @@ pub fn resolve(
             continuation: ability.sub_ability.clone(),
             replacement_applied: ability.replacement_applied.clone(),
             players,
+            trigger_context,
         },
     );
 
@@ -75,6 +83,7 @@ pub(crate) struct PromptRequest {
     pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub players: Vec<PlayerId>,
+    pub trigger_context: Option<ResolvingTriggerContext>,
 }
 
 pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
@@ -87,6 +96,7 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         continuation,
         replacement_applied,
         mut players,
+        trigger_context,
     } = request;
     let Some(player) = players.first().copied() else {
         return;
@@ -104,6 +114,11 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         continuation,
         replacement_applied,
         remaining_players: players,
+        // CR 608.2: thread the STORED prompt-time context — never
+        // fresh-capture here (`prompt_next` is also reached from
+        // `resume_pending` at priority time, where a fresh capture returns
+        // None and would discard the carry).
+        trigger_context,
     };
     // `priority_player` routing to the chooser is owned by the centralized
     // post-apply sync (`public_state::sync_priority_player_from_waiting_for`),
@@ -134,6 +149,9 @@ pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>
             continuation: pending.continuation,
             replacement_applied: pending.replacement_applied,
             players: pending.remaining_players,
+            // CR 608.2: thread the frame's STORED context (never recapture —
+            // at priority time a fresh capture returns None).
+            trigger_context: pending.trigger_context,
         },
     );
 }
@@ -148,6 +166,7 @@ pub(crate) struct BranchSelection {
     pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub remaining_players: Vec<PlayerId>,
+    pub trigger_context: Option<ResolvingTriggerContext>,
     pub index: usize,
 }
 
@@ -166,6 +185,7 @@ pub(crate) fn resolve_branch(
         continuation,
         replacement_applied,
         remaining_players,
+        trigger_context,
         index,
     } = selection;
     let Some(branch) = branches.get(index) else {
@@ -185,6 +205,9 @@ pub(crate) fn resolve_branch(
             continuation: continuation.clone(),
             replacement_applied: replacement_applied.clone(),
             remaining_players,
+            // CR 608.2: copy the STORED prompt-time context forward (never
+            // re-capture — the event is already None at branch time).
+            trigger_context: trigger_context.clone(),
         });
     }
 
@@ -194,10 +217,34 @@ pub(crate) fn resolve_branch(
     resolved.replace_target_occurrences(parent_occurrences.occurrences());
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolved.set_scoped_player_recursive(player);
-    if !resolved
-        .targets
-        .iter()
-        .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
+    // CR 603.2 + CR 608.2c (run boon-blockers-20261010): skip the chooser-target
+    // push when the SELECTED branch is event-context-bound (`target: None` with
+    // an `affected: TriggeringSource` carrier — the boon-fired keyword-choice
+    // shape, e.g. Swiftspear's Teachings' "it gains your choice of prowess or
+    // haste"). The unconditional push fills `ability.targets`, which defeats
+    // the `affected: TriggeringSource` early-return in effect.rs (gated on
+    // `ability.targets.is_empty()`) and misbinds the grant to
+    // `SpecificPlayer(chooser)` instead of the triggering object. Every other
+    // branch keeps the push byte-identically — ordinary `target: Some`
+    // branches, `affected: None`/`Controller`/broadcast recipients (the push
+    // is their recipient), and non-context `affected` — including the
+    // villainous-choice branches the push was introduced for (de2e0db063),
+    // which never carry `TriggeringSource`.
+    let branch_is_event_context_bound = matches!(
+        branch.effect.as_ref(),
+        Effect::GenericEffect {
+            target: None,
+            static_abilities,
+            ..
+        } if static_abilities
+            .iter()
+            .any(|s| matches!(s.affected, Some(TargetFilter::TriggeringSource)))
+    );
+    if !branch_is_event_context_bound
+        && !resolved
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
     {
         resolved.push_target(TargetRef::Player(player));
     }
@@ -212,7 +259,19 @@ pub(crate) fn resolve_branch(
         }
     }
 
-    super::resolve_ability_chain(state, &resolved, events, 1)?;
+    // CR 608.2: replay the carried prompt-time context around branch
+    // resolution (the ChooseZoneChoice mirror) so
+    // `resolve_event_context_target(TriggeringSource)` answers exactly what
+    // it would have answered without the pause; `None`-carry is a
+    // byte-identical no-op and the restore bounds the window to this branch.
+    let trigger_snapshot = trigger_context
+        .as_ref()
+        .map(|ctx| super::super::triggers::push_resolving_trigger_context(state, ctx));
+    let result = super::resolve_ability_chain(state, &resolved, events, 1);
+    if let Some(snapshot) = trigger_snapshot {
+        super::super::triggers::restore_trigger_event_context(state, snapshot);
+    }
+    result?;
     resume_pending(state, events);
     // NOTE: the token-choice applied seed is intentionally NOT cleared here.
     // A branch may stash a token-bearing sub-ability into `pending_continuation`
@@ -232,6 +291,26 @@ fn choosing_players(
     chooser: &crate::types::ability::PlayerFilter,
 ) -> Vec<PlayerId> {
     use crate::types::ability::PlayerFilter;
+
+    // CR 701.55c vs CR 608.2d: only the printed villainous-choice instruction
+    // ("… faces a villainous choice — A, or B") is doubled by
+    // `GrantsExtraVillainousChoice`. An ordinary "choice of" / "choose one"
+    // resolves once no matter how many Valeyards are out — the pre-fix
+    // authority doubled every `ChooseOneOf` unconditionally.
+    let villainous = matches!(
+        &ability.effect,
+        Effect::ChooseOneOf {
+            kind: ChooseOneOfKind::Villainous,
+            ..
+        }
+    );
+    let expand = |state: &GameState, players: Vec<PlayerId>| {
+        if villainous {
+            expand_extra_villainous_instances(state, players)
+        } else {
+            players
+        }
+    };
 
     let apnap = players::apnap_order(state);
 
@@ -267,7 +346,7 @@ fn choosing_players(
             .iter()
             .any(|p| p.id == player && !p.is_eliminated);
         let players = if alive { vec![player] } else { Vec::new() };
-        return expand_extra_villainous_instances(state, players);
+        return expand(state, players);
     }
 
     let targeted: Vec<PlayerId> = ability
@@ -293,7 +372,7 @@ fn choosing_players(
             .into_iter()
             .filter(|player| targeted.contains(player))
             .collect();
-        return expand_extra_villainous_instances(state, players);
+        return expand(state, players);
     }
 
     let players = apnap
@@ -308,7 +387,7 @@ fn choosing_players(
             )
         })
         .collect();
-    expand_extra_villainous_instances(state, players)
+    expand(state, players)
 }
 
 /// CR 701.55c: Count the number of ADDITIONAL villainous-choice instances a
@@ -415,6 +494,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -488,6 +568,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Opponent,
                 branches: vec![branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             source,
@@ -587,6 +668,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Opponent,
                 branches: vec![branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -689,6 +771,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![colorless, white],
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -731,6 +814,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ChosenPlayer { index: 0 },
                 branches: vec![branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -783,6 +867,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ParentObjectTargetOwner,
                 branches: vec![branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(1),
@@ -824,6 +909,7 @@ mod tests {
                     value: Box::new(QuantityExpr::Fixed { value: 3 }),
                 },
                 branches: vec![branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
             Vec::new(),
             ObjectId(1),
@@ -872,6 +958,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ParentObjectTargetOwner,
                 branches: vec![branch.clone()],
+                kind: ChooseOneOfKind::Villainous,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(1),
@@ -945,6 +1032,134 @@ mod tests {
         }
     }
 
+    /// CR 701.55c + CR 608.2: the second-instance continuation of a doubled
+    /// villainous choice carries the SAME prompt-time trigger context — the
+    /// `resume_pending` copy-forward, not a re-capture (the live event is
+    /// already None at branch time). Explicitly synthetic continuation
+    /// fixture: no printed card pairs a villainous instruction with a
+    /// trigger-context earner, so the test seeds `current_trigger_event`
+    /// directly, clears it after the first prompt (simulating the real
+    /// pause, which destroys resolution-scoped context), and drives both
+    /// instances through `GameAction::ChooseBranch`.
+    #[test]
+    fn villainous_second_instance_continuation_preserves_trigger_context() {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let obj_id = ObjectId(99);
+        let target_obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            crate::types::identifiers::CardId(0),
+            PlayerId(1),
+            "Faced Creature".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.objects.insert(obj_id, target_obj);
+
+        // A Valeyard-like permanent controlled by player 0 (an opponent of
+        // the facing player 1) carrying GrantsExtraVillainousChoice.
+        let valeyard_id = ObjectId(50);
+        let mut valeyard = crate::game::game_object::GameObject::new(
+            valeyard_id,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "The Valeyard".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        valeyard.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::GrantsExtraVillainousChoice,
+            )
+            .affected(TargetFilter::Player),
+        );
+        state.objects.insert(valeyard_id, valeyard);
+        state.battlefield.push_back(valeyard_id);
+
+        // Seed a live trigger event; the prompt captures it.
+        let event = crate::types::events::GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        };
+        state.current_trigger_event = Some(event.clone());
+        state.current_trigger_events = vec![event.clone()];
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::ParentObjectTargetOwner,
+                branches: vec![branch],
+                kind: ChooseOneOfKind::Villainous,
+            },
+            vec![TargetRef::Object(ObjectId(99))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).expect("villainous choice prompts");
+        let first_context = match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                remaining_players,
+                trigger_context: Some(captured),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(
+                    remaining_players.as_slice(),
+                    &[PlayerId(1)],
+                    "the doubled choice queues its second instance up front"
+                );
+                assert_eq!(
+                    captured.event,
+                    Some(event.clone()),
+                    "the first prompt captures the live trigger event"
+                );
+                captured.clone()
+            }
+            other => panic!("expected first ChooseOneOfBranch, got {other:?}"),
+        };
+
+        // Simulate the real pause: resolution-scoped context is gone by
+        // branch time, so the second prompt's context can only arrive via
+        // the stored copy-forward — never a re-capture.
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("first instance answers");
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                trigger_context: Some(carried),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(
+                    carried.event.is_some(),
+                    "the carried context must still hold the event after the live one cleared"
+                );
+                assert_eq!(
+                    carried.event, first_context.event,
+                    "the second instance must carry the SAME captured event, not a re-capture"
+                );
+            }
+            other => panic!("expected second ChooseOneOfBranch, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("second instance answers");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "both instances answered, back to priority: {:?}",
+            state.waiting_for
+        );
+    }
+
     /// CR 701.55c (cluster 32, Class D): an extra-instance source controlled by
     /// the FACING player themselves (not an opponent) grants no extra instance —
     /// the static reads "if an OPPONENT would face a villainous choice". Guards
@@ -992,6 +1207,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::ParentObjectTargetOwner,
                 branches: vec![branch],
+                kind: ChooseOneOfKind::Villainous,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(1),

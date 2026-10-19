@@ -205,8 +205,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, PlayerFilter, QuantityModification,
-        ReplacementDefinition, StaticDefinition, TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, ControllerRef, Effect, PlayerFilter,
+        QuantityModification, ReplacementDefinition, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
@@ -269,6 +269,7 @@ mod tests {
                         player: TargetFilter::Controller,
                     },
                 )],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         state

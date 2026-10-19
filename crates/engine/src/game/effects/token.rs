@@ -12,10 +12,11 @@ use crate::game::zones;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachCardinality,
     AttachSelection, CastingPermission, Comparator, ContinuousModification, ControllerRef,
-    CopiableValues, DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind, FilterProp,
-    ManaContribution, ManaProduction, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    CopiableValues, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectError,
+    EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee, PlayerFilter,
+    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -474,6 +475,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_with_host_override(state, ability, events, None)
+}
+
+/// `resolve` with a pre-chosen token host. `Some` resumes a "one of them"
+/// host choice the first pass paused for (`WaitingFor::ChooseTokenHost`):
+/// the choice binds the host and the pause branch is skipped, so a resumed
+/// resolution never prompts twice. `None` is the ordinary first pass.
+pub(crate) fn resolve_with_host_override(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    host_override: Option<AttachTarget>,
+) -> Result<(), EffectError> {
     let (
         script_name,
         fallback_power,
@@ -552,10 +566,39 @@ pub fn resolve(
     // and nothing bound it": CR 303.4i denies the entry of an Aura token in the
     // second case and says nothing about the first, and the seam that applies
     // that verdict runs after the CR 614 replacement pipeline, far from here.
-    let host_request = TokenHostRequest::from_binding(
-        attach_to.is_some(),
-        attach_to.and_then(|f| resolve_attach_host(state, ability, f)),
-    );
+    let host_request = if let Some(host) = host_override {
+        // Resumed after a "one of them" host choice: the choice is bound.
+        TokenHostRequest::Bound(host)
+    } else {
+        match boon_batch_host_candidates(state, ability, attach_to) {
+            // A batch-semantics boon ("one of them") with several legal
+            // entrants: pause for the controller's choice. Nothing has been
+            // proposed or mutated yet, so the resume path's re-entry is
+            // side-effect-free up to this point.
+            Some(candidates) if candidates.len() > 1 => {
+                state.waiting_for = WaitingFor::ChooseTokenHost {
+                    player: ability.controller,
+                    source_id: ability.source_id,
+                    legal_targets: candidates,
+                    pending_ability: Box::new(ability.clone()),
+                };
+                return Ok(());
+            }
+            // Zero or one legal entrant: `Unbound` (→ CR 303.4i denial for
+            // Aura tokens) or auto-bound. No prompt either way.
+            Some(candidates) => TokenHostRequest::from_binding(
+                true,
+                candidates
+                    .into_iter()
+                    .next()
+                    .map(target_ref_to_attach_target),
+            ),
+            None => TokenHostRequest::from_binding(
+                attach_to.is_some(),
+                attach_to.and_then(|f| resolve_attach_host(state, ability, f)),
+            ),
+        }
+    };
 
     // CR 111.1 + CR 111.4: Resolve the token's characteristics into a
     // self-describing `TokenSpec`. Script-name parsing takes precedence;
@@ -668,11 +711,13 @@ pub fn resolve(
 /// amount that reads the recipient's characteristics or controller ("its
 /// power", `SharesQuality`) would read an id with no object behind it, while
 /// CR 614.12 asks for the permanent as it would exist on the battlefield; such
-/// amounts (as far as the classifier enumerates them), and amounts that read no
-/// recipient, resolve exactly as before. A recipient read the classifier does
-/// not enumerate (its `_` tail, e.g. `Intensity { scope: Recipient }`) is graded
-/// `Unread` and can ride along inside a composite with an identity read; no
-/// parsed card produces that shape today.
+/// amounts, including composites with both identity and characteristic reads,
+/// stay unbound. The exhaustive classifier grades every quantity and filter
+/// variant, so a characteristic read such as `Intensity { scope: Recipient }`
+/// cannot ride along inside a composite graded only as an identity read.
+/// Filters held in game state (`FilterProp::CanEnchant`,
+/// `TargetFilter::ChosenDamageSource`) are graded `Characteristics`
+/// conservatively, so they stay unbound as well.
 ///
 /// The single authority for both `resolve` and its read-only mirror
 /// `resolve_token_spec`, so the live resolution, the bulk-run gate and the
@@ -1173,6 +1218,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                 controller: spec.controller,
                 source_id: spec.source_id,
                 one_shot: true,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
             };
             crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
@@ -1328,6 +1374,11 @@ pub fn apply_resolved_token_creation(
         .get(&object_id)
         .expect("the token was materialized above")
         .snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+    // CR 400.7: mirror the live birth authority
+    // (`zones::record_and_emit_entry_from_no_zone`), which fills the entered
+    // incarnation from the birth occurrence — replay's reconstructed record
+    // must equal the live one field for field.
+    entry_record.entered_incarnation = state.objects.get(&object_id).map(|obj| obj.incarnation);
     crate::game::restrictions::record_zone_change(state, &mut entry_record);
     // CR 111.1: replay must not hand the same id out again to a later allocation.
     state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);
@@ -2164,6 +2215,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
             controller,
             source_id,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         };
         crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
@@ -3140,6 +3192,137 @@ pub(crate) fn resolve_token_spec(
 /// This does NOT duplicate attach legality: the actual attach is performed by
 /// `attach::attach_to` / `attach::attach_to_player`, the single authority for
 /// CR 701.3a / CR 301.5 / CR 303.4 host validity.
+/// CR 303.4c + CR 608.2d: projected attach legality for one "one of them"
+/// host candidate. The Role token does not exist yet, so the verdict is
+/// judged against a synthetic projection built from the token effect's own
+/// characteristics — script attrs first, typed fallbacks second, the same
+/// precedence the spec build uses — through the COMPLETE shared authority
+/// (`sba::is_valid_attachment_target_for_attacher`: protection/prohibition,
+/// the Enchant filter, and the zone gate), the same verdict the CR 303.4i
+/// entry check will reach on the real token. The projection id peeks
+/// `next_object_id` without consuming it: it cannot collide with a live
+/// object, so the self-attach/cycle arms and id-keyed 702.16n/p exemptions
+/// correctly never fire for it.
+///
+/// Untargeted-choice shroud/hexproof immunity is structural (the authority
+/// has no such arm — targeting only). When the token cannot be projected (a
+/// non-Token ability never carries a batch stamp, so this is
+/// defensive-only), no filter applies and the CR 303.4i final entry check
+/// stays the backstop.
+pub(crate) fn boon_host_passes_projected_legality(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host: &TargetRef,
+) -> bool {
+    let Effect::Token {
+        name,
+        power,
+        toughness,
+        types,
+        colors,
+        keywords,
+        supertypes,
+        owner,
+        ..
+    } = &ability.effect
+    else {
+        return true;
+    };
+    let attrs = parse_token_script(name).or_else(|| {
+        build_token_attrs_from_effect(
+            name, power, toughness, types, colors, keywords, supertypes, state, ability,
+        )
+    });
+    let Some(attrs) = attrs else {
+        return true;
+    };
+    let projection_id = ObjectId(state.next_object_id);
+    let Some(token_owner) = resolve_token_owner(state, ability, owner) else {
+        return true;
+    };
+    let mut projection = GameObject::new(
+        projection_id,
+        CardId(0),
+        token_owner,
+        attrs.display_name,
+        Zone::Battlefield,
+    );
+    projection.controller = token_owner;
+    projection.color = attrs.colors;
+    projection.card_types.core_types = attrs.core_types;
+    projection.card_types.subtypes = attrs.subtypes;
+    projection.card_types.supertypes = attrs.supertypes;
+    projection.keywords = attrs.keywords;
+    projection.power = attrs.power;
+    projection.toughness = attrs.toughness;
+    // CR 111.3 + CR 111.10: the complete authority reads the attacher's
+    // intrinsic payload — the Enchant filter is `Keyword::Enchant` on the
+    // token, and the script/fallback attrs never carry it. Mirror exactly
+    // what the apply path injects on the real token
+    // (`inject_predefined_token_abilities_inner`), from the same source, so
+    // the offer-time verdict and the entry-time verdict cannot drift. Only
+    // keywords and statics matter to attach legality; granted abilities and
+    // triggers ride the real token alone.
+    let materialized =
+        materialize_predefined_token_payload(&projection.name, &projection.card_types.subtypes);
+    projection.keywords.extend(materialized.keywords);
+    for def in materialized.static_definitions {
+        projection.static_definitions.push(def);
+    }
+    match host {
+        TargetRef::Object(host_id) => crate::game::sba::is_valid_attachment_target_for_attacher(
+            state,
+            projection_id,
+            &projection,
+            *host_id,
+        ),
+        TargetRef::Player(host_player) => {
+            super::attach::player_attachment_illegality(state, Some(&projection), *host_player)
+                .is_none()
+        }
+    }
+}
+
+/// Digital-only Alchemy (no CR entry): the live host candidates for a
+/// batch-semantics boon's "one of them" token host. `Some` ⟺ the ability
+/// carries a fire-time stamped entrant set (Dunbarrow Revivalist's "one or
+/// more creatures enter … attached to one of them") AND names a pronoun
+/// host (`ParentTarget` — the "one of them" set reference, 1:1 with the
+/// `Pronoun` authority); `None` ⟺ existing host resolution applies
+/// unchanged. The set is filtered to incarnation-current battlefield
+/// objects (CR 400.7): an entrant that left (or left and returned) before
+/// resolution is not choosable. Candidates must also pass projected attach
+/// legality (CR 303.4c/702.16c — protection-illegal entrants are never
+/// offered, CR 608.2d); the `Bound`-but-illegal CR 303.4i final entry check
+/// remains the backstop.
+fn boon_batch_host_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attach_to: Option<&TargetFilter>,
+) -> Option<Vec<TargetRef>> {
+    if !matches!(attach_to, Some(TargetFilter::ParentTarget)) {
+        return None;
+    }
+    let stamped = &ability.context.boon_trigger_batch_objects;
+    if stamped.is_empty() {
+        return None;
+    }
+    Some(
+        stamped
+            .iter()
+            .filter(|pin| {
+                pin.is_current(state)
+                    && state
+                        .objects
+                        .get(&pin.object_id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            })
+            .map(|pin| TargetRef::Object(pin.object_id))
+            .filter(|host| boon_host_passes_projected_legality(state, ability, host))
+            .collect(),
+    )
+}
+
 fn resolve_attach_host(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -3688,29 +3871,6 @@ fn blood_ability() -> AbilityDefinition {
     })
 }
 
-/// CR 106.1 + CR 701.21a: Eldrazi Spawn — "Sacrifice this token: Add {C}."
-/// Modern Eldrazi Spawn printings (from Rise of the Eldrazi onward) use this
-/// no-tap sacrifice mana ability. Applied by subtype lookup so every token
-/// with subtype "Spawn" gains the ability without per-card registration.
-fn spawn_ability() -> AbilityDefinition {
-    AbilityDefinition::new(
-        AbilityKind::Activated,
-        Effect::Mana {
-            produced: ManaProduction::Colorless {
-                count: QuantityExpr::Fixed { value: 1 },
-            },
-            restrictions: vec![],
-            grants: vec![],
-            expiry: None,
-            target: None,
-        },
-    )
-    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
-        TargetFilter::SelfRef,
-        1,
-    )))
-}
-
 /// CR 111.10h: Powerstone — "{T}: Add {C}. This mana can't be spent to cast a nonartifact spell."
 fn powerstone_ability() -> AbilityDefinition {
     use crate::types::ability::ManaSpendRestriction;
@@ -3881,6 +4041,7 @@ fn junk_ability() -> AbilityDefinition {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             },
             target: TargetFilter::TrackedSet {
@@ -4051,7 +4212,6 @@ pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
         "Blood" => vec![blood_ability()],
         "Powerstone" => vec![powerstone_ability()],
         "Map" => vec![map_ability()],
-        "Spawn" => vec![spawn_ability()],
         "Lander" => vec![lander_ability()],
         "Mutagen" => vec![mutagen_ability()],
         "Junk" => vec![junk_ability()],
@@ -4385,7 +4545,7 @@ fn refresh_token_art_descriptor(
 ///
 /// Two dispatch paths:
 /// - **Subtype** (CR 111.10): Treasure, Food, Clue, Blood, Powerstone,
-///   Map, Spawn — each subtype contributes a single activated ability
+///   Map — each subtype contributes a single activated ability
 ///   (`predefined_token_abilities`).
 /// - **Name** (CR 111.10): Role tokens. All seven Roles share the `Role`
 ///   subtype, so dispatch is by display name via `predefined_role_token_spec`.
@@ -6028,24 +6188,6 @@ mod tests {
     }
 
     #[test]
-    fn predefined_spawn_has_colorless_sacrifice_mana_ability() {
-        // CR 106.1 + CR 701.21a: Eldrazi Spawn tokens produced by Writhing
-        // Chrysalis, Awakening Zone, etc. share a single sacrifice-for-{C}
-        // mana ability, injected by subtype.
-        let abilities = predefined_token_abilities("Spawn");
-        assert_eq!(abilities.len(), 1);
-        assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
-        assert!({
-            if let Some(AbilityCost::Sacrifice(sc)) = &abilities[0].cost {
-                matches!(sc.target, TargetFilter::SelfRef)
-                    && sc.requirement == crate::types::ability::SacrificeRequirement::count(1)
-            } else {
-                false
-            }
-        });
-    }
-
-    #[test]
     fn focused_writhing_chrysalis_spawn_token_sacrifice_adds_mana_and_triggers_counter() {
         let parsed = crate::parser::parse_oracle_text(
             "Devoid (This card has no color.)\n\
@@ -6088,8 +6230,8 @@ mod tests {
         }
 
         // Focused runtime coverage: start from the parsed cast-trigger execute
-        // ability so this test isolates token resolution, injected token mana
-        // abilities, mana-ability cost payment, and sacrifice-trigger handling.
+        // ability so this test isolates token resolution, the mana ability the
+        // creating effect gives the token, its cost payment, and sacrifice-trigger handling.
         // Full casting would add unrelated hand/mana/priority setup.
         let create_spawn = parsed.triggers[0]
             .execute
@@ -6099,6 +6241,7 @@ mod tests {
         let mut events = Vec::new();
         super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
             .expect("Spawn token creation should resolve");
+        crate::game::layers::flush_layers(&mut state);
 
         let spawn = state
             .battlefield
@@ -6115,6 +6258,7 @@ mod tests {
             })
             .expect("Writhing Chrysalis should create an Eldrazi Spawn token");
 
+        assert_eq!(state.objects[&spawn].abilities.len(), 1);
         assert!(
             matches!(
                 *state.objects[&spawn].abilities[0].effect,

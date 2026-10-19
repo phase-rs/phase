@@ -12,8 +12,8 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
-    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetDamageSourceBinding,
-    TargetFilter, TargetRef,
+    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1607,6 +1607,147 @@ pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) ->
         target_filter,
         matches!(damage_source, Some(DamageSource::Target)),
     )
+}
+
+/// CR 115.10a + CR 608.2d: does this `DealDamage` recipient filter DESCRIBE its
+/// recipient, so the controller chooses it while the damage is applied?
+///
+/// "Comet deals damage … to a creature or player" and "deal 2 damage to another
+/// creature you control" never use the word "target", so nothing is announced as
+/// the ability goes on the stack (CR 115.10a: only a thing identified by the word
+/// "target" is a target) and the recipient is chosen as the effect is applied
+/// (CR 115.10 + CR 608.2d). The shape is a population of battlefield objects, or
+/// one together with players ("a creature or player").
+///
+/// Everything else stays out, each on its own reading: a context reference (the
+/// source, an earlier target, an event participant) and an attachment host (CR
+/// 303.4b + CR 301.5f: "enchanted creature" is whatever the Aura is attached to)
+/// are determined, not chosen; a player-only recipient ("an opponent", "a
+/// player") names no object population and keeps its existing reading; and a
+/// filter that matches everything ("any target") is announced as a target.
+/// The parser (the timing) and the resolver (the prompt) both ask this one
+/// question, so a recipient the parser times for resolution is exactly one the
+/// resolver offers a choice for.
+pub(crate) fn names_resolution_chosen_recipient(target: &TargetFilter) -> bool {
+    if target.is_context_ref()
+        || target.contains_source_attachment_host()
+        || super::filter_refs_parent_target(target)
+    {
+        return false;
+    }
+    match target {
+        TargetFilter::Or { filters } => {
+            filters
+                .iter()
+                .all(|leg| leg.denotes_battlefield_objects() || matches!(leg, TargetFilter::Player))
+                && filters
+                    .iter()
+                    .any(TargetFilter::denotes_battlefield_objects)
+        }
+        leaf => leaf.denotes_battlefield_objects(),
+    }
+}
+
+/// CR 608.2d: is this `DealDamage` node still waiting to learn whom it damages —
+/// a described recipient ([`names_resolution_chosen_recipient`]) timed for
+/// resolution, with nothing bound to it yet and no division announced?
+pub(crate) fn awaits_resolution_recipient_choice(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::DealDamage {
+            damage_source: None,
+            target,
+            ..
+        } if names_resolution_chosen_recipient(target)
+    ) && ability.target_choice_timing == TargetChoiceTiming::Resolution
+        && ability.targets.is_empty()
+        && ability.distribution.is_none()
+}
+
+/// CR 115.10a + CR 608.2d: the creatures and players the controller may choose
+/// among for a described damage recipient — objects in battlefield order, then
+/// players in seat order.
+///
+/// A plain scan of the live population, never targeting legality (`can_target`):
+/// this is a choice, not a target, so hexproof, shroud and "can't be the target
+/// of" do not restrict who is offered. Protection does not either; it prevents
+/// the damage itself (CR 702.16e), not the choice. A player who has left the
+/// game is not offered (CR 800.4), by the same existence authority every
+/// non-targeting seat choice uses.
+pub(crate) fn resolution_recipient_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    let Effect::DealDamage { target, .. } = &ability.effect else {
+        return Vec::new();
+    };
+    let resolved = super::resolved_object_filter(state, ability, target);
+    let objects = super::resolved_battlefield_population_ids(state, ability, target)
+        .into_iter()
+        .map(TargetRef::Object);
+    let players = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|&player| {
+            crate::game::players::player_exists_for_choice(state, player)
+                && filter::player_matches_target_filter_in_state(
+                    state,
+                    &resolved,
+                    player,
+                    Some(ability.controller),
+                    Some(ability.source_id),
+                )
+        })
+        .map(TargetRef::Player);
+    objects.chain(players).collect()
+}
+
+/// Marks `ability` as parked on its own recipient prompt: its recipient filter
+/// becomes the exact pool the prompt offers, one bound-referent leg per
+/// candidate. The prompt (`WaitingFor::ChooseObjectsSelection`) is shared with
+/// the tracked-set producers, so the parked node's own shape is what tells
+/// [`parked_recipient_pool`] that an answer belongs to it. A pool filter fails
+/// [`names_resolution_chosen_recipient`] by shape (its legs are bound referents,
+/// not a described population), so the parked node never prompts a second time.
+pub(crate) fn bind_recipient_pool(ability: &mut ResolvedAbility, pool: &[TargetRef]) {
+    let Effect::DealDamage { target, .. } = &mut ability.effect else {
+        return;
+    };
+    *target = TargetFilter::Or {
+        filters: pool
+            .iter()
+            .map(|candidate| match candidate {
+                TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
+                TargetRef::Player(player) => TargetFilter::SpecificPlayer { id: *player },
+            })
+            .collect(),
+    };
+}
+
+/// The pool a node parked by [`bind_recipient_pool`] is waiting on, or `None` for
+/// any other node. A pool is at least two bound referents (zero and one
+/// candidate never prompt) and nothing is chosen yet.
+pub(crate) fn parked_recipient_pool(ability: &ResolvedAbility) -> Option<Vec<TargetRef>> {
+    let Effect::DealDamage {
+        target: TargetFilter::Or { filters },
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    if !ability.targets.is_empty() {
+        return None;
+    }
+    let pool = filters
+        .iter()
+        .map(|leg| match leg {
+            TargetFilter::SpecificObject { id } => Some(TargetRef::Object(*id)),
+            TargetFilter::SpecificPlayer { id } => Some(TargetRef::Player(*id)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (pool.len() >= 2).then_some(pool)
 }
 
 /// CR 120.1: a multi-source damage node's `(recipient, sources)`, or `None`
@@ -8002,5 +8143,268 @@ mod tests {
             assert_eq!(damage_recipients(&state, &root), Vec::<TargetRef>::new());
             assert_eq!(damage_sources(&state, &root), illegal_sources);
         }
+    }
+
+    // CR 115.10a + CR 608.2d: the resolution-time recipient chooser — the shape
+    // the parser and the resolver share, the candidate scan, and the pool marker
+    // a parked prompt carries.
+
+    fn described_creature() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature())
+    }
+
+    fn described_planeswalker() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker))
+    }
+
+    fn creature_or_player() -> TargetFilter {
+        TargetFilter::Or {
+            filters: vec![described_creature(), TargetFilter::Player],
+        }
+    }
+
+    fn opponent_only() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+
+    /// A described-recipient damage node timed for resolution with nothing bound.
+    fn recipient_node(target: TargetFilter) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    fn battlefield_creature(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// Only a described population of battlefield objects, alone or beside
+    /// players, is chosen at resolution. Each determined or non-population shape
+    /// stays out, and the Comet shape is the paired positive.
+    #[test]
+    fn a_resolution_chosen_recipient_is_a_described_population() {
+        let described = [
+            creature_or_player(),
+            described_creature(),
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ),
+            TargetFilter::Or {
+                filters: vec![described_creature(), described_planeswalker()],
+            },
+        ];
+        for filter in &described {
+            assert!(names_resolution_chosen_recipient(filter), "{filter:?}");
+        }
+
+        let determined = [
+            // Matches everything, or names no object population.
+            TargetFilter::Any,
+            TargetFilter::Player,
+            opponent_only(),
+            TargetFilter::Typed(TypedFilter::default()),
+            // Context references are bound, never chosen.
+            TargetFilter::Controller,
+            TargetFilter::SelfRef,
+            TargetFilter::ParentTarget,
+            // CR 303.4b + CR 301.5f: an Aura's own host is determined.
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            // A determined anaphor beside a planeswalker ("the player or
+            // planeswalker it's attacking").
+            TargetFilter::Or {
+                filters: vec![TargetFilter::ParentTarget, described_planeswalker()],
+            },
+            // A player-only leg is not "a creature or player".
+            TargetFilter::Or {
+                filters: vec![described_creature(), opponent_only()],
+            },
+            // The parked pool is bound referents, not a description, so a parked
+            // node never prompts a second time.
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: ObjectId(1) },
+                    TargetFilter::SpecificPlayer { id: PlayerId(1) },
+                ],
+            },
+        ];
+        for filter in &determined {
+            assert!(!names_resolution_chosen_recipient(filter), "{filter:?}");
+        }
+    }
+
+    /// A node awaits its recipient only while nothing is chosen: not once timed
+    /// for the stack, bound, divided, sourced by a targets-positional referent,
+    /// aimed at a determined recipient, or parked on its own pool.
+    #[test]
+    fn a_node_awaits_a_recipient_only_while_nothing_is_chosen() {
+        let comet = recipient_node(creature_or_player());
+        assert!(
+            awaits_resolution_recipient_choice(&comet),
+            "the Comet shape"
+        );
+
+        let mut stack_timed = comet.clone();
+        stack_timed.target_choice_timing = TargetChoiceTiming::Stack;
+        let mut bound = comet.clone();
+        bound.set_unpinned_targets(vec![TargetRef::Player(PlayerId(1))]);
+        let mut divided = comet.clone();
+        divided.distribution = Some(vec![(TargetRef::Player(PlayerId(1)), 3)]);
+        let mut sourced = comet.clone();
+        if let Effect::DealDamage { damage_source, .. } = &mut sourced.effect {
+            *damage_source = Some(DamageSource::Target);
+        }
+        let mut parked = comet.clone();
+        bind_recipient_pool(
+            &mut parked,
+            &[
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+        );
+        for (name, node) in [
+            ("stack-timed", stack_timed),
+            ("already bound", bound),
+            ("divided", divided),
+            ("targets-positional damage source", sourced),
+            (
+                "context-reference recipient",
+                recipient_node(TargetFilter::ParentTarget),
+            ),
+            (
+                "parent-target leg",
+                recipient_node(TargetFilter::Or {
+                    filters: vec![TargetFilter::ParentTarget, described_planeswalker()],
+                }),
+            ),
+            ("parked on its own pool", parked),
+        ] {
+            assert!(!awaits_resolution_recipient_choice(&node), "{name}");
+        }
+    }
+
+    /// The candidates are objects in battlefield order, then every player who is
+    /// still in the game; a non-creature permanent is not a creature. An
+    /// object-only description offers no player.
+    #[test]
+    fn the_recipient_candidates_are_the_live_creatures_then_the_players() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opposing = battlefield_creature(&mut state, PlayerId(1), "Opposing Ogre");
+        let own = battlefield_creature(&mut state, PlayerId(0), "Own Bear");
+        let card_id = CardId(state.next_object_id);
+        create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Idol".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = recipient_node(creature_or_player());
+        assert_eq!(
+            resolution_recipient_candidates(&state, &ability),
+            vec![
+                TargetRef::Object(opposing),
+                TargetRef::Object(own),
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            "a three-player game lists both opponents; the artifact is not a creature"
+        );
+
+        let own_creatures = recipient_node(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert_eq!(
+            resolution_recipient_candidates(&state, &own_creatures),
+            vec![TargetRef::Object(own)],
+            "an object-only description offers no player"
+        );
+
+        state.players[2].is_eliminated = true;
+        assert_eq!(
+            resolution_recipient_candidates(&state, &ability),
+            vec![
+                TargetRef::Object(opposing),
+                TargetRef::Object(own),
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+            "CR 800.4: a player who has left the game is not offered"
+        );
+    }
+
+    /// The marker round-trips the exact pool, and only a node still waiting on at
+    /// least two bound referents carries it.
+    #[test]
+    fn a_parked_pool_names_exactly_the_candidates_it_offered() {
+        let pool = vec![
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+            TargetRef::Player(PlayerId(1)),
+        ];
+        let mut node = recipient_node(creature_or_player());
+        assert_eq!(parked_recipient_pool(&node), None, "an unparked node");
+
+        bind_recipient_pool(&mut node, &pool);
+        assert_eq!(parked_recipient_pool(&node), Some(pool.clone()));
+
+        let mut chosen = node.clone();
+        chosen.set_unpinned_targets(vec![pool[0].clone()]);
+        assert_eq!(parked_recipient_pool(&chosen), None, "a pick ends the wait");
+
+        let mut single = recipient_node(creature_or_player());
+        bind_recipient_pool(&mut single, &pool[..1]);
+        assert_eq!(
+            parked_recipient_pool(&single),
+            None,
+            "one candidate never prompts"
+        );
+    }
+
+    /// CR 608.2d: "a player can't choose an impossible option". An optional
+    /// described recipient with nothing to choose is infeasible; the same node is
+    /// feasible once a creature exists.
+    #[test]
+    fn an_optional_described_recipient_is_infeasible_without_a_candidate() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let creature_only = recipient_node(described_creature());
+        assert!(
+            crate::game::effects::optional_effect_is_infeasible(&state, &creature_only),
+            "no creature to choose"
+        );
+        battlefield_creature(&mut state, PlayerId(1), "Opposing Ogre");
+        assert!(
+            !crate::game::effects::optional_effect_is_infeasible(&state, &creature_only),
+            "paired positive: a creature exists"
+        );
+
+        let empty_state = GameState::new(FormatConfig::standard(), 2, 42);
+        let mut stack_timed = recipient_node(described_creature());
+        stack_timed.target_choice_timing = TargetChoiceTiming::Stack;
+        assert!(
+            !crate::game::effects::optional_effect_is_infeasible(&empty_state, &stack_timed),
+            "a stack-timed recipient is announced, not chosen here"
+        );
     }
 }

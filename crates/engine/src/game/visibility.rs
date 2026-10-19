@@ -133,6 +133,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::CrewVehicle { .. }
         | WaitingFor::StationTarget { .. }
@@ -225,6 +226,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
@@ -2168,15 +2170,23 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             // the entire declaration. The predicate itself is `pins_name_hidden_source` (this
             // file), the single authority shared with the `RespondToShortcut` projection below,
             // which receives this very template verbatim one state transition later.
-            let declaration = declaration.clone().filter(|template| {
-                !pins_name_hidden_source(
-                    &template.decisions,
-                    &target_hidden,
-                    PinCarrier::OfferWithSchema,
-                )
-            });
+            let keep_visible =
+                |template: &Option<crate::analysis::decision_template::DecisionTemplate>| {
+                    template.clone().filter(|template| {
+                        !pins_name_hidden_source(
+                            &template.decisions,
+                            &target_hidden,
+                            PinCarrier::OfferWithSchema,
+                        )
+                    })
+                };
+            let declaration = keep_visible(declaration);
             (
                 ShortcutDecisionSchema {
+                    // The suggestion is a declaration like the one above, under the same rule.
+                    suggested_declaration: keep_visible(&schema.suggested_declaration),
+                    // Public: a published slot and the seat a trigger already on the stack targets.
+                    leading_aims: schema.leading_aims.clone(),
                     iteration_count: schema.iteration_count.clone(),
                     // CR 732.2a: BOTH published answers are derived from PUBLIC board state
                     // (life, poison, library sizes over the living players) and the engine's own
@@ -2707,7 +2717,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // cards are eligible instant/sorcery spells within the MV budget. Redact the
     // candidate list to opaque placeholders for viewers who cannot see the
     // controller's private zones — `remaining_casts`, `remaining_mv_budget`, and
-    // the rider stay public (CR 601.2 + CR 408 — the resolving spell is public).
+    // the rider stay public (CR 601.2 + CR 400.2 — the stack is a public zone).
     if let WaitingFor::CastOffer {
         player,
         kind:
@@ -2718,6 +2728,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 ref face_policy,
                 ref zones,
                 ref graveyard_replacement,
+                ref enters_with_modifications,
                 ref member_pool,
             },
     } = state.waiting_for
@@ -2732,6 +2743,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     face_policy: face_policy.clone(),
                     zones: zones.clone(),
                     graveyard_replacement: graveyard_replacement.clone(),
+                    // CR 608.2c: the gains-modifications rider is public (the
+                    // resolving grant is public, CR 601.2 + CR 400.2) — pass it
+                    // through unredacted, exactly like the destination rider.
+                    enters_with_modifications: enters_with_modifications.clone(),
                     // CR 400.2: the member pool can reference the same private
                     // candidates (a hand/graveyard window would leak eligible
                     // ids through it); redact it to placeholders exactly like
@@ -2751,14 +2766,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // `cards.len()` reveals the count of blue cards in the caster's hand minus
     // one). Redact `cards` to opaque placeholders for viewers who cannot see
     // the caster's hand. `count` and `pending_cast` are public (CR 601.2 +
-    // CR 408 — the spell on the stack is public information).
+    // CR 400.2 — the spell on the stack is public information).
     // The graveyard variant of `ExileForCost` is intentionally NOT redacted
     // because the graveyard is a public zone (CR 400.2).
     // CR 400.2: Hand and library are hidden zones. The eligible-objects list
     // for a `PayCost` choice can leak hidden-zone contents to opponents
     // (e.g. the count of blue cards in the caster's hand). Redact the
     // `choices` for viewers who cannot see the caster's private zones; `count`
-    // and `resume` stay public (CR 601.2 + CR 408 — the spell on the stack is
+    // and `resume` stay public (CR 601.2 + CR 400.2 — the spell on the stack is
     // public information). Public-zone choices (graveyard / battlefield) and
     // public-zone exile costs are intentionally NOT redacted.
     if let WaitingFor::PayCost {
@@ -2971,7 +2986,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .outside_game_cards_brought_in
         .retain(|record| viewer.is_some_and(|viewer| record.player == viewer));
 
-    // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
+    // CR 601.2 + CR 400.2: A spell being cast is on the stack and is public information —
     // caster, targets, chosen X values, and pending mana payment are all visible to
     // opponents. The old behavior of clearing `pending_cast` for non-casters was both
     // rules-incorrect and inconsistent with the inline `pending_cast` fields embedded in
@@ -4107,6 +4122,15 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             redact_ability_payment(pending_effect, hidden_ids);
         }
         WaitingFor::MultiTargetSelection {
+            pending_ability, ..
+        }
+        // CR 400.2: the batch-semantics token-host pause
+        // (`effects/token.rs` clones the raw creating ability into
+        // `pending_ability`) carries the same trigger-source payment
+        // snapshots as the multi-target pause and needs the same
+        // viewer-keyed redaction — otherwise a hidden cost-paid mana
+        // source leaks to opponents and unseated viewers.
+        | WaitingFor::ChooseTokenHost {
             pending_ability, ..
         } => redact_ability_payment(pending_ability, hidden_ids),
         WaitingFor::RepeatDecision { ability, .. }
@@ -6599,6 +6623,22 @@ mod tests {
                 }),
             ),
             (
+                // CR 400.2: the batch token-host pause carries
+                // the same trigger-source payment snapshots as the
+                // multi-target pause (production path: `effects/token.rs`
+                // clones the raw creating ability) and gets the same
+                // viewer-keyed redaction.
+                "ChooseTokenHost",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ChooseTokenHost {
+                    player: owner,
+                    source_id: paid,
+                    legal_targets: Vec::new(),
+                    pending_ability: effect(),
+                }),
+            ),
+            (
                 "RepeatDecision",
                 "/waiting_for/".to_string(),
                 2,
@@ -7082,6 +7122,7 @@ mod tests {
             continuation: Some(effect()),
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
+            trigger_context: None,
         };
         assert_eq!(
             payment_arrays_under(&state, "/pending_cost_move_resume/").len(),
@@ -7253,6 +7294,7 @@ mod tests {
             ))),
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
+            trigger_context: None,
         };
 
         for viewer in [PlayerId(0), PlayerId(1)] {
@@ -9705,7 +9747,7 @@ mod tests {
         );
     }
 
-    // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
+    // CR 601.2 + CR 400.2: A spell being cast is on the stack and is public information —
     // opponents see the caster, the spell, chosen targets, and mana payment progress
     // as it happens (the MTGA "Opponent is casting X" experience). The tests below guard
     // against regression of the pre-correction behavior that cleared `pending_cast` for
@@ -9727,7 +9769,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during ManaPayment (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during ManaPayment (CR 601.2 + CR 400.2)"
         );
         let pc = filtered.pending_cast.as_ref().unwrap();
         assert_eq!(pc.object_id, ObjectId(10));
@@ -9753,7 +9795,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during ChooseXValue (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during ChooseXValue (CR 601.2 + CR 400.2)"
         );
     }
 
@@ -9775,7 +9817,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during TargetSelection (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during TargetSelection (CR 601.2 + CR 400.2)"
         );
     }
 
@@ -9801,7 +9843,7 @@ mod tests {
 
         assert!(
             filtered.pending_cast.is_some(),
-            "non-caster must see opponent's pending cast during ModeChoice (CR 601.2 + CR 408)"
+            "non-caster must see opponent's pending cast during ModeChoice (CR 601.2 + CR 400.2)"
         );
     }
 
@@ -11210,6 +11252,14 @@ mod tests {
                 graveyard_replacement: Some(
                     crate::types::ability::SpellStackToGraveyardReplacement::Exile,
                 ),
+                enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Haste,
+                        },
+                    ],
+                    cast_filter: None,
+                },
                 member_pool: vec![hand_candidate],
             },
         };
@@ -11245,6 +11295,7 @@ mod tests {
                         remaining_casts,
                         remaining_mv_budget,
                         graveyard_replacement,
+                        enters_with_modifications,
                         member_pool,
                         ..
                     },
@@ -11267,6 +11318,15 @@ mod tests {
                 assert_eq!(
                     graveyard_replacement.as_ref(),
                     Some(&crate::types::ability::SpellStackToGraveyardReplacement::Exile)
+                );
+                // CR 608.2c: the gains-modifications rider is public — the
+                // opponent-facing redaction must pass it through unredacted.
+                assert_eq!(
+                    enters_with_modifications.modifications,
+                    vec![crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }],
+                    "the public gains rider must survive opponent redaction"
                 );
             }
             other => panic!("expected FreeCastWindow for opponent, got {other:?}"),
@@ -11582,6 +11642,8 @@ mod tests {
                 paused_at_index: 0,
                 destination: Zone::Exile,
                 completion: PendingCostMoveCompletion::FinishPending,
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             },
             PendingCostMoveResume::Foretell {
                 player: PlayerId(0),
@@ -11599,6 +11661,8 @@ mod tests {
                     phyrexian_choices: None,
                     pre_payment_checks: None,
                 },
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             },
             PendingCostMoveResume::SacrificeForCost {
                 player: PlayerId(0),
@@ -12877,12 +12941,15 @@ mod tests {
             predicted_winner: None,
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
             },
             schema: ShortcutDecisionSchema {
+                suggested_declaration: None,
+                leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(3),
                 measured_repetition_bound: Some(3),
                 deliverable_capacity: 3,
@@ -13305,11 +13372,13 @@ mod tests {
                 predicted_winner: None,
                 count: IterationCount::Fixed(3),
                 unbounded: Vec::new(),
-                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 template: Some(declaration.clone()),
                 per_cycle: None,
                 shortened_by: None,
                 published_declaration: Some(declaration),
+                leading_aims: Vec::new(),
                 road: crate::analysis::loop_check::OfferRoad::Ring,
                 period: Default::default(),
             },
@@ -13967,7 +14036,7 @@ mod tests {
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             }];
@@ -14280,7 +14349,7 @@ mod tests {
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }

@@ -306,6 +306,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::RevealChoice { .. }
@@ -363,6 +364,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
@@ -566,6 +568,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
@@ -616,6 +619,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
@@ -1333,9 +1337,14 @@ struct LoopShortcutProjection {
     /// The count-keyed magnitudes are minted downstream by `loop_shortcut_preview`, which
     /// needs the offer's interaction id to speak the published candidate ids — a binding
     /// this projection's own parameter list is pinned against holding.
-    per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
+    per_cycle: Option<crate::analysis::resource::PeriodSignature>,
     points: Vec<LoopShortcutPointProjection>,
     candidates: Vec<LoopShortcutCandidateValue>,
+    /// The offer's `ShortcutDecisionSchema::suggested_declaration`, which every published count
+    /// and an empty-pin completion are stated from when present.
+    suggestion: Option<crate::analysis::decision_template::DecisionTemplate>,
+    /// The offer's `ShortcutDecisionSchema::leading_aims`.
+    leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
 }
 
 #[derive(Debug, Clone)]
@@ -2889,6 +2898,62 @@ fn shortcut_preview_counts(count: &InteractionShortcutCountSpec) -> Vec<u32> {
     }
 }
 
+/// CR 732.2a + CR 601.2c: the allocation the offer's SUGGESTION states at `count` — its prefix
+/// over repetitions `1..=count`, segment by segment: segment `k` of the suggestion's `Piecewise`
+/// pin on the domain point's slot takes `min(count, start_{k+1}) - start_k` of them (none below),
+/// on the choice id of its seat, and a zero segment is dropped. `None` — the caller falls back to
+/// [`canonical_allocation`] — with no suggestion, no such pin, or a segment whose seat has no
+/// choice id on the point.
+///
+/// Every count's prefix is admitted at that count: the departures that precede a landing inside
+/// the prefix are produced by the repetitions before it, which the prefix and the whole schedule
+/// share, so a prefix violating the aim conjunct would make the whole suggestion violate it.
+fn suggested_allocation(
+    domain: &ShortcutAllocationDomain<'_>,
+    suggestion: Option<&crate::analysis::decision_template::DecisionTemplate>,
+    count: u32,
+) -> Option<Vec<AmountAssignment>> {
+    use crate::analysis::decision_template::{
+        AnnouncementSubject, PinnedDecision, TargetPin, TargetSchedule,
+    };
+    let seats = domain.seats.as_ref()?;
+    let pins = suggestion?
+        .decisions
+        .iter()
+        .find_map(|decision| match decision {
+            PinnedDecision::Targets { slot, targets } if *slot == domain.point.slot => {
+                Some(targets)
+            }
+            _ => None,
+        })?;
+    // The witness mints `Piecewise` alone; every other shape states no suggested split.
+    let segments = match pins.as_slice() {
+        [TargetPin::Scheduled(schedule)] => match schedule {
+            TargetSchedule::Piecewise(segments) => segments,
+            TargetSchedule::Constant(_) | TargetSchedule::RoundRobin(_) => return None,
+        },
+        [TargetPin::ByIdentity(_) | TargetPin::Player(_)] | [] | [_, _, ..] => return None,
+    };
+    let mut allocation = Vec::with_capacity(segments.len());
+    for (k, (start, ranking)) in segments.iter().enumerate() {
+        let end = segments.get(k + 1).map_or(u32::MAX, |(next, _)| *next);
+        let amount = count.min(end).saturating_sub(*start);
+        if amount == 0 {
+            continue;
+        }
+        let seat = match ranking.head() {
+            AnnouncementSubject::Seat(seat) => seat,
+            AnnouncementSubject::Object(_) => return None,
+        };
+        let index = seats.iter().position(|candidate| candidate == seat)?;
+        allocation.push(AmountAssignment {
+            choice_id: domain.ids.get(index)?.clone(),
+            amount,
+        });
+    }
+    Some(allocation)
+}
+
 /// CR 732.2a + CR 601.2c: the even split of one element's `count` over the announced choices
 /// the declaration names, remainder on the EARLIEST ids so the amounts are non-increasing.
 ///
@@ -2993,22 +3058,38 @@ impl VictimSplit {
     /// published ids in published order; `ids` and `seats` are the two parallel readings of
     /// that same order. A segment naming an id the point does not publish contributes
     /// nothing rather than shifting every later segment onto the wrong seat.
+    ///
+    /// CR 119.3 + CR 603.3d: with a `lead` — the seat the point's trigger already on the stack
+    /// latched — the first repetition resolves that trigger on that seat and the count's last
+    /// announcement never resolves, so the lead seat gains one cycle and the tail segment loses
+    /// one. With no lead every announcement resolves and the allocation is the split.
     fn new(
         charge: &VictimCharge,
         ids: &[InteractionChoiceId],
         seats: &[PlayerId],
         allocation: &[AmountAssignment],
+        lead: Option<PlayerId>,
     ) -> Option<Self> {
+        let mut cycles: Vec<(PlayerId, u32)> = allocation
+            .iter()
+            .filter_map(|assignment| {
+                let index = ids.iter().position(|id| *id == assignment.choice_id)?;
+                Some((*seats.get(index)?, assignment.amount))
+            })
+            .collect();
+        if let Some(lead) = lead.filter(|_| !cycles.is_empty()) {
+            if let Some((_, tail)) = cycles.last_mut() {
+                *tail = tail.saturating_sub(1);
+            }
+            match cycles.iter_mut().find(|(seat, _)| *seat == lead) {
+                Some((_, landed)) => *landed += 1,
+                None => cycles.push((lead, 1)),
+            }
+        }
         Some(Self {
             rate: charge.rate,
             charged_seat: charge.seat,
-            cycles: allocation
-                .iter()
-                .filter_map(|assignment| {
-                    let index = ids.iter().position(|id| *id == assignment.choice_id)?;
-                    Some((*seats.get(index)?, assignment.amount))
-                })
-                .collect(),
+            cycles,
         })
         .filter(|split| !split.cycles.is_empty())
     }
@@ -3100,11 +3181,14 @@ fn shortcut_allocation_domain<'a>(
 /// The announced-choice half is `ShortcutAllocationDomain`, folded in flat: an offer publishing
 /// no announced-target decision has no domain, and states its magnitudes unsplit.
 struct ShortcutPreviewBasis<'a> {
-    delta: &'a crate::analysis::resource::ResourceVector,
+    signature: &'a crate::analysis::resource::PeriodSignature,
     group: Option<u32>,
     ids: Vec<InteractionChoiceId>,
     seats: Option<Vec<PlayerId>>,
     charge: Option<VictimCharge>,
+    /// The seat the domain point's trigger already on the stack latched, when it is one of the
+    /// point's seats.
+    lead: Option<PlayerId>,
 }
 
 /// CR 732.2a: the per-period signature and the announced-choice domain every previewed element
@@ -3117,26 +3201,37 @@ fn shortcut_preview_basis<'a>(
     interaction_id: &InteractionId,
     projection: &'a LoopShortcutProjection,
 ) -> Option<ShortcutPreviewBasis<'a>> {
-    let periodic = projection.per_cycle.as_ref()?;
+    let signature = projection.per_cycle.as_ref()?;
+    let (crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)
+    | crate::analysis::resource::PeriodSignature::OneRepetition(periodic)) = signature;
     if shortcut_preview_entries(&periodic.delta, 1, None).is_empty() {
         return None;
     }
-    let (group, ids, seats, charge) = match shortcut_allocation_domain(interaction_id, projection) {
-        Some(domain) => {
-            let charge = domain
-                .seats
-                .as_deref()
-                .and_then(|seats| victim_charge(periodic, domain.point, seats));
-            (Some(domain.group), domain.ids, domain.seats, charge)
-        }
-        None => (None, Vec::new(), None, None),
-    };
+    let (group, ids, seats, charge, lead) =
+        match shortcut_allocation_domain(interaction_id, projection) {
+            Some(domain) => {
+                let charge = domain
+                    .seats
+                    .as_deref()
+                    .zip(signature.every_repetition())
+                    .and_then(|(seats, periodic)| victim_charge(periodic, domain.point, seats));
+                let lead = projection
+                    .leading_aims
+                    .iter()
+                    .find(|(slot, _)| *slot == domain.point.slot)
+                    .map(|(_, seat)| *seat)
+                    .filter(|seat| domain.seats.as_ref().is_some_and(|s| s.contains(seat)));
+                (Some(domain.group), domain.ids, domain.seats, charge, lead)
+            }
+            None => (None, Vec::new(), None, None, None),
+        };
     Some(ShortcutPreviewBasis {
-        delta: &periodic.delta,
+        signature,
         group,
         ids,
         seats,
         charge,
+        lead,
     })
 }
 
@@ -3150,20 +3245,26 @@ fn shortcut_preview_basis<'a>(
 /// A `None` basis is a declaration whose PARTITION is known and whose magnitudes are not: the
 /// count and the allocation are still the proposer's own, and no magnitude is invented beside
 /// them. Only the declared side passes one — an offer with no basis publishes no element at all.
+/// A basis whose signature states one repetition mints the partition alone, for the same reason.
 fn shortcut_preview_element(
     basis: Option<&ShortcutPreviewBasis<'_>>,
     count: u32,
     allocation: Vec<AmountAssignment>,
 ) -> InteractionShortcutPreview {
-    let entries =
-        basis
-            .map(|basis| {
+    let entries = basis
+        .map(|basis| match basis.signature {
+            crate::analysis::resource::PeriodSignature::EveryRepetition(periodic) => {
                 let split = basis.charge.as_ref().zip(basis.seats.as_deref()).and_then(
-                    |(charge, seats)| VictimSplit::new(charge, &basis.ids, seats, &allocation),
+                    |(charge, seats)| {
+                        VictimSplit::new(charge, &basis.ids, seats, &allocation, basis.lead)
+                    },
                 );
-                shortcut_preview_entries(basis.delta, count, split.as_ref())
-            })
-            .unwrap_or_default();
+                shortcut_preview_entries(&periodic.delta, count, split.as_ref())
+            }
+            // The count's consequence is the take's replay, which nothing here performs.
+            crate::analysis::resource::PeriodSignature::OneRepetition(_) => Vec::new(),
+        })
+        .unwrap_or_default();
     InteractionShortcutPreview {
         count,
         entries,
@@ -3191,21 +3292,26 @@ fn loop_shortcut_preview(
     counts
         .into_iter()
         .map(|count| {
-            let allocation = canonical_allocation(&basis.ids, count);
+            let allocation = shortcut_allocation_domain(interaction_id, projection)
+                .and_then(|domain| {
+                    suggested_allocation(&domain, projection.suggestion.as_ref(), count)
+                })
+                .unwrap_or_else(|| canonical_allocation(&basis.ids, count));
             shortcut_preview_element(Some(&basis), count, allocation)
         })
         .collect()
 }
 
-/// CR 732.2a: the declaration a pin naming NOTHING states — the offer's own canonical split of
-/// the declared count, minted on demand at any count in the published window.
+/// CR 732.2a: the declaration a pin naming NOTHING states — the offer's own split of the
+/// declared count ([`suggested_allocation`], else [`canonical_allocation`]), minted on demand at
+/// any count in the published window.
 ///
 /// The offer's `preview` list is a bounded SAMPLE of that window (`shortcut_preview_counts`),
 /// while the ingress admits every count in it. At an unsampled count there is no published
 /// element to restate, so the pin the client can honestly send names nothing — and CR 732.2a
 /// leaves the count the proposer's to specify regardless of how many the payload published.
-/// This completes that declaration with the same `canonical_allocation` the sampled counts
-/// already publish, so the answer at an unsampled count is the offer's own answer.
+/// This completes that declaration with the same allocation the sampled counts already publish,
+/// so the answer at an unsampled count is the offer's own answer.
 ///
 /// It is a COMPLETION of the player's declaration, not the engine making a CR 601.2c
 /// announcement for them, and every conjunct below is what keeps that true:
@@ -3276,7 +3382,8 @@ fn completed_shortcut_declaration(
     if !pin.choice_ids.is_empty() || !pin.amounts.is_empty() {
         return None;
     }
-    let allocation = canonical_allocation(&domain.ids, count);
+    let allocation = suggested_allocation(&domain, projection.suggestion.as_ref(), count)
+        .unwrap_or_else(|| canonical_allocation(&domain.ids, count));
     if allocation.is_empty() {
         return None;
     }
@@ -3428,8 +3535,9 @@ fn scheduled_announcements(
 /// the count.
 ///
 /// The one place that rule is expressed, for every pin kind. An until-lethal proposal names no
-/// count to partition, so it declares an ORDER and no segment. `None` is a start past the count,
-/// which is a partition nobody could have declared.
+/// count to partition, so it declares an ORDER and no segment. The projection cuts every step
+/// the count does not reach before asking (`DecisionTemplate::cut_schedules_at`), so each segment
+/// is positive; `None` is a start past the count, which is a partition nobody could have declared.
 fn declared_segments(starts: &[u32], declared_count: Option<u32>) -> Option<Vec<u32>> {
     let Some(count) = declared_count else {
         return Some(Vec::new());
@@ -3512,7 +3620,10 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
     };
     // The single hidden-information authority has already set this to `None` for a viewer who
     // may not see the declaration, so an identity that authority dropped is unreachable here.
-    let template = proposal.template.as_ref()?;
+    let mut template = proposal.template.clone()?;
+    // CR 732.2a: a template-free declaration resolves to a suggestion cut at a larger count, and a
+    // shortening lowers the count under the same template, so the steps past it are cut here.
+    template.cut_schedules_at(&proposal.count);
     // The proposal's LIVE count as a degenerate one-point window — the proposer's declaration
     // until a responder shortens, and that responder's named place afterwards (CR 732.2b), which
     // is what the seats still queued are being asked about. Nothing on this path samples a count
@@ -3639,6 +3750,8 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             per_cycle: proposal.per_cycle.clone(),
             points,
             candidates,
+            suggestion: None,
+            leading_aims: proposal.leading_aims.clone(),
         },
         segments,
     })
@@ -3719,7 +3832,13 @@ fn declared_sequence_preview(
     let basis = shortcut_preview_basis(interaction_id, &declared.projection);
     let charge_escapes_declaration = basis
         .as_ref()
-        .zip(declared.projection.per_cycle.as_ref())
+        .zip(
+            declared
+                .projection
+                .per_cycle
+                .as_ref()
+                .and_then(crate::analysis::resource::PeriodSignature::every_repetition),
+        )
         .is_some_and(|(basis, periodic)| {
             basis.seats.as_deref().is_some_and(|announced| {
                 let life_seats: Vec<PlayerId> = periodic.delta.life.keys().copied().collect();
@@ -3800,12 +3919,13 @@ fn loop_shortcut_projection(
             // restored dump into an engine panic.
             //
             // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
-            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has THREE call sites and
+            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has four call sites and
             // derives every capacity itself: `interactive_loop_bridge` and the unbounded
             // recorded offer measure no threshold, so theirs is
             // `MAX_SHORTCUT_CYCLES`, while `bounded_offer_tail` hands it a measured
             // threshold that cannot be `0` — that producer refuses outright unless the reduction
-            // measured one of at least 1. The per-viewer projection in
+            // measured one of at least 1 — and `counted_offer` the repetitions the counting
+            // replay performed, at least one. The per-viewer projection in
             // `game/visibility.rs` only re-projects an existing schema's pair; and
             // `ShortcutDecisionSchema::default()` seeds the capacity at `MAX_SHORTCUT_CYCLES`
             // (`analysis/decision_template.rs`), which is also its `#[serde(default)]` for a save
@@ -3828,13 +3948,13 @@ fn loop_shortcut_projection(
         }
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
-    // state their consequence instead of standing alone. It is published only by
-    // `bounded_offer_tail`, for a ring period and a recorded loss period alike; every other mint
-    // carries `None`, as
-    // does every save written before the field existed. The other authority the magnitudes
-    // need — a FINITE count — is `count` above, and the two coincide by construction rather
-    // than by luck: that same producer mints a `Fixed` VARIANT, which is what selects the finite
-    // arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
+    // state their consequence instead of standing alone. It is published by
+    // `bounded_offer_tail`, for a ring period and a recorded loss period alike, and by
+    // `counted_offer`, whose signature states one repetition and so no count's magnitude; every
+    // other mint carries `None`, as does every save written before the field existed. The other
+    // authority the magnitudes need — a FINITE count — is `count` above, and the two coincide by
+    // construction rather than by luck: each producer mints a `Fixed` VARIANT, which is what
+    // selects the finite arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
     let per_cycle = certificate.per_cycle.clone();
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -3998,6 +4118,8 @@ fn loop_shortcut_projection(
         per_cycle,
         points,
         candidates,
+        suggestion: schema.suggested_declaration.clone(),
+        leading_aims: schema.leading_aims.clone(),
     })
 }
 
@@ -4814,6 +4936,7 @@ fn selection_projection(
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -4881,6 +5004,7 @@ fn selection_projection(
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
@@ -11995,7 +12119,8 @@ mod tests {
                 predicted_winner: Some(viewer),
                 certificate: LoopCertificate {
                     unbounded: Vec::new(),
-                    win_kind: WinKind::LethalDamage,
+                    win_kind: Some(WinKind::LethalDamage),
+                    win_kind_at: None,
                     mandatory: false,
                     residual_board_delta: BoardDelta::default(),
                     per_cycle: None,

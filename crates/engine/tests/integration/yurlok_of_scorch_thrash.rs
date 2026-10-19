@@ -1,7 +1,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, EffectScope, PlayerFilter, QuantityExpr,
-    QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, EffectScope, PlayerFilter,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementPlayerScope, TapStateChange, TargetFilter,
 };
 use engine::types::actions::GameAction;
@@ -440,6 +440,7 @@ fn interactive_cross_event_substitution_resumes_remaining_apnap_drain_once() {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![gain_branch(1), gain_branch(2)],
+                kind: ChooseOneOfKind::Ordinary,
             },
         ))
         .description("Choose gain instead".to_string());
@@ -600,6 +601,7 @@ fn nested_life_loss_choice_cannot_bypass_outer_substitute_phase_owner() {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Opponent,
                 branches: vec![tap_then_nested_life_loss, harmless_branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
         ))
         .condition(ReplacementCondition::SourceTappedState { tapped: false })
@@ -796,6 +798,7 @@ fn nested_nonpreventing_life_loss_execute_terminally_resumes_phase_owner() {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Opponent,
                 branches: vec![tap_then_nested_life_loss, harmless_branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
         ))
         .condition(ReplacementCondition::SourceTappedState { tapped: false })

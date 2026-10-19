@@ -163,6 +163,9 @@ vi.mock("../../hooks/usePlayerId", () => ({
   usePerspectivePlayerId: () => 0,
   useCanActForWaitingState: () => true,
   waitingPlayer: () => null,
+  // The mounted priority-attention controller reads the local seat for the
+  // authorized-submitter check.
+  getPlayerId: () => 0,
 }));
 
 vi.mock("../../hooks/useIsMobile", () => ({

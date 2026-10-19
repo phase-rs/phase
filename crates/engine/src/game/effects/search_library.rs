@@ -4,9 +4,9 @@ use crate::game::filter::{
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility,
-    SearchOrderingHint, SearchSelectionConstraint, SharedQuality, SubAbilityLink, TargetFilter,
-    TargetRef,
+    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
+    ResolvedAbility, SearchOrderingHint, SearchSelectionConstraint, SharedQuality, SubAbilityLink,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::is_land_subtype;
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -32,6 +32,17 @@ fn resolve_library_owner(
     ability: &ResolvedAbility,
     target_player: &TargetFilter,
 ) -> PlayerId {
+    // CR 608.2c: "that player ... searches their library" under a player-scoped
+    // trigger (Mornsong Aria, Maralen of the Mornsong: "each player's draw step")
+    // names the scoped player's library, not the source controller's.
+    // Resolved by the shared context resolver, the same authority the chained
+    // `Shuffle { ScopedPlayer }` uses, so the search and the shuffle name the
+    // same player.
+    if matches!(target_player, TargetFilter::ScopedPlayer) {
+        if let Some(player) = super::resolve_player_for_context_ref(state, ability, target_player) {
+            return player;
+        }
+    }
     // Pre-resolved: a TargetRef::Player was picked at cast time.
     if let Some(pid) = ability.targets.iter().find_map(|t| match t {
         TargetRef::Player(pid) => Some(*pid),
@@ -93,6 +104,10 @@ fn searcher_is_library_owner(target_player: &TargetFilter) -> bool {
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
+            // "At the beginning of each player's draw step, that player ...
+            // searches their library" (Mornsong Aria, Maralen of the
+            // Mornsong): the scoped player searches, not the source's controller.
+            | TargetFilter::ScopedPlayer
     )
 }
 
@@ -373,6 +388,7 @@ pub(crate) struct PreparedEffectiveSearch {
 /// continuation path places the complete selected set on top and no later
 /// instruction destroys that order.
 pub(crate) fn search_ordering_hint(
+    state: &GameState,
     ability: &ResolvedAbility,
     selection_limit: usize,
 ) -> SearchOrderingHint {
@@ -380,6 +396,7 @@ pub(crate) fn search_ordering_hint(
         return SearchOrderingHint::Unordered;
     };
     let outcomes = search_ordering_outcomes(
+        state,
         continuation,
         SearchDisposition {
             selected_targets_bound: true,
@@ -453,45 +470,53 @@ fn known_shuffle_player(ability: &ResolvedAbility, target: &TargetFilter) -> Opt
 }
 
 fn search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if current.condition.is_some() {
-        let mut outcomes = search_ordering_after_condition(current, incoming);
-        outcomes.extend(condition_false_search_ordering_outcomes(current, incoming));
+        let mut outcomes = search_ordering_after_condition(state, current, incoming);
+        outcomes.extend(condition_false_search_ordering_outcomes(
+            state, current, incoming,
+        ));
         return outcomes;
     }
-    search_ordering_after_condition(current, incoming)
+    search_ordering_after_condition(state, current, incoming)
 }
 
 fn search_ordering_after_condition(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if current.optional {
-        let mut outcomes = search_ordering_after_optional(current, incoming);
-        outcomes.extend(optional_decline_search_ordering_outcomes(current, incoming));
+        let mut outcomes = search_ordering_after_optional(state, current, incoming);
+        outcomes.extend(optional_decline_search_ordering_outcomes(
+            state, current, incoming,
+        ));
         if current.optional_for.is_some() {
             outcomes.push(incoming);
         }
         return outcomes;
     }
-    search_ordering_after_optional(current, incoming)
+    search_ordering_after_optional(state, current, incoming)
 }
 
 fn search_ordering_after_optional(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if current.unless_pay.is_some() {
-        let mut outcomes = executed_search_ordering_outcomes(current, incoming);
+        let mut outcomes = executed_search_ordering_outcomes(state, current, incoming);
         outcomes.push(incoming);
         return outcomes;
     }
-    executed_search_ordering_outcomes(current, incoming)
+    executed_search_ordering_outcomes(state, current, incoming)
 }
 
 fn executed_search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     mut disposition: SearchDisposition,
 ) -> Vec<SearchDisposition> {
@@ -547,40 +572,43 @@ fn executed_search_ordering_outcomes(
         _ => {}
     }
 
-    continue_search_ordering(current.sub_ability.as_deref(), disposition)
+    continue_search_ordering(state, current.sub_ability.as_deref(), disposition)
 }
 
 fn condition_false_search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if let Some(branch) = current.else_ability.as_deref() {
-        return continue_search_ordering(Some(branch), incoming);
+        return continue_search_ordering(state, Some(branch), incoming);
     }
     if let Some(sub) = current.sub_ability.as_deref() {
         if super::sub_outlives_false_parent_gate(sub)
             || (sub.sub_link == SubAbilityLink::SequentialSibling && sub.condition.is_none())
         {
-            return continue_search_ordering(Some(sub), incoming);
+            return continue_search_ordering(state, Some(sub), incoming);
         }
     }
     vec![incoming]
 }
 
 fn optional_decline_search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     mut incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
-    let Some(branch) = super::optional_decline_branch(current) else {
+    let Some(branch) = super::optional_decline_branch(state, current) else {
         return vec![incoming];
     };
     incoming.selected_targets_bound = incoming.selected_targets_bound
         && super::can_inherit_parent_targets(&branch)
         && super::effect_refs_parent_target(&branch.effect);
-    search_ordering_outcomes(&branch, incoming)
+    search_ordering_outcomes(state, &branch, incoming)
 }
 
 fn continue_search_ordering(
+    state: &GameState,
     next: Option<&ResolvedAbility>,
     mut disposition: SearchDisposition,
 ) -> Vec<SearchDisposition> {
@@ -589,7 +617,7 @@ fn continue_search_ordering(
     };
     disposition.selected_targets_bound =
         disposition.selected_targets_bound && super::can_inherit_parent_targets(next);
-    search_ordering_outcomes(next, disposition)
+    search_ordering_outcomes(state, next, disposition)
 }
 
 /// CR 701.23a + CR 701.23i: compute one effective search from immutable game
@@ -749,7 +777,7 @@ pub(crate) fn prepare_effective_search(
         split,
         active_search,
         hidden_event,
-        ordering_hint: search_ordering_hint(ability, count),
+        ordering_hint: search_ordering_hint(state, ability, count),
         decision: ActiveSearchDecisionControl {
             searcher,
             searched_zone_owner,
@@ -798,6 +826,17 @@ pub fn resolve(
         events.push(event);
     }
     if prepared.candidates.is_empty() {
+        // CR 701.23a + CR 701.23b + CR 608.2c: The completed search supplied
+        // no card for a following "it" / "that card" instruction.
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::SearchLibrary);
+        // CR 608.2c: A second search owns its result, including an empty one.
+        // The ordinary postlude allocates the unbound case; an already-bound
+        // chain needs a fresh set before that postlude can union its result.
+        if state.chain_tracked_set_id.is_some()
+            && super::resolution_next_needs_tracked_set(state, ability)
+        {
+            super::publish_fresh_tracked_set(state, Vec::new());
+        }
         // CR 701.23b: A player searching a hidden zone isn't required to find
         // cards even if they're present ("fail to find"). Resolve immediately.
         events.push(GameEvent::EffectResolved {
@@ -843,13 +882,71 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, Comparator, FilterProp, QuantityExpr, QuantityRef,
-        TypeFilter, TypedFilter, UnlessPayModifier,
+        SearchDestinationSplit, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 701.23a + CR 701.23b + CR 608.2c: Completion without candidates
+    /// publishes a missing object even when the synchronous search has a split destination.
+    #[test]
+    fn missing_referent_no_candidate_search_stamps_the_transient_relay() {
+        for split_destination in [false, true] {
+            let mut state = GameState::new_two_player(7);
+            let mut ability = make_search_ability(TargetFilter::Any, 1);
+            let Effect::SearchLibrary { split, .. } = &mut ability.effect else {
+                unreachable!("the fixture is a search");
+            };
+            *split = split_destination.then_some(SearchDestinationSplit {
+                primary_destination: Zone::Battlefield,
+                primary_count: 1,
+                primary_enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                rest_destination: Zone::Hand,
+            });
+            assert_eq!(split.is_some(), split_destination);
+            if let Some(split) = split {
+                assert_eq!(split.primary_destination, Zone::Battlefield);
+                assert_eq!(split.primary_count, 1);
+                assert_eq!(
+                    split.primary_enter_tapped,
+                    crate::types::zones::EtbTapState::Tapped
+                );
+                assert_eq!(split.rest_destination, Zone::Hand);
+            }
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert_eq!(
+                state.last_parent_target_missing_reason,
+                Some(ParentTargetMissingReason::SearchLibrary)
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.active_library_searches.is_empty());
+            assert!(state.active_search_decision_controls.is_empty());
+            assert!(state.pending_search_found_batch.is_none());
+            assert!(state.resolution_stack.is_empty());
+            assert!(!matches!(
+                state.waiting_for,
+                WaitingFor::SearchChoice { .. } | WaitingFor::SearchPartitionChoice { .. }
+            ));
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                }
+            )));
+            assert!(events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::SearchLibrary,
+                    ..
+                }
+            )));
+        }
+    }
 
     fn make_search_ability(filter: TargetFilter, count: i32) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -888,6 +985,7 @@ mod tests {
 
     #[test]
     fn ordering_hint_accepts_fixed_one_for_a_one_card_search() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -901,13 +999,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 1).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 1),
+            search_ordering_hint(&state, &search, 1),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_accepts_fixed_two_for_a_two_card_search() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -921,13 +1020,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_rejects_fixed_one_for_a_two_card_search() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -941,13 +1041,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_requires_every_branch_to_order_selected_cards_on_top() {
+        let state = GameState::new_two_player(42);
         let bottom = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -973,13 +1074,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_accepts_when_every_branch_orders_selected_cards_on_top() {
+        let state = GameState::new_two_player(42);
         let else_top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -996,13 +1098,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_preserves_top_order_across_unrelated_optional_instruction() {
+        let state = GameState::new_two_player(42);
         let mut optional_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -1027,13 +1130,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_is_unordered_when_unless_payment_skips_ordering_chain() {
+        let state = GameState::new_two_player(42);
         let mut top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -1064,13 +1168,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(guarded);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_accounts_for_optional_decline_after_condition_succeeds() {
+        let state = GameState::new_two_player(42);
         let else_top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -1089,13 +1194,14 @@ mod tests {
             make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_optional_top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_requires_optional_else_to_inherit_selected_targets() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -1121,13 +1227,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(optional);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_tracks_selected_cards_final_linear_placement() {
+        let state = GameState::new_two_player(42);
         let bottom = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
@@ -1152,13 +1259,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_is_unordered_when_later_shuffle_destroys_top_order() {
+        let state = GameState::new_two_player(42);
         let shuffle = ResolvedAbility::new(
             Effect::Shuffle {
                 target: TargetFilter::Controller,
@@ -1181,13 +1289,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_preserves_top_order_when_later_shuffle_targets_other_player() {
+        let state = GameState::new_two_player(42);
         let shuffle = ResolvedAbility::new(
             Effect::Shuffle {
                 target: TargetFilter::Opponent,
@@ -1210,9 +1319,72 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
+    }
+
+    #[test]
+    fn ordering_hint_preserves_no_continuation_and_nested_search_outcomes() {
+        let state = GameState::new_two_player(42);
+        let search = make_search_ability(TargetFilter::Any, 2);
+        assert_eq!(
+            search_ordering_hint(&state, &search, 2),
+            SearchOrderingHint::Unordered
+        );
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert_eq!(
+            search_ordering_hint(&state, &search.clone().sub_ability(top.clone()), 2),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+        let nested = top.sub_ability(make_search_ability(TargetFilter::Any, 1));
+        assert_eq!(
+            search_ordering_hint(&state, &search.sub_ability(nested), 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_preserves_tracked_set_shuffle_but_not_searched_library_shuffle() {
+        let state = GameState::new_two_player(42);
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        for (target, expected) in [
+            (
+                TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                SearchOrderingHint::OrderedToLibraryTop,
+            ),
+            (TargetFilter::Controller, SearchOrderingHint::Unordered),
+        ] {
+            let shuffle = ResolvedAbility::new(
+                Effect::Shuffle { target },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let search = make_search_ability(TargetFilter::Any, 2)
+                .sub_ability(top.clone().sub_ability(shuffle));
+            assert_eq!(search_ordering_hint(&state, &search, 2), expected);
+        }
     }
 
     fn add_library_creature(
@@ -3585,6 +3757,54 @@ mod tests {
                 .contains(&PlayerId(0)),
             "caster is the searcher for 'search target opponent's library'"
         );
+    }
+
+    /// CR 701.23a + CR 608.2c: Mornsong Aria / Maralen of the Mornsong — "that
+    /// player ... searches their library". Under a draw-step trigger scoped to
+    /// the opponent, the opponent browses their own library; the trigger's
+    /// controller must not pick the card for them.
+    #[test]
+    fn scoped_player_search_makes_the_scoped_player_the_searcher() {
+        let mut state = GameState::new_two_player(42);
+        let _own_card = add_library_creature(&mut state, 2, PlayerId(0), "Controller Bear");
+        let opp_card = add_library_creature(&mut state, 1, PlayerId(1), "Scoped Bear");
+
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ScopedPlayer),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![],
+            ObjectId(9995),
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "the scoped player searches their own library"
+                );
+                assert_eq!(cards.as_slice(), [opp_card], "the scoped player's library");
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+        assert!(state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(1)));
+        assert!(!state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
     }
 
     #[test]

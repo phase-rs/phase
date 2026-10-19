@@ -2,13 +2,18 @@
 //! real count and a whole counter name, and a created token's entry-counter
 //! amount reads "other" relative to the entering token.
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::Effect;
+use engine::types::ability::{
+    AggregateFunction, Effect, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::format::FormatConfig;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const PRINTLIFTER: &str = "Deathtouch\nWhenever this creature or another creature you control \
@@ -23,11 +28,15 @@ const SHOE_TREE: &str = "This creature enters with up to two shoe counters on it
                          it.";
 /// Synthetic control: a printed count and a whole custom counter name.
 const SHOE_RACK: &str = "This creature enters with two shoe counters on it.";
-/// Thought Sponge's two non-keyword lines ("Flash" omitted: an inline keyword
-/// line without its MTGJSON keyword name takes a different parser branch).
-const THOUGHT_SPONGE: &str = "This creature enters with a number of +1/+1 counters on it equal \
+/// Thought Sponge's verbatim Oracle text; Flash is also supplied as a keyword hint.
+const THOUGHT_SPONGE: &str =
+    "Flash\nThis creature enters with a number of +1/+1 counters on it equal \
                               to the greatest number of cards an opponent has drawn this \
                               turn.\nWhen this creature dies, draw cards equal to its power.";
+/// Synthetic neighbour whose discarded-card extremum remains unsupported.
+const UNREAD_DRAW_EXTREMUM: &str = "This creature enters with a number of +1/+1 counters on it \
+                                  equal to the greatest number of cards an opponent has \
+                                  discarded this turn.";
 const CENTAUR_VINECRASHER_ENTERS: &str = "This creature enters with a number of +1/+1 counters \
                                           on it equal to the number of land cards in all \
                                           graveyards.";
@@ -240,16 +249,14 @@ fn prose_counter_clause_places_no_counter() {
     assert!(has_unimplemented_ability(&runner, shoe_tree));
 }
 
-/// CR 122.6: Thought Sponge's count is its "equal to" quantity, which the
-/// engine cannot read, so the clause fails closed instead of placing one
-/// +1/+1 counter. (0 is also the rules value here — no opponent drew — so the
-/// assertion pins "no `Fixed 1` published", with the gap as its positive side.)
+/// CR 122.6: an unreadable discarded-card extremum must fail closed instead
+/// of publishing a default single counter; the readable Vinecrasher is the control.
 #[test]
 fn unread_equal_to_count_places_no_counter() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let sponge = scenario
-        .add_creature_to_hand_from_oracle(P0, "Thought Sponge", 1, 1, THOUGHT_SPONGE)
+        .add_creature_to_hand_from_oracle(P0, "Unread Draw Extremum", 1, 1, UNREAD_DRAW_EXTREMUM)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let vinecrasher = scenario
@@ -292,6 +299,243 @@ fn unread_equal_to_count_places_no_counter() {
         "no Fixed 1 count published"
     );
     assert!(has_unimplemented_ability(&runner, sponge));
+}
+
+/// CR 614.1c + CR 122.6: cast the actual replacement through the normal stack.
+/// CR 121.1 + CR 800.4i + CR 102.3: the magnitude is a per-player history
+/// extremum, retaining departures but excluding teammates for opponent scopes.
+fn assert_draw_extremum_entry(
+    mut scenario: GameScenario,
+    caster: PlayerId,
+    card: (&str, &str),
+    scope: PlayerScope,
+    draws: &[u32],
+    departed: Option<PlayerId>,
+    expected: u32,
+) {
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..4 {
+        scenario.add_basic_land(caster, ManaColor::Blue);
+    }
+    let sponge = scenario
+        .add_creature_to_hand(caster, card.0, 1, 1)
+        .from_oracle_text_with_keywords(&["Flash"], card.1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().players.len(), draws.len());
+    for (player, &drawn) in runner.state_mut().players.iter_mut().zip(draws) {
+        player.cards_drawn_this_turn = drawn;
+        player.is_eliminated = Some(player.id) == departed;
+    }
+    runner.state_mut().active_player = caster;
+    runner.state_mut().priority_player = caster;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+
+    assert!(
+        !has_unimplemented_ability(&runner, sponge),
+        "positive parse guard"
+    );
+    let count = QuantityExpr::Ref {
+        qty: QuantityRef::CardsDrawnThisTurn { player: scope },
+    };
+    assert!(
+        runner.state().objects[&sponge]
+            .replacement_definitions
+            .iter_unchecked()
+            .any(
+                |definition| definition.execute.as_deref().is_some_and(|execute| {
+                    matches!(
+                        &*execute.effect,
+                        Effect::PutCounter {
+                            counter_type: CounterType::Plus1Plus1,
+                            count: actual,
+                            target: TargetFilter::SelfRef,
+                        } if actual == &count
+                    )
+                })
+            ),
+        "SHAPE reach guard: the replacement reads the exact draw extremum"
+    );
+    let outcome = runner.cast(sponge).resolve();
+    outcome.assert_zone(&[sponge], Zone::Battlefield);
+    assert_eq!(
+        outcome.state().objects[&sponge]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        expected,
+        "the entering permanent reads the caster's history population"
+    );
+}
+
+#[test]
+fn issue_9887_thought_sponge_counts_opponent_draws_not_own() {
+    assert_draw_extremum_entry(
+        GameScenario::new(),
+        P0,
+        ("Thought Sponge", THOUGHT_SPONGE),
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        },
+        &[5, 3],
+        None,
+        3,
+    );
+}
+
+#[test]
+fn issue_9887_thought_sponge_uses_max_not_sum_first_or_last() {
+    assert_draw_extremum_entry(
+        GameScenario::new_n_player(4, 42),
+        P0,
+        ("Thought Sponge", THOUGHT_SPONGE),
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        },
+        &[7, 2, 5, 3],
+        None,
+        5,
+    );
+}
+
+#[test]
+fn issue_9887_thought_sponge_keeps_departed_opponents_draws() {
+    assert_draw_extremum_entry(
+        GameScenario::new_n_player(3, 42),
+        P0,
+        ("Thought Sponge", THOUGHT_SPONGE),
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        },
+        &[9, 7, 2],
+        Some(P1),
+        7,
+    );
+}
+
+#[test]
+fn issue_9887_thought_sponge_excludes_two_headed_giant_teammate() {
+    assert_draw_extremum_entry(
+        GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42),
+        P0,
+        ("Thought Sponge", THOUGHT_SPONGE),
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        },
+        &[1, 8, 2, 3],
+        None,
+        3,
+    );
+}
+
+#[test]
+fn issue_9887_thought_sponge_p1_cast_reads_p0_as_opponent() {
+    assert_draw_extremum_entry(
+        GameScenario::new_n_player(4, 42),
+        P1,
+        ("Thought Sponge", THOUGHT_SPONGE),
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        },
+        &[5, 7, 2, 3],
+        None,
+        5,
+    );
+}
+
+#[test]
+fn issue_9887_synthetic_all_player_draw_extremum_includes_controller() {
+    let oracle = "This creature enters with a number of +1/+1 counters on it equal to the greatest number of cards a player has drawn this turn.";
+    assert_draw_extremum_entry(
+        GameScenario::new(),
+        P0,
+        ("Synthetic All-player Extremum", oracle),
+        PlayerScope::AllPlayers {
+            aggregate: AggregateFunction::Max,
+            exclude: None,
+        },
+        &[5, 3],
+        None,
+        5,
+    );
+}
+
+#[test]
+fn issue_9887_thought_sponge_zero_draws_is_supported_zero() {
+    assert_draw_extremum_entry(
+        GameScenario::new(),
+        P0,
+        ("Thought Sponge", THOUGHT_SPONGE),
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        },
+        &[0, 0],
+        None,
+        0,
+    );
+}
+
+/// CR 122.6: a one-word-away unreadable amount must not publish a partial
+/// counter placement. Every row casts the positive real-card control too.
+#[test]
+fn issue_9887_extremum_near_misses_remain_pipeline_gaps() {
+    for quantity in [
+        "the least number of cards an opponent has drawn this turn",
+        "the fewest number of cards an opponent has drawn this turn",
+        "the greatest number of cards an opponent has discarded this turn",
+        "the greatest number of cards an opponent drew last turn",
+        "the greatest number of cards each opponent has drawn this turn",
+        "the greatest number of cards target opponent has drawn this turn",
+        "the greatest number of cards you have drawn this turn",
+        "the greatest number of cards your opponents have drawn this turn",
+        "the greatest number of cards any player has drawn this turn",
+        "the greatest number of card an opponent has drawn this turn",
+        "the greatest number of cards an opponent has drawn this turn ever",
+        "the greatest number of cards an opponent has drawn this turn among your opponents",
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let control = scenario
+            .add_creature_to_hand(P0, "Thought Sponge", 1, 1)
+            .from_oracle_text_with_keywords(&["Flash"], THOUGHT_SPONGE)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let oracle = format!(
+            "This creature enters with a number of +1/+1 counters on it equal to {quantity}."
+        );
+        let witness = scenario
+            .add_creature_to_hand_from_oracle(P0, "Synthetic Unread Extremum", 1, 1, &oracle)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().players[0].cards_drawn_this_turn = 5;
+        runner.state_mut().players[1].cards_drawn_this_turn = 3;
+        assert!(!has_unimplemented_ability(&runner, control), "{quantity}");
+        let positive = runner.cast(control).resolve();
+        positive.assert_zone(&[control], Zone::Battlefield);
+        assert_eq!(
+            positive.state().objects[&control]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&3),
+            "positive reach guard for {quantity}"
+        );
+        let negative = runner.cast(witness).resolve();
+        negative.assert_zone(&[witness], Zone::Battlefield);
+        assert_eq!(
+            negative.state().objects[&witness]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            None,
+            "{quantity}"
+        );
+        assert!(has_unimplemented_ability(&runner, witness), "{quantity}");
+    }
 }
 
 /// CR 614.1c + CR 122.6 + CR 608.2c: an "enters with" counter list whose second

@@ -20,6 +20,7 @@ import {
   buildPlayers,
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
+  chooseTokenHostWaitingForFactory,
   copyRetargetWaitingForFactory,
   retargetChoiceWaitingForFactory,
   returnAsAuraTargetWaitingForFactory,
@@ -899,7 +900,7 @@ const MIXED_LEGAL: TargetRef[] = [{ Object: 7 }, { Player: 1 }];
  *
  * The `NO_TARGET_REF_LEGAL_SET` entries are SKIPPED at runtime — they exist
  * only for the compile-time gate. The map's size is not a runtime coverage
- * number; the 11 `PartitionFixture` entries are.
+ * number; the 12 `PartitionFixture` entries are.
  */
 const NO_TARGET_REF_LEGAL_SET = "no-TargetRef-legal-set" as const;
 
@@ -913,7 +914,7 @@ const PARTITION_FIXTURES: Record<
   WaitingFor["type"],
   PartitionFixture | typeof NO_TARGET_REF_LEGAL_SET
 > = {
-  // ── The 11 `TargetRef`-bearing variants ────────────────────────────────
+  // ── The 12 `TargetRef`-bearing variants ────────────────────────────────
   TargetSelection: {
     waitingFor: targetSelectionWaitingForFactory
       .withData({
@@ -956,6 +957,13 @@ const PARTITION_FIXTURES: Record<
   },
   ReturnAsAuraTarget: {
     waitingFor: returnAsAuraTargetWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  ChooseTokenHost: {
+    waitingFor: chooseTokenHostWaitingForFactory
       .withData({ legal_targets: MIXED_LEGAL })
       .forPlayer(0)
       .build(),
@@ -1144,6 +1152,7 @@ const PARTITION_FIXTURES: Record<
   ChooseAnnouncingOpponent: NO_TARGET_REF_LEGAL_SET,
   ChooseGiftRecipient: NO_TARGET_REF_LEGAL_SET,
   ClashCardPlacement: NO_TARGET_REF_LEGAL_SET,
+  PhysicalContest: NO_TARGET_REF_LEGAL_SET,
   VoteChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeon: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeonRoom: NO_TARGET_REF_LEGAL_SET,
@@ -1215,6 +1224,18 @@ describe("getWaitingForPlayerChoiceIds", () => {
   // list genuinely mixes both axes in production.
   it("projects ReturnAsAuraTarget player refs", () => {
     const wf = returnAsAuraTargetWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
+  });
+
+  // Same cluster shape as ReturnAsAuraTarget: the host list mixes object
+  // entrants and players, and the two authorities must partition it.
+  it("projects ChooseTokenHost player refs", () => {
+    const wf = chooseTokenHostWaitingForFactory
       .withData({ legal_targets: MIXED_LEGAL })
       .forPlayer(0)
       .build();
@@ -1331,6 +1352,7 @@ describe("the two click-target authorities partition the engine's legal list", (
       [
         "ChooseObjectsSelection",
         "ChooseOneOfBranch",
+        "ChooseTokenHost",
         "CopyRetarget",
         "DistributeAmong",
         "EachPlayerCopyChosenSelection",

@@ -25,7 +25,7 @@ use engine::analysis::decision_template::{
 use engine::analysis::loop_check::{LoopCertificate, ShortcutProposal, ShortcutResponse, WinKind};
 use engine::analysis::resource::{
     loop_detect_cost, loop_states_equal_modulo_resources, reset_loop_detect_cost, BoardDelta,
-    ChargeBound, LoopDetectCost, PeriodicDelta, ResourceAxis,
+    ChargeBound, LoopDetectCost, PeriodSignature, PeriodicDelta, ResourceAxis,
 };
 use engine::game::derived_views::{FamilyCollapseState, UnboundedFamily};
 use engine::game::engine::{apply, EngineError};
@@ -1085,7 +1085,8 @@ fn declare_and_respond_authorization() {
 fn loop_shortcut_acting_player_reads_proposer() {
     let cert = LoopCertificate {
         unbounded: vec![],
-        win_kind: WinKind::LethalDamage,
+        win_kind: Some(WinKind::LethalDamage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -1117,11 +1118,13 @@ fn loop_shortcut_acting_player_reads_proposer() {
         predicted_winner: Some(P0),
         count: IterationCount::UntilLethal,
         unbounded: vec![],
-        win_kind: WinKind::LethalDamage,
+        win_kind: Some(WinKind::LethalDamage),
+        win_kind_at: None,
         template: None,
         per_cycle: None,
         shortened_by: None,
         published_declaration: None,
+        leading_aims: Vec::new(),
         road: engine::analysis::loop_check::OfferRoad::Ring,
         period: Default::default(),
     };
@@ -1535,6 +1538,7 @@ fn interactive_3p_subset_lethal_does_not_crown() {
         certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature")
             .frames_per_period,
         2,
@@ -1624,7 +1628,8 @@ fn setup_3p_both_fall(
 fn synthetic_lethal_cert() -> LoopCertificate {
     LoopCertificate {
         unbounded: vec![],
-        win_kind: WinKind::LethalDamage,
+        win_kind: Some(WinKind::LethalDamage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -1844,6 +1849,8 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         index: 0,
     };
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: IterationCount::UntilLethal,
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
@@ -3241,7 +3248,7 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     };
     assert_eq!(
         certificate.win_kind,
-        WinKind::Advantage,
+        Some(WinKind::Advantage),
         "an inert token-growth loop is a CR 104.4b optional Advantage loop"
     );
     assert!(
@@ -4011,7 +4018,7 @@ fn vito_interruptibility_undefused_opponent_passes_grants() {
     // The Vito drain's deciding win is lethal (the drain kills P1), not an inert Advantage loop.
     assert_eq!(
         certificate.win_kind,
-        WinKind::LethalDamage,
+        Some(WinKind::LethalDamage),
         "the Vito drain offer's deciding win_kind is LethalDamage"
     );
     assert!(
@@ -4235,45 +4242,6 @@ fn off_mode_capture_leaves_recast_context_none() {
     assert!(
         engine::game::play_trace_view(on.state()).is_some(),
         "Interactive/sampling: the same buyback+token cast IS traced"
-    );
-}
-
-/// N6 (CR 704.5g, branch d) — LIVE no-offer control. Each recast fires a
-/// `"Whenever you cast a spell, ~ deals 1 damage to itself"` trigger on the controller's 9/9
-/// engine, so the controller-side `damage_marked` total STRICTLY increases s_n1→s_n2. A
-/// board-growing loop that also accrues damage on its own engine is self-terminating, not a
-/// CR 732.2a shortcut, so `driving_resources_non_decreasing` branch (d) vetoes ⇒ NO offer.
-/// Discriminating: revert-probe (delete branch (d)) ⇒ this WRONGLY offers. Paired reach-guard:
-/// the same base loop WITHOUT the drain (P1's scenario) DOES offer.
-#[test]
-fn object_growth_self_damage_recast_does_not_offer() {
-    let (mut runner, sprout, fodder) = sprout_swarm_scenario_with_drain(
-        4,
-        Some("Whenever you cast a spell, Test Drain Engine deals 1 damage to Test Drain Engine."),
-    );
-    let outcome = runner
-        .cast(sprout)
-        .accept_optional()
-        .convoke_with(&[fodder[0]])
-        .commit()
-        .resolve();
-    assert!(
-        !matches!(outcome.final_waiting_for(), WaitingFor::LoopShortcut { .. }),
-        "N6: a damage-accruing recast is self-terminating (CR 704.5g) ⇒ must NOT offer, got {:?}",
-        outcome.final_waiting_for()
-    );
-
-    // Reach-guard: the same base loop without the drain reaches the offer.
-    let (mut ok_runner, ok_sprout, ok_fodder) = sprout_swarm_scenario(4);
-    let ok = ok_runner
-        .cast(ok_sprout)
-        .accept_optional()
-        .convoke_with(&[ok_fodder[0]])
-        .commit()
-        .resolve();
-    assert!(
-        matches!(ok.final_waiting_for(), WaitingFor::LoopShortcut { .. }),
-        "reach-guard: without the self-damage drain the same loop offers"
     );
 }
 
@@ -4545,6 +4513,8 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         index: 0,
     };
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: IterationCount::UntilLethal,
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
@@ -4567,7 +4537,8 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
     };
     let cert = LoopCertificate {
         unbounded: vec![],
-        win_kind: WinKind::LethalDamage,
+        win_kind: Some(WinKind::LethalDamage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -4687,7 +4658,8 @@ fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
                 predicted_winner: Some(P0),
                 count: IterationCount::Fixed(3),
                 unbounded: vec![],
-                win_kind: WinKind::LethalDamage,
+                win_kind: Some(WinKind::LethalDamage),
+                win_kind_at: None,
                 template: Some(DecisionTemplate {
                     owner: P0,
                     decisions: vec![PinnedDecision::Targets {
@@ -4709,6 +4681,7 @@ fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
                 per_cycle: None,
                 shortened_by: None,
                 published_declaration: None,
+                leading_aims: Vec::new(),
                 road: engine::analysis::loop_check::OfferRoad::Ring,
                 period: Default::default(),
             },
@@ -5084,8 +5057,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 142,
-        "`WaitingFor` has 142 variants at this tip, read off the `syn` parse. This number is \
+        total, 144,
+        "`WaitingFor` has 144 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5148,6 +5121,19 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // public, so neither the carrier vec nor the redaction loop changes.
     // 141 ⇒ 142 is ADJUDICATED: `ManaAbilityManaPayment { player, pending_mana_ability }`
     // holds no `DecisionTemplate`, so neither the carrier vec nor the redaction loop changes.
+    // 142 ⇒ 143 is ADJUDICATED: the one-time-boon token-host choice (CR 608.2d,
+    // Dunbarrow Revivalist) added `ChooseTokenHost { player, source_id,
+    // legal_targets, pending_ability }`. Measured, not inferred from the diff:
+    // that body holds NO `DecisionTemplate` (zero matches) — it is a
+    // resolution-choice prompt answered by `GameAction::ChooseTarget`, not a
+    // shortcut-style template — so it is not a third carrier and the carrier
+    // assertion below is unchanged by it.
+    // 143 ⇒ 144 is ADJUDICATED: the Eye to Eye / Mouth to Mouth contest added
+    // `PhysicalContest { state: ContestState }`. Measured, not inferred from the diff:
+    // that body holds NO `DecisionTemplate` (zero matches) — it is an actorless
+    // real-time physical clicking contest driven by the host engine contest driver,
+    // not a shortcut-style template — so it is not a third carrier and the carrier
+    // assertion below is unchanged by it.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(
@@ -6337,18 +6323,24 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                 predicted_winner: None,
                 count: engine::analysis::decision_template::IterationCount::Fixed(3),
                 unbounded: vec![],
-                win_kind: engine::analysis::loop_check::WinKind::Advantage,
+                win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+                win_kind_at: None,
                 template: None,
-                per_cycle: Some(engine::analysis::resource::PeriodicDelta {
-                    frames_per_period: frames,
-                    delta: Default::default(),
-                    victim_slot: vec![],
-                    declarable_victims: vec![],
-                    seat_life_charge: vec![],
-                    cleanup: None,
-                }),
+                per_cycle: Some(
+                    engine::analysis::resource::PeriodSignature::EveryRepetition(
+                        engine::analysis::resource::PeriodicDelta {
+                            frames_per_period: frames,
+                            delta: Default::default(),
+                            victim_slot: vec![],
+                            declarable_victims: vec![],
+                            seat_life_charge: vec![],
+                            cleanup: None,
+                        },
+                    ),
+                ),
                 shortened_by: None,
                 published_declaration: None,
+                leading_aims: Vec::new(),
                 road: engine::analysis::loop_check::OfferRoad::Ring,
                 period: Default::default(),
             },
@@ -7396,7 +7388,7 @@ fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
         )
     };
     assert_eq!(predicted_winner, Some(P0), "the crown still names P0");
-    assert_eq!(certificate.win_kind, WinKind::LethalDamage);
+    assert_eq!(certificate.win_kind, Some(WinKind::LethalDamage));
     assert_eq!(
         certificate.unbounded,
         vec![ResourceAxis::Life(P0), ResourceAxis::Life(PlayerId(3))],
@@ -7442,6 +7434,8 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
         trigger_description: None,
     };
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: IterationCount::UntilLethal,
         measured_repetition_bound: None,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
@@ -8139,7 +8133,7 @@ fn witherbloom_lumaret_4p_offers_with_opponent_utility_lands() {
             );
             assert_eq!(
                 certificate.win_kind,
-                WinKind::Advantage,
+                Some(WinKind::Advantage),
                 "CR 732.2a: this is a beneficial (advantage) loop, not a mandatory win"
             );
             assert!(
@@ -9808,6 +9802,7 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes the per-period signature its bound was divided by");
     assert!(
         per_cycle.frames_per_period >= 1,
@@ -9917,7 +9912,7 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     // ── siblings: nothing terminal happened, and no revocable-infinity was marked ──
     assert_eq!(
         certificate.win_kind,
-        engine::analysis::loop_check::WinKind::LethalDamage,
+        Some(engine::analysis::loop_check::WinKind::LethalDamage),
         "CR 704.5a: a life drain is not `Advantage`, which is the conjunct that keeps this \
          seam disjoint from the Path C revocable-infinity mark"
     );
@@ -10278,7 +10273,9 @@ fn dina_offering_beat_certifies_through_basis_b_and_exempts_nothing() {
     let (proposer, certificate, _) = bounded_offer_parts(&state);
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("the bounded offer publishes a per-cycle signature");
 
     let replay = replay_at_priority(&state, proposer);
@@ -10302,7 +10299,10 @@ fn dina_offering_beat_certifies_through_basis_b_and_exempts_nothing() {
         panic!("the bounded offer is a LoopShortcut window");
     };
     assert_eq!(
-        replayed.per_cycle.as_ref(),
+        replayed
+            .per_cycle
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition),
         Some(&published),
         "REACH-GUARD: the replayed mint must publish the SAME per-cycle signature as the \
          production offer at beat {beat}"
@@ -10612,6 +10612,7 @@ fn bounded_offer_on_a_within_turn_draw_drain_is_basis_b() {
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes the per-period signature its bound was divided by");
     let k = per_cycle.frames_per_period;
     assert!(
@@ -10802,6 +10803,7 @@ fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature");
         assert_eq!(
             per_cycle.frames_per_period, 2,
@@ -10975,6 +10977,7 @@ fn a_foreign_driving_period_neither_refuses_nor_recertifies_a_bounded_offer() {
                 certificate
                     .per_cycle
                     .as_ref()
+                    .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
                     .expect(
                         "a bounded offer publishes the per-period signature its bound was \
                              divided by",
@@ -11318,6 +11321,7 @@ fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer states its per-period signature");
         assert_eq!(
             per_cycle.frames_per_period, 2,
@@ -11384,7 +11388,9 @@ fn accept_bounded_fixed(
     let (proposer, certificate, schema) = bounded_offer_parts(state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes the per-period signature its bound was divided by");
     let bound = schema.deliverable_capacity;
     let before: Vec<(PlayerId, i64)> = state
@@ -12016,7 +12022,9 @@ fn bounded_fixed_drive_stops_at_the_first_lethal_cycle() {
     let (proposer, certificate, schema) = bounded_offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let bound = schema.deliverable_capacity;
     let lives_before: Vec<(PlayerId, i64)> = state
@@ -12341,7 +12349,9 @@ fn bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat() {
     let (proposer, certificate, schema) = bounded_offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let honest_bound = schema.deliverable_capacity;
     let lives_before: Vec<(PlayerId, i64)> = state
@@ -12601,10 +12611,12 @@ fn restored_proposal(
         count: IterationCount::Fixed(n),
         unbounded: certificate.unbounded.clone(),
         win_kind: certificate.win_kind,
+        win_kind_at: None,
         template: None,
-        per_cycle: Some(per_cycle),
+        per_cycle: Some(PeriodSignature::EveryRepetition(per_cycle)),
         shortened_by: None,
         published_declaration: None,
+        leading_aims: Vec::new(),
         road: engine::analysis::loop_check::OfferRoad::Ring,
         period: Default::default(),
     }
@@ -12720,7 +12732,9 @@ pub(crate) fn published_cascade(state: &GameState) -> Vec<(u32, Vec<PlayerId>)> 
     let (proposer, certificate, schema) = bounded_offer_parts(state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let declaration = match &state.waiting_for {
         WaitingFor::LoopShortcut { declaration, .. } => declaration.clone(),
@@ -13223,7 +13237,9 @@ fn the_accept_at_a_cascade_crossing_commits_that_cycle_and_eliminates_its_seat()
     let points = schema.points.clone();
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let declaration = match &at_offer.waiting_for {
         WaitingFor::LoopShortcut { declaration, .. } => declaration.clone(),
@@ -13395,7 +13411,9 @@ fn a_tie_entrys_seat_set_is_refused_when_only_one_of_them_departs() {
     let (state, proposer, certificate, _honest) = dina_bounded_offer();
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     // P2 is one point from its threshold; P3 is three, with a published charge of three, which
     // raises its `dip` to three and makes the reduction read both as crossing on repetition 1.
@@ -13528,7 +13546,9 @@ fn an_unpredicted_departure_is_refused_from_either_drive_arm() {
         let certificate = certificate.clone();
         let published = certificate
             .per_cycle
-            .clone()
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .cloned()
             .expect("a bounded offer publishes its per-period signature");
 
         // The seat the period drains hardest is the one this row moves; read off the published
@@ -13660,7 +13680,9 @@ fn a_co_departure_the_prediction_does_not_name_is_refused() {
     let (state, proposer, certificate, _honest) = dina_bounded_offer();
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
 
     // The signature omits P1's life entry, so the reduction cannot see P1 at all and names P2.
@@ -13746,7 +13768,9 @@ fn an_absent_prediction_admits_no_departure() {
     let (state, proposer, certificate, _honest) = dina_bounded_offer();
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
 
     // One driven cycle spans five published periods, so the board's real per-cycle drain is
@@ -13848,7 +13872,9 @@ fn a_departure_on_an_iteration_the_prediction_did_not_name_is_refused() {
     let (state, proposer, certificate, _honest) = dina_bounded_offer();
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     // One driven cycle spans TWO published periods, so a seat two life from its threshold
     // crosses inside the first cycle whatever the reduction predicted.
@@ -14009,7 +14035,9 @@ fn an_unsigned_proposal_commits_the_cycle_a_seat_departs_on() {
     let (state, proposer, certificate, _honest) = dina_bounded_offer();
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
 
     let mut board = state.clone();
@@ -14093,7 +14121,9 @@ fn an_emptied_charge_still_bounds_the_drive_at_the_guard() {
     let (state, proposer, certificate, honest) = dina_bounded_offer();
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let before = seat_lives(&state);
     assert!(
@@ -14165,7 +14195,9 @@ fn an_emptied_charge_preserves_the_published_count() {
     let (state, proposer, certificate, honest) = dina_bounded_offer();
     let published = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let before = seat_lives(&state);
     assert!(honest > 0, "REACH-GUARD: the published count is non-zero");
@@ -14220,7 +14252,9 @@ fn the_honest_count_reaches_the_cross_lethal_arm_when_the_crossing_takes_the_las
     let (proposer, certificate, schema) = bounded_offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let honest = schema.deliverable_capacity;
     let opponents: Vec<PlayerId> = state
@@ -14323,7 +14357,9 @@ fn the_cross_lethal_arm_crowns_only_the_seat_the_proposal_names() {
     let certificate = certificate.clone();
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let honest = schema.deliverable_capacity;
     let opponents: Vec<PlayerId> = state
@@ -14418,7 +14454,9 @@ fn the_cross_lethal_arm_crowns_only_the_seat_the_proposal_names() {
     };
     let sym_per_cycle = sym_certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let seats: Vec<PlayerId> = runner.state().players.iter().map(|p| p.id).collect();
     let sym_charges: Vec<i64> = seats
@@ -14567,13 +14605,12 @@ fn a_cycle_that_does_not_match_the_published_period_is_dropped() {
     let WaitingFor::LoopShortcut { certificate, .. } = &mut state.waiting_for else {
         unreachable!("bounded_offer_parts already matched the offer")
     };
-    certificate
-        .per_cycle
-        .as_mut()
-        .expect("a bounded offer publishes its signature")
-        .delta
-        .life
-        .insert(stowaway, -7);
+    let Some(engine::analysis::resource::PeriodSignature::EveryRepetition(signed)) =
+        certificate.per_cycle.as_mut()
+    else {
+        panic!("a bounded offer publishes its signature");
+    };
+    signed.delta.life.insert(stowaway, -7);
 
     let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
     r6a_declare_and_accept_all(&mut state, proposer, n);
@@ -14633,7 +14670,9 @@ fn ai_bounded_declare_candidate_is_generated_legal_and_drives() {
     let (proposer, certificate, schema) = bounded_offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let suggestion = crate::fantastic_four_bounded_loop::published_suggestion(schema);
 
@@ -14806,6 +14845,8 @@ fn g1_declare_verdict(
         legal_targets.push(TargetRef::Object(obj_b));
     }
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: count.clone(),
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
@@ -15557,6 +15598,8 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
         certificate,
         schema: ShortcutDecisionSchema {
             points: vec![],
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             ..schema
         },
         // `None` is a RULING, not a default. Passing the live field through would stage the R5
@@ -16156,7 +16199,7 @@ fn an_over_cap_count_is_refused_at_consumption_and_at_the_responders_seam() {
 #[test]
 fn ai1_the_bounded_declare_candidate_carries_the_offers_own_pin_when_one_is_published() {
     // ── arm (a): the LIVE offer, which now publishes one point ──
-    let (mut runner, _slot, _bond, _hexproof, _lives) = r5_reach_offer();
+    let (mut runner, slot, _bond, _hexproof, _lives) = r5_reach_offer();
     let WaitingFor::LoopShortcut {
         schema,
         declaration,
@@ -16181,21 +16224,82 @@ fn ai1_the_bounded_declare_candidate_carries_the_offers_own_pin_when_one_is_publ
          publishes a declaration — without one arm (a) would measure the fail-closed path \
          `d6n_a_points_carrying_offer_without_a_declaration_enumerates_only_decline` covers",
     );
+    assert_eq!(
+        declaration.replay,
+        ReplayMode::Scheduled {
+            count: IterationCount::Fixed(999)
+        },
+        "REACH-GUARD: the observation drives P1's 999 life"
+    );
+    // CR 104.2a: a win takes 999 + 1000 + 1000 repetitions, past the 1000 capacity, and the
+    // proposer only gains, so the suggestion is the witness at the capacity, cut to the segments
+    // 1000 repetitions reach.
+    assert_eq!(schema.deliverable_capacity, 1000);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(1000));
+    let suggestion = schema
+        .suggested_declaration
+        .clone()
+        .expect("the offer publishes its witness as the suggestion");
+    let seat = |s: PlayerId| Ranking::one(AnnouncementSubject::Seat(s));
+    assert_eq!(
+        suggestion.decisions,
+        vec![PinnedDecision::Targets {
+            slot: slot.clone(),
+            targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
+                (0, seat(P1)),
+                (998, seat(P2)),
+            ]))],
+        }]
+    );
     let live = engine::ai_support::legal_actions(runner.state());
     assert_eq!(
         live,
         vec![
             GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(
-                    crate::fantastic_four_bounded_loop::published_suggestion(&schema)
-                ),
-                template: Some(declaration),
+                count: IterationCount::Fixed(1000),
+                template: Some(suggestion),
             },
             GameAction::DeclineShortcut,
         ],
         "AI1(a): against a points-carrying bounded offer that HAS a declaration, the generator \
-         emits it — carrying the ENGINE's own pin set, never one the AI built"
+         emits the offer's suggestion — carrying the ENGINE's own pin set, never one the AI built"
     );
+    // CR 732.2b: the responder is stated the declaration the AI took, at its count.
+    let mut declared = runner.state().clone();
+    apply(&mut declared, P0, live[0].clone()).expect("the AI's declaration is admitted");
+    let WaitingFor::RespondToShortcut { player, .. } = declared.waiting_for.clone() else {
+        panic!("the declaration opens the respond window");
+    };
+    engine::game::interaction::bind_interaction_authority(
+        &mut declared,
+        engine::types::interaction::InteractionSessionId("ai1".into()),
+    )
+    .expect("valid interaction authority binding");
+    let filtered = engine::game::visibility::filter_state_for_viewer(&declared, player);
+    let view = engine::game::interaction::derive_viewer_interaction(&declared, &filtered, player);
+    let [opportunity] = view.opportunities.as_slice() else {
+        panic!("the responder reads one opportunity");
+    };
+    let engine::types::interaction::InteractionOpportunityResponse::Schema {
+        spec:
+            engine::types::interaction::InteractionResponseSpec::ShortcutReply {
+                declared: Some(preview),
+                ..
+            },
+        ..
+    } = &opportunity.response
+    else {
+        panic!(
+            "the responder reads the declared preview, got {:?}",
+            opportunity.response
+        );
+    };
+    let life: Vec<(Option<u8>, i32)> = preview
+        .entries
+        .iter()
+        .map(|entry| (entry.player, entry.amount))
+        .collect();
+    assert_eq!(life, vec![(Some(0), 1000), (Some(1), -999), (Some(2), -1)]);
 
     // ── arm (b): the POSITIVE CONTROL — the same board with an EMPTY point set ──
     r28_empty_schema_offer(&mut runner);
@@ -16264,6 +16368,8 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
         predicted_winner: None,
         certificate: synthetic_lethal_cert(),
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(3),
             measured_repetition_bound: Some(3),
             deliverable_capacity: 3,
@@ -16598,10 +16704,15 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
     let LoopCertificate {
         unbounded,
         win_kind,
+        win_kind_at,
         mandatory,
         residual_board_delta,
         per_cycle,
     } = certificate;
+    assert_eq!(
+        *win_kind_at, None,
+        "CR 732.2a: the threshold authority states its outcome of the loop as a whole"
+    );
     assert_eq!(
         *unbounded,
         vec![
@@ -16615,7 +16726,7 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
     );
     assert_eq!(
         *win_kind,
-        WinKind::LethalDamage,
+        Some(WinKind::LethalDamage),
         "CR 704.5a: opponents reach 0 life"
     );
     assert!(
@@ -16627,14 +16738,14 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
         BoardDelta::default(),
         "CR 110.1: this cycle recycles its board exactly, so there is no non-recycled remainder"
     );
-    let Some(PeriodicDelta {
+    let Some(PeriodSignature::EveryRepetition(PeriodicDelta {
         frames_per_period,
         delta,
         victim_slot,
         declarable_victims,
         seat_life_charge,
         cleanup: _,
-    }) = per_cycle
+    })) = per_cycle
     else {
         panic!(
             "the bounded producer is the one that NARROWS the CR 704 bound, so it publishes \
@@ -17944,4 +18055,149 @@ fn a_take_ending_at_an_answer_beat_ends_where_play_by_hand_does() {
         "reach: play by hand ends at the pass, before P0 orders the lethal loss's two triggers; \
          a take ending on that answer leaves both on the stack: {stacks:?}"
     );
+}
+/// What each Sprout Swarm recast offers on the board of [`sprout_swarm_scenario_with_drain`]: the
+/// first offer taken whole when `take_first`, declined otherwise, then every later offer declined
+/// and Sprout Swarm recast twelve times, convoked by an untapped Saproling. `Some((bounded,
+/// capacity))` for an offer, `None` for none.
+fn self_damage_recast_offers(
+    mode: LoopDetectionMode,
+    take_first: bool,
+) -> Vec<Option<(bool, u32)>> {
+    let drain = "Whenever you cast a spell, Test Drain Engine deals 1 damage to Test Drain Engine.";
+    let (mut runner, sprout, fodder) = sprout_swarm_scenario_with_drain(4, Some(drain));
+    runner.state_mut().loop_detection = mode;
+    runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit()
+        .resolve();
+    let offered = |state: &GameState| match &state.waiting_for {
+        WaitingFor::LoopShortcut { schema, .. } => {
+            Some((schema.is_bounded(), schema.deliverable_capacity))
+        }
+        _ => None,
+    };
+    let mut offers = vec![offered(runner.state())];
+    if take_first {
+        let count = runner_capacity(&runner);
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: None,
+            })
+            .expect("declare");
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            runner
+                .act(GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Accept,
+                })
+                .expect("accept");
+        }
+    }
+    for _ in 0..12 {
+        if matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }) {
+            runner.act(GameAction::DeclineShortcut).expect("decline");
+        }
+        let state = runner.state();
+        let card = state
+            .objects
+            .values()
+            .find(|o| o.name == "Sprout Swarm" && o.zone == engine::types::zones::Zone::Hand)
+            .map(|o| o.id)
+            .expect("Sprout Swarm returns by buyback");
+        let tapper = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| state.objects[id].name == "Saproling" && !state.objects[id].tapped)
+            .expect("an untapped Saproling");
+        runner
+            .cast(card)
+            .accept_optional()
+            .convoke_with(&[tapper])
+            .commit()
+            .resolve();
+        offers.push(offered(runner.state()));
+    }
+    offers
+}
+
+fn runner_capacity(runner: &GameRunner) -> u32 {
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut { schema, .. } => schema.deliverable_capacity,
+        other => panic!("not offered: {other:?}"),
+    }
+}
+
+/// CR 704.5g + CR 732.2a: each recast fires "Whenever you cast a spell, Test Drain Engine deals 1
+/// damage to Test Drain Engine." on the controller's 9/9, so damage grows on the engine and the
+/// period is counted by replay, not left unbounded. Nothing stops the recasts when the engine
+/// dies, so the count stands at the cap; a take of the whole count makes a Saproling a cycle and
+/// the engine is gone. Once it is gone the period repeats without bound: after the take at once,
+/// and after declining once its death is behind the count. Where the replay would cross its death
+/// the reproduced-class arm refuses the pair, so the seventh and eighth recasts are not offered.
+/// The same loop without the drain is unbounded from the first recast.
+#[test]
+fn object_growth_self_damage_recast_is_counted() {
+    let counted = Some((true, 25));
+    let unbounded = Some((false, 1000));
+    for mode in [LoopDetectionMode::On, LoopDetectionMode::Interactive] {
+        let mut declined = vec![counted; 6];
+        declined.extend([None, None]);
+        declined.extend([unbounded; 5]);
+        assert_eq!(self_damage_recast_offers(mode, false), declined, "{mode:?}");
+        let mut took = vec![counted];
+        took.extend([unbounded; 12]);
+        assert_eq!(self_damage_recast_offers(mode, true), took, "{mode:?}");
+    }
+
+    let (mut taker, sprout, fodder) = sprout_swarm_scenario_with_drain(
+        4,
+        Some("Whenever you cast a spell, Test Drain Engine deals 1 damage to Test Drain Engine."),
+    );
+    taker
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit()
+        .resolve();
+    let before = saproling_count(taker.state());
+    taker
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(25),
+            template: None,
+        })
+        .expect("declare");
+    while matches!(
+        taker.state().waiting_for,
+        WaitingFor::RespondToShortcut { .. }
+    ) {
+        taker
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("accept");
+    }
+    assert_eq!(saproling_count(taker.state()), before + 25);
+    assert!(!taker
+        .state()
+        .battlefield
+        .iter()
+        .any(|id| taker.state().objects[id].name == "Test Drain Engine"));
+
+    let (mut free, free_sprout, free_fodder) = sprout_swarm_scenario(4);
+    free.cast(free_sprout)
+        .accept_optional()
+        .convoke_with(&[free_fodder[0]])
+        .commit()
+        .resolve();
+    let WaitingFor::LoopShortcut { schema, .. } = &free.state().waiting_for else {
+        panic!("the drain-free loop is not offered");
+    };
+    assert!(!schema.is_bounded());
 }

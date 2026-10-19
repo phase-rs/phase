@@ -29,7 +29,7 @@ use crate::types::game_state::{
     PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
     PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
     PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
-    ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId};
 use crate::types::player::PlayerId;
@@ -1994,6 +1994,18 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 104.4b + CR 608.2d: a descendant choice belongs to every
+    /// unfinished enclosing iteration. This changes evidence, never ownership.
+    pub(crate) fn note_repeat_until_descendant_choice(&mut self) {
+        for frame in self.frames.iter_mut() {
+            if let ResolutionFrame::RepeatUntil(pending) = frame {
+                if let Some(witness) = pending.iteration_progress.as_mut() {
+                    witness.choice = RepeatIterationChoice::OptionalOffered;
+                }
+            }
+        }
+    }
+
     /// Park a newly active repeat-until owner.
     pub fn push_repeat_until(&mut self, frame: PendingRepeatUntil) {
         self.push_inner(ResolutionFrame::RepeatUntil(frame));
@@ -3790,7 +3802,8 @@ impl ResolutionStack {
 /// from the legacy actor fallback stored in `valid_card`. Version 4 requires
 /// every draw frame to carry its result owner explicitly, including `null`.
 /// Version 5 adds the simultaneous-draw dealer to the draw frame.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
+/// Version 6 retains deferred Clash bottom choices until the final answer.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4342,7 +4355,7 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4 and 5 use the same frame
+    /// 2 and 3 share the typed-frame reader; versions 4, 5 and 6 use the same frame
     /// layout with an explicit draw-result-owner presence check, and a version-4
     /// draw frame simply has no dealer.
     fn from_value(mut value: Value) -> Result<Self, String> {
@@ -4367,12 +4380,12 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | RESOLUTION_STATE_WIRE_VERSION => {
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | 5 | RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV4
             }
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -4585,6 +4598,7 @@ impl ResolutionStateWire {
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
                 crate::types::game_state::validate_trigger_firing_coherence(&legacy)?;
+                crate::types::game_state::validate_owed_spell_final_part_coherence(&legacy)?;
                 crate::types::game_state::validate_return_result_occurrence_coherence(&legacy)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&legacy);
@@ -4648,6 +4662,7 @@ impl ResolutionStateWire {
                     );
                 }
                 crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
+                crate::types::game_state::validate_owed_spell_final_part_coherence(&projected)?;
                 crate::types::game_state::validate_return_result_occurrence_coherence(&projected)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&projected);
@@ -4690,6 +4705,7 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
     {
         state.resolving_stack_entry = None;
         state.resolving_trigger_firing = None;
+        state.resolving_spell_final_part = None;
         state.resolution_source_relatch = None;
     }
 }
@@ -6993,7 +7009,7 @@ mod tests {
 
     #[test]
     fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 5);
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 6);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
@@ -7479,6 +7495,7 @@ mod tests {
             restored.stop_progress, None,
             "a legacy payload carries no baseline, and `None` can never stop the repeat"
         );
+        assert_eq!(restored.iteration_progress, None);
         // Positive reach-guard: the payload really parsed — the frame's ability
         // survived intact, so `stop_progress == None` is not a parse failure.
         assert_eq!(
@@ -7505,6 +7522,12 @@ mod tests {
         let frame = PendingRepeatUntil {
             ability: Box::new(repeat_ability),
             stop_progress: Some(witness.clone()),
+            iteration_progress: Some(crate::types::game_state::RepeatUntilIterationWitness {
+                choice: RepeatIterationChoice::MandatoryOnly(
+                    crate::types::game_state::RepeatIterationMovement::Stationary,
+                ),
+                zone_changes_before: 3,
+            }),
         };
         let round_tripped: PendingRepeatUntil =
             serde_json::from_str(&serde_json::to_string(&frame).expect("frame serializes"))
@@ -7554,6 +7577,7 @@ mod tests {
             PendingRepeatUntil {
                 ability: Box::new(repeat_ability),
                 stop_progress: None,
+                iteration_progress: None,
             },
         ));
         assert!(matches!(
@@ -7790,6 +7814,7 @@ mod tests {
                 continuation: None,
                 replacement_applied: HashSet::new(),
                 remaining_players: Vec::new(),
+                trigger_context: None,
             },
         );
         crate::game::effects::choose_one_of::resume_pending(&mut choose_one_of, &mut Vec::new());
@@ -9027,6 +9052,6 @@ mod tests {
         let error = serde_json::from_value::<ResolutionStateWire>(future)
             .expect_err("an unknown version is refused")
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, or 5"), "{error}");
+        assert!(error.contains("1, 2, 3, 4, 5, or 6"), "{error}");
     }
 }

@@ -149,6 +149,15 @@ describe("adapter boundary guardrails", () => {
     expect(isWaitingForHandled(waitingFor)).toBe(true);
   });
 
+  it("handles the token-host waiting payload", () => {
+    const waitingFor: WaitingFor = {
+      type: "ChooseTokenHost",
+      data: { player: 0, source_id: 1, legal_targets: [{ Object: 7 }, { Object: 8 }], pending_ability: null },
+    };
+
+    expect(isWaitingForHandled(waitingFor)).toBe(true);
+  });
+
   it("handles the copy-retarget waiting payload", () => {
     const waitingFor: WaitingFor = {
       type: "CopyRetarget",

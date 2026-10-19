@@ -8,11 +8,12 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::combat::AttackTarget;
 use crate::game::conditions::{
-    counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_has_enduring_story, eval_is_initiative, eval_is_monarch, eval_no_monarch,
-    eval_recipient_attacking_owner_target, eval_shares_color_with_most_common_color,
-    eval_source_entered_this_turn, eval_source_has_dealt_damage, eval_source_in_zone,
-    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+    counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_boon,
+    eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
+    eval_no_monarch, eval_recipient_attacking_owner_target,
+    eval_shares_color_with_most_common_color, eval_source_entered_this_turn,
+    eval_source_has_dealt_damage, eval_source_in_zone, eval_source_is_attacking,
+    eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{
@@ -43,9 +44,10 @@ use crate::types::ability_visit::{
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
-    is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
+    is_land_subtype, noncreature_subtype_set, CardType, CoreType, SubtypeSet, Supertype,
 };
 use crate::types::counter::{has_positive_counters, CounterType};
+use crate::types::events::ActivatedAbilityKind;
 use crate::types::game_state::{
     DayNight, GameState, LayersDirty, StaticGateKey, TransientContinuousEffect,
     TransientContinuousEffectBindings,
@@ -80,7 +82,20 @@ impl LayerZoneObjectCache {
         self.ids_by_zone.entry(zone).or_insert_with(|| {
             #[cfg(test)]
             record_layer_zone_materialization(zone);
-            super::targeting::zone_object_ids(state, zone)
+            let mut ids = super::targeting::zone_object_ids(state, zone);
+            // CR 608.2n + CR 613.1: an instant or sorcery whose resolution is
+            // paused for a choice is popped off `state.stack` but is still on the
+            // stack until its final part. The keyword-reset loop below already
+            // resets it, so a continuous effect granting it a keyword (Taigam's
+            // rebound) must be re-applied to it in the same pass.
+            if zone == Zone::Stack {
+                if let Some(entry) = super::stack::resolving_instant_or_sorcery_on_stack(state) {
+                    if !ids.contains(&entry.id) {
+                        ids.push(entry.id);
+                    }
+                }
+            }
+            ids
         })
     }
 
@@ -220,34 +235,69 @@ enum ContinuousEffectGroupKey {
 
 type StartedContinuousEffectSets = HashMap<ContinuousEffectGroupKey, Vec<ObjectId>>;
 
+/// CR 205.3: The subtype set a card type owns. Kindred (and the legacy Tribal
+/// type) share the creature types (CR 205.3m, CR 308.2, CR 308.3). Card types
+/// with no subtype list of their own correlate with no subtype set.
+fn core_type_subtype_set(core_type: CoreType) -> Option<SubtypeSet> {
+    match core_type {
+        // CR 205.3m + CR 308.2 + CR 308.3: creatures and kindreds share creature types.
+        CoreType::Creature | CoreType::Kindred | CoreType::Tribal => Some(SubtypeSet::Creature),
+        // CR 205.3g: artifact types.
+        CoreType::Artifact => Some(SubtypeSet::Artifact),
+        // CR 205.3h: enchantment types.
+        CoreType::Enchantment => Some(SubtypeSet::Enchantment),
+        // CR 205.3i: land types.
+        CoreType::Land => Some(SubtypeSet::Land),
+        // CR 205.3j: planeswalker types.
+        CoreType::Planeswalker => Some(SubtypeSet::Planeswalker),
+        // CR 205.3k: instants and sorceries share spell types.
+        CoreType::Instant | CoreType::Sorcery => Some(SubtypeSet::Spell),
+        // CR 205.3q: battle types.
+        CoreType::Battle => Some(SubtypeSet::Battle),
+        CoreType::Dungeon
+        | CoreType::Plane
+        | CoreType::Phenomenon
+        | CoreType::Scheme
+        | CoreType::Conspiracy => None,
+    }
+}
+
+/// CR 205.3: The subtype set a subtype belongs to. The fixed noncreature lists
+/// are authoritative; every other subtype is a creature type (CR 205.3m).
+fn subtype_set_of(subtype: &str) -> SubtypeSet {
+    noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature)
+}
+
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-/// CR 205.1a: Whether a subtype correlates to at least one of the given core
-/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// CR 205.1a + CR 205.3d: Whether a subtype correlates to at least one of the
+/// given core types - i.e. whether it survives a card-type replacement or
+/// removal. A creature type correlates only to Creature, Kindred or Tribal, so
+/// it never survives on an object that has none of them. Shared with the
 /// token-copy "stamp at creation" path so both the layered and baked
 /// applications of `SetCardTypes` drop the same uncorrelated subtypes.
-pub(crate) fn subtype_matches_core_types(
-    subtype: &str,
-    core_types: &[CoreType],
-    all_creature_types: &[String],
-) -> bool {
-    let Some(set) = noncreature_subtype_set(subtype) else {
-        return core_types.contains(&CoreType::Creature)
-            || core_types.contains(&CoreType::Kindred)
-            || all_creature_types
-                .iter()
-                .any(|creature_type| creature_type == subtype);
+pub(crate) fn subtype_matches_core_types(subtype: &str, core_types: &[CoreType]) -> bool {
+    let set = subtype_set_of(subtype);
+    core_types
+        .iter()
+        .any(|core_type| core_type_subtype_set(*core_type) == Some(set))
+}
+
+/// CR 205.1a: Remove a card type. "If an object's card type is removed, the
+/// subtypes correlated with that card type will remain if they are also the
+/// subtypes of a card type the object currently has; otherwise, they are also
+/// removed for the entire time the object's card type is removed." Only
+/// subtypes of the removed type's own set are considered, so an unrelated
+/// subtype added by a later effect is untouched. Shared by the layered
+/// `RemoveType` application, the baked token-copy arms and the bestow form.
+pub(crate) fn remove_core_type(card_types: &mut CardType, core_type: CoreType) {
+    card_types.core_types.retain(|t| *t != core_type);
+    let Some(removed_set) = core_type_subtype_set(core_type) else {
+        return;
     };
-    core_types.iter().any(|core_type| {
-        matches!(
-            (core_type, set),
-            (CoreType::Artifact, SubtypeSet::Artifact)
-                | (CoreType::Enchantment, SubtypeSet::Enchantment)
-                | (CoreType::Land, SubtypeSet::Land)
-                | (CoreType::Planeswalker, SubtypeSet::Planeswalker)
-                | (CoreType::Instant | CoreType::Sorcery, SubtypeSet::Spell)
-                | (CoreType::Battle, SubtypeSet::Battle)
-        )
-    })
+    let remaining = &card_types.core_types;
+    card_types.subtypes.retain(|subtype| {
+        subtype_set_of(subtype) != removed_set || subtype_matches_core_types(subtype, remaining)
+    });
 }
 
 /// CR 205.3: Remove every subtype belonging to `set`. Creature-type membership
@@ -1609,6 +1659,11 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::IsMonarch { player } => {
             matches!(player, PlayerScope::RecipientController)
         }
+        // Digital-only Alchemy (no CR entry): same recipient-anchored
+        // subject rule as the monarch arm above.
+        StaticCondition::HasBoon { player } => {
+            matches!(player, PlayerScope::RecipientController)
+        }
         // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
         // color…" — the color check is on the recipient (the enchanted creature),
         // not the Aura source, so it must route through the recipient-eval path.
@@ -1712,6 +1767,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -1754,6 +1810,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -1870,6 +1927,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -1903,6 +1961,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => CharacteristicKinds::EMPTY,
     }
 }
@@ -2000,6 +2059,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2042,6 +2102,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -2259,6 +2320,12 @@ fn evaluate_condition_inner(
                     .unwrap_or(controller)
             });
             super::players::is_opponent(state, source_controller, state.active_player)
+        }
+        // CR 500.8 + CR 506.1 + CR 608.2c: the first combat phase of the turn
+        // must be the phase in progress (shared predicate; the composed
+        // possessive form carries its `DuringYourTurn` scope separately).
+        StaticCondition::FirstCombatPhaseOfTurn => {
+            super::conditions::first_combat_phase_in_progress(state)
         }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
@@ -2569,6 +2636,13 @@ fn evaluate_condition_inner(
         StaticCondition::IsMonarch { player } => {
             designation_player(state, player, controller, source_id, context)
                 .is_some_and(|player| eval_is_monarch(state, player))
+        }
+        // Digital-only Alchemy (no CR entry): "if you have a boon" — the
+        // player axis resolves like `IsMonarch`'s; the leaf reads the held
+        // boon list instead of a designation.
+        StaticCondition::HasBoon { player } => {
+            designation_player(state, player, controller, source_id, context)
+                .is_some_and(|player| eval_has_boon(state, player))
         }
         // CR 726.3: True when the controller has the initiative.
         StaticCondition::IsInitiative => eval_is_initiative(state, controller),
@@ -3154,11 +3228,13 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     // needed it is the NON-RESOLVING stack exit — a stolen spell countered and
     // exiled (Dissipate), the CR 724.1b "end the turn" / CR 724.2b "end the
     // combat phase" stack exiles, and stack-exile riders. A stolen spell that
-    // exiles ON RESOLUTION (rebound, CR 702.88a) is NOT that class: MEASURED,
-    // the mid-resolution flush re-seeds the object from
-    // `resolving_stack_entry.controller` while the layer-2 scan can no longer
-    // reach it (`zone_object_ids(Stack)` no longer lists the popped entry), so
-    // the caster is already restored before the move.
+    // exiles ON RESOLUTION (rebound, CR 702.88a) is NOT that class: the
+    // mid-resolution flush re-seeds the object from
+    // `resolving_stack_entry.controller` (the `.chain()` above), and the layer-2
+    // scan reaches the popped resolving spell too, because
+    // `LayerZoneObjectCache::ids_for` adds it back into the Stack-zone population
+    // (CR 608.2n). The seed is what restores the caster's control before the move;
+    // the scan only re-applies the continuous effects over that restored state.
 
     // CR 611.2 + CR 613.1: Rebuild the static-effect-source index from the
     // just-reset base `static_definitions` so the Copy / main gathers below
@@ -3324,10 +3400,13 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     // covered by its own CDA static definition.
     if !state.all_creature_types.is_empty() {
         for &id in &bf_ids {
-            let has_changeling = state
-                .objects
-                .get(&id)
-                .is_some_and(|o| o.has_keyword(&Keyword::Changeling));
+            let has_changeling = state.objects.get(&id).is_some_and(|o| {
+                // CR 205.3d/m: the derived types must still own the creature set.
+                o.has_keyword(&Keyword::Changeling)
+                    && o.card_types.core_types.iter().any(|core_type| {
+                        core_type_subtype_set(*core_type) == Some(SubtypeSet::Creature)
+                    })
+            });
             if has_changeling {
                 let all_types = state.all_creature_types.clone();
                 if let Some(obj) = state.objects.get_mut(&id) {
@@ -3969,6 +4048,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::ConvokedCreatureCount
@@ -4295,6 +4375,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -4637,6 +4718,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -4673,6 +4755,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -6559,10 +6642,13 @@ fn apply_layers_incremental(
     // has Changeling but no CDA covered it.
     if !state.all_creature_types.is_empty() {
         for &id in &recipient_ids {
-            let has_changeling = state
-                .objects
-                .get(&id)
-                .is_some_and(|o| o.has_keyword(&Keyword::Changeling));
+            let has_changeling = state.objects.get(&id).is_some_and(|o| {
+                // CR 205.3d/m: the derived types must still own the creature set.
+                o.has_keyword(&Keyword::Changeling)
+                    && o.card_types.core_types.iter().any(|core_type| {
+                        core_type_subtype_set(*core_type) == Some(SubtypeSet::Creature)
+                    })
+            });
             if has_changeling {
                 let all_types = state.all_creature_types.clone();
                 if let Some(obj) = state.objects.get_mut(&id) {
@@ -8011,6 +8097,12 @@ struct ExpandedReferencedGrants {
 /// the acquired ability carries (and is enforced under) the granting card's
 /// frequency limit (Locus of Enlightenment's "once each turn"). `None` leaves the
 /// donated abilities uncapped — the required default for every other grant.
+///
+/// CR 606.2: When `kind` is `Some(k)`, only activated abilities whose
+/// `ActivatedAbilityKind::of_definition` classification equals `k` are donated
+/// (Nicol Bolas, Dragon-God's `Some(Loyalty)` loyalty subset). `None` donates
+/// all activated abilities. The kind and cap axes are orthogonal: the filter
+/// applies iff `Some`, the injection iff `Some`, independently.
 fn expand_granted_activated_abilities(
     state: &GameState,
     host_source_id: ObjectId,
@@ -8018,6 +8110,7 @@ fn expand_granted_activated_abilities(
     affected_ids: &[ObjectId],
     source: &TargetFilter,
     cap: Option<&ActivationRestriction>,
+    kind: Option<ActivatedAbilityKind>,
 ) -> ExpandedReferencedGrants {
     let mut out = ExpandedReferencedGrants {
         output: ReferencedGrantOutput::default(),
@@ -8085,6 +8178,13 @@ fn expand_granted_activated_abilities(
             };
             for ability in provider.abilities.iter() {
                 if ability.kind != crate::types::ability::AbilityKind::Activated {
+                    continue;
+                }
+                // CR 606.2: the kind selector narrows the donated set to the
+                // exact `of_definition` classification — NOT
+                // `satisfies_prohibition_kind`, whose `Normal`-covers-`Mana`
+                // semantics belong to the prohibition axis (CR 602.5/605.1a).
+                if kind.is_some_and(|k| ActivatedAbilityKind::of_definition(ability) != k) {
                     continue;
                 }
                 // CR 602.5b + CR 602.5c: A granting card's use-restriction (Locus
@@ -10618,7 +10718,7 @@ fn apply_continuous_effect_filtered(
     // recipient restriction have been resolved by the ordinary apply path.
     // Install each donated definition at this effect's layer-6 position.
     let expanded = match &effect.modification {
-        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } => {
+        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap, kind } => {
             Some(expand_granted_activated_abilities(
                 state,
                 effect.source_id,
@@ -10626,6 +10726,7 @@ fn apply_continuous_effect_filtered(
                 affected_ids,
                 source,
                 cap.as_ref(),
+                *kind,
             ))
         }
         ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
@@ -10900,12 +11001,12 @@ fn apply_continuous_effect_filtered(
     // WHICH CARDS: only those whose magnitude is recipient-INDEPENDENT, since a
     // recipient-DEPENDENT one is resolved inside the loop below and never
     // reaches this binding at all. That excludes Rat Colony ("each OTHER Rat"
-    // carries `FilterProp::Another`, which `quantity::filter_uses_recipient`
-    // reports as recipient-relative) and includes the 161 corpus cards shaped
-    // like Beanstalk Giant / Ashaya / Adeline ("equal to the number of lands you
-    // control"). The test pair below is built on the latter for exactly that
-    // reason — a Rat Colony fixture would assert zero against a counter that can
-    // never move.
+    // carries `FilterProp::Another`) and Ancient Ooze (an aggregate over
+    // "other" creatures): the exhaustive quantity classifier reports both as
+    // recipient-relative. Beanstalk Giant / Ashaya / Adeline ("equal to the
+    // number of lands you control") remain recipient-independent.
+    // The test pair below uses the latter class; a Rat Colony fixture would
+    // assert zero against a counter that can never move.
     //
     // Skipping it is a pure evaluation-order change, not a semantic one: the
     // affected set is already fixed above (and CR 613.6-retained through
@@ -11731,8 +11832,12 @@ pub(crate) fn apply_type_or_color_modification(
                 obj.card_types.core_types.push(*core_type);
             }
         }
+        // CR 205.1a: removing a card type also removes its correlated subtypes
+        // (unless another remaining type owns the same subtype set), so an
+        // object that stops being a creature has no creature types while it
+        // isn't one. A later `AddType` never resurrects them (CR 613.7).
         ContinuousModification::RemoveType { core_type } => {
-            obj.card_types.core_types.retain(|t| t != core_type);
+            remove_core_type(&mut obj.card_types, *core_type);
         }
         ContinuousModification::SetColor { colors } => {
             obj.color = colors.clone();
@@ -11753,9 +11858,9 @@ pub(crate) fn apply_type_or_color_modification(
         // CR 205.1a + CR 613.1d: Replace the entire core card-type set.
         ContinuousModification::SetCardTypes { core_types } => {
             obj.card_types.core_types = core_types.clone();
-            obj.card_types.subtypes.retain(|subtype| {
-                subtype_matches_core_types(subtype, core_types, all_creature_types)
-            });
+            obj.card_types
+                .subtypes
+                .retain(|subtype| subtype_matches_core_types(subtype, core_types));
         }
         // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
         // named subtype set. Membership for the `Creature` set is resolved
@@ -12159,6 +12264,45 @@ pub(crate) fn compute_current_copiable_values(
 #[cfg(test)]
 mod tests {
 
+    /// CR 500.8 + CR 506.1 + CR 506.2 + CR 611.3a (structural review round 4):
+    /// the static "As long as it's the first combat phase of your turn" gate
+    /// admits its effect only while that phase is in progress — the phase-start
+    /// tally alone (one `BeginCombat` this turn) leaves the buff on through the
+    /// postcombat main and the ending phase, and an added combat phase makes the
+    /// gate false while the second one runs. `Phase::group` recovers the
+    /// CR 506.1 phase from the engine's flattened combat-step variants, so every
+    /// step of the first combat phase qualifies.
+    #[test]
+    fn first_combat_phase_static_requires_the_phase_in_progress() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(1);
+        for (phase, begin_combat_starts, expected) in [
+            (Phase::PreCombatMain, 0, false),
+            (Phase::DeclareAttackers, 1, true),
+            (Phase::EndCombat, 1, true),
+            (Phase::PostCombatMain, 1, false),
+            (Phase::End, 1, false),
+            (Phase::DeclareAttackers, 2, false),
+        ] {
+            state.steps_started_this_turn.clear();
+            for _ in 0..begin_combat_starts {
+                state.steps_started_this_turn.record(Phase::BeginCombat);
+            }
+            state.phase = phase;
+            assert_eq!(
+                evaluate_condition_inner(
+                    &state,
+                    &StaticCondition::FirstCombatPhaseOfTurn,
+                    PlayerId(0),
+                    source,
+                    ConditionContext::NONE,
+                ),
+                expected,
+                "phase {phase:?} with {begin_combat_starts} BeginCombat start(s)"
+            );
+        }
+    }
+
     /// CR 201.5a: the predicate is true exactly for grant bodies that name their granter.
     #[test]
     fn granting_object_reference_decides_the_stamp() {
@@ -12430,31 +12574,365 @@ mod tests {
         let mut state = setup();
         state.all_creature_types = vec!["Bear".to_string(), "Berserker".to_string()];
 
-        assert!(subtype_matches_core_types(
-            "Bear",
-            &[CoreType::Creature],
-            &state.all_creature_types
-        ));
+        assert!(subtype_matches_core_types("Bear", &[CoreType::Creature]));
         assert!(!subtype_matches_core_types(
             "Equipment",
-            &[CoreType::Creature],
-            &state.all_creature_types
+            &[CoreType::Creature]
         ));
         assert!(!subtype_matches_core_types(
             "Mountain",
-            &[CoreType::Creature],
-            &state.all_creature_types
+            &[CoreType::Creature]
         ));
         assert!(subtype_matches_core_types(
             "Equipment",
-            &[CoreType::Artifact, CoreType::Creature],
-            &state.all_creature_types
+            &[CoreType::Artifact, CoreType::Creature]
         ));
-        assert!(subtype_matches_core_types(
-            "Siege",
-            &[CoreType::Battle],
-            &state.all_creature_types
-        ));
+        assert!(subtype_matches_core_types("Siege", &[CoreType::Battle]));
+    }
+
+    /// CR 205.3m + CR 308.2 + CR 308.3 + CR 205.1a/205.3d: creature types
+    /// correlate only to Creature, Kindred or Tribal; every other subtype set is
+    /// fixed. Registry-free by signature.
+    #[test]
+    fn subtype_matches_core_types_creature_types_require_creature_kindred_or_tribal() {
+        for (subtype, core_types, expected) in [
+            ("Avatar", vec![CoreType::Enchantment], false),
+            (
+                "Avatar",
+                vec![CoreType::Enchantment, CoreType::Creature],
+                true,
+            ),
+            (
+                "Avatar",
+                vec![CoreType::Kindred, CoreType::Enchantment],
+                true,
+            ),
+            ("Avatar", vec![CoreType::Tribal, CoreType::Artifact], true),
+            ("Equipment", vec![CoreType::Artifact], true),
+            ("Equipment", vec![CoreType::Creature], false),
+            ("Heartwood", vec![CoreType::Artifact], true),
+            ("Heartwood", vec![CoreType::Creature], false),
+            ("Vibranium", vec![CoreType::Artifact], true),
+            ("Vibranium", vec![CoreType::Creature], false),
+            ("Forest", vec![CoreType::Land, CoreType::Creature], true),
+            ("Forest", vec![CoreType::Creature], false),
+            ("Siege", vec![CoreType::Battle], true),
+            ("Adventure", vec![CoreType::Instant], true),
+        ] {
+            assert_eq!(
+                subtype_matches_core_types(subtype, &core_types),
+                expected,
+                "{subtype} vs {core_types:?}"
+            );
+        }
+    }
+
+    /// CR 205.1a + CR 205.3d: `SetCardTypes` to a result with no creature type
+    /// drops registered creature types (the registry no longer keeps them alive).
+    /// Deliberately synthetic: the registry clause has no real-card owner.
+    #[test]
+    fn set_card_types_drops_registered_creature_types_from_a_noncreature_result() {
+        for (result_type, keeps_bear) in [(CoreType::Land, false), (CoreType::Creature, true)] {
+            let mut state = setup();
+            state.all_creature_types = vec!["Bear".to_string()];
+            let target = make_creature(&mut state, "Bear Object", 2, 2, PlayerId(0));
+            {
+                let obj = state.objects.get_mut(&target).unwrap();
+                obj.card_types.subtypes = vec!["Bear".to_string()];
+                obj.base_card_types = obj.card_types.clone();
+            }
+            let source = make_creature(&mut state, "Type Setter", 1, 1, PlayerId(0));
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SpecificObject { id: target })
+                        .modifications(vec![ContinuousModification::SetCardTypes {
+                            core_types: vec![result_type],
+                        }]),
+                );
+
+            evaluate_layers(&mut state);
+
+            let obj = &state.objects[&target];
+            assert_eq!(obj.card_types.core_types, vec![result_type]);
+            assert_eq!(
+                obj.card_types.subtypes.iter().any(|s| s == "Bear"),
+                keeps_bear,
+                "SetCardTypes to {result_type:?}"
+            );
+        }
+    }
+
+    /// CR 205.1a + CR 613.7: a creature type removed with the Creature type is
+    /// not resurrected by a later `AddType { Creature }`, in either timestamp
+    /// order.
+    #[test]
+    fn remove_type_then_later_add_type_creature_keeps_creature_types_removed() {
+        for (remove_ts, add_ts, ends_creature) in [(5, 10, true), (10, 5, false)] {
+            let mut state = setup();
+            state.all_creature_types = vec!["Bear".to_string()];
+            let target = make_creature(&mut state, "Bear Object", 2, 2, PlayerId(0));
+            {
+                let obj = state.objects.get_mut(&target).unwrap();
+                obj.card_types.subtypes = vec!["Bear".to_string()];
+                obj.base_card_types = obj.card_types.clone();
+            }
+            for (name, ts, modification) in [
+                (
+                    "Remover",
+                    remove_ts,
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    },
+                ),
+                (
+                    "Adder",
+                    add_ts,
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                ),
+            ] {
+                let source = make_creature(&mut state, name, 1, 1, PlayerId(0));
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.timestamp = ts;
+                obj.static_definitions.push(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SpecificObject { id: target })
+                        .modifications(vec![modification]),
+                );
+            }
+
+            evaluate_layers(&mut state);
+
+            let obj = &state.objects[&target];
+            assert_eq!(
+                obj.card_types.core_types.contains(&CoreType::Creature),
+                ends_creature,
+                "reach guard: remove ts {remove_ts}, add ts {add_ts}"
+            );
+            assert!(
+                !obj.card_types.subtypes.iter().any(|s| s == "Bear"),
+                "CR 205.1a: a later AddType Creature must not restore Bear (remove ts {remove_ts}, add ts {add_ts})"
+            );
+        }
+    }
+
+    /// CR 205.1a: `remove_core_type` drops the removed type's correlated
+    /// subtypes unless a remaining type owns the same subtype set.
+    #[test]
+    fn remove_core_type_helper_cases() {
+        use crate::types::card_type::CardType;
+        use CoreType::*;
+
+        fn card_type(core_types: &[CoreType], subtypes: &[&str]) -> CardType {
+            CardType {
+                supertypes: vec![],
+                core_types: core_types.to_vec(),
+                subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+        fn removed(core_types: &[CoreType], subtypes: &[&str], remove: CoreType) -> CardType {
+            let mut ct = card_type(core_types, subtypes);
+            remove_core_type(&mut ct, remove);
+            ct
+        }
+
+        // Land Creature - Forest Dryad (Dryad Arbor shape).
+        let empty = removed(&[Artifact, Creature], &[], Creature);
+        assert_eq!(empty.core_types, vec![Artifact]);
+        assert!(empty.subtypes.is_empty());
+        for subtype in ["Heartwood", "Vibranium"] {
+            for (remove, remaining, expected) in [
+                (Creature, Artifact, vec![subtype]),
+                (Artifact, Creature, vec!["Bear"]),
+            ] {
+                let mut actual = card_type(&[Artifact, Creature], &[subtype, "Bear"]);
+                actual.supertypes.push(Supertype::Legendary);
+                remove_core_type(&mut actual, remove);
+                assert_eq!(actual.core_types, vec![remaining]);
+                assert_eq!(actual.subtypes, expected);
+                assert_eq!(actual.supertypes, vec![Supertype::Legendary]);
+            }
+        }
+        assert_eq!(
+            removed(&[Land, Creature], &["Forest", "Dryad"], Creature),
+            card_type(&[Land], &["Forest"])
+        );
+        assert_eq!(
+            removed(&[Land, Creature], &["Forest", "Dryad"], Land),
+            card_type(&[Creature], &["Dryad"])
+        );
+        // Kindred / Tribal keep the creature set (CR 308.2, CR 308.3).
+        assert_eq!(
+            removed(&[Kindred, Creature], &["Eldrazi"], Creature),
+            card_type(&[Kindred], &["Eldrazi"])
+        );
+        assert_eq!(
+            removed(&[Tribal, Creature], &["Eldrazi"], Creature),
+            card_type(&[Tribal], &["Eldrazi"])
+        );
+        assert_eq!(
+            removed(&[Kindred, Creature], &["Eldrazi"], Kindred),
+            card_type(&[Creature], &["Eldrazi"])
+        );
+        // Already lacks the type (the bestow shape): the set is still pruned.
+        assert_eq!(
+            removed(&[Enchantment], &["Insect", "Aura"], Creature),
+            card_type(&[Enchantment], &["Aura"])
+        );
+        // A type with no subtype set changes nothing.
+        assert_eq!(
+            removed(&[Dungeon], &["Insect"], Dungeon),
+            card_type(&[], &["Insect"])
+        );
+        // The remaining sets.
+        assert_eq!(
+            removed(&[Enchantment, Creature], &["Saga", "Insect"], Enchantment),
+            card_type(&[Creature], &["Insect"])
+        );
+        assert_eq!(
+            removed(&[Planeswalker, Creature], &["Jace", "Human"], Planeswalker),
+            card_type(&[Creature], &["Human"])
+        );
+        assert_eq!(removed(&[Battle], &["Siege"], Battle), card_type(&[], &[]));
+        assert_eq!(
+            removed(&[Instant, Sorcery], &["Adventure"], Instant),
+            card_type(&[Sorcery], &["Adventure"])
+        );
+        assert_eq!(
+            removed(&[Artifact, Creature], &["Equipment", "Cat"], Artifact),
+            card_type(&[Creature], &["Cat"])
+        );
+    }
+
+    /// CR 205.1a/205.3g: canonical artifact types survive exactly their owner.
+    /// Synthetic primitive inputs exercise the ordinary production layer pass.
+    #[test]
+    fn artifact_subtype_correlation_survives_layered_removal_and_replacement() {
+        for subtype in ["Heartwood", "Vibranium"] {
+            for (modification, remaining, expected) in [
+                (
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    },
+                    CoreType::Artifact,
+                    subtype,
+                ),
+                (
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Artifact,
+                    },
+                    CoreType::Creature,
+                    "Bear",
+                ),
+                (
+                    ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Artifact],
+                    },
+                    CoreType::Artifact,
+                    subtype,
+                ),
+                (
+                    ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Creature],
+                    },
+                    CoreType::Creature,
+                    "Bear",
+                ),
+            ] {
+                let mut state = setup();
+                state.all_creature_types = vec!["Bear".into(), "Elf".into()];
+                let target = make_creature(&mut state, "Artifact Creature", 2, 2, PlayerId(0));
+                let obj = state.objects.get_mut(&target).unwrap();
+                obj.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
+                obj.card_types.subtypes = vec![subtype.into(), "Bear".into()];
+                obj.card_types.supertypes = vec![Supertype::Legendary];
+                obj.base_card_types = obj.card_types.clone();
+                let source = make_creature(&mut state, "Type Setter", 1, 1, PlayerId(0));
+                state
+                    .objects
+                    .get_mut(&source)
+                    .unwrap()
+                    .static_definitions
+                    .push(
+                        StaticDefinition::continuous()
+                            .affected(TargetFilter::SpecificObject { id: target })
+                            .modifications(vec![modification]),
+                    );
+                evaluate_layers(&mut state);
+                let actual = &state.objects[&target].card_types;
+                assert_eq!(actual.core_types, vec![remaining]);
+                assert_eq!(actual.subtypes, vec![expected.to_string()]);
+                assert_eq!(actual.supertypes, vec![Supertype::Legendary]);
+            }
+        }
+    }
+
+    /// CR 205.3d/m + CR 702.73a: both final append sites require a live owner.
+    #[test]
+    fn changeling_postfix_respects_correlated_type_in_full_and_incremental_paths() {
+        for incremental in [false, true] {
+            for registry in [vec!["Bear".to_string(), "Elf".to_string()], vec![]] {
+                let mut state = setup();
+                state.all_creature_types = registry.clone();
+                let mut cases = Vec::new();
+                for (core, changeling, base_subtype, eligible) in [
+                    (CoreType::Creature, true, "Shapeshifter", true),
+                    (CoreType::Kindred, true, "Shapeshifter", true),
+                    (CoreType::Tribal, true, "Shapeshifter", true),
+                    (CoreType::Enchantment, true, "Aura", false),
+                    (CoreType::Artifact, true, "Equipment", false),
+                    (CoreType::Creature, false, "Human", false),
+                ] {
+                    let id = make_creature(&mut state, "Postfix recipient", 2, 2, PlayerId(0));
+                    let obj = state.objects.get_mut(&id).unwrap();
+                    obj.card_types.core_types = vec![core];
+                    obj.card_types.subtypes = vec![base_subtype.into()];
+                    obj.base_card_types = obj.card_types.clone();
+                    obj.keywords = if changeling {
+                        vec![Keyword::Changeling]
+                    } else {
+                        vec![]
+                    };
+                    obj.base_keywords = obj.keywords.clone();
+                    cases.push((id, core, changeling, base_subtype, eligible));
+                }
+                if incremental {
+                    let entered = cases.iter().map(|(id, ..)| *id).collect();
+                    let prepared = prepare_incremental_flush(
+                        &mut state,
+                        &entered,
+                        StaticGateTruth::AssumeChanged,
+                    )
+                    .expect("reach: the actual incremental preparation accepts these entrants");
+                    apply_layers_incremental(
+                        &mut state,
+                        prepared,
+                        StateDurationRetirementOwner::LayerSettlement,
+                    );
+                } else {
+                    evaluate_layers(&mut state);
+                }
+                for (id, core, changeling, base_subtype, eligible) in cases {
+                    let obj = &state.objects[&id];
+                    assert_eq!(obj.card_types.core_types, vec![core]);
+                    assert_eq!(obj.has_keyword(&Keyword::Changeling), changeling);
+                    let mut expected = vec![base_subtype.to_string()];
+                    if eligible {
+                        expected.extend(registry.clone());
+                    }
+                    assert_eq!(
+                        obj.card_types.subtypes, expected,
+                        "incremental={incremental}, core={core:?}"
+                    );
+                }
+            }
+        }
     }
 
     fn make_creature(
@@ -19292,6 +19770,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
                     cap: None,
+                    kind: None,
                 }])]
             .into();
         }
@@ -19330,6 +19809,946 @@ mod tests {
             host_obj.abilities.iter().any(|a| a == &granted),
             "Myr Welder must gain the exiled card's activated ability; got {:?}",
             host_obj.abilities
+        );
+    }
+
+    /// CR 613.1f + CR 606.2: `GrantAllActivatedAbilitiesOf { kind:
+    /// Some(Loyalty) }` — the loyalty-subset reference grant. A loyalty-empty
+    /// planeswalker host carrying a hand-built parametrized-loyalty
+    /// `{ planeswalkers on the battlefield }` static (host-inclusive source —
+    /// the `Not{SelfRef}` conjunct is Phase 3 emission) gains exactly the provider
+    /// walker's loyalty abilities after layer evaluation: the `[+1]`/`[-3]`
+    /// fixed-loyalty defs and the `[-X]` `RemoveCounter{X}`-shaped def (per
+    /// `is_loyalty_ability_cost`), each with its `AsSorcery` restriction
+    /// intact — while the provider's `{T}` non-loyalty activated ability is
+    /// excluded by the ability-level loyalty-cost filter.
+    ///
+    /// Two phases: the lone host gains nothing while only itself matches its
+    /// own source (per-recipient self-skip); once the provider enters, the
+    /// host holds exactly the three donated loyalty defs. A second pass
+    /// re-derives the same three (per-pass reset idempotence), and a second
+    /// recipient under a different controller sharing the provider gains the
+    /// same three (per-controller memoization + per-recipient self-skip).
+    ///
+    /// Reverting the expander filter to kind-only lets the `{T}` def through
+    /// (RED); reverting the L9 dispatch arm donates nothing (RED).
+    #[test]
+    fn grants_all_loyalty_abilities_of_planeswalkers_on_the_battlefield() {
+        use crate::types::ability::CounterCostSelection;
+        use crate::types::ability::REMOVE_COUNTER_COST_X;
+
+        let mut state = setup();
+
+        // Battlefield-wide planeswalker source, host-inclusive by design.
+        let grant_source = || {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+            ]))
+        };
+        let grant_static = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: grant_source(),
+                    cap: None,
+                    kind: Some(ActivatedAbilityKind::Loyalty),
+                }])
+        };
+        // Battlefield planeswalker with no abilities of its own (baseline zero).
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+
+        let host = make_walker(&mut state, 800, PlayerId(0), "Loyalty-less Stand-in");
+        state.objects.get_mut(&host).unwrap().static_definitions = vec![grant_static()].into();
+
+        // Phase 1 (negative): the lone host matches its own source but the
+        // per-recipient self-skip donates nothing.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects.get(&host).unwrap().abilities.is_empty(),
+            "lone host must gain nothing from itself; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // Provider walker: [+1]/[-3] loyalty defs with printed-loyalty timing,
+        // a [-X] RemoveCounter{X}-shaped loyalty def, and a {T} non-loyalty
+        // activated def. Distinct effects identify each donor def.
+        let plus_one = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let minus_three = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -3 })
+        .sorcery_speed();
+        let minus_x = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        })
+        .sorcery_speed();
+        let tap_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let provider = make_walker(&mut state, 801, PlayerId(0), "Donor Walker");
+        {
+            let obj = state.objects.get_mut(&provider).unwrap();
+            // Printed abilities: on the base too, so a layer reset to
+            // `base_abilities` cannot make a negative assertion vacuous.
+            for def in [&plus_one, &minus_three, &minus_x, &tap_def] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        // Phase 2 (positive reach-guard): the host holds exactly the three
+        // donated loyalty defs with their timing intact.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let host_abilities = &state.objects.get(&host).unwrap().abilities;
+        assert_eq!(
+            host_abilities.len(),
+            3,
+            "host must hold exactly the three donated loyalty defs; got {:?}",
+            host_abilities
+        );
+        for donated in host_abilities.iter() {
+            assert!(
+                donated == &plus_one || donated == &minus_three || donated == &minus_x,
+                "unexpected donated def {donated:?}"
+            );
+            assert_eq!(
+                donated.activation_restrictions,
+                vec![ActivationRestriction::AsSorcery],
+                "donated loyalty def must keep its sorcery-speed timing; got {:?}",
+                donated.activation_restrictions
+            );
+        }
+        assert!(
+            host_abilities
+                .iter()
+                .all(|a| a.cost != Some(AbilityCost::Tap)),
+            "{{T}} non-loyalty def must be excluded by the loyalty-cost filter"
+        );
+
+        // A second pass re-derives the same three (per-pass reset idempotence).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&host).unwrap().abilities.len(),
+            3,
+            "second pass must re-derive the same three defs; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // A second recipient under a DIFFERENT controller sharing the provider
+        // gains the same three (per-controller memoization entry per
+        // controller + per-recipient self-skip).
+        let host_p1 = make_walker(&mut state, 802, PlayerId(1), "Second Stand-in");
+        state.objects.get_mut(&host_p1).unwrap().static_definitions = vec![grant_static()].into();
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        for id in [host, host_p1] {
+            assert_eq!(
+                state.objects.get(&id).unwrap().abilities.len(),
+                3,
+                "each recipient must hold exactly the three donated defs; got {:?}",
+                state.objects.get(&id).unwrap().abilities
+            );
+        }
+    }
+
+    /// CR 611.3a: the loyalty reference grant tracks the battlefield live —
+    /// a provider leaving retires its donations on the next pass, and a newly
+    /// entered provider donates immediately. Host + provider → present;
+    /// provider to graveyard → absent; a second provider entering donates its
+    /// own defs; when one of two providers leaves, only the remaining
+    /// provider's defs stay (provider-scan `matches_target_filter`
+    /// false-after-leave).
+    #[test]
+    fn loyalty_reference_grant_tracks_the_battlefield() {
+        let mut state = setup();
+
+        let grant_source =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+            ]));
+        let grant_static = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: grant_source,
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
+            }]);
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+        fn give_printed_loyalty(state: &mut GameState, walker: ObjectId, def: &AbilityDefinition) {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        fn send_to_graveyard(state: &mut GameState, object_id: ObjectId) {
+            let mut events = Vec::new();
+            move_object(
+                state,
+                ZoneMoveRequest {
+                    object_id,
+                    to: Zone::Graveyard,
+                    cause: ZoneChangeCause::Effect { source: object_id },
+                    mods: EntryMods::default(),
+                    placement: None,
+                    exile_links: ExileLinkSpec::default(),
+                    replacement_applied: Default::default(),
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                },
+                &mut events,
+            );
+            flush_layers(state);
+        }
+
+        let host = make_walker(&mut state, 810, PlayerId(0), "Loyalty-less Stand-in");
+        state.objects.get_mut(&host).unwrap().static_definitions = vec![grant_static].into();
+
+        // Distinct effects identify which provider donated.
+        let first_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let second_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -2 })
+        .sorcery_speed();
+
+        // Host + first provider → present (reach-guard).
+        let first = make_walker(&mut state, 811, PlayerId(0), "First Donor");
+        give_printed_loyalty(&mut state, first, &first_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&host)
+                .unwrap()
+                .abilities
+                .iter()
+                .any(|a| a == &first_def),
+            "host must hold the first provider's loyalty def; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // Second provider enters → both donate.
+        let second = make_walker(&mut state, 812, PlayerId(0), "Second Donor");
+        give_printed_loyalty(&mut state, second, &second_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&host).unwrap().abilities.len(),
+            2,
+            "host must hold both providers' defs; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // First provider leaves while the second remains → only the remaining
+        // provider's defs stay.
+        send_to_graveyard(&mut state, first);
+        {
+            let held = &state.objects.get(&host).unwrap().abilities;
+            assert_eq!(
+                held.len(),
+                1,
+                "only the remaining provider's def must stay; got {held:?}"
+            );
+            assert!(
+                held.iter().any(|a| a == &second_def),
+                "remaining def must be the second provider's; got {held:?}"
+            );
+        }
+
+        // Last provider leaves → absent.
+        send_to_graveyard(&mut state, second);
+        assert!(
+            state.objects.get(&host).unwrap().abilities.is_empty(),
+            "host must hold nothing once all providers leave; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+    }
+
+    /// Hand-built kind-selected loyalty grant static (the runtime authority
+    /// in isolation — the verbatim line now refuses at parse, so the parser
+    /// is bypassed here by design). Every Phase 3 layers test builds its
+    /// Bolas host statics through this helper, carrying the same source
+    /// filter the parser used to lower; providers stay hand-built with
+    /// distinct effects, since provider parsing is the orthogonal
+    /// Priority-11 printed-loyalty path.
+    fn bolas_grant_statics_from_verbatim_line() -> Vec<StaticDefinition> {
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(
+                            vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                        )),
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::SelfRef),
+                        },
+                    ],
+                },
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
+            }])]
+    }
+
+    /// CR 613.1f + CR 606.2: a Bolas host whose statics are the hand-built
+    /// kind-selected grant (the runtime authority in isolation) gains exactly
+    /// the donor walkers' loyalty defs: the `[+1]`/`[-3]` fixed-loyalty defs
+    /// and the `[-X]` `RemoveCounter{X}`-shaped def (per
+    /// `is_loyalty_ability_cost`), each with its `AsSorcery` timing
+    /// intact — while the donor's `{T}` non-loyalty def is excluded by the
+    /// ability-level loyalty-cost filter. An OPPONENT-controlled donor
+    /// donates too (the source carries no controller axis).
+    ///
+    /// Two phases plus a hostile leg: lone Bolas gains nothing; once the donor
+    /// enters Bolas holds exactly the three donated defs; once an
+    /// opponent-controlled donor enters Bolas holds all five. Reverting the
+    /// runtime kind filter admits the `{T}` def (red at the phase-2
+    /// assertion).
+    #[test]
+    fn bolas_gains_exactly_donor_loyalty_defs() {
+        use crate::types::ability::CounterCostSelection;
+        use crate::types::ability::REMOVE_COUNTER_COST_X;
+
+        let mut state = setup();
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+
+        let bolas = make_walker(&mut state, 900, PlayerId(0), "Nicol Bolas, Dragon-God");
+        state.objects.get_mut(&bolas).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+
+        // Phase 1 (negative): lone Bolas gains nothing (self-exclusion).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects.get(&bolas).unwrap().abilities.is_empty(),
+            "lone Bolas must gain nothing; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+
+        // Donor walker: [+1]/[-3] loyalty defs with printed-loyalty timing, a
+        // [-X] RemoveCounter{X}-shaped loyalty def, and a {T} non-loyalty
+        // activated def. Distinct effects identify each donor def.
+        let plus_one = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let minus_three = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -3 })
+        .sorcery_speed();
+        let minus_x = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        })
+        .sorcery_speed();
+        let tap_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let donor = make_walker(&mut state, 901, PlayerId(0), "Donor Walker");
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            // Printed abilities: on the base too, so a layer reset to
+            // `base_abilities` cannot make a negative assertion vacuous.
+            for def in [&plus_one, &minus_three, &minus_x, &tap_def] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        // Phase 2 (positive reach-guard): exactly the three donated loyalty
+        // defs with their timing intact; the {T} def excluded (reaches the
+        // `is_loyalty_ability_cost` false arm) and the [-X]-shaped cost
+        // included (reaches the `RemoveCounter` true arm).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let held = &state.objects.get(&bolas).unwrap().abilities;
+        assert_eq!(
+            held.len(),
+            3,
+            "Bolas must hold exactly the three donated loyalty defs; got {held:?}"
+        );
+        for donated in held.iter() {
+            assert!(
+                donated == &plus_one || donated == &minus_three || donated == &minus_x,
+                "unexpected donated def {donated:?}"
+            );
+            assert_eq!(
+                donated.activation_restrictions,
+                vec![ActivationRestriction::AsSorcery],
+                "donated loyalty def must keep its sorcery-speed timing; got {:?}",
+                donated.activation_restrictions
+            );
+        }
+        assert!(
+            held.iter().all(|a| a.cost != Some(AbilityCost::Tap)),
+            "{{T}} non-loyalty def must be excluded by the loyalty-cost filter"
+        );
+
+        // Hostile: an opponent-controlled donor still donates — the source has
+        // no controller axis (reaches `matches_target_filter` with no
+        // controller conjunct).
+        let opp_plus = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 11 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let opp_minus = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -2 })
+        .sorcery_speed();
+        let opp_donor = make_walker(&mut state, 902, PlayerId(1), "Opponent Donor");
+        {
+            let obj = state.objects.get_mut(&opp_donor).unwrap();
+            for def in [&opp_plus, &opp_minus] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let held = &state.objects.get(&bolas).unwrap().abilities;
+        assert_eq!(
+            held.len(),
+            5,
+            "Bolas must hold both donors' loyalty defs; got {held:?}"
+        );
+        for def in [&plus_one, &minus_three, &minus_x, &opp_plus, &opp_minus] {
+            assert!(
+                held.iter().any(|a| a == def),
+                "Bolas must hold donated def {def:?}; got {held:?}"
+            );
+        }
+    }
+
+    /// CR 611.3a: the hand-built Bolas grant tracks the battlefield live —
+    /// a provider leaving retires its donations on the next pass, and a newly
+    /// entered provider donates immediately. Bolas + donor → present; second
+    /// donor enters → both present; first donor leaves while the second remains
+    /// → only the remaining donor's defs stay (provider-scan
+    /// `matches_target_filter` false-after-leave); last donor leaves → absent.
+    /// Reverting the runtime expansion strands the phase-1 presence assertion
+    /// (red).
+    #[test]
+    fn bolas_grant_tracks_the_battlefield_live() {
+        let mut state = setup();
+
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+        fn give_printed_loyalty(state: &mut GameState, walker: ObjectId, def: &AbilityDefinition) {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        fn send_to_graveyard(state: &mut GameState, object_id: ObjectId) {
+            let mut events = Vec::new();
+            move_object(
+                state,
+                ZoneMoveRequest {
+                    object_id,
+                    to: Zone::Graveyard,
+                    cause: ZoneChangeCause::Effect { source: object_id },
+                    mods: EntryMods::default(),
+                    placement: None,
+                    exile_links: ExileLinkSpec::default(),
+                    replacement_applied: Default::default(),
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                },
+                &mut events,
+            );
+            flush_layers(state);
+        }
+
+        let bolas = make_walker(&mut state, 910, PlayerId(0), "Nicol Bolas, Dragon-God");
+        state.objects.get_mut(&bolas).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+
+        // Distinct effects identify which provider donated.
+        let first_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let second_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -2 })
+        .sorcery_speed();
+
+        // Bolas + first donor → present (reach-guard).
+        let first = make_walker(&mut state, 911, PlayerId(0), "First Donor");
+        give_printed_loyalty(&mut state, first, &first_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bolas)
+                .unwrap()
+                .abilities
+                .iter()
+                .any(|a| a == &first_def),
+            "Bolas must hold the first donor's loyalty def; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+
+        // Second donor enters → both donate.
+        let second = make_walker(&mut state, 912, PlayerId(0), "Second Donor");
+        give_printed_loyalty(&mut state, second, &second_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&bolas).unwrap().abilities.len(),
+            2,
+            "Bolas must hold both donors' defs; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+
+        // First donor leaves while the second remains → only the remaining
+        // donor's defs stay.
+        send_to_graveyard(&mut state, first);
+        {
+            let held = &state.objects.get(&bolas).unwrap().abilities;
+            assert_eq!(
+                held.len(),
+                1,
+                "only the remaining donor's def must stay; got {held:?}"
+            );
+            assert!(
+                held.iter().any(|a| a == &second_def),
+                "remaining def must be the second donor's; got {held:?}"
+            );
+        }
+
+        // Last donor leaves → absent.
+        send_to_graveyard(&mut state, second);
+        assert!(
+            state.objects.get(&bolas).unwrap().abilities.is_empty(),
+            "Bolas must hold nothing once all donors leave; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+    }
+
+    /// CR 613.1f: self-exclusion is self-ONLY. A lone Bolas (three printed
+    /// loyalty defs, hand-built statics) holds exactly its three printed
+    /// defs — no self-duplication. Two Bolases plus a donor each hold their own
+    /// three printed + the other Bolas's three printed + the donor's two, each
+    /// exactly once (re-donation dedup: B's donated-from-donor defs re-donated
+    /// to A collapse via the `GrantAbility` structural-equality `any` branch),
+    /// with identical composition across two consecutive passes (per-pass reset
+    /// idempotence). Reverting the runtime expansion strands the pair
+    /// assertions (red: each holds only its own three).
+    ///
+    /// Attribution (defense in depth): the FILTER conjunct is discriminated by
+    /// P3-C1's exact-shape assert (revert the source arm to bare Typed →
+    /// P3-C1 red, this test stays green — the per-recipient self-skip covers);
+    /// reverting the skip alone stays green (the filter covers); reverting
+    /// BOTH still stays green — self-donated defs are structurally identical
+    /// to the printed base, so the GrantAbility dedup suppresses them. This
+    /// test guards the no-self-duplication outcome, not the exclusion
+    /// mechanism (filter: P3-C1; skip: P2-C2).
+    #[test]
+    fn bolas_grant_excludes_self_only() {
+        let mut state = setup();
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+        fn give_printed(state: &mut GameState, walker: ObjectId, defs: &[AbilityDefinition]) {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            for def in defs {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        // Distinct loyalty defs per permanent so provenance is identifiable.
+        fn loyalty_plus(gain: i32) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: gain },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: 1 })
+            .sorcery_speed()
+        }
+        fn loyalty_minus(draw: i32) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: draw },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: -3 })
+            .sorcery_speed()
+        }
+        fn loyalty_seven(gain: i32) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: gain },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: -7 })
+            .sorcery_speed()
+        }
+
+        let a_printed = [loyalty_plus(1), loyalty_minus(3), loyalty_seven(7)];
+        let b_printed = [loyalty_plus(11), loyalty_minus(13), loyalty_seven(17)];
+        let donor_defs = [loyalty_plus(101), loyalty_minus(102)];
+
+        // Lone Bolas: exactly its three printed defs, no self-duplication.
+        let bolas_a = make_walker(&mut state, 920, PlayerId(0), "Nicol Bolas, Dragon-God");
+        give_printed(&mut state, bolas_a, &a_printed);
+        state.objects.get_mut(&bolas_a).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        {
+            let held = &state.objects.get(&bolas_a).unwrap().abilities;
+            assert_eq!(
+                held.len(),
+                3,
+                "lone Bolas must hold exactly its three printed defs; got {held:?}"
+            );
+            for def in &a_printed {
+                assert!(
+                    held.iter().any(|a| a == def),
+                    "lone Bolas must hold printed def {def:?}; got {held:?}"
+                );
+            }
+        }
+
+        // A second Bolas plus a donor: each Bolas gains the donor's defs AND
+        // the other Bolas's PRINTED defs — exclusion is self-only, not all.
+        let bolas_b = make_walker(&mut state, 921, PlayerId(0), "Nicol Bolas, Second Copy");
+        give_printed(&mut state, bolas_b, &b_printed);
+        state.objects.get_mut(&bolas_b).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+        let donor = make_walker(&mut state, 922, PlayerId(0), "Donor Walker");
+        give_printed(&mut state, donor, &donor_defs);
+
+        // Two consecutive passes: identical composition each time.
+        for pass in 1..=2 {
+            state.layers_dirty.mark_full();
+            evaluate_layers(&mut state);
+            for (id, own, other) in [
+                (bolas_a, &a_printed, &b_printed),
+                (bolas_b, &b_printed, &a_printed),
+            ] {
+                let held = &state.objects.get(&id).unwrap().abilities;
+                assert_eq!(
+                    held.len(),
+                    8,
+                    "pass {pass}: Bolas must hold own 3 + other's 3 + donor's 2; got {held:?}"
+                );
+                for def in own.iter().chain(other.iter()).chain(donor_defs.iter()) {
+                    assert_eq!(
+                        held.iter().filter(|a| a == &def).count(),
+                        1,
+                        "pass {pass}: single copy of {def:?} expected (re-donation dedup); got {held:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// CR 613.1f + CR 606.3 (transitive timing, Seam S1): a donor walker
+    /// holding a quoted-granted loyalty def — built via the PRODUCTION
+    /// quoted-grant path (`parse_quoted_ability_modifications`, the P1-C4
+    /// extractor pattern), NOT hand-built — donates a correctly-timed def to
+    /// the hand-built-statics Bolas: present with `AsSorcery` intact. A quoted
+    /// NON-loyalty grant alongside is excluded (reaches the loyalty-cost false
+    /// arm on a quoted def).
+    ///
+    /// Fixture decision: hand-placed donor def via the P1 production path, not
+    /// a live Gauntlet two-hop (which would depend on intra-pass Layer-6
+    /// ordering between Gauntlet's grant and Bolas's expansion); the
+    /// Gauntlet→donor hop is P1-covered. Timing enforcement composes from P1-C4
+    /// (quoted defs with `AsSorcery` refuse off-turn) + P3-C4 (donated defs'
+    /// carried restrictions are consulted). Reverting the runtime expansion
+    /// strands the donation assertion (red).
+    #[test]
+    fn bolas_donates_quoted_granted_loyalty_def_with_timing() {
+        use crate::parser::oracle_static::parse_quoted_ability_modifications;
+
+        // The P1 production path: a quoted "[0]: Proliferate" loyalty def
+        // carries sorcery-speed timing.
+        let parsed = parse_quoted_ability_modifications("\"[0]: Proliferate\"");
+        let quoted_loyalty = match parsed.as_slice() {
+            [ContinuousModification::GrantAbility { definition }] => (**definition).clone(),
+            other => panic!("expected single GrantAbility, got {other:?}"),
+        };
+        assert_eq!(quoted_loyalty.kind, AbilityKind::Activated);
+        assert!(
+            matches!(
+                quoted_loyalty.cost,
+                Some(AbilityCost::Loyalty { amount: 0 })
+            ),
+            "fixture def must be [0] loyalty, got {:?}",
+            quoted_loyalty.cost
+        );
+        assert!(
+            matches!(*quoted_loyalty.effect, Effect::Proliferate),
+            "fixture def effect must be Proliferate, got {:?}",
+            quoted_loyalty.effect
+        );
+        assert!(
+            quoted_loyalty
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "quoted loyalty def must carry AsSorcery via the P1 attach; got {:?}",
+            quoted_loyalty.activation_restrictions
+        );
+
+        // Quoted non-loyalty grant alongside (exclusion hostile).
+        let parsed_tap = parse_quoted_ability_modifications("\"{T}: Draw a card\"");
+        let quoted_tap = match parsed_tap.as_slice() {
+            [ContinuousModification::GrantAbility { definition }] => (**definition).clone(),
+            other => panic!("expected single GrantAbility, got {other:?}"),
+        };
+        assert!(
+            matches!(quoted_tap.cost, Some(AbilityCost::Tap)),
+            "hostile fixture def must be {{T}}, got {:?}",
+            quoted_tap.cost
+        );
+
+        let mut state = setup();
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+
+        let bolas = make_walker(&mut state, 930, PlayerId(0), "Nicol Bolas, Dragon-God");
+        state.objects.get_mut(&bolas).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+        let donor = make_walker(&mut state, 931, PlayerId(0), "Donor Walker");
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            // Printed abilities: on the base too, so a layer reset to
+            // `base_abilities` cannot make a negative assertion vacuous.
+            for def in [&quoted_loyalty, &quoted_tap] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        // Reach-guard: the quoted defs are present on the DONOR pre-pass.
+        for def in [&quoted_loyalty, &quoted_tap] {
+            let obj = state.objects.get(&donor).unwrap();
+            assert!(
+                obj.base_abilities.iter().any(|a| a == def),
+                "quoted def {def:?} must be installed on the donor base pre-pass"
+            );
+            assert!(
+                obj.abilities.iter().any(|a| a == def),
+                "quoted def {def:?} must be installed on the donor live pre-pass"
+            );
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let held = &state.objects.get(&bolas).unwrap().abilities;
+        let donated = held
+            .iter()
+            .find(|a| a == &&quoted_loyalty)
+            .unwrap_or_else(|| panic!("Bolas must gain the quoted loyalty def; got {held:?}"));
+        assert!(
+            donated
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "donated quoted def must keep its sorcery-speed timing; got {:?}",
+            donated.activation_restrictions
+        );
+        assert!(
+            !held.iter().any(|a| a == &quoted_tap),
+            "quoted non-loyalty grant must be excluded from donation; got {held:?}"
         );
     }
 
@@ -20297,6 +21716,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
                     cap: None,
+                    kind: None,
                 }])]
             .into();
         }
@@ -20345,7 +21765,8 @@ mod tests {
         // isolates one pass). Single controller ⟹ exactly M provider scans.
         crate::game::perf_counters::reset();
         let effects =
-            expand_granted_activated_abilities(&state, host, 1, &recipients, &source, None).effects;
+            expand_granted_activated_abilities(&state, host, 1, &recipients, &source, None, None)
+                .effects;
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans, m,
@@ -20401,6 +21822,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
                     cap: None,
+                    kind: None,
                 }])]
             .into();
         }
@@ -20444,6 +21866,7 @@ mod tests {
             1,
             &[recipient_p0, recipient_p1],
             &source,
+            None,
             None,
         )
         .effects;
@@ -22992,6 +24415,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
@@ -23019,7 +24443,7 @@ mod tests {
             source_id,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }
@@ -23350,6 +24774,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         };
 
@@ -23422,6 +24847,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::PlayFromExile {
@@ -23439,6 +24865,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::AdventureCreature);
@@ -23496,6 +24923,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 });
         };
@@ -23560,6 +24988,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
@@ -23705,6 +25134,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
@@ -23857,6 +25287,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
         state
@@ -23881,6 +25312,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
@@ -23940,6 +25372,7 @@ mod tests {
                         single_use: false,
                         cast_cost_modifier: None,
                         alt_ability_cost: None,
+                        without_paying_mana_cost: false,
                         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     });
             }
@@ -23999,6 +25432,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
@@ -30096,9 +31530,15 @@ mod tests {
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SelfRef,
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::SelfRef,
+            },
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SelfRef,
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
             },
             ContinuousModification::GrantTrigger {
                 trigger: Box::new(TriggerDefinition::new(TriggerMode::ChangesZone)),
@@ -30151,6 +31591,22 @@ mod tests {
     /// sits in layer 4 but also strips abilities, and CR 613.1f's
     /// `RemoveAllAbilities` sits in layer 6 but is classified `ALL` because it
     /// turns off characteristic-defining abilities (CR 604.3).
+    ///
+    /// CR 613.1f: the parametrized loyalty reference grant is an
+    /// ability-adding effect (Layer 6), beside its unqualified activated and
+    /// triggered siblings.
+    #[test]
+    fn grant_all_loyalty_subset_abilities_of_maps_to_layer_6() {
+        assert_eq!(
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SelfRef,
+                cap: None,
+                kind: Some(ActivatedAbilityKind::Loyalty),
+            }
+            .layer(),
+            Layer::Ability
+        );
+    }
     #[test]
     fn modification_write_kinds_agree_with_their_layer() {
         for m in every_layered_modification() {
@@ -31199,6 +32655,7 @@ mod object_sweep_sharing_tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         }
     }

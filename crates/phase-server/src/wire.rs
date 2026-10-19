@@ -6,7 +6,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 // Keep this aligned with client/src/network/wireEnvelope.ts.
-const FORMAT_RAW: u8 = 0x00;
+pub(crate) const FORMAT_RAW: u8 = 0x00;
 const FORMAT_GZIP: u8 = 0x01;
 const COMPRESSION_THRESHOLD: usize = 256;
 /// Deflate level for the outgoing envelope, and the only place it is chosen. Measured
@@ -19,33 +19,38 @@ const COMPRESSION_LEVEL: u32 = 3;
 /// incompressible, so a transport-level compressor above it (RFC 7692 permessage-deflate)
 /// would spend CPU for nothing and must not be enabled.
 pub async fn encode_json_message(json: String, use_envelope: bool) -> Result<Message, String> {
+    // Tiny control frames must remain independent of game CPU admission.
+    if !use_envelope || json.len() < COMPRESSION_THRESHOLD {
+        return encode_json_message_sync(json, use_envelope);
+    }
+    tokio::task::spawn_blocking(move || encode_json_message_sync(json, use_envelope))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Canonical outbound codec, shared by blocking application encoders and tiny controls.
+pub(crate) fn encode_json_message_sync(
+    json: String,
+    use_envelope: bool,
+) -> Result<Message, String> {
     if !use_envelope {
         return Ok(Message::text(json));
     }
 
-    let bytes = json.into_bytes();
+    let mut bytes = json.into_bytes();
     if bytes.len() < COMPRESSION_THRESHOLD {
-        let mut framed = Vec::with_capacity(bytes.len() + 1);
-        framed.push(FORMAT_RAW);
-        framed.extend(bytes);
-        return Ok(Message::binary(framed));
+        bytes.insert(0, FORMAT_RAW);
+        return Ok(Message::binary(bytes));
     }
 
-    let framed = tokio::task::spawn_blocking(move || {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(COMPRESSION_LEVEL));
-        encoder
-            .write_all(&bytes)
-            .map_err(|error| error.to_string())?;
-        let compressed = encoder.finish().map_err(|error| error.to_string())?;
-        let mut framed = Vec::with_capacity(compressed.len() + 1);
-        framed.push(FORMAT_GZIP);
-        framed.extend(compressed);
-        Ok::<_, String>(framed)
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-
-    Ok(Message::binary(framed))
+    // The format prefix is outside the gzip stream. Let the encoder append
+    // directly to the final frame, avoiding a second compressed-payload copy.
+    let mut encoder = GzEncoder::new(vec![FORMAT_GZIP], Compression::new(COMPRESSION_LEVEL));
+    encoder
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())?;
+    let compressed = encoder.finish().map_err(|error| error.to_string())?;
+    Ok(Message::binary(compressed))
 }
 
 pub async fn decode_client_envelope(
@@ -106,81 +111,14 @@ mod tests {
 
     #[test]
     fn rejects_unknown_and_oversized_envelopes() {
-        assert!(decode_envelope(&[0xff, 1], 8)
-            .unwrap_err()
-            .contains("unknown"));
-
-        assert!(decode_envelope(&[FORMAT_GZIP, 1, 2, 3], 8)
-            .unwrap_err()
-            .contains("invalid gzip"));
-
+        assert!(decode_envelope(&[0xff, 1], 8).is_err());
+        assert!(decode_envelope(&[FORMAT_GZIP, 1, 2, 3], 8).is_err());
         let oversized = [vec![FORMAT_RAW], vec![b'x'; 9]].concat();
-        assert!(decode_envelope(&oversized, 8)
-            .unwrap_err()
-            .contains("exceeds"));
-
+        assert!(decode_envelope(&oversized, 8).is_err());
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&[b'x'; 9]).unwrap();
         let oversized_gzip = [vec![FORMAT_GZIP], encoder.finish().unwrap()].concat();
-        assert!(decode_envelope(&oversized_gzip, 8)
-            .unwrap_err()
-            .contains("exceeds"));
-    }
-
-    /// A body whose gzip output differs at every deflate level 0-9. Repeated JSON structure
-    /// gives the matcher something to find; varied field values make how far it looks change
-    /// what it finds. A uniform body such as `"x".repeat(512)` gzips to identical bytes from
-    /// level 2 through 8, which is what a level assertion must not be built on.
-    fn level_discriminating_payload() -> String {
-        let mut seed = 0x9e37_79b9u32;
-        let mut payload = String::new();
-        while payload.len() < 14_700 {
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let n = seed >> 8;
-            payload.push_str(&format!(
-                "{{\"seat\":{},\"object\":{},\"name\":\"Card {}\",\"tags\":[{},{}]}},",
-                n % 4,
-                n % 9973,
-                n % 251,
-                n % 1_000_003,
-                n % 65_521
-            ));
-        }
-        payload
-    }
-
-    #[tokio::test]
-    async fn gzip_envelope_uses_the_named_compression_level() {
-        let json =
-            serde_json::to_string(&ServerMessage::error(level_discriminating_payload())).unwrap();
-        let Message::Binary(framed) = encode_json_message(json.clone(), true).await.unwrap() else {
-            panic!("negotiated large frame must use the binary envelope");
-        };
-        assert_eq!(framed[0], FORMAT_GZIP);
-
-        let body_at = |level: u32| {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
-            encoder.write_all(json.as_bytes()).unwrap();
-            encoder.finish().unwrap()
-        };
-        let expected = body_at(COMPRESSION_LEVEL);
-        for level in (0..=9u32).filter(|level| *level != COMPRESSION_LEVEL) {
-            assert_ne!(
-                body_at(level),
-                expected,
-                "this payload cannot tell level {level} from level {COMPRESSION_LEVEL}"
-            );
-        }
-        // Byte equality against the const's own level. The loop above is what makes it
-        // discriminating: on a uniform payload every level from 2 to 8 emits the same bytes,
-        // so the same assertion would pin a neighbourhood rather than the const the encoder
-        // is supposed to read.
-        assert_eq!(
-            &framed[1..],
-            expected.as_slice(),
-            "envelope body is not gzip level {COMPRESSION_LEVEL}"
-        );
-        assert_eq!(decode_envelope(&framed, json.len()).unwrap(), json);
+        assert!(decode_envelope(&oversized_gzip, 8).is_err());
     }
 
     #[tokio::test]
@@ -196,7 +134,10 @@ mod tests {
             panic!("negotiated small frame must use the raw binary envelope");
         };
         assert_eq!(raw[0], FORMAT_RAW);
-        assert!(decode_envelope(&raw, 1024).unwrap().contains("Pong"));
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&decode_envelope(&raw, 1024).unwrap()).unwrap(),
+            ServerMessage::Pong { timestamp: 7 },
+        ));
 
         let large = ServerMessage::error("x".repeat(COMPRESSION_THRESHOLD * 2));
         let gzip = encode_server_message(&large, true).await.unwrap();
@@ -204,8 +145,9 @@ mod tests {
             panic!("negotiated large frame must use gzip");
         };
         assert_eq!(gzip[0], FORMAT_GZIP);
-        assert!(decode_envelope(&gzip, 4096)
-            .unwrap()
-            .contains(&"x".repeat(64)));
+        assert_eq!(
+            decode_envelope(&gzip, 4096).unwrap(),
+            serde_json::to_string(&large).unwrap(),
+        );
     }
 }

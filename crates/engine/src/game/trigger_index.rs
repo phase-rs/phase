@@ -495,7 +495,10 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::ExtraTurnCreated { .. }
-        | GameEvent::ResolutionHalted { .. } => {}
+        | GameEvent::ResolutionHalted { .. }
+        // Contests are adapted physical minigames with no triggered-ability keys.
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -840,9 +843,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
+        | EffectKind::PhysicalContest
         | EffectKind::Behold
         | EffectKind::Vote
         | EffectKind::SeparateIntoPiles
+        | EffectKind::ExileTopCardContest
         | EffectKind::SwitchPT
         | EffectKind::CopySpell
         | EffectKind::EpicCopy
@@ -892,6 +897,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::BecomeUnprepared
         | EffectKind::SetClassLevel
         | EffectKind::CreateDelayedTrigger
+        // Digital-only Alchemy (no CR entry): no production
+        // `EffectResolved`-dispatching matcher watches for boon
+        // installation, so `CreateBoon` resolving emits no trigger key.
+        | EffectKind::CreateBoon
         | EffectKind::AddTargetReplacement
         | EffectKind::AddRestriction
         | EffectKind::ReduceNextSpellCost
@@ -933,6 +942,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChooseFromZone
         | EffectKind::RememberCard
         | EffectKind::NoteManaSpent
+        // Digital-only Alchemy (no CR entry): noting a number emits no
+        // `EffectResolved` at all, so no matcher dispatches on it.
+        | EffectKind::NoteNumber
         | EffectKind::ChooseObjectsIntoTrackedSet
         // CR 608.2d + CR 122.1: counter-kind choice / consume — the actual
         // counter placement fires `GameEvent::CounterAdded`, so no matcher

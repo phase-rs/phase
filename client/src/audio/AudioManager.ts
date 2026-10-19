@@ -35,6 +35,16 @@ const DEFAULT_PHASE_BREAKPOINTS = { mid: 5, late: 10 };
  */
 export type SfxPreloadResult = "skipped" | "none" | "partial" | "loaded";
 
+/** UI announcements are independent of engine GameEvent sound mappings. */
+export type AudioCue = "priority";
+
+const CUE_NOTES: Record<AudioCue, readonly { frequency: number; offset: number }[]> = {
+  priority: [
+    { frequency: 659.25, offset: 0 },
+    { frequency: 880, offset: 0.11 },
+  ],
+};
+
 class AudioManager {
   private ctx: AudioContext | null = null;
   private sfxBuffers = new Map<string, AudioBuffer>();
@@ -74,8 +84,9 @@ class AudioManager {
    * buffers already decoded — the flag guards every method that OPENS a media
    * pipeline, FEEDS one, or RESUMES one: `warmUp()` (the device),
    * `preloadSfx()` (a decode), `playTrack()`/`playStinger()` (a media element
-   * source), `playSfx()` (a buffer source), `startMusic()` (the rotation entry
-   * point), and `ensurePlayback()` (a direct `ctx.resume()`). A new method in any of those categories must join the
+   * source), `playSfx()` (a buffer source), `playCue()` (oscillators, and a direct `ctx.resume()`),
+   * `startMusic()` (the rotation entry point), and `ensurePlayback()` (a direct
+   * `ctx.resume()`). A new method in any of those categories must join the
    * set. Pure parameter automation on nodes that already exist — gain ramps,
    * `dispose()`'s teardown — is inert on a dead context and stays unguarded.
    *
@@ -94,7 +105,8 @@ class AudioManager {
    * across both of its awaits. Every `await` and every callback in this file
    * that afterwards touches the context is covered by that rule; a new one
    * must recheck too, choosing the invalidation signal that matches what it
-   * produces (generation for music rotation, theme identity for SFX buffers).
+   * produces (generation for music rotation, theme identity for SFX buffers,
+   * context/gain identity plus the caller's `AbortSignal` for UI cues).
    */
   disable(): void {
     this.disabled = true;
@@ -235,6 +247,55 @@ class AudioManager {
     }
 
     source.start();
+  }
+
+  /**
+   * Synthesize a brief UI cue through the same volume bus as game SFX. A cue
+   * deferred behind a suspended context is dropped if `signal` aborts first.
+   */
+  playCue(cue: AudioCue, signal?: AbortSignal): void {
+    if (this.disabled || !this.ctx || !this.sfxGain || signal?.aborted) return;
+    if (this.computeEffectiveSfxGain(usePreferencesStore.getState()) <= 0) return;
+
+    const ctx = this.ctx;
+    const sfxGain = this.sfxGain;
+    const play = () => {
+      // A resume can settle after disable, teardown, a volume change, or the
+      // caller no longer wanting the cue.
+      if (this.disabled || this.ctx !== ctx || this.sfxGain !== sfxGain) return;
+      if (signal?.aborted) return;
+      if (ctx.state === "closed") return;
+      if (this.computeEffectiveSfxGain(usePreferencesStore.getState()) <= 0) return;
+
+      const now = ctx.currentTime;
+      for (const { frequency, offset } of CUE_NOTES[cue]) {
+        const start = now + offset;
+        const end = start + 0.24;
+        const oscillator = ctx.createOscillator();
+        const envelope = ctx.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(frequency, start);
+        envelope.gain.setValueAtTime(0, start);
+        envelope.gain.linearRampToValueAtTime(0.13, start + 0.012);
+        envelope.gain.linearRampToValueAtTime(0, end);
+        oscillator.connect(envelope);
+        envelope.connect(sfxGain);
+        oscillator.onended = () => {
+          oscillator.disconnect();
+          envelope.disconnect();
+        };
+        oscillator.start(start);
+        oscillator.stop(end);
+      }
+    };
+
+    if (ctx.state !== "running") {
+      // Suspended by autoplay policy, or interrupted (iOS/Safari); the cue is
+      // best-effort either way.
+      void ctx.resume().then(play).catch(() => {});
+    } else {
+      play();
+    }
   }
 
   /**

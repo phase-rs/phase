@@ -63,6 +63,7 @@ use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
+use super::layers::remove_core_type;
 use super::mana_payment;
 use super::priority;
 use super::quantity::resolve_quantity;
@@ -2646,6 +2647,52 @@ pub(super) fn spell_cast_origin_zone(
         .unwrap_or(spell_obj.zone)
 }
 
+/// CR 118.9a + CR 601.2b: a spell may elect its printed alternative cost only
+/// when the exact exile authority elected for this cast leaves its mana cost
+/// available. A plain impulse grant supplies zone permission (CR 601.3) without
+/// replacing that cost; sibling grants cannot change the elected authority.
+pub(super) fn exile_cast_pays_printed_mana_cost(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> bool {
+    let Some(index) = casting_permission_index else {
+        return false;
+    };
+    if play_from_exile_permission_source_at_index(
+        state,
+        obj,
+        player,
+        index,
+        Some(CardPlayMode::Cast),
+    )
+    .is_none()
+    {
+        return false;
+    }
+    match &obj.casting_permissions[index.0] {
+        // CR 118.9a: only a paid, rider-free impulse grant leaves the mana cost
+        // in place (`is_normal_cost_authority_for_rider`); a "without paying its
+        // mana cost" grant (Fire Lord Ozai) or an alt-ability rider is already
+        // the cast's one alternative cost. CR 601.2f: a cost-rider grant stays
+        // unoffered, since its composition with a non-mana alternative cost is
+        // not modelled.
+        permission @ CastingPermission::PlayFromExile {
+            cast_cost_modifier: None,
+            ..
+        } => permission.is_normal_cost_authority_for_rider(),
+        CastingPermission::PlayFromExile { .. }
+        | CastingPermission::AdventureCreature
+        | CastingPermission::ExileWithAltCost { .. }
+        | CastingPermission::ExileWithAltAbilityCost { .. }
+        | CastingPermission::ExileWithEnergyCost
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => false,
+    }
+}
+
 /// Collect the keywords granted to `object_id` by `CastWithKeyword` statics
 /// (CR 604.1). `fused` projects a pre-payment fused split spell with its COMBINED
 /// characteristics (CR 702.102b) so `CastWithKeyword` `affected` filters keyed on
@@ -3579,32 +3626,30 @@ fn has_exile_cast_permission(
     // alternative-cost grant underneath it would be a second alternative cost
     // on the same cast.
     let alt_rider = variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
-    // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — the
-    // land/look companion installed alongside an alt-cost grant
-    // (`PlayFromExileProvenance::LandLookCompanion`, see `cast_from_zone.rs`) is not cast authority,
-    // so a rider cast accepts only a genuine impulse-class grant as its
-    // normal-cost route. Every other variant keeps the plain scan: where a
-    // companion exists, its alt-cost sibling authorizes those casts anyway.
+    // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — a
+    // rider cast accepts only a normal-cost authority as its route
+    // (`CastingPermission::is_normal_cost_authority_for_rider`: a paid,
+    // rider-free impulse grant). That predicate subsumes the land/look
+    // companion exclusion (`PlayFromExileProvenance::LandLookCompanion`, see
+    // `cast_from_zone.rs` — provenance, not cast authority) and extends it to
+    // the free channel (`without_paying_mana_cost`) and the alt-ability-cost
+    // rider, which are likewise alternative costs. Every other variant keeps
+    // the plain scan: where a companion exists, its alt-cost sibling
+    // authorizes those casts anyway.
     let play_from_exile_route = if alt_rider {
         obj.casting_permissions
             .iter()
             .enumerate()
             .any(|(index, p)| {
-                !matches!(
-                    p,
-                    crate::types::ability::CastingPermission::PlayFromExile {
-                        provenance:
-                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
-                        ..
-                    }
-                ) && play_from_exile_permission_source_at_index(
-                    state,
-                    obj,
-                    player,
-                    CastingPermissionIndex(index),
-                    Some(CardPlayMode::Cast),
-                )
-                .is_some()
+                p.is_normal_cost_authority_for_rider()
+                    && play_from_exile_permission_source_at_index(
+                        state,
+                        obj,
+                        player,
+                        CastingPermissionIndex(index),
+                        Some(CardPlayMode::Cast),
+                    )
+                    .is_some()
             })
     } else {
         play_from_exile_permission_source(state, obj, player, turn_number, Some(CardPlayMode::Cast))
@@ -4289,9 +4334,9 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
     object_id: ObjectId,
     player: PlayerId,
     casting_permission_index: Option<CastingPermissionIndex>,
-) -> Vec<crate::types::ability::ContinuousModification> {
+) -> crate::types::ability::PendingEntersModifications {
     let Some(obj) = state.objects.get(&object_id) else {
-        return Vec::new();
+        return Default::default();
     };
     selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)
         .map(|permission| match permission {
@@ -4299,7 +4344,7 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
                 enters_with_modifications,
                 ..
             } => enters_with_modifications.clone(),
-            _ => Vec::new(),
+            _ => Default::default(),
         })
         .unwrap_or_default()
 }
@@ -4521,7 +4566,7 @@ pub(super) fn selected_play_from_exile_permission_source(
 /// cast. Alternative-cost permissions take precedence because cost preparation
 /// already elects the first matching alternative-cost grant; otherwise the
 /// first functioning `PlayFromExile` grant is the authority.
-fn selected_object_cast_permission_index(
+pub(super) fn selected_object_cast_permission_index(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
@@ -4597,6 +4642,12 @@ fn selected_object_cast_permission_index(
         Some(_) => obj.zone == Zone::Exile,
     };
 
+    // CR 118.9a: whether the elected variant brings its own independent
+    // alternative cost (Evoke, Bestow, Overload, the face-down {3}, …). Only
+    // such a rider must skip non-normal-cost `PlayFromExile` slots below;
+    // every other variant keeps electing the first functioning grant.
+    let alt_rider =
+        selected_variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     selected_alt_cost.or_else(|| {
         if !play_from_exile_can_authorize_variant {
             return None;
@@ -4605,18 +4656,23 @@ fn selected_object_cast_permission_index(
         // of an alt-cost grant (`PlayFromExileProvenance::LandLookCompanion`) is never elected as a
         // cast authority; the sibling alt-cost grant is that sentence's cast
         // route. A genuine impulse grant further down the vector still wins.
+        // A rider variant additionally skips any `PlayFromExile` slot that is
+        // not a normal-cost authority (free channel or alt-ability-cost
+        // rider): first *satisfying* grant wins — the `:5434` lesson, not a
+        // filter on a first match.
         obj.casting_permissions
             .iter()
             .enumerate()
             .filter(|(_, p)| {
-                !matches!(
-                    p,
-                    CastingPermission::PlayFromExile {
-                        provenance:
-                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
-                        ..
-                    }
-                )
+                (!alt_rider || p.is_normal_cost_authority_for_rider())
+                    && !matches!(
+                        p,
+                        CastingPermission::PlayFromExile {
+                            provenance:
+                                crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
+                            ..
+                        }
+                    )
             })
             .find_map(|(index, _)| {
                 play_from_exile_permission_source_at_index(
@@ -5916,6 +5972,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
     match condition {
         StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::IsPresent { .. } => true,
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().all(holder_bound_condition_is_modeled)
@@ -5938,6 +5995,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -9232,6 +9290,18 @@ fn prepare_spell_cast_announced(
                 // spell-casting cost pipeline, so they are unaffected.
                 crate::types::ability::CastingPermission::PlayFromExile {
                     alt_ability_cost: Some(_),
+                    granted_to,
+                    ..
+                } if *granted_to == player => Some(crate::types::mana::ManaCost::zero()),
+                // CR 118.9 (run boon-blockers-20261010): Fire Lord Ozai class —
+                // a `PlayFromExile` grant stamped free ("without paying its
+                // mana cost") zeroes the spell's mana cost exactly like the
+                // Inside Information arm above. The grant's own election
+                // decides: the field rides the elected permission through
+                // prepared/finalized cast, so a second active permission for
+                // the same exiled spell keeps its own cost treatment.
+                crate::types::ability::CastingPermission::PlayFromExile {
+                    without_paying_mana_cost: true,
                     granted_to,
                     ..
                 } if *granted_to == player => Some(crate::types::mana::ManaCost::zero()),
@@ -14992,20 +15062,34 @@ pub fn handle_prototype_cost_choice_with_payment_mode(
 /// touched by layers, but battlefield re-entry resets are anchored on base
 /// values too).
 ///
-/// `bestow_form` is set to `Some(BestowFormState)` to mark the object as in
-/// bestow form; `revert_bestow_aura_form` is the inverse operation.
+/// `bestow_form` is set to `Some(BestowFormState { .. })` (carrying the removed
+/// creature subtypes, CR 205.1a) to mark the object as in bestow form; `revert_bestow_aura_form` is the inverse operation.
 ///
 /// Idempotent: safe to re-run after printed-face rehydration or layer resets
 /// re-anchor `card_types` from a refreshed `base_card_types`.
 pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
     use crate::types::card_type::CoreType;
-    // CR 702.103b: Remove the Creature core type while bestowed.
-    obj.card_types
-        .core_types
-        .retain(|t| !matches!(t, CoreType::Creature));
-    obj.base_card_types
-        .core_types
-        .retain(|t| !matches!(t, CoreType::Creature));
+    // CR 702.103b + CR 205.1a: Remove the Creature core type while bestowed;
+    // the creature types of the printed face go with it, because a bestowed
+    // Aura is an Aura enchantment and not a creature.
+    let base_subtypes_before = obj.base_card_types.subtypes.clone();
+    remove_core_type(&mut obj.card_types, CoreType::Creature);
+    remove_core_type(&mut obj.base_card_types, CoreType::Creature);
+    // Record what the base lost so `revert_bestow_aura_form` can restore it.
+    // Union with any existing payload, never overwrite: a re-run on an
+    // already-bestowed object finds nothing left to remove and must keep it.
+    let mut removed_creature_subtypes = obj
+        .bestow_form
+        .take()
+        .map(|form| form.removed_creature_subtypes)
+        .unwrap_or_default();
+    for subtype in base_subtypes_before {
+        if !obj.base_card_types.subtypes.contains(&subtype)
+            && !removed_creature_subtypes.contains(&subtype)
+        {
+            removed_creature_subtypes.push(subtype);
+        }
+    }
     // CR 702.103b: Gain the Aura subtype while bestowed. Idempotent push.
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         obj.card_types.subtypes.push("Aura".to_string());
@@ -15034,14 +15118,17 @@ pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObj
     {
         obj.base_keywords.push(enchant_creature);
     }
-    obj.bestow_form = Some(crate::game::game_object::BestowFormState);
+    obj.bestow_form = Some(crate::game::game_object::BestowFormState {
+        removed_creature_subtypes,
+    });
     // Bestow form rewrites the printed base: restore the derived art baseline.
     obj.restore_token_art_baseline();
 }
 
 /// CR 702.103e + CR 702.103f: Inverse of `apply_bestow_aura_form`. Restores the
-/// Creature core type, removes the synthesized Aura subtype, and removes the
-/// granted `enchant creature` keyword. Called when:
+/// Creature core type and the creature types the form removed (CR 205.1a),
+/// removes the synthesized Aura subtype, and removes the granted
+/// `enchant creature` keyword. Called when:
 ///   * Resolution-time illegal target (CR 702.103e) — revert before the spell
 ///     finishes resolving so it ETBs as a normal creature.
 ///   * Bestow Aura on the battlefield becomes unattached (CR 702.103f) —
@@ -15050,9 +15137,9 @@ pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObj
 ///
 /// Idempotent: a no-op if the object is not in bestow form.
 pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
-    if obj.bestow_form.is_none() {
+    let Some(form) = obj.bestow_form.take() else {
         return;
-    }
+    };
     use crate::types::card_type::CoreType;
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
         obj.card_types.core_types.push(CoreType::Creature);
@@ -15062,10 +15149,21 @@ pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameOb
     }
     obj.card_types.subtypes.retain(|s| s != "Aura");
     obj.base_card_types.subtypes.retain(|s| s != "Aura");
+    // CR 205.1a: the object is a creature again, so it regains the creature
+    // types the bestow form removed. Pushed after the Aura is dropped so the
+    // printed order is the final order. A battlefield object is re-derived by
+    // the layer pass; a stack object (not layered) needs the live fields too.
+    for subtype in form.removed_creature_subtypes {
+        if !obj.card_types.subtypes.contains(&subtype) {
+            obj.card_types.subtypes.push(subtype.clone());
+        }
+        if !obj.base_card_types.subtypes.contains(&subtype) {
+            obj.base_card_types.subtypes.push(subtype);
+        }
+    }
     obj.keywords.retain(|k| !matches!(k, Keyword::Enchant(_)));
     obj.base_keywords
         .retain(|k| !matches!(k, Keyword::Enchant(_)));
-    obj.bestow_form = None;
     obj.restore_token_art_baseline();
 }
 
@@ -16662,6 +16760,13 @@ pub(super) struct ResolutionCastRequest {
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
     pub(super) graveyard_replacement:
         Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    /// CR 608.2c + CR 611.2a + CR 611.2c: the cast-permission
+    /// gains-modifications rider ("If you cast a [quality] spell this way, it
+    /// gains …", Strago and Relm) rides the elected resolution permission into
+    /// the cast finalization, which applies it as a `Duration::Permanent`
+    /// continuous effect scoped to the cast object. Empty for every other
+    /// during-resolution route.
+    pub(super) enters_with_modifications: crate::types::ability::PendingEntersModifications,
     /// CR 608.2g + CR 609.4b + CR 118.9: whether the during-resolution cast
     /// is free (Cascade/Discover/Suspend, `Auto`), pays the card's real
     /// printed cost (Quistis Trepe / Tinybones the Pickpocket, `Manual` with
@@ -16784,7 +16889,11 @@ fn install_resolution_cast_permission(
             source_id: None,
             graveyard_replacement: request.graveyard_replacement.clone(),
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            // CR 608.2c: the request is the transaction authority for the
+            // rider; `selected_exile_alt_cost_permission_enters_with_modifications`
+            // is the single reader, so a non-elected sibling permission cannot
+            // leak its own modifications onto this cast.
+            enters_with_modifications: request.enters_with_modifications.clone(),
             mana_spend_permission,
             cast_cost_modifier: None,
         });
@@ -18501,6 +18610,9 @@ fn stamp_graveyard_authority(ability: &mut ResolvedAbility, authority: &Graveyar
 /// the ability the cast carries into payment (the modal placeholder, the
 /// resolved or Aura ability, the no-ability placeholder).
 fn stamp_prepared_cast_context(prepared: &PreparedSpellCast, ability: &mut ResolvedAbility) {
+    // CR 601.2a + CR 601.2c: from its announcement, a spell declares only the
+    // targets chosen for it.
+    ability.start_target_record_recursive();
     if let Some(GraveyardAuthorityResolution::Complete(authority)) = &prepared.graveyard_authority {
         stamp_graveyard_authority(ability, authority);
     }
@@ -20723,9 +20835,17 @@ fn can_cast_prepared_now_with_probe(
         return true;
     }
 
-    if targets_ok
-        && super::casting_costs::payable_spell_alternative_cost(state, player, prepared.object_id)
-            .is_some()
+    // CR 118.9a + CR 601.2b: a face-down or other non-Normal method already
+    // elected its own alternative cost and cannot use the printed self-option.
+    if prepared.casting_variant == CastingVariant::Normal
+        && targets_ok
+        && super::casting_costs::payable_spell_alternative_cost_details_at_index(
+            state,
+            player,
+            prepared.object_id,
+            prepared.casting_permission_index,
+        )
+        .is_some()
     {
         return true;
     }
@@ -27497,7 +27617,7 @@ fn activate_with_cost_carrier(
                     kind: PayCostKind::ReturnToHand,
                     choices: eligible,
                     count: count as usize,
-                    min_count: 0,
+                    min_count: count as usize,
                     resume: CostResume::Spell {
                         spell: Box::new(pending_return),
                     },
@@ -27998,6 +28118,9 @@ pub(crate) fn record_activation_announcement(
     ability_index: usize,
     ability: &mut ResolvedAbility,
 ) {
+    // CR 602.2b + CR 601.2c: from its announcement, an ability declares only the
+    // targets chosen for it.
+    ability.start_target_record_recursive();
     ability.activation_record =
         capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
     let provenance = state
@@ -28974,6 +29097,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted
@@ -32186,7 +32310,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32223,7 +32347,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }];
@@ -32410,7 +32534,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32637,7 +32761,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32772,7 +32896,7 @@ mod castable_zone_authority_tests {
                         duration: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     }];
@@ -33146,6 +33270,7 @@ mod sacrifice_cost_context_identity_tests {
                 None,
                 false,
                 None,
+                false,
                 &mut vec![],
             )
             .unwrap();
@@ -33839,6 +33964,7 @@ mod dandan_read_sweep_tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
         id
@@ -33943,5 +34069,132 @@ mod dandan_read_sweep_tests {
                 "{cards:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod selected_impulse_authority_tests {
+    use super::exile_cast_pays_printed_mana_cost;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{
+        CardPlayMode, CastingPermission, Duration, ExileGrantCostProvenance,
+        PlayFromExileProvenance, TargetFilter,
+    };
+    use crate::types::game_state::CastingPermissionIndex;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
+    use crate::types::statics::CastFrequency;
+    use crate::types::zones::EtbTapState;
+
+    #[test]
+    fn indexed_impulse_offer_rejects_used_and_filter_failing_slots() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let card = scenario.add_spell_to_exile(P0, "Offer", true).id();
+        let other = scenario.add_spell_to_exile(P0, "Other", true).id();
+        let mut runner = scenario.build();
+        let live = CastingPermission::PlayFromExile {
+            provenance: PlayFromExileProvenance::Impulse,
+            mode: CardPlayMode::Play,
+            duration: Duration::Permanent,
+            granted_to: P0,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
+            land_enter_tapped: EtbTapState::Unspecified,
+        };
+        let mut used = live.clone();
+        if let CastingPermission::PlayFromExile {
+            frequency,
+            source_id,
+            ..
+        } = &mut used
+        {
+            *frequency = CastFrequency::OncePerTurn;
+            *source_id = Some(card);
+        }
+        let mut filtered = live.clone();
+        if let CastingPermission::PlayFromExile { card_filter, .. } = &mut filtered {
+            *card_filter = Some(TargetFilter::SpecificObject { id: other });
+        }
+        // CR 118.9a: a "without paying its mana cost" grant (Fire Lord Ozai) is
+        // already the cast's one alternative cost.
+        let mut free = live.clone();
+        if let CastingPermission::PlayFromExile {
+            without_paying_mana_cost,
+            ..
+        } = &mut free
+        {
+            *without_paying_mana_cost = true;
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .casting_permissions
+            .extend([
+                used,
+                filtered,
+                live,
+                CastingPermission::ExileWithAltCost {
+                    source_id: None,
+                    cost_provenance: ExileGrantCostProvenance::Alternative,
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(P0),
+                    resolution_cleanup: None,
+                    duration: None,
+                    graveyard_replacement: None,
+                    mana_spend_permission: None,
+                    enters_with_counter: None,
+                    enters_with_modifications: Default::default(),
+                    cast_cost_modifier: None,
+                },
+                free,
+            ]);
+        runner.state_mut().exile_play_permissions_used.insert(card);
+        let state = runner.state();
+        let obj = &state.objects[&card];
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(0)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(1)),
+        ));
+        assert!(exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(2)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(3)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(4)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(state, obj, P0, None));
     }
 }

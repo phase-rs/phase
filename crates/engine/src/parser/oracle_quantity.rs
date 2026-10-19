@@ -820,6 +820,28 @@ pub(crate) fn parse_cda_quantity_with_context(
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
+    // CR 608.2k: owner-bound possessive pronouns ("its power", "2 plus its
+    // power", "half its toughness"). When the context carries a
+    // `characteristic_pronoun_owner` (set only by
+    // `parse_where_x_quantity_expression_with_owner` for boon-granted
+    // "it"/"that" tails, where the pronoun names the triggering object), the
+    // bare pronoun-characteristic surface binds the owner STRUCTURALLY during
+    // this shared parse — every recursive arm below (fractions, multipliers,
+    // offsets, sums) re-enters through this same context, so composed and
+    // nested forms bind the owner at every level with no post-hoc repair.
+    // Explicit self-references ("~'s power") never match the pronoun grammar
+    // and fall through to the `Source` arms below unchanged. `None` (every
+    // other caller) skips this arm entirely: zero behavior change.
+    if let Some(owner) = ctx.characteristic_pronoun_owner {
+        if let Ok((rest, qty)) =
+            nom_quantity::parse_pronoun_characteristic_ref_with_scope(text, owner)
+        {
+            if rest.is_empty() {
+                return Some(QuantityExpr::Ref { qty });
+            }
+        }
+    }
+
     // CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" — the
     // cross-player extremum of the numbers players secretly chose earlier in THIS
     // ability (Wheel of Misfortune, Menacing Ogre, Life at Stake).
@@ -856,8 +878,23 @@ pub(crate) fn parse_cda_quantity_with_context(
     // falls through to `Variable { name: "<whole phrase>" }`, which resolves to 0
     // at runtime (a silent no-op). Tried first so the leading "half " is consumed
     // before the single-ref / binary-arithmetic arms below.
-    if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
-        if rest.is_empty() {
+    //
+    // CR 608.2k exception: in owner mode the general nom grammar hardcodes
+    // `Source` for possessive pronouns, so the CDA-recursive fraction arm
+    // below (which re-enters with this context, binding the owner) runs
+    // FIRST; the nom-direct attempt becomes the fallback after it. Default
+    // mode keeps today's nom-first order exactly.
+    let owner_mode = ctx.characteristic_pronoun_owner.is_some();
+    let try_nom_fraction = || {
+        if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
+            if rest.is_empty() {
+                return Some(expr);
+            }
+        }
+        None
+    };
+    if !owner_mode {
+        if let Some(expr) = try_nom_fraction() {
             return Some(expr);
         }
     }
@@ -895,6 +932,14 @@ pub(crate) fn parse_cda_quantity_with_context(
                 divisor,
                 rounding,
             });
+        }
+    }
+    // CR 608.2k owner-mode fallback: the CDA-recursive fraction declined, so
+    // retry the general nom grammar — today's result for tails only it
+    // accepts (no owner benefit, but no owner-mode gap either).
+    if owner_mode {
+        if let Some(expr) = try_nom_fraction() {
+            return Some(expr);
         }
     }
 
@@ -994,21 +1039,6 @@ pub(crate) fn parse_cda_quantity_with_context(
         if rest.is_empty() {
             return Some(expr);
         }
-    }
-
-    // "the number of card types among cards in all graveyards"
-    // "the number of cards in your opponents' graveyards" / "cards in opponents' graveyards"
-    if text.contains("cards in your opponents' graveyards")
-        || text.contains("cards in opponents' graveyards")
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::ZoneCardCount {
-                zone: ZoneRef::Graveyard,
-                card_types: vec![],
-                scope: CountScope::Opponents,
-                filter: None,
-            },
-        });
     }
 
     // "the number of noncreature spells they've cast this turn"
@@ -5168,6 +5198,110 @@ mod tests {
                     .expect("statically valid property aggregate")
                 ),
             }
+        );
+    }
+
+    /// The whole-phrase reading: one `ZoneCardCount` over the opponents' graveyards.
+    fn opponents_graveyard_zone_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![],
+                scope: CountScope::Opponents,
+                filter: None,
+            },
+        }
+    }
+
+    /// CR 604.3 + CR 208.2a + CR 404.1 + CR 102.2/102.3: preservation and reach
+    /// guard for the whole-phrase reading. Passes before and after the
+    /// substring fallback arm is removed.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_whole_phrase_reads_zone_count() {
+        for phrase in [
+            "the number of cards in your opponents' graveyards",
+            "the number of cards in opponents' graveyards",
+            "the number of cards in your opponents' graveyards.",
+            "cards in your opponents' graveyards",
+        ] {
+            assert_eq!(
+                parse_cda_quantity(phrase),
+                Some(opponents_graveyard_zone_count()),
+                "{phrase}"
+            );
+        }
+    }
+
+    /// CR 614.1c + CR 122.6: an enters-with amount the parser cannot read must
+    /// fail closed. The shared nom grammar requires full consumption, so an
+    /// extremum head, a supertype qualifier, or a trailing relative clause must
+    /// decline the whole phrase rather than leave a truncated zone count.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_extended_text_fails_closed() {
+        // Positive reach guard: the unextended phrase is still read.
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards"),
+            Some(opponents_graveyard_zone_count())
+        );
+        for phrase in [
+            "the greatest number of cards an opponent has drawn this turn among cards in your opponents' graveyards",
+            "the greatest number of cards an opponent has drawn this turn among cards in opponents' graveyards",
+            "the number of nonbasic land cards in your opponents' graveyards",
+            "the number of cards in your opponents' graveyards that were put there from the battlefield this turn",
+        ] {
+            assert_eq!(parse_cda_quantity(phrase), None, "{phrase}");
+        }
+    }
+
+    /// The arithmetic forms compose over the whole-phrase reading instead of
+    /// being shadowed by a bare substring count.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_composes_in_arithmetic() {
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards plus 1"),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(opponents_graveyard_zone_count()),
+                offset: 1,
+            })
+        );
+        assert_eq!(
+            parse_cda_quantity(
+                "the number of cards in your hand plus the number of cards in your opponents' graveyards",
+            ),
+            Some(QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    opponents_graveyard_zone_count(),
+                ],
+            })
+        );
+    }
+
+    /// CR 205.2a + CR 604.3: Nighthawk Scavenger's "1 plus the number of card
+    /// types among cards in your opponents' graveyards" is the preserved
+    /// sibling — the leading offset arm reads the distinct-card-type count
+    /// directly and is unaffected by the whole-phrase arm.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_card_types_among_reads_distinct_types() {
+        assert_eq!(
+            parse_cda_quantity(
+                "1 plus the number of card types among cards in your opponents' graveyards",
+            ),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Opponents,
+                        },
+                    },
+                }),
+                offset: 1,
+            })
         );
     }
 
