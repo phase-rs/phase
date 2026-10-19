@@ -25,6 +25,563 @@ use std::path::Path;
 const SAILORS: &str = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
 
 const LOCKET: &str = "Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.";
+
+#[test]
+#[cfg(feature = "cli")]
+fn jev_all_nine_complete_current_export_string_loader() {
+    use engine::types::ability::{
+        AbilityCondition, CardTypeSetSource, ChoiceType, CounterAdjustment,
+        DelayedTriggerCondition, EffectScope, ObjectScope, ParitySource, PerpetualModification,
+        PlayerFilter, PtValue, ReturnResultReadSpec, SharedQuality, SharedQualityRelation,
+        SubAbilityLink, TapStateChange, TargetReadOrigin,
+    };
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::counter::CounterMatch;
+    use engine::types::mana::ManaColor;
+    use engine::types::replacements::ReplacementEvent;
+    use std::collections::{BTreeMap, BTreeSet};
+    const CIRCADIAN: &str = "Vivid — Seek X cards that each share a color with one or more permanents you control, where X is the number of colors among permanents you control. For each color among permanents you control, those cards perpetually gain \"This spell costs {1} less to cast.\"";
+    const BROKEN: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness. Sacrifice the token at the beginning of the next end step.";
+    const CRATEROUS: &str = "Craterous Stomp deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains \"This creature can't block Giants or Warriors.\"";
+    const PRESERVE: &str = "At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
+    const IMMARD: &str = "Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
+    const ASHLING: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+    // allow-full-card-db: the cli-qualified final-input regression exercises the complete production String through the actual browser loader.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    let serialized = std::fs::read_to_string(&path)
+        .expect("fresh complete current production export is required; this test cannot skip");
+    let raw: Map<String, Value> =
+        serde_json::from_str(&serialized).expect("complete raw export map");
+    assert!(
+        raw.len() > 35_000,
+        "production face-scale population required"
+    );
+    let by_storage: BTreeMap<_, _> = raw
+        .iter()
+        .map(|(key, entry)| (key.to_lowercase(), entry))
+        .collect();
+    assert_eq!(
+        by_storage.len(),
+        raw.len(),
+        "no lowercase storage-key collision"
+    );
+    // The unchanged complete String is the browser's actual production loader input.
+    let db = CardDatabase::from_json_str(&serialized).expect("whole production string loads");
+    let server_db = CardDatabase::from_export(&path).expect("same complete server export loads");
+    let expected_keys: BTreeSet<_> = by_storage.keys().map(String::as_str).collect();
+    let loaded_keys: BTreeSet<_> = db.face_iter().map(|(key, _)| key).collect();
+    assert_eq!(db.face_iter().count(), expected_keys.len());
+    assert_eq!(loaded_keys, expected_keys);
+    assert_eq!(
+        server_db
+            .face_iter()
+            .map(|(key, _)| key)
+            .collect::<BTreeSet<_>>(),
+        expected_keys
+    );
+    for (key, face) in db.face_iter() {
+        let entry = by_storage[key];
+        assert_eq!(face.name, entry["name"].as_str().unwrap(), "{key}");
+        assert_eq!(
+            serde_json::to_value(&face.mana_cost).unwrap(),
+            entry["mana_cost"],
+            "{key}"
+        );
+        assert_eq!(
+            serde_json::to_value(&face.card_type).unwrap(),
+            entry["card_type"],
+            "{key}"
+        );
+        assert_eq!(
+            face.oracle_text.as_deref(),
+            entry["oracle_text"].as_str(),
+            "{key}"
+        );
+        assert_eq!(
+            face.scryfall_oracle_id.as_deref(),
+            entry["scryfall_oracle_id"].as_str(),
+            "{key}"
+        );
+    }
+    use ManaCostShard::*;
+    for (name, oracle, id, generic, shards, types, subtypes, supertypes) in [
+        (
+            "Sailors' Bane",
+            SAILORS,
+            "5d22ab00-b454-4407-93d7-65b47f56cbaa",
+            7,
+            vec![Blue, Blue],
+            vec![CoreType::Creature],
+            vec!["Dragon", "Turtle"],
+            vec![],
+        ),
+        (
+            "Machinist's Dismissal",
+            DISMISSAL,
+            "2f2a6a57-6919-405b-93df-a1d4c077da0f",
+            4,
+            vec![Blue],
+            vec![CoreType::Instant],
+            vec![],
+            vec![],
+        ),
+        (
+            "Locket of Yesterdays",
+            LOCKET,
+            "bfbfa8c1-5b03-40bb-8a4c-aedb768cb023",
+            1,
+            vec![],
+            vec![CoreType::Artifact],
+            vec![],
+            vec![],
+        ),
+        (
+            "Broken Visage",
+            BROKEN,
+            "8e1d750e-44a7-47b1-8e0a-5f8b15d48b41",
+            4,
+            vec![Black],
+            vec![CoreType::Instant],
+            vec![],
+            vec![],
+        ),
+        (
+            "Circadian Struggle",
+            CIRCADIAN,
+            "82cb6351-58db-462d-a49b-ad365f19f1ec",
+            4,
+            vec![GreenBlue, GreenBlue],
+            vec![CoreType::Instant],
+            vec![],
+            vec![],
+        ),
+        (
+            "Craterous Stomp",
+            CRATEROUS,
+            "e0aa676e-2a3a-4ed5-93f9-65e53a8fcb96",
+            1,
+            vec![Red],
+            vec![CoreType::Kindred, CoreType::Instant],
+            vec!["Giant"],
+            vec![],
+        ),
+        (
+            "Game Preserve",
+            PRESERVE,
+            "409e0a43-0e85-47ea-9d40-de0860b12952",
+            2,
+            vec![Green],
+            vec![CoreType::Enchantment],
+            vec![],
+            vec![],
+        ),
+        (
+            "Immard, the Stormcleaver",
+            IMMARD,
+            "104f65d3-bedb-4dc5-a5dd-8ab9fe796af4",
+            1,
+            vec![Blue, Red, White],
+            vec![CoreType::Creature],
+            vec!["Human", "Soldier"],
+            vec![Supertype::Legendary],
+        ),
+        (
+            "Ashling's Prerogative",
+            ASHLING,
+            "b68bc097-482a-4fe5-9fca-df5941f3dc5c",
+            1,
+            vec![Red],
+            vec![CoreType::Enchantment],
+            vec![],
+            vec![],
+        ),
+    ] {
+        let key = name.to_lowercase();
+        let entry = by_storage[key.as_str()];
+        let face = db.get_face_by_name(name).unwrap();
+        let cost = ManaCost::Cost { generic, shards };
+        assert_eq!(face.name, name);
+        assert_eq!(face.oracle_text.as_deref(), Some(oracle));
+        assert_eq!(entry["oracle_text"].as_str(), Some(oracle));
+        assert_eq!(face.scryfall_oracle_id.as_deref(), Some(id));
+        assert_eq!(entry["scryfall_oracle_id"].as_str(), Some(id));
+        assert_eq!(face.mana_cost, cost);
+        assert_eq!(entry["mana_cost"], serde_json::to_value(cost).unwrap());
+        let expected_type = CardType {
+            core_types: types,
+            subtypes: subtypes.into_iter().map(String::from).collect(),
+            supertypes,
+        };
+        assert_eq!(face.card_type, expected_type);
+        assert_eq!(
+            entry["card_type"],
+            serde_json::to_value(expected_type).unwrap()
+        );
+        assert!(
+            face.parse_warnings.is_empty(),
+            "{name}: {:?}",
+            face.parse_warnings
+        );
+        assert!(
+            engine::game::coverage::card_face_gaps(face).is_empty(),
+            "{name}: {:?}",
+            engine::game::coverage::card_face_gaps(face)
+        );
+    }
+    let face = |name| db.get_face_by_name(name).unwrap();
+    let typed =
+        |kind, properties| TargetFilter::Typed(TypedFilter::new(kind).properties(properties));
+    let owned = FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    let sailors_count = QuantityRef::ObjectCount {
+        filter: TargetFilter::And {
+            filters: vec![
+                typed(TypeFilter::Card, vec![owned.clone()]),
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(
+                            TypeFilter::Card,
+                            vec![FilterProp::InZone { zone: Zone::Exile }],
+                        ),
+                        typed(
+                            TypeFilter::Card,
+                            vec![
+                                FilterProp::InZone {
+                                    zone: Zone::Graveyard,
+                                },
+                                owned.clone(),
+                            ],
+                        ),
+                    ],
+                },
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(TypeFilter::Instant, vec![]),
+                        typed(TypeFilter::Sorcery, vec![]),
+                        typed(TypeFilter::Card, vec![FilterProp::HasAdventure]),
+                    ],
+                },
+            ],
+        },
+    };
+    let sailors = face("Sailors' Bane");
+    assert_eq!(sailors.static_abilities.len(), 1);
+    assert_eq!(
+        sailors.static_abilities[0].affected,
+        Some(TargetFilter::SelfRef)
+    );
+    assert!(
+        matches!(&sailors.static_abilities[0].mode, StaticMode::ModifyCost { mode: CostModifyMode::Reduce, amount, dynamic_count: Some(count), .. } if *amount == ManaCost::generic(1) && *count == sailors_count)
+    );
+    assert!(sailors
+        .keywords
+        .contains(&Keyword::Ward(engine::types::keywords::WardCost::Mana(
+            ManaCost::generic(4)
+        ))));
+    let dismissal = face("Machinist's Dismissal");
+    assert_eq!(dismissal.static_abilities.len(), 1);
+    let population = TargetFilter::Or {
+        filters: vec![
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            ),
+            typed(
+                TypeFilter::Artifact,
+                vec![FilterProp::InZone { zone: Zone::Hand }, owned.clone()],
+            ),
+        ],
+    };
+    assert!(
+        matches!(&dismissal.static_abilities[0].mode, StaticMode::ModifyCost { mode: CostModifyMode::Reduce, amount, dynamic_count: Some(QuantityRef::ObjectCount { filter }), .. } if *amount == ManaCost::generic(1) && *filter == population)
+    );
+    assert_eq!(dismissal.abilities.len(), 1);
+    assert!(
+        matches!(dismissal.abilities[0].effect.as_ref(), Effect::Counter { target: TargetFilter::Typed(tf), source_rider: None, countered_spell_zone: None } if tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))) && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack }))
+    );
+    let locket = face("Locket of Yesterdays");
+    let locket_count = QuantityRef::ObjectCount {
+        filter: TargetFilter::And {
+            filters: vec![
+                typed(TypeFilter::Card, vec![]),
+                typed(
+                    TypeFilter::Card,
+                    vec![FilterProp::SharesQuality {
+                        quality: SharedQuality::Name,
+                        reference: Some(Box::new(TargetFilter::CastingSpell)),
+                        relation: SharedQualityRelation::Shares,
+                    }],
+                ),
+                typed(
+                    TypeFilter::Card,
+                    vec![
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                        owned,
+                    ],
+                ),
+            ],
+        },
+    };
+    assert_eq!(locket.static_abilities.len(), 1);
+    assert_eq!(
+        locket.static_abilities[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+    assert!(
+        matches!(&locket.static_abilities[0].mode, StaticMode::ModifyCost { mode: CostModifyMode::Reduce, amount, dynamic_count: Some(count), spell_filter: None, .. } if *amount == ManaCost::generic(1) && *count == locket_count)
+    );
+    let broken = face("Broken Visage");
+    assert!(broken.static_abilities.is_empty());
+    assert_eq!(broken.abilities.len(), 1);
+    let destroy = &broken.abilities[0];
+    assert!(
+        matches!(destroy.effect.as_ref(), Effect::Destroy { target: TargetFilter::Typed(tf), cant_regenerate: true, .. } if tf.type_filters.contains(&TypeFilter::Creature) && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))) && tf.properties.iter().any(|prop| matches!(prop, FilterProp::Attacking { .. })))
+    );
+    let token = destroy.sub_ability.as_deref().unwrap();
+    assert_eq!(token.target_reads, TargetReadOrigin::ParentAnnouncement);
+    assert!(
+        matches!(token.effect.as_ref(), Effect::Token { power, toughness, colors, types, count: QuantityExpr::Fixed { value: 1 }, .. } if *power == PtValue::Quantity(QuantityExpr::Ref { qty: QuantityRef::Power { scope: ObjectScope::Target } }) && *toughness == PtValue::Quantity(QuantityExpr::Ref { qty: QuantityRef::Toughness { scope: ObjectScope::Target } }) && colors == &[ManaColor::Black] && types.contains(&"Spirit".into()))
+    );
+    let delayed = token.sub_ability.as_deref().unwrap();
+    assert_eq!(delayed.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(
+        matches!(delayed.effect.as_ref(), Effect::CreateDelayedTrigger { condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End }, effect, uses_tracked_set: true } if matches!(effect.effect.as_ref(), Effect::Sacrifice { .. }))
+    );
+    // The ordinary Token instruction declares the creation operation at runtime;
+    // its resident TokenCreationFrameId publishes the completed incarnation set
+    // through forwarded_result_context to this immediate tracked-set consumer.
+    // It is not the distinct sought/revealed ReturnResultId AST family. The U9
+    // broken_visage_* tests assert actual captured births, cleanup, foreign later
+    // tokens, same-ID returned members and current/legacy restored authorities.
+    assert!(token.declares_return_result.is_none());
+    assert!(delayed.reads_return_result.is_none());
+    assert!(delayed.sub_ability.is_none());
+    let circadian = face("Circadian Struggle");
+    assert!(circadian.static_abilities.is_empty());
+    assert_eq!(circadian.abilities.len(), 1);
+    let seek = &circadian.abilities[0];
+    let population =
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You));
+    let colors = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::Objects {
+                filter: population.clone(),
+            },
+        },
+    };
+    assert!(
+        matches!(seek.effect.as_ref(), Effect::Seek { filter: TargetFilter::Typed(tf), count, destination: Zone::Hand, from_top: None, .. } if *count == colors && tf.properties.iter().any(|prop| matches!(prop, FilterProp::SharesQuality { quality: SharedQuality::Color, reference: Some(reference), relation: SharedQualityRelation::Shares } if **reference == population)))
+    );
+    let grant = seek.sub_ability.as_deref().unwrap();
+    assert_eq!(grant.repeat_for, Some(colors));
+    assert!(seek.declares_return_result.is_some());
+    assert_eq!(
+        grant.reads_return_result.as_ref().map(|(id, _)| *id),
+        seek.declares_return_result
+    );
+    assert!(
+        matches!(grant.effect.as_ref(), Effect::ApplyPerpetual { target: TargetFilter::None, modification: PerpetualModification::ModifyCost { mode: CostModifyMode::Reduce, amount } } if *amount == ManaCost::generic(1))
+    );
+    let stomp = face("Craterous Stomp");
+    assert_eq!(stomp.abilities.len(), 1);
+    let damage = &stomp.abilities[0];
+    assert!(
+        matches!(damage.effect.as_ref(), Effect::DealDamage { amount: QuantityExpr::Fixed { value: 3 }, target: TargetFilter::Typed(tf), .. } if tf.controller == Some(ControllerRef::Opponent) && tf.type_filters == [TypeFilter::Creature])
+    );
+    let rest = damage.sub_ability.as_deref().unwrap();
+    assert_eq!(rest.target_reads, TargetReadOrigin::ParentAnnouncement);
+    let Effect::GenericEffect {
+        static_abilities,
+        duration: Some(Duration::Permanent),
+        ..
+    } = rest.effect.as_ref()
+    else {
+        panic!("complete permanent Coward grant")
+    };
+    assert!(static_abilities.iter().any(|def| matches!(&def.affected, Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::ParentTargetController) && tf.properties.contains(&FilterProp::DistinctFrom { reference: Box::new(TargetFilter::ParentTarget) }))));
+    assert!(static_abilities.iter().flat_map(|def| &def.modifications).any(|modification| matches!(modification, ContinuousModification::AddSubtype { subtype } if subtype == "Coward")));
+    let restriction = StaticMode::BlockRestriction {
+        filter: TargetFilter::Not {
+            filter: Box::new(TargetFilter::Or {
+                filters: vec![
+                    typed(TypeFilter::Subtype("Giant".into()), vec![]),
+                    typed(TypeFilter::Subtype("Warrior".into()), vec![]),
+                ],
+            }),
+        },
+    };
+    assert!(
+        static_abilities
+            .iter()
+            .flat_map(|def| &def.modifications)
+            .any(|modification| match modification {
+                ContinuousModification::GrantStaticAbility { definition } =>
+                    definition.mode == restriction
+                        && definition.affected == Some(TargetFilter::SelfRef),
+                ContinuousModification::AddStaticMode { mode } => *mode == restriction,
+                _ => false,
+            })
+    );
+    let preserve = face("Game Preserve");
+    assert_eq!(preserve.triggers.len(), 1);
+    let reveal = preserve.triggers[0].execute.as_deref().unwrap();
+    assert_eq!(reveal.player_scope, Some(PlayerFilter::All));
+    assert!(matches!(
+        reveal.effect.as_ref(),
+        Effect::RevealTop { count: 1, .. }
+    ));
+    let owner_entry = reveal.sub_ability.as_deref().unwrap();
+    assert!(reveal.declares_return_result.is_some());
+    assert_eq!(
+        owner_entry.reads_return_result.as_ref().map(|(id, _)| *id),
+        reveal.declares_return_result
+    );
+    assert_eq!(
+        owner_entry
+            .reads_return_result
+            .as_ref()
+            .map(|(_, spec)| spec),
+        Some(&ReturnResultReadSpec {
+            noun: TargetFilter::Typed(TypedFilter::creature()),
+            destination: Zone::Library,
+            recipient: ControllerRef::ParentTargetOwner
+        })
+    );
+    assert!(matches!(
+        owner_entry.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::None,
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            enters_under: None,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&owner_entry.condition, Some(AbilityCondition::QuantityCheck { lhs: QuantityExpr::Ref { qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by: None } }, comparator: engine::types::ability::Comparator::EQ, rhs: QuantityExpr::Ref { qty: QuantityRef::TrackedSetSize } }) if **filter == TargetFilter::Typed(TypedFilter::creature()))
+    );
+    let immard = face("Immard, the Stormcleaver");
+    assert_eq!(immard.triggers.len(), 2);
+    assert!(immard
+        .triggers
+        .iter()
+        .any(|trigger| trigger.mode == engine::types::triggers::TriggerMode::Attacks));
+    assert!(immard
+        .triggers
+        .iter()
+        .any(|trigger| trigger.mode == engine::types::triggers::TriggerMode::ChangesZone));
+    for trigger in &immard.triggers {
+        let parent = trigger.execute.as_deref().unwrap();
+        assert!(
+            matches!(parent.effect.as_ref(), Effect::ChooseCounterAdjustment { adjustment: CounterAdjustment::AddOrRemove, counters: CounterMatch::OfType(CounterType::Generic(kind)), count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef } if kind == "charge")
+        );
+        assert!(!parent.optional);
+        let reflexive = parent.sub_ability.as_deref().unwrap();
+        let condition = reflexive.condition.as_ref().unwrap();
+        assert!(condition.has_when_you_do_marker());
+        let (result, counters) = condition.counter_removal_event().unwrap();
+        assert_eq!(parent.declares_return_result, Some(result));
+        assert_eq!(*counters, CounterMatch::Any);
+        assert_eq!(reflexive.mode_abilities.len(), 2);
+        assert!(matches!(
+            reflexive.mode_abilities[0].effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                ..
+            }
+        ));
+        let keywords = &reflexive.mode_abilities[1];
+        assert_eq!(keywords.duration, Some(Duration::UntilEndOfTurn));
+        let Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } = keywords.effect.as_ref()
+        else {
+            panic!("complete self keyword mode")
+        };
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            static_abilities[0].modifications,
+            vec![
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Indestructible
+                }
+            ]
+        );
+    }
+    let ashling = face("Ashling's Prerogative");
+    assert_eq!(ashling.replacements.len(), 2);
+    assert_eq!(ashling.static_abilities.len(), 1);
+    assert!(ashling
+        .replacements
+        .iter()
+        .any(|def| def.valid_card == Some(TargetFilter::SelfRef)
+            && def.execute.as_deref().is_some_and(|ability| matches!(
+                ability.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::OddOrEven,
+                    persist: true,
+                    ..
+                }
+            ))));
+    let parity = FilterProp::ManaValueParity {
+        parity: ParitySource::SourceChosen,
+    };
+    assert_eq!(
+        ashling.static_abilities[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![parity.clone()])
+        ))
+    );
+    assert_eq!(
+        ashling.static_abilities[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }]
+    );
+    let external = ashling
+        .replacements
+        .iter()
+        .find(|def| def.valid_card != Some(TargetFilter::SelfRef))
+        .unwrap();
+    assert_eq!(external.event, ReplacementEvent::Moved);
+    assert_eq!(external.destination_zone, Some(Zone::Battlefield));
+    assert_eq!(
+        external.mode,
+        engine::types::ability::ReplacementMode::Mandatory
+    );
+    assert_eq!(
+        external.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Not {
+                prop: Box::new(parity)
+            }]
+        )))
+    );
+    assert!(matches!(
+        external.execute.as_deref().unwrap().effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap
+        }
+    ));
+}
 const BEHOLD: &str = "Scry 2, then draw two cards.\nForetell {1}{U} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
 const DREAM_DEVOURER: &str = "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}. (During your turn, you may pay {2} and exile it from your hand face down. Cast it on a later turn for its foretell cost.)\nWhenever you foretell a card, this creature gets +2/+0 until end of turn.";
 const SEA_GATE_RESTORATION: &str = "Draw cards equal to the number of cards in your hand plus one. You have no maximum hand size for the rest of the game.";

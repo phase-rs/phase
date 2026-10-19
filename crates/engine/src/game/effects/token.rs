@@ -2850,6 +2850,9 @@ fn try_resolve_copy_batch(
     inner: &crate::types::ability::AbilityCondition,
     run_members: &[&ResolvedAbility],
 ) -> bool {
+    if crate::game::replacement::has_external_battlefield_entry_tap_modifier(state) {
+        return false;
+    }
     // 1. SHAPE GATE FIRST (cheapest): the swapped effect must be a bare
     //    self-copy with the default single-token shape and no exceptions.
     let Effect::CopyTokenOf {
@@ -2999,6 +3002,37 @@ pub(crate) fn copy_probe_spec_for(
     all_creature_types: &[String],
 ) -> TokenSpec {
     use crate::types::proposed_event::TokenCharacteristics;
+    let projected = copy_probe_object_for(copy, all_creature_types);
+    TokenSpec {
+        characteristics: TokenCharacteristics {
+            display_name: projected.name.clone(),
+            power: projected.power,
+            toughness: projected.toughness,
+            loyalty: projected.loyalty,
+            core_types: projected.card_types.core_types,
+            subtypes: projected.card_types.subtypes,
+            supertypes: projected.card_types.supertypes,
+            colors: projected.color,
+            keywords: projected.keywords,
+        },
+        script_name: projected.name,
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+        tapped: copy.tapped,
+        enters_attacking: copy.enters_attacking,
+        sacrifice_at: copy.sacrifice_at.clone(),
+        source_id: copy.source_id,
+        controller: copy.controller,
+        attach_to: TokenHostRequest::NotRequested,
+    }
+}
+
+/// CR 707.2 + CR 707.9b: retain the captured mana cost and the immediate copy
+/// exceptions when an entry predicate reads the proposed copied creature.
+pub(crate) fn copy_probe_object_for(
+    copy: &CopyTokenSpec,
+    all_creature_types: &[String],
+) -> GameObject {
     let immediate: Vec<_> = copy
         .additional_modifications
         .iter()
@@ -3025,28 +3059,7 @@ pub(crate) fn copy_probe_spec_for(
         Zone::Battlefield,
     );
     materialize_token_copy_body(&mut projected, copy, &modifications, 0, 0, copy.tapped);
-    TokenSpec {
-        characteristics: TokenCharacteristics {
-            display_name: projected.name.clone(),
-            power: projected.power,
-            toughness: projected.toughness,
-            loyalty: projected.loyalty,
-            core_types: projected.card_types.core_types,
-            subtypes: projected.card_types.subtypes,
-            supertypes: projected.card_types.supertypes,
-            colors: projected.color,
-            keywords: projected.keywords,
-        },
-        script_name: projected.name,
-        static_abilities: vec![],
-        enter_with_counters: vec![],
-        tapped: copy.tapped,
-        enters_attacking: copy.enters_attacking,
-        sacrifice_at: copy.sacrifice_at.clone(),
-        source_id: copy.source_id,
-        controller: copy.controller,
-        attach_to: TokenHostRequest::NotRequested,
-    }
+    projected
 }
 
 fn normalized_token_static_definition(mut static_def: StaticDefinition) -> StaticDefinition {
@@ -4688,6 +4701,172 @@ fn materialize_token_ability_payload_for_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u15_full_copy_probe_retains_mana_value_and_immediate_type_exceptions() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "MV3 copied creature".into(),
+            Zone::Battlefield,
+        );
+        object.mana_cost = crate::types::mana::ManaCost::generic(3);
+        object.base_mana_cost = object.mana_cost.clone();
+        object.card_types.core_types = vec![CoreType::Creature];
+        object.base_card_types = object.card_types.clone();
+        let copy = CopyTokenSpec {
+            values: Box::new(intrinsic_copiable_values(&object)),
+            display_source: DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+            token_art: None,
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: object.id,
+            controller: PlayerId(1),
+        };
+        let body = copy_probe_object_for(&copy, &[]);
+        assert_eq!(body.effective_mana_value(), 3);
+        assert!(body.is_token);
+        assert!(body.card_types.core_types.contains(&CoreType::Creature));
+        assert_eq!(body.controller, PlayerId(1));
+        let mut exception = copy.clone();
+        exception
+            .additional_modifications
+            .push(ContinuousModification::RemoveManaCost);
+        assert_eq!(
+            copy_probe_object_for(&exception, &[]).effective_mana_value(),
+            0
+        );
+        exception
+            .additional_modifications
+            .push(ContinuousModification::RemoveType {
+                core_type: CoreType::Creature,
+            });
+        assert!(!copy_probe_object_for(&exception, &[])
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+        exception
+            .additional_modifications
+            .push(ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            });
+        assert!(copy_probe_object_for(&exception, &[])
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+        assert_eq!(object.mana_cost, crate::types::mana::ManaCost::generic(3));
+        assert_eq!(
+            copy.values.mana_cost,
+            crate::types::mana::ManaCost::generic(3)
+        );
+        let mut state = GameState::new_two_player(42);
+        state.objects.insert(object.id, object.clone());
+        let mut registry_source = GameObject::new(
+            ObjectId(2),
+            CardId(2),
+            PlayerId(0),
+            "Registry source".into(),
+            Zone::Battlefield,
+        );
+        registry_source.chosen_attributes =
+            vec![crate::types::ability::ChosenAttribute::OddOrEven(
+                crate::types::ability::Parity::Odd,
+            )];
+        state.objects.insert(registry_source.id, registry_source);
+        let parity = crate::types::ability::FilterProp::ManaValueParity {
+            parity: crate::types::ability::ParitySource::SourceChosen,
+        };
+        let positive = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature().properties(vec![parity.clone()]),
+        );
+        let negative = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature().properties(vec![
+                crate::types::ability::FilterProp::Not {
+                    prop: Box::new(parity),
+                },
+            ]),
+        );
+        let before = serde_json::to_value(&state).unwrap();
+        for (modifications, odd, opposite) in [
+            (vec![], true, false),
+            (vec![ContinuousModification::RemoveManaCost], false, true),
+            (
+                vec![ContinuousModification::RemoveType {
+                    core_type: CoreType::Creature,
+                }],
+                false,
+                false,
+            ),
+            (
+                vec![
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    },
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                ],
+                true,
+                false,
+            ),
+        ] {
+            let mut payload = copy.clone();
+            payload.additional_modifications = modifications;
+            let event = ProposedEvent::CreateToken {
+                creation_frame: None,
+                instructions: None,
+                owner: PlayerId(1),
+                spec: Box::new(copy_probe_spec_for(&payload, &[])),
+                copy: Some(Box::new(payload)),
+                enter_tapped: EtbTapState::Unspecified,
+                count: 1,
+                applied: HashSet::new(),
+            };
+            let ctx = crate::game::filter::FilterContext::from_source(&state, ObjectId(2));
+            assert_eq!(
+                crate::game::filter::matches_target_filter_on_battlefield_entry(
+                    &state, &event, &positive, &ctx
+                ),
+                odd
+            );
+            assert_eq!(
+                crate::game::filter::matches_target_filter_on_battlefield_entry(
+                    &state, &event, &negative, &ctx
+                ),
+                opposite
+            );
+            let you = TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::You),
+            );
+            let opponent = TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::Opponent),
+            );
+            assert!(
+                !crate::game::filter::matches_target_filter_on_battlefield_entry(
+                    &state, &event, &you, &ctx
+                )
+            );
+            assert_eq!(
+                crate::game::filter::matches_target_filter_on_battlefield_entry(
+                    &state, &event, &opponent, &ctx
+                ),
+                odd || opposite
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            before,
+            "detached matching cannot allocate or alter either authority"
+        );
+    }
     use crate::game::ability_utils::{
         build_resolved_from_def, build_resolved_from_def_with_targets,
     };
@@ -10317,6 +10496,85 @@ mod tests {
     }
 
     // ── #9657: a token's entry-counter quantity reads "it" as the token ──
+
+    #[test]
+    fn u15_copy_bulk_guard_uses_exact_runtime_entry_class() {
+        use crate::types::ability::{AbilityCondition, Comparator, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+        let mut state = GameState::new_two_player(42);
+        let source = entry_counter_creature(&mut state, PlayerId(0), "Plain copy source", 3);
+        {
+            let object = state.objects.get_mut(&source).unwrap();
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(3);
+            object.base_mana_cost = object.mana_cost.clone();
+        }
+        let sub = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut member = sub.clone();
+        member.sub_ability = Some(Box::new(sub.clone()));
+        let inner = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 1 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        assert!(try_resolve_copy_batch(
+            &state,
+            &member,
+            &sub,
+            &inner,
+            &[&member, &member]
+        ));
+        let parsed = crate::parser::parse_oracle_text(
+            "Creatures enter untapped.",
+            "External",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(parsed.replacements.len(), 1);
+        let external = parsed.replacements[0].clone();
+        assert_eq!(external.event, ReplacementEvent::ChangeZone);
+        for event in [ReplacementEvent::Moved, ReplacementEvent::ChangeZone] {
+            let mut exact = external.clone();
+            exact.event = event;
+            state.pending_damage_replacements = vec![exact];
+            assert!(!try_resolve_copy_batch(
+                &state,
+                &member,
+                &sub,
+                &inner,
+                &[&member, &member]
+            ));
+        }
+        for invalid in [
+            ReplacementDefinition::new(ReplacementEvent::Moved).valid_card(TargetFilter::Any),
+            external.destination_zone(Zone::Graveyard),
+        ] {
+            state.pending_damage_replacements = vec![invalid];
+            assert!(!crate::game::replacement::has_external_battlefield_entry_tap_modifier(&state));
+            assert!(try_resolve_copy_batch(
+                &state,
+                &member,
+                &sub,
+                &inner,
+                &[&member, &member]
+            ));
+        }
+    }
 
     /// A creature on the battlefield with power = toughness = `pt`.
     fn entry_counter_creature(

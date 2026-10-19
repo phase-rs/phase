@@ -17432,6 +17432,94 @@ pub mod tests {
     use super::*;
 
     #[test]
+    fn u15_parsed_external_filter_binding_divergence() {
+        use crate::types::ability::{Parity, ParitySource};
+        let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Ashling's Prerogative",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert!(parsed.parse_warnings.is_empty());
+        assert_eq!(parsed.replacements.len(), 2);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(parsed.abilities.is_empty());
+        assert!(parsed
+            .replacements
+            .iter()
+            .any(
+                |definition| definition.valid_card == Some(TargetFilter::SelfRef)
+                    && definition
+                        .execute
+                        .as_deref()
+                        .is_some_and(|ability| matches!(
+                            ability.effect.as_ref(),
+                            crate::types::ability::Effect::Choose {
+                                choice_type: crate::types::ability::ChoiceType::OddOrEven,
+                                persist: true,
+                                ..
+                            }
+                        ))
+            ));
+        assert_eq!(
+            parsed.statics[0].modifications,
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Haste,
+            }]
+        );
+        let original = parsed
+            .replacements
+            .iter()
+            .find_map(|def| {
+                def.valid_card
+                    .as_ref()
+                    .filter(|filter| **filter != TargetFilter::SelfRef)
+            })
+            .unwrap();
+        assert!(
+            matches!(original, TargetFilter::Typed(tf) if tf.type_filters == [crate::types::ability::TypeFilter::Creature] && tf.controller.is_none() && matches!(tf.properties.as_slice(), [FilterProp::Not { prop }] if matches!(prop.as_ref(), FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+        );
+        for parity in [
+            ParitySource::SourceChosen,
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+        ] {
+            let mut filter = original.clone();
+            let mut leaves = 0;
+            let mut complete = true;
+            crate::game::filter::rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: value @ ParitySource::SourceChosen,
+                    } = prop
+                    {
+                        *value = parity;
+                        leaves += 1;
+                    }
+                },
+                &mut complete,
+            );
+            assert!(complete);
+            assert_eq!(leaves, 1);
+            let divergent = parity == ParitySource::LastNamedChoice;
+            assert_eq!(filter_binding_diverges(&filter), divergent);
+            let TargetFilter::Typed(tf) = &filter else {
+                unreachable!()
+            };
+            let FilterProp::Not { prop } = &tf.properties[0] else {
+                unreachable!()
+            };
+            assert_eq!(filter_prop_binding_diverges(&tf.properties[0]), divergent);
+            assert_eq!(filter_prop_binding_diverges(prop), divergent);
+            assert_eq!(parity_source_binding_diverges(&parity), divergent);
+        }
+    }
+
+    #[test]
     fn u14_parity_binding_divergence_is_distinct_from_member_binding() {
         use crate::types::ability::{Parity, ParitySource};
         for (parity, divergent) in [

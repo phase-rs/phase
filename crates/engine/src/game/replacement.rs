@@ -6475,6 +6475,126 @@ fn replacement_condition_quantity_ctx(
 /// CR 400.7 + CR 614.1d: determine whether a replacement's `valid_card`
 /// predicate matches the event subject. Connive carries its own exact snapshot;
 /// all other events retain their established live or entry-snapshot paths.
+fn is_external_battlefield_entry_tap_modifier(def: &ReplacementDefinition) -> bool {
+    if !matches!(
+        def.event,
+        ReplacementEvent::Moved | ReplacementEvent::ChangeZone
+    ) || def.destination_zone != Some(Zone::Battlefield)
+        || def.mode != ReplacementMode::Mandatory
+        || !def.valid_card.as_ref().is_some_and(|filter| {
+            super::filter::filter_implies_battlefield_permanent(filter)
+                && !super::filter::filter_contains(filter, &|node| {
+                    !matches!(
+                        node,
+                        TargetFilter::Typed(_)
+                            | TargetFilter::And { .. }
+                            | TargetFilter::Or { .. }
+                            | TargetFilter::Not { .. }
+                    )
+                })
+        })
+    {
+        return false;
+    }
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    if !matches!(
+        execute.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap | TapStateChange::Untap
+        }
+    ) || execute
+        != &AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            execute.effect.as_ref().clone(),
+        )
+    {
+        return false;
+    }
+    let mut plain = ReplacementDefinition::new(def.event);
+    plain.execute = def.execute.clone();
+    plain.valid_card = def.valid_card.clone();
+    plain.destination_zone = def.destination_zone;
+    plain.description = def.description.clone();
+    plain.condition = def.condition.clone();
+    plain.active_zones = def.active_zones.clone();
+    plain.source_object = def.source_object;
+    plain.source_controller = def.source_controller;
+    plain.origin = def.origin.clone();
+    plain.granting_object = def.granting_object;
+    plain.expiry = def.expiry.clone();
+    def == &plain
+}
+
+/// CR 614.12 + CR 616.1g: the actual materializer determines one entry boundary
+/// for the precise external class, before either raw registry matcher runs.
+fn replacement_definition_event_matches(
+    def: &ReplacementDefinition,
+    event: &ProposedEvent,
+    source: ObjectId,
+    state: &GameState,
+    matcher: ReplacementMatcher,
+) -> bool {
+    if is_external_battlefield_entry_tap_modifier(def) {
+        match event {
+            ProposedEvent::CreateToken {
+                copy, spec, count, ..
+            } => {
+                return *count > 0
+                    && copy.as_deref().is_none_or(|copy| {
+                        !super::effects::token_copy::copy_token_uses_liminal_entry(
+                            copy,
+                            &spec.enter_with_counters,
+                        )
+                    })
+            }
+            ProposedEvent::TokenEntry { .. } => return true,
+            _ => {}
+        }
+    }
+    matcher(event, source, state)
+}
+
+fn replacement_destination_matches(
+    def: &ReplacementDefinition,
+    event: &ProposedEvent,
+    destination: Zone,
+) -> bool {
+    match event {
+        ProposedEvent::ZoneChange { to, .. } => *to == destination,
+        ProposedEvent::CreateToken { .. } => {
+            destination == Zone::Battlefield
+                && (def.event == ReplacementEvent::ChangeZone
+                    || is_external_battlefield_entry_tap_modifier(def))
+        }
+        ProposedEvent::TokenEntry { .. } => {
+            destination == Zone::Battlefield
+                && matches!(
+                    def.event,
+                    ReplacementEvent::ChangeZone | ReplacementEvent::Moved
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Conservatively retain ordinary per-copy delivery when entry ordering may be
+/// material. The same precise class controls admission and this optimization.
+pub(crate) fn has_external_battlefield_entry_tap_modifier(state: &GameState) -> bool {
+    state.objects.values().any(|object| {
+        object.replacement_definitions.iter_all().any(|def| {
+            is_external_battlefield_entry_tap_modifier(def)
+                && super::functioning_abilities::replacement_functions_in_zone(object, def)
+        })
+    }) || state
+        .pending_damage_replacements
+        .iter()
+        .any(is_external_battlefield_entry_tap_modifier)
+}
+
 fn replacement_valid_card_matches(
     repl_def: &ReplacementDefinition,
     event: &ProposedEvent,
@@ -6488,8 +6608,8 @@ fn replacement_valid_card_matches(
         return matches_target_filter_on_event_snapshot(state, subject, filter, ctx);
     }
     if repl_def.event == ReplacementEvent::ChangeZone
-        || (matches!(event, ProposedEvent::TokenEntry { .. })
-            && repl_def.event == ReplacementEvent::Moved)
+        || (repl_def.event == ReplacementEvent::Moved
+            && repl_def.destination_zone == Some(Zone::Battlefield))
     {
         return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
     }
@@ -7148,19 +7268,7 @@ fn apply_state_level_gates(
     }
     // CR 614.6: Zone-change replacements may be scoped to a specific destination.
     if let Some(ref dest_zone) = repl_def.destination_zone {
-        let matches_dest = match event {
-            ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
-            ProposedEvent::CreateToken { .. } => {
-                repl_def.event == ReplacementEvent::ChangeZone && *dest_zone == Zone::Battlefield
-            }
-            ProposedEvent::TokenEntry { .. } => {
-                matches!(
-                    repl_def.event,
-                    ReplacementEvent::ChangeZone | ReplacementEvent::Moved
-                ) && *dest_zone == Zone::Battlefield
-            }
-            _ => false,
-        };
+        let matches_dest = replacement_destination_matches(repl_def, event, *dest_zone);
         if !matches_dest {
             return false;
         }
@@ -7280,6 +7388,7 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
         ProposedEvent::CreateToken { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::CreateToken);
             push_replacement_event_key(&mut keys, ReplacementEvent::ChangeZone);
+            push_replacement_event_key(&mut keys, ReplacementEvent::Moved);
         }
         ProposedEvent::TokenEntry { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::ChangeZone);
@@ -7573,7 +7682,7 @@ fn object_replacement_candidate_applies(
     let Some(handler) = registry.get(&repl_def.event) else {
         return false;
     };
-    if !(handler.matcher)(event, obj.id, state) {
+    if !replacement_definition_event_matches(repl_def, event, obj.id, state, handler.matcher) {
         return false;
     }
 
@@ -7598,19 +7707,7 @@ fn object_replacement_candidate_applies(
     }
     if let Some(ref dest_zone) = repl_def.destination_zone {
         // CR 614.6: only zone-change-style events can match a destination scope.
-        let matches_dest = match event {
-            ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
-            ProposedEvent::CreateToken { .. } => {
-                repl_def.event == ReplacementEvent::ChangeZone && *dest_zone == Zone::Battlefield
-            }
-            ProposedEvent::TokenEntry { .. } => {
-                matches!(
-                    repl_def.event,
-                    ReplacementEvent::ChangeZone | ReplacementEvent::Moved
-                ) && *dest_zone == Zone::Battlefield
-            }
-            _ => false,
-        };
+        let matches_dest = replacement_destination_matches(repl_def, event, *dest_zone);
         if !matches_dest {
             return false;
         }
@@ -8970,7 +9067,13 @@ pub(crate) fn find_applicable_replacements_with_damage_source_context(
                 }
                 // Verify the handler matcher still matches (DamageDone for damage
                 // entries, ChangeZone for zone-redirect entries).
-                if (handler.matcher)(event, source_host, state) {
+                if replacement_definition_event_matches(
+                    repl_def,
+                    event,
+                    source_host,
+                    state,
+                    handler.matcher,
+                ) {
                     candidates.push(rid);
                 }
             }
@@ -11632,8 +11735,20 @@ fn choosable_replacement_candidates(
     proposed: &ProposedEvent,
     candidates: Vec<ReplacementId>,
 ) -> Vec<ReplacementId> {
+    // CR 616.1g: creation replacements settle before modifiers of the contained
+    // battlefield entry. Resolve the actual stored IDs on every current pass.
+    let creation_pending = matches!(proposed, ProposedEvent::CreateToken { .. })
+        && candidates.iter().any(|rid| {
+            replacement_choice_definition(state, *rid)
+                .is_some_and(|def| def.event == ReplacementEvent::CreateToken)
+        });
     let tiered: Vec<(ReplacementId, ReplacementPrecedence)> = candidates
         .into_iter()
+        .filter(|rid| {
+            !creation_pending
+                || !replacement_choice_definition(state, *rid)
+                    .is_some_and(is_external_battlefield_entry_tap_modifier)
+        })
         .map(|rid| (rid, replacement_precedence(state, rid, proposed)))
         .collect();
     let Some(first) = tiered.iter().map(|(_, tier)| *tier).min() else {
@@ -13005,6 +13120,507 @@ mod tests {
         ReplacementDefinition::new(event)
     }
 
+    #[test]
+    fn u15_precise_mixed_entry_class_stage_index_and_state_store() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Creatures enter untapped.",
+            "Synthetic external untap",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(parsed.replacements.len(), 1);
+        let untap = parsed.replacements[0].clone();
+        assert_eq!(untap.event, ReplacementEvent::ChangeZone);
+        assert!(is_external_battlefield_entry_tap_modifier(&untap));
+        let mut tap = untap.clone();
+        tap.event = ReplacementEvent::Moved;
+        tap.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        )));
+        assert!(is_external_battlefield_entry_tap_modifier(&tap));
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Battlefield,
+            vec![tap.clone(), untap.clone()],
+        );
+        let mut original = GameObject::new(
+            ObjectId(20),
+            CardId(20),
+            PlayerId(0),
+            "Copy value".into(),
+            Zone::Battlefield,
+        );
+        original.card_types.core_types = vec![CoreType::Creature];
+        original.base_card_types = original.card_types.clone();
+        original.mana_cost = crate::types::mana::ManaCost::generic(3);
+        original.base_mana_cost = original.mana_cost.clone();
+        let copy = CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &original,
+            )),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+            token_art: None,
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(30),
+            controller: PlayerId(0),
+        };
+        let ordinary = ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
+            owner: PlayerId(0),
+            spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut liminal = ordinary.clone();
+        if let ProposedEvent::CreateToken { copy: payload, .. } = &mut liminal {
+            *payload = Some(Box::new(copy));
+        }
+        assert!(change_zone_matcher(&liminal, ObjectId(10), &state));
+        let mut nonliminal = liminal.clone();
+        if let ProposedEvent::CreateToken { spec, .. } = &mut nonliminal {
+            spec.enter_with_counters.push((CounterType::Plus1Plus1, 1));
+        }
+        let mut suppressed = ordinary.clone();
+        if let ProposedEvent::CreateToken { count, .. } = &mut suppressed {
+            *count = 0;
+        }
+        for def in [&tap, &untap] {
+            assert!(!replacement_definition_event_matches(
+                def,
+                &suppressed,
+                ObjectId(10),
+                &state,
+                replacement_registry()[&def.event].matcher
+            ));
+        }
+        for (event, expected) in [(&ordinary, true), (&liminal, false), (&nonliminal, true)] {
+            for def in [&tap, &untap] {
+                assert_eq!(
+                    replacement_definition_event_matches(
+                        def,
+                        event,
+                        ObjectId(10),
+                        &state,
+                        replacement_registry()[&def.event].matcher
+                    ),
+                    expected
+                );
+                assert!(replacement_destination_matches(
+                    def,
+                    event,
+                    Zone::Battlefield
+                ));
+            }
+            rebuild_replacement_index(&mut state);
+            let indexed = indexed_object_replacement_candidates_from_index(
+                &state,
+                event,
+                replacement_registry(),
+                None,
+            );
+            let legacy =
+                legacy_object_replacement_candidates(&state, event, replacement_registry(), None);
+            assert_eq!(indexed, legacy);
+            assert_eq!(indexed.len(), if expected { 2 } else { 0 });
+        }
+        assert_eq!(
+            auto_choice_event(&ordinary),
+            Some(ReplacementEvent::CreateToken)
+        );
+        assert!(has_external_battlefield_entry_tap_modifier(&state));
+        let mut excluded = tap.clone();
+        excluded.valid_card = Some(TargetFilter::Any);
+        assert!(!is_external_battlefield_entry_tap_modifier(&excluded));
+        let mut wrong_destination = tap.clone();
+        wrong_destination.destination_zone = Some(Zone::Graveyard);
+        assert!(!is_external_battlefield_entry_tap_modifier(
+            &wrong_destination
+        ));
+        let mut self_only = tap.clone();
+        self_only.valid_card = Some(TargetFilter::SelfRef);
+        assert!(!is_external_battlefield_entry_tap_modifier(&self_only));
+        let mut chained = tap.clone();
+        chained.execute.as_deref_mut().unwrap().sub_ability = tap.execute.clone();
+        assert!(!is_external_battlefield_entry_tap_modifier(&chained));
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .replacement_definitions
+            .clear();
+        assert!(!has_external_battlefield_entry_tap_modifier(&state));
+        state.pending_damage_replacements.push(tap.clone());
+        state.pending_damage_replacements.push(untap.clone());
+        let candidates = find_applicable_replacements(&state, &ordinary, replacement_registry());
+        assert_eq!(
+            candidates,
+            vec![
+                ReplacementId {
+                    source: ObjectId(0),
+                    index: 0
+                },
+                ReplacementId {
+                    source: ObjectId(0),
+                    index: 1
+                }
+            ]
+        );
+        assert!(find_applicable_replacements(&state, &liminal, replacement_registry()).is_empty());
+        let creation = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+        state.pending_damage_replacements.push(creation);
+        let candidates = find_applicable_replacements(&state, &ordinary, replacement_registry());
+        assert_eq!(
+            choosable_replacement_candidates(&state, &ordinary, candidates),
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 2
+            }]
+        );
+        let settled = apply_single_replacement(
+            &mut state,
+            ordinary.clone(),
+            ReplacementId {
+                source: ObjectId(0),
+                index: 2,
+            },
+            ReplacementBranch::Execute,
+            replacement_registry(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &settled,
+            ProposedEvent::CreateToken { count: 2, .. }
+        ));
+        assert!(settled.already_applied(&ReplacementId {
+            source: ObjectId(0),
+            index: 2
+        }));
+        let candidates = find_applicable_replacements(&state, &settled, replacement_registry());
+        assert_eq!(
+            choosable_replacement_candidates(&state, &settled, candidates).len(),
+            2
+        );
+        // The same class must reach an actual staged entry and both stores.
+        let entry_ref = original.id;
+        state.liminal_entries.insert(
+            entry_ref,
+            LiminalEntry {
+                creation_frame: None,
+                instructions: None,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(original),
+                ),
+                name: "Copy value".into(),
+                source_id: ObjectId(30),
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: vec![],
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
+            },
+        );
+        let inner = ProposedEvent::TokenEntry {
+            entry_ref,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: vec![],
+            applied: HashSet::new(),
+        };
+        state.pending_damage_replacements = vec![tap.clone(), untap.clone()];
+        assert_eq!(
+            find_applicable_replacements(&state, &inner, replacement_registry()).len(),
+            2
+        );
+        for event in [&ordinary, &nonliminal, &inner] {
+            for (first, second, final_state) in
+                [(0, 1, EtbTapState::Untapped), (1, 0, EtbTapState::Tapped)]
+            {
+                let mut local = state.clone();
+                let mut events = vec![];
+                let first_id = ReplacementId {
+                    source: ObjectId(0),
+                    index: first,
+                };
+                let second_id = ReplacementId {
+                    source: ObjectId(0),
+                    index: second,
+                };
+                let once = apply_single_replacement(
+                    &mut local,
+                    event.clone(),
+                    first_id,
+                    ReplacementBranch::Execute,
+                    replacement_registry(),
+                    &mut events,
+                )
+                .unwrap();
+                assert!(once.already_applied(&first_id));
+                assert!(!once.already_applied(&second_id));
+                assert_eq!(
+                    find_applicable_replacements(&local, &once, replacement_registry()),
+                    vec![second_id]
+                );
+                let twice = apply_single_replacement(
+                    &mut local,
+                    once,
+                    second_id,
+                    ReplacementBranch::Execute,
+                    replacement_registry(),
+                    &mut events,
+                )
+                .unwrap();
+                assert!(twice.already_applied(&first_id) && twice.already_applied(&second_id));
+                assert_eq!(twice.battlefield_entry_tap_state(), Some(final_state));
+                assert!(
+                    find_applicable_replacements(&local, &twice, replacement_registry()).is_empty()
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, GameEvent::ReplacementApplied { .. }))
+                        .count(),
+                    2
+                );
+            }
+        }
+        for def in [&tap, &untap] {
+            assert!(replacement_definition_event_matches(
+                def,
+                &inner,
+                ObjectId(10),
+                &state,
+                replacement_registry()[&def.event].matcher
+            ));
+        }
+        let parsed = crate::parser::parse_oracle_text(
+            "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.",
+            "Ashling's Prerogative", &[], &["Enchantment".into()], &[]);
+        assert_eq!(parsed.replacements.len(), 2);
+        let mut sourced = parsed
+            .replacements
+            .into_iter()
+            .find(|def| def.valid_card != Some(TargetFilter::SelfRef))
+            .unwrap();
+        sourced.source_object = Some(ObjectId(10));
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes = vec![
+            crate::types::ability::ChosenAttribute::Color(crate::types::mana::ManaColor::Blue),
+            crate::types::ability::ChosenAttribute::OddOrEven(crate::types::ability::Parity::Odd),
+            crate::types::ability::ChosenAttribute::OddOrEven(crate::types::ability::Parity::Even),
+        ];
+        state.pending_damage_replacements = vec![sourced.clone()];
+        assert_eq!(
+            find_applicable_replacements(&state, &ordinary, replacement_registry()),
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }]
+        );
+        // Its MV3 copied entrant matches Odd, so the complement does not apply.
+        assert!(find_applicable_replacements(&state, &inner, replacement_registry()).is_empty());
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes
+            .clear();
+        assert!(find_applicable_replacements(&state, &ordinary, replacement_registry()).is_empty());
+        sourced.source_object = None;
+        state.pending_damage_replacements = vec![sourced.clone()];
+        assert!(find_applicable_replacements(&state, &ordinary, replacement_registry()).is_empty());
+        let mut complete = true;
+        crate::game::filter::rewrite_filter_props(
+            sourced.valid_card.as_mut().unwrap(),
+            &mut |_| {},
+            &mut |prop| {
+                if let FilterProp::ManaValueParity { parity } = prop {
+                    *parity = crate::types::ability::ParitySource::Fixed(
+                        crate::types::ability::Parity::Odd,
+                    );
+                }
+            },
+            &mut complete,
+        );
+        assert!(complete);
+        state.pending_damage_replacements = vec![sourced];
+        let id = ReplacementId {
+            source: ObjectId(0),
+            index: 0,
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &ordinary, replacement_registry()),
+            vec![id]
+        );
+        let mut applied = ordinary.clone();
+        applied.mark_applied(id);
+        assert!(applied.already_applied(&id));
+        assert!(!applied.already_applied(&ReplacementId {
+            source: ObjectId(10),
+            index: 0
+        }));
+        assert!(find_applicable_replacements(&state, &applied, replacement_registry()).is_empty());
+        // Creation changes are read from the current proposal, before either
+        // encoding is admitted. Entry tap itself cannot erase entry counters.
+        state.pending_damage_replacements = vec![tap.clone(), untap.clone()];
+        assert!(find_applicable_replacements(&state, &liminal, replacement_registry()).is_empty());
+        let mut counter_modified = liminal.clone();
+        if let ProposedEvent::CreateToken {
+            spec, enter_tapped, ..
+        } = &mut counter_modified
+        {
+            spec.enter_with_counters.push((CounterType::Plus1Plus1, 1));
+            *enter_tapped = EtbTapState::Tapped;
+        }
+        assert_eq!(
+            find_applicable_replacements(&state, &counter_modified, replacement_registry()).len(),
+            2
+        );
+        let mut body_substituted = liminal.clone();
+        if let ProposedEvent::CreateToken { copy, .. } = &mut body_substituted {
+            *copy = None;
+        }
+        assert_eq!(
+            find_applicable_replacements(&state, &body_substituted, replacement_registry()).len(),
+            2
+        );
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                ),
+            ),
+        );
+        let candidates = find_applicable_replacements(&state, &liminal, replacement_registry());
+        assert_eq!(
+            choosable_replacement_candidates(&state, &liminal, candidates),
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 2
+            }]
+        );
+        let changed = apply_single_replacement(
+            &mut state,
+            liminal.clone(),
+            ReplacementId {
+                source: ObjectId(0),
+                index: 2,
+            },
+            ReplacementBranch::Execute,
+            replacement_registry(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            matches!(&changed, ProposedEvent::CreateToken { spec, copy: Some(copy), .. }
+            if spec.enter_with_counters == [(CounterType::Plus1Plus1, 1)]
+                && !super::effects::token_copy::copy_token_uses_liminal_entry(copy, &spec.enter_with_counters))
+        );
+        assert_eq!(
+            find_applicable_replacements(&state, &changed, replacement_registry()).len(),
+            2
+        );
+        state.pending_damage_replacements.clear();
+        let parsed = crate::parser::parse_oracle_text(
+            "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.",
+            "Ashling's Prerogative", &[], &["Enchantment".into()], &[]);
+        let definition = parsed
+            .replacements
+            .into_iter()
+            .find(|def| def.valid_card != Some(TargetFilter::SelfRef))
+            .unwrap();
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .replacement_definitions = vec![definition].into();
+        let mut second = state.objects[&ObjectId(10)].clone();
+        second.id = ObjectId(11);
+        second.card_id = CardId(11);
+        state.objects.insert(second.id, second);
+        state.battlefield.push_back(ObjectId(11));
+        for (first, second, outer_sources, inner_sources) in [
+            (
+                crate::types::ability::Parity::Odd,
+                crate::types::ability::Parity::Odd,
+                vec![ObjectId(10), ObjectId(11)],
+                vec![],
+            ),
+            (
+                crate::types::ability::Parity::Odd,
+                crate::types::ability::Parity::Even,
+                vec![ObjectId(10)],
+                vec![ObjectId(11)],
+            ),
+            (
+                crate::types::ability::Parity::Even,
+                crate::types::ability::Parity::Even,
+                vec![],
+                vec![ObjectId(10), ObjectId(11)],
+            ),
+        ] {
+            for (id, parity) in [(ObjectId(10), first), (ObjectId(11), second)] {
+                state.objects.get_mut(&id).unwrap().chosen_attributes =
+                    vec![crate::types::ability::ChosenAttribute::OddOrEven(parity)];
+            }
+            rebuild_replacement_index(&mut state);
+            for (event, sources) in [(&ordinary, outer_sources), (&inner, inner_sources)] {
+                let expected: Vec<_> = sources
+                    .into_iter()
+                    .map(|source| ReplacementId { source, index: 0 })
+                    .collect();
+                let indexed = indexed_object_replacement_candidates_from_index(
+                    &state,
+                    event,
+                    replacement_registry(),
+                    None,
+                );
+                let legacy = legacy_object_replacement_candidates(
+                    &state,
+                    event,
+                    replacement_registry(),
+                    None,
+                );
+                assert_eq!(indexed, expected);
+                assert_eq!(legacy, expected);
+                assert_eq!(
+                    find_applicable_replacements(&state, event, replacement_registry()),
+                    expected
+                );
+            }
+        }
+    }
+
     fn shield_removal_commands(state: &GameState, object_id: ObjectId) -> usize {
         state.resolved_rules_journal.entries().iter().filter(|entry| matches!(
             &entry.command,
@@ -14279,7 +14895,7 @@ mod tests {
             !event
                 .applied_set()
                 .contains(&AppliedReplacementKey::object(ObjectId(10), 0)),
-            "external Moved replacement must not see TokenEntry"
+            "unscoped generic external Moved/Any must not see TokenEntry"
         );
     }
 
@@ -14382,7 +14998,11 @@ mod tests {
             ),
             (
                 token_event,
-                vec![ReplacementEvent::CreateToken, ReplacementEvent::ChangeZone],
+                vec![
+                    ReplacementEvent::CreateToken,
+                    ReplacementEvent::ChangeZone,
+                    ReplacementEvent::Moved,
+                ],
             ),
             (
                 ProposedEvent::TokenEntry {

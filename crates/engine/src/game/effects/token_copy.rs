@@ -1315,6 +1315,34 @@ pub(crate) fn apply_copy_token_after_replacement(
     )
 }
 
+/// CR 306.5b + CR 707.2 + CR 707.9b: copy exceptions can replace starting
+/// loyalty; intrinsic self-entry counters and explicit entry counters all
+/// belong to the materializer's actual counter work.
+pub(crate) fn copy_token_entry_counters(
+    copy: &CopyTokenSpec,
+    explicit: &[(crate::types::counter::CounterType, u32)],
+) -> Vec<(crate::types::counter::CounterType, u32)> {
+    let loyalty =
+        copy_starting_loyalty_override(&copy.additional_modifications).or(copy.values.loyalty);
+    crate::game::printed_cards::intrinsic_face_counters(loyalty, None)
+        .into_iter()
+        .chain(crate::game::printed_cards::self_etb_counter_replacements(
+            &copy.values.replacement_definitions,
+        ))
+        .chain(explicit.iter().cloned())
+        .collect()
+}
+
+/// CR 614.12: the current copy proposal has a later exact TokenEntry only
+/// when its immediate exceptions and its complete counter work permit it.
+pub(crate) fn copy_token_uses_liminal_entry(
+    copy: &CopyTokenSpec,
+    explicit: &[(crate::types::counter::CounterType, u32)],
+) -> bool {
+    copy_token_modifications_are_liminal_immediate(&copy.additional_modifications)
+        && copy_token_entry_counters(copy, explicit).is_empty()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     state: &mut GameState,
@@ -1327,6 +1355,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     initial_created_ids: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> CopyTokenApplyStatus {
+    let etb_counters = copy_token_entry_counters(&copy, &enter_with_counters);
+    let liminal_immediate = copy_token_uses_liminal_entry(&copy, &enter_with_counters);
     let CopyTokenSpec {
         mut values,
         display_source,
@@ -1348,7 +1378,6 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         values.loyalty = Some(loyalty);
         values.printed_loyalty = Some(PrintedLoyalty::Fixed(loyalty));
     }
-    let copied_loyalty = values.loyalty;
 
     // CR 306.5b + CR 707.2 + CR 707.9b: A token that's a copy of a planeswalker
     // enters with loyalty counters equal to the copied loyalty, except a copy
@@ -1367,20 +1396,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     // path bypasses the ZoneChange replacement pass, so the copied card's
     // intrinsic "enters with counters" replacement is seeded here from its
     // copiable replacement set rather than firing during entry.
-    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
-        crate::game::printed_cards::intrinsic_face_counters(copied_loyalty, None)
-            .into_iter()
-            .chain(crate::game::printed_cards::self_etb_counter_replacements(
-                &values.replacement_definitions,
-            ))
-            .chain(enter_with_counters.iter().cloned())
-            .collect();
-
-    // Liminal choice is loop-invariant; compute once so the terminal drain below
-    // can mirror the former continue_liminal_copy_token_batch tail for this path.
-    let liminal_immediate =
-        copy_token_modifications_are_liminal_immediate(&additional_modifications)
-            && etb_counters.is_empty();
+    // The shared admission predicate above uses this same exact counter list.
     // CR 205.3m: the live creature-type list the CR 707.9 subtype exceptions
     // resolve against. Loop-invariant, and cloned once so the per-token CR
     // 303.4f/g projection below can be built while `state` is borrowed.
@@ -6238,6 +6254,10 @@ pub(crate) mod tests {
             7,
             8,
         );
+        state.objects.get_mut(&source).unwrap().mana_cost =
+            crate::types::mana::ManaCost::generic(3);
+        state.objects.get_mut(&source).unwrap().base_mana_cost =
+            crate::types::mana::ManaCost::generic(3);
         let modifications = vec![
             ContinuousModification::SetName {
                 name: "Immediate Construct".into(),
@@ -6280,6 +6300,50 @@ pub(crate) mod tests {
             panic!("copy proposal")
         };
         let copy = batch.copy.as_deref().unwrap();
+        let body = super::super::token::copy_probe_object_for(copy, &state.all_creature_types);
+        assert_eq!(body.effective_mana_value(), 3);
+        assert!(!copy_token_uses_liminal_entry(copy, &[]));
+        let mut immediate = copy.clone();
+        immediate.additional_modifications.clear();
+        assert!(copy_token_uses_liminal_entry(&immediate, &[]));
+        assert!(!copy_token_uses_liminal_entry(
+            &immediate,
+            &[(CounterType::Plus1Plus1, 1)]
+        ));
+        assert_eq!(
+            copy_token_entry_counters(&immediate, &[(CounterType::Plus1Plus1, 1)]),
+            vec![(CounterType::Plus1Plus1, 1)]
+        );
+        immediate.values.loyalty = Some(4);
+        immediate
+            .additional_modifications
+            .push(ContinuousModification::SetStartingLoyalty { value: 2 });
+        assert!(!copy_token_uses_liminal_entry(&immediate, &[]));
+        assert_eq!(
+            copy_token_entry_counters(&immediate, &[]),
+            vec![(CounterType::Loyalty, 2)]
+        );
+        immediate.values.loyalty = None;
+        immediate.additional_modifications = vec![ContinuousModification::RemoveManaCost];
+        assert!(copy_token_uses_liminal_entry(&immediate, &[]));
+        assert_eq!(
+            super::super::token::copy_probe_object_for(&immediate, &[]).effective_mana_value(),
+            0
+        );
+        let parsed_counter = crate::parser::parse_oracle_text(
+            "This creature enters with a +1/+1 counter on it.",
+            "Synthetic counter copy",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert_eq!(parsed_counter.replacements.len(), 1);
+        immediate.values.replacement_definitions = parsed_counter.replacements;
+        assert!(!copy_token_uses_liminal_entry(&immediate, &[]));
+        assert_eq!(
+            copy_token_entry_counters(&immediate, &[]),
+            vec![(CounterType::Plus1Plus1, 1)]
+        );
         let probe = super::super::token::copy_probe_spec_for(copy, &state.all_creature_types);
         assert_eq!(
             serde_json::to_value(&state).unwrap(),

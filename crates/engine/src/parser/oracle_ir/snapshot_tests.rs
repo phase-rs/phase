@@ -7,6 +7,37 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn jev_full_ashling() {
+    use crate::parser::oracle_ir::doc::OracleNodeIr;
+    use crate::types::ability::{FilterProp, ParitySource, TargetFilter};
+    let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+    let mut doc = parse_oracle_ir(
+        text,
+        "Ashling's Prerogative",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 3);
+    let OracleNodeIr::Replacement(reader) = &doc.items[2].node else {
+        panic!("complete external reader: {doc:#?}")
+    };
+    assert!(
+        matches!(&reader.definition.valid_card, Some(TargetFilter::Typed(tf))
+        if tf.controller.is_none() && matches!(tf.properties.as_slice(),
+            [FilterProp::Not { prop }] if matches!(prop.as_ref(),
+                FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+    );
+    insta::assert_json_snapshot!("jev_full_ashling_ir", doc);
+    let lowered = lower_oracle_ir(&mut doc);
+    assert_eq!(lowered.replacements.len(), 2);
+    assert_eq!(lowered.statics.len(), 1);
+    assert!(lowered.abilities.is_empty());
+    insta::assert_json_snapshot!("jev_full_ashling_lowered", lowered);
+}
+
+#[test]
 fn jev_source_parity_static() {
     let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
     let mut doc = parse_oracle_ir(text, "Parity Standard", &[], &["Enchantment".into()], &[]);

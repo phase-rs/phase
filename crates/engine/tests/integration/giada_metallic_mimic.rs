@@ -1259,7 +1259,6 @@ fn entry_projection_coverage_over_the_export() {
         [
             "Arcane Adaptation",
             "Ashes of the Fallen",
-            "Ashling's Prerogative",
             "Bicycle Elemental",
             "Chronicle of Victory",
             "Conspiracy",

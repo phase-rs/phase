@@ -253,6 +253,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // CR 608.2c: a recognized external subject owns its complete restriction.
+    // Refusal cannot fall through to a self-entry replacement.
+    if let Some((subject, kind)) = parse_external_entry_suffix(norm_lower.trim_end_matches('.')) {
+        if tag::<_, _, OracleError<'_>>("~").parse(subject).is_err() {
+            return build_external_entry_replacement(subject, &text, kind);
+        }
+    }
+
     // --- "~ enters under the control of an opponent of your choice." ---
     // CR 110.2a: A self-ETB controller-override replacement — the permanent
     // enters the battlefield directly under an opponent's control (Xantcha,
@@ -267,11 +275,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // Guard: reject text with " unless " or "if you control" — all conditional
     // patterns must be handled above. Counter-bearing variants fall through to
     // `parse_enters_with_counters`, which composes the tap and counter modifiers.
-    if (nom_primitives::scan_contains(&norm_lower, "enters the battlefield tapped")
-        || nom_primitives::scan_contains(&norm_lower, "enters tapped"))
-        && !nom_primitives::scan_contains(&norm_lower, "unless")
-        && !nom_primitives::scan_contains(&norm_lower, "if you control")
-        && !nom_primitives::scan_contains(&norm_lower, "if x")
+    if all_consuming((
+        tag::<_, _, OracleError<'_>>("~ enters "),
+        opt(tag("the battlefield ")),
+        tag("tapped"),
+        opt(tag(".")),
+    ))
+    .parse(norm_lower.as_str())
+    .is_ok()
         && !has_enters_tapped_with_counter(&norm_lower)
     {
         return Some(
@@ -6427,7 +6438,7 @@ fn build_external_entry_replacement(
     original_text: &str,
     kind: ExternalEntryKind,
 ) -> Option<ReplacementDefinition> {
-    if subject.contains('~') {
+    if tag::<_, _, OracleError<'_>>("~").parse(subject).is_ok() {
         return None;
     }
 
@@ -6436,8 +6447,11 @@ fn build_external_entry_replacement(
         | ExternalEntryKind::PlayedByOpponents { enters_tapped } => enters_tapped,
     };
 
-    let (filter, rest) = parse_type_phrase_folding(subject);
-    if !rest.trim().is_empty() {
+    let (filter, rest) = parse_target(subject);
+    if !rest.trim().is_empty()
+        || !matches!(&filter, TargetFilter::Typed(tf) if !tf.type_filters.is_empty())
+            && !matches!(&filter, TargetFilter::Or { filters } if !filters.is_empty())
+    {
         return None;
     }
 
@@ -6477,12 +6491,19 @@ fn build_external_entry_replacement(
         }
     };
 
+    let reads_parity = crate::game::filter::filter_contains_filter_prop(&valid_card, &|prop| {
+        matches!(prop, FilterProp::ManaValueParity { .. })
+    });
     Some(
-        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
-            .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
-            .valid_card(valid_card)
-            .destination_zone(Zone::Battlefield)
-            .description(original_text.to_string()),
+        ReplacementDefinition::new(if reads_parity {
+            ReplacementEvent::Moved
+        } else {
+            ReplacementEvent::ChangeZone
+        })
+        .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+        .valid_card(valid_card)
+        .destination_zone(Zone::Battlefield)
+        .description(original_text.to_string()),
     )
 }
 

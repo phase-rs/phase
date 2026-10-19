@@ -1645,7 +1645,16 @@ fn source_parity_chooser(item: &OracleItemIr) -> bool {
         a.sub_ability.is_none() && a.else_ability.is_none() && a.condition.is_none()
             && !a.optional && a.mode_abilities.is_empty()
             && matches!(a.effect.as_ref(), Effect::Choose { choice_type: ChoiceType::OddOrEven, persist: true, selection } if selection.is_chosen())
+            && a == &AbilityDefinition::new(AbilityKind::Spell, a.effect.as_ref().clone())
     })
+        && {
+            let mut plain = ReplacementDefinition::new(ReplacementEvent::Moved);
+            plain.valid_card = Some(TargetFilter::SelfRef);
+            plain.destination_zone = Some(Zone::Battlefield);
+            plain.execute = def.execute.clone();
+            plain.description = def.description.clone();
+            def == &plain
+        }
 }
 
 fn source_parity_static_reader(filter: &TargetFilter) -> bool {
@@ -1657,6 +1666,43 @@ fn source_parity_static_reader(filter: &TargetFilter) -> bool {
             }
         )
     })
+}
+
+fn source_parity_replacement_reader(def: &ReplacementDefinition) -> bool {
+    def.event == ReplacementEvent::Moved
+        && def.destination_zone == Some(Zone::Battlefield)
+        && def.mode == ReplacementMode::Mandatory
+        && def.condition.is_none()
+        && def.runtime_execute.is_none()
+        && def.valid_card.as_ref().is_some_and(|filter| {
+            crate::game::filter::filter_implies_battlefield_permanent(filter)
+                && source_parity_static_reader(filter)
+        })
+        && def.execute.as_deref().is_some_and(|ability| {
+            !ability.optional
+                && ability.condition.is_none()
+                && ability.sub_ability.is_none()
+                && ability.else_ability.is_none()
+                && ability.mode_abilities.is_empty()
+                && matches!(
+                    ability.effect.as_ref(),
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap | TapStateChange::Untap,
+                    }
+                )
+                && ability
+                    == &AbilityDefinition::new(AbilityKind::Spell, ability.effect.as_ref().clone())
+        })
+        && {
+            let mut plain = ReplacementDefinition::new(ReplacementEvent::Moved);
+            plain.destination_zone = Some(Zone::Battlefield);
+            plain.valid_card = def.valid_card.clone();
+            plain.execute = def.execute.clone();
+            plain.description = def.description.clone();
+            def == &plain
+        }
 }
 
 fn detect_source_parity_statics(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
@@ -1675,11 +1721,21 @@ fn detect_source_parity_statics(items: &[OracleItemIr], relations: &mut Vec<Docu
         })
         .map(|i| i.id)
         .collect();
-    if !statics.is_empty() {
+    let replacements: Vec<_> = items
+        .iter()
+        .filter_map(|item| match &item.node {
+            OracleNodeIr::Replacement(ir) if source_parity_replacement_reader(&ir.definition) => {
+                Some(item.id)
+            }
+            _ => None,
+        })
+        .collect();
+    if !statics.is_empty() || !replacements.is_empty() {
         relations.push(DocumentRelationIr::LinkedChoice(
             LinkedChoiceKind::SourceParityStatic {
                 chooser: chooser.id,
                 statics,
+                replacements,
             },
         ));
     }
@@ -1714,12 +1770,12 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            let OracleNodeIr::Static(ir) = &item.node else {
-                return None;
+            let filter = match &item.node {
+                OracleNodeIr::Static(ir) => ir.definition.affected.as_ref(),
+                OracleNodeIr::Replacement(ir) => ir.definition.valid_card.as_ref(),
+                _ => None,
             };
-            ir.definition
-                .affected
-                .as_ref()
+            filter
                 .is_some_and(source_parity_static_reader)
                 .then_some(index)
         })
@@ -1727,21 +1783,54 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
     if readers.is_empty() {
         return;
     }
+    // Item spans belong to the parser's normalized line buffer, not raw Oracle.
+    // Reuse that exact normalization before trusting an externally supplied
+    // relation's item/source pair; a foreign or stale fragment is no supplier.
+    let normalized = normalize_card_name_refs(&doc.source_text, &doc.card_name);
+    let source_lines: Vec<_> = normalized.split('\n').collect();
+    let source_is_current = |item: &OracleItemIr| {
+        let span = item.source.span();
+        if item.source.id().item != item.id
+            || span.first_line > span.last_line
+            || span.last_line >= source_lines.len()
+            || span.precision != super::oracle_ir::doc::SpanPrecision::Exact
+        {
+            return false;
+        }
+        let start: usize = source_lines[..span.first_line]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum();
+        let end: usize = source_lines[..=span.last_line]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum::<usize>()
+            - 1;
+        span.start_byte == start
+            && span.end_byte == end
+            && item.source.fragment() == Some(source_lines[span.first_line])
+    };
     let parity_relations: Vec<_> = relations
         .iter()
         .filter_map(|r| match r {
             DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
                 chooser,
                 statics,
-            }) => Some((*chooser, statics)),
+                replacements,
+            }) => Some((*chooser, statics, replacements)),
             _ => None,
         })
         .collect();
     let prepared = (|| {
-        let [(chooser_id, statics)] = parity_relations.as_slice() else {
+        let [(chooser_id, statics, replacements)] = parity_relations.as_slice() else {
             return None;
         };
-        if statics.len() != readers.len()
+        if statics.len() + replacements.len() != readers.len()
+            || statics.iter().any(|id| replacements.contains(id))
+            || replacements
+                .iter()
+                .enumerate()
+                .any(|(index, id)| replacements[..index].contains(id))
             || doc
                 .items
                 .iter()
@@ -1761,7 +1850,7 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
             return None;
         }
         let chooser = doc.items.iter().find(|i| i.id == *chooser_id)?;
-        if !source_parity_chooser(chooser) {
+        if !source_parity_chooser(chooser) || !source_is_current(chooser) {
             return None;
         }
         let before = chooser.source.span();
@@ -1769,18 +1858,26 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
         for index in &readers {
             let item = &doc.items[*index];
             let after = item.source.span();
-            if !statics.contains(&item.id)
-                || item.id == *chooser_id
+            if item.id == *chooser_id
+                || !source_is_current(item)
                 || (before.first_line, before.ordinal_within_span)
                     >= (after.first_line, after.ordinal_within_span)
                 || before.start_byte > after.start_byte
             {
                 return None;
             }
-            let OracleNodeIr::Static(ir) = &item.node else {
-                return None;
+            let mut filter = match &item.node {
+                OracleNodeIr::Static(ir) if statics.contains(&item.id) => {
+                    ir.definition.affected.clone()?
+                }
+                OracleNodeIr::Replacement(ir)
+                    if replacements.contains(&item.id)
+                        && source_parity_replacement_reader(&ir.definition) =>
+                {
+                    ir.definition.valid_card.clone()?
+                }
+                _ => return None,
             };
-            let mut filter = ir.definition.affected.clone()?;
             let mut complete = true;
             rewrite_filter_props(
                 &mut filter,
@@ -1804,23 +1901,28 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
     })();
     if let Some(rewritten) = prepared {
         for (index, filter) in rewritten {
-            if let OracleNodeIr::Static(ir) = &mut doc.items[index].node {
-                ir.definition.affected = Some(filter);
+            match &mut doc.items[index].node {
+                OracleNodeIr::Static(ir) => ir.definition.affected = Some(filter),
+                OracleNodeIr::Replacement(ir) => ir.definition.valid_card = Some(filter),
+                _ => unreachable!("validated reader category"),
             }
         }
     } else {
         for index in readers {
             let item = &mut doc.items[index];
-            let OracleNodeIr::Static(ir) = &item.node else {
-                continue;
-            };
-            let fragment = ir.source_text.clone();
-            item.node = OracleNodeIr::Unsupported {
-                unsupported: UnsupportedAbilityIr::new(
+            let (category, fragment) = match &item.node {
+                OracleNodeIr::Static(ir) => (
                     UnsupportedAbilityCategory::StaticStructure,
-                    fragment.clone(),
-                    fragment,
+                    ir.source_text.clone(),
                 ),
+                OracleNodeIr::Replacement(ir) => (
+                    UnsupportedAbilityCategory::ReplacementStructure,
+                    ir.source_text.clone(),
+                ),
+                _ => unreachable!("collected reader category"),
+            };
+            item.node = OracleNodeIr::Unsupported {
+                unsupported: UnsupportedAbilityIr::new(category, fragment.clone(), fragment),
                 min_x_value: 0,
             };
         }

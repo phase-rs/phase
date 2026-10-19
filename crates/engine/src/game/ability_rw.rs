@@ -7503,6 +7503,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn u15_parsed_external_filter_rw_axes() {
+        use crate::types::ability::{Parity, ParitySource};
+        let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Ashling's Prerogative",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert!(parsed.parse_warnings.is_empty());
+        assert_eq!(parsed.replacements.len(), 2);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(parsed.abilities.is_empty());
+        assert!(parsed
+            .replacements
+            .iter()
+            .any(
+                |definition| definition.valid_card == Some(TargetFilter::SelfRef)
+                    && definition
+                        .execute
+                        .as_deref()
+                        .is_some_and(|ability| matches!(
+                            ability.effect.as_ref(),
+                            crate::types::ability::Effect::Choose {
+                                choice_type: crate::types::ability::ChoiceType::OddOrEven,
+                                persist: true,
+                                ..
+                            }
+                        ))
+            ));
+        assert_eq!(
+            parsed.statics[0].modifications,
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Haste,
+            }]
+        );
+        let original = parsed
+            .replacements
+            .iter()
+            .find_map(|def| {
+                def.valid_card
+                    .as_ref()
+                    .filter(|filter| **filter != TargetFilter::SelfRef)
+            })
+            .unwrap();
+        assert!(
+            matches!(original, TargetFilter::Typed(tf) if tf.type_filters == [crate::types::ability::TypeFilter::Creature] && tf.controller.is_none() && matches!(tf.properties.as_slice(), [FilterProp::Not { prop }] if matches!(prop.as_ref(), FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+        );
+        for parity in [
+            ParitySource::SourceChosen,
+            ParitySource::Fixed(Parity::Even),
+            ParitySource::LastNamedChoice,
+        ] {
+            let mut filter = original.clone();
+            let mut leaves = 0;
+            let mut complete = true;
+            crate::game::filter::rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: value @ ParitySource::SourceChosen,
+                    } = prop
+                    {
+                        *value = parity;
+                        leaves += 1;
+                    }
+                },
+                &mut complete,
+            );
+            assert!(complete);
+            assert_eq!(leaves, 1);
+            let bound = parity == ParitySource::SourceChosen;
+            for profile in [rw_target_filter(&filter), board_membership_read(&filter)] {
+                assert_eq!(profile.reads_member_bound, bound);
+                assert_eq!(profile.reads_src.other, bound);
+                assert!(!profile.reads_event_live);
+                assert!(
+                    !profile.writes_event_object.any()
+                        && !profile.writes_self.any()
+                        && !profile.writes_external.any()
+                );
+            }
+            assert!(!legacy_target_filter(&filter));
+            let TargetFilter::Typed(tf) = &filter else {
+                unreachable!()
+            };
+            assert_eq!(member_bound_filter_prop(&tf.properties[0]), bound);
+            assert!(!legacy_filter_prop(&tf.properties[0]));
+        }
+    }
+
+    #[test]
     fn u14_parity_classification_axes() {
         use crate::types::ability::{Parity, ParitySource};
         for parity in [

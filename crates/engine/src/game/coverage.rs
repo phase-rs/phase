@@ -13682,6 +13682,73 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn u15_parsed_external_filter_labels_and_complete_coverage() {
+        use crate::types::ability::{FilterProp, Parity, ParitySource, TargetFilter};
+        let text = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
+        let face = counter_rider_face("Ashling's Prerogative", text, &[], &["Enchantment"]);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.replacements.len(), 2);
+        assert_eq!(face.static_abilities.len(), 1);
+        assert!(face.parse_warnings.is_empty());
+        assert!(super::card_face_gaps(&face).is_empty());
+        let original = face
+            .replacements
+            .iter()
+            .find_map(|def| {
+                def.valid_card
+                    .as_ref()
+                    .filter(|filter| **filter != TargetFilter::SelfRef)
+            })
+            .unwrap();
+        assert!(
+            matches!(original, TargetFilter::Typed(tf) if matches!(tf.properties.as_slice(), [FilterProp::Not { prop }] if matches!(prop.as_ref(), FilterProp::ManaValueParity { parity: ParitySource::SourceChosen })))
+        );
+        let mut labels = Vec::new();
+        for parity in [
+            ParitySource::SourceChosen,
+            ParitySource::LastNamedChoice,
+            ParitySource::Fixed(Parity::Even),
+        ] {
+            let mut filter = original.clone();
+            let mut count = 0;
+            let mut complete = true;
+            crate::game::filter::rewrite_filter_props(
+                &mut filter,
+                &mut |_| {},
+                &mut |prop| {
+                    if let FilterProp::ManaValueParity {
+                        parity: value @ ParitySource::SourceChosen,
+                    } = prop
+                    {
+                        *value = parity;
+                        count += 1;
+                    }
+                },
+                &mut complete,
+            );
+            assert!(complete);
+            assert_eq!(count, 1);
+            let TargetFilter::Typed(typed) = filter else {
+                unreachable!()
+            };
+            let label = super::fmt_typed_filter(&typed);
+            assert!(label.contains("not "));
+            labels.push(label);
+        }
+        assert!(labels[0].contains("source-chosen"));
+        assert_ne!(labels[0], labels[1]);
+        assert_ne!(labels[1], labels[2]);
+        assert!(labels[2].contains("even"));
+        let malformed = counter_rider_face(
+            "Synthetic malformed",
+            "Each creature without mana value of the chosen qualityness enters tapped.",
+            &[],
+            &["Enchantment"],
+        );
+        assert!(!super::card_face_gaps(&malformed).is_empty());
+    }
+
+    #[test]
     fn u14_parity_formatter_distinguishes_authorities() {
         use crate::types::ability::{FilterProp, Parity, ParitySource, TypedFilter};
         let label = |parity| {

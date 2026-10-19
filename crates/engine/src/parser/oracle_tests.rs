@@ -4,6 +4,324 @@ const U14_STANDARD: &str = "As this enchantment enters, choose odd or even. (Zer
 const U14_ASHLING: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
 
 #[test]
+fn u15_full_ashling_joint_readers_and_complete_subject() {
+    use crate::types::ability::{ParitySource, ReplacementMode, TapStateChange, TypeFilter};
+    let mut doc = parse_oracle_ir(
+        U14_ASHLING,
+        "Ashling's Prerogative",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, U14_ASHLING);
+    assert_eq!(doc.items.len(), 3);
+    let relation = doc
+        .relations
+        .iter()
+        .find_map(|r| match r {
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                chooser,
+                statics,
+                replacements,
+            }) => Some((*chooser, statics.clone(), replacements.clone())),
+            _ => None,
+        })
+        .expect("one exact joint printed relation");
+    assert_eq!(relation.0, doc.items[0].id);
+    assert_eq!(relation.1, vec![doc.items[1].id]);
+    assert_eq!(relation.2, vec![doc.items[2].id]);
+    assert!(source_parity_chooser(&doc.items[0]));
+    for (index, line) in U14_ASHLING.lines().enumerate() {
+        assert_eq!(doc.items[index].source.fragment(), Some(line));
+    }
+    let OracleNodeIr::Replacement(ir) = &doc.items[2].node else {
+        panic!("{doc:#?}")
+    };
+    assert_eq!(ir.definition.event, ReplacementEvent::Moved);
+    assert_eq!(ir.definition.destination_zone, Some(Zone::Battlefield));
+    assert_eq!(ir.definition.mode, ReplacementMode::Mandatory);
+    assert_eq!(
+        ir.definition.valid_card,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Not {
+                prop: Box::new(FilterProp::ManaValueParity {
+                    parity: ParitySource::SourceChosen
+                })
+            }],
+        }))
+    );
+    let execute = ir.definition.execute.as_deref().unwrap();
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap
+        }
+    ));
+    assert!(execute.sub_ability.is_none() && execute.else_ability.is_none());
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.replacements.len(), 2);
+    assert_eq!(parsed.statics.len(), 1);
+    assert!(parsed.abilities.is_empty());
+}
+
+#[test]
+fn u15_joint_multiple_readers_preserve_unrelated_and_local_items() {
+    let text = format!("{U14_ASHLING}\nEach creature with mana value of the chosen quality has flying.\nEach creature without mana value of the chosen quality enters untapped.\nChoose odd or even.\nCreatures have vigilance.");
+    let doc = parse_oracle_ir(
+        &text,
+        "Synthetic multiple readers",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    let relations: Vec<_> = doc
+        .relations
+        .iter()
+        .filter_map(|relation| match relation {
+            DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+                chooser,
+                statics,
+                replacements,
+            }) => Some((chooser, statics, replacements)),
+            _ => None,
+        })
+        .collect();
+    let [(chooser, statics, replacements)] = relations.as_slice() else {
+        panic!("one joint relation")
+    };
+    assert_eq!(**chooser, doc.items[0].id);
+    assert_eq!(statics.len(), 2);
+    assert_eq!(replacements.len(), 2);
+    assert!(statics.iter().all(|id| !replacements.contains(id)));
+    let mut readers = 0;
+    for item in &doc.items {
+        let filter = match &item.node {
+            OracleNodeIr::Static(ir) if statics.contains(&item.id) => {
+                ir.definition.affected.as_ref()
+            }
+            OracleNodeIr::Replacement(ir) if replacements.contains(&item.id) => {
+                ir.definition.valid_card.as_ref()
+            }
+            _ => None,
+        };
+        if let Some(filter) = filter {
+            readers += 1;
+            assert!(target_filter_uses_filter_prop(filter, &|prop| matches!(
+                prop,
+                FilterProp::ManaValueParity {
+                    parity: ParitySource::SourceChosen
+                }
+            )));
+            assert!(!source_parity_static_reader(filter));
+        }
+    }
+    assert_eq!(readers, 4);
+    assert!(doc
+        .items
+        .iter()
+        .any(|item| item.source.fragment() == Some("Choose odd or even.")
+            && !statics.contains(&item.id)
+            && !replacements.contains(&item.id)));
+    assert!(doc.items.iter().any(|item| matches!(&item.node, OracleNodeIr::Static(ir)
+        if ir.definition.modifications == [ContinuousModification::AddKeyword { keyword: Keyword::Vigilance }]
+            && !statics.contains(&item.id))));
+}
+
+#[test]
+fn u15_external_subject_refuses_residual_and_self_fallback() {
+    let positive = "Each creature without mana value of the chosen quality enters tapped.";
+    assert!(super::oracle_replacement::parse_replacement_line(positive, "Synthetic").is_some());
+    for text in [
+        "Each creature without mana value of the chosen qualityness enters tapped.",
+        "Each creature without mana value of the chosen quality enters tapped and draw a card.",
+        "Each creature with an unexplained quality enters tapped.",
+        "This enchantment mentions that a creature enters tapped.",
+        "This enchantment enters tapped. Draw a card.",
+    ] {
+        assert!(
+            super::oracle_replacement::parse_replacement_line(text, "Synthetic").is_none(),
+            "{text}"
+        );
+    }
+    assert!(super::oracle_replacement::parse_replacement_line(
+        "This enchantment enters tapped.",
+        "Synthetic"
+    )
+    .is_some());
+}
+
+#[test]
+fn u15_joint_reader_transaction_refuses_every_stale_half() {
+    use crate::types::ability::ParitySource;
+    for corruption in 0..20 {
+        let mut doc = parse_oracle_ir(
+            U14_ASHLING,
+            "Ashling's Prerogative",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(doc.items.len(), 3);
+        let mut relation = doc
+            .relations
+            .iter()
+            .find(|relation| {
+                matches!(
+                    relation,
+                    DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic { .. })
+                )
+            })
+            .unwrap()
+            .clone();
+        for item in &mut doc.items {
+            let filter = match &mut item.node {
+                OracleNodeIr::Static(ir) => ir.definition.affected.as_mut(),
+                OracleNodeIr::Replacement(ir) => ir.definition.valid_card.as_mut(),
+                _ => None,
+            };
+            if let Some(filter) = filter {
+                let mut complete = true;
+                rewrite_filter_props(
+                    filter,
+                    &mut |_| {},
+                    &mut |prop| {
+                        if let FilterProp::ManaValueParity {
+                            parity: parity @ ParitySource::SourceChosen,
+                        } = prop
+                        {
+                            *parity = ParitySource::LastNamedChoice;
+                        }
+                    },
+                    &mut complete,
+                );
+                assert!(complete);
+            }
+        }
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
+            chooser,
+            statics,
+            replacements,
+        }) = &mut relation
+        else {
+            unreachable!()
+        };
+        assert_eq!(statics.len(), 1);
+        assert_eq!(replacements.len(), 1);
+        match corruption {
+            0 => {}
+            1 => *chooser = OracleItemId(u32::MAX),
+            2 => statics.clear(),
+            3 => replacements.clear(),
+            4 => replacements.push(replacements[0]),
+            5 => statics.push(replacements[0]),
+            6 => replacements[0] = statics[0],
+            7 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.event = ReplacementEvent::ChangeZone;
+            }
+            8 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.destination_zone = Some(Zone::Graveyard);
+            }
+            9 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.execute.as_deref_mut().unwrap().optional = true;
+            }
+            10 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                let tail = ir.definition.execute.clone();
+                ir.definition.execute.as_deref_mut().unwrap().sub_ability = tail;
+            }
+            11 => doc.items[2].source = doc.items[0].source.clone(),
+            12 => doc.items[2].id = doc.items[1].id,
+            13 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.quantity_modification =
+                    Some(crate::types::ability::QuantityModification::Double);
+            }
+            14 => {
+                let mut second = doc.items[0].clone();
+                second.id = OracleItemId(u32::MAX - 1);
+                doc.items.push(second);
+            }
+            15 => doc.items[2].source = doc.items[1].source.clone(),
+            16 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.execute.as_deref_mut().unwrap().cost = Some(AbilityCost::Tap);
+            }
+            17 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[0].node else {
+                    unreachable!()
+                };
+                ir.definition.execute.as_deref_mut().unwrap().cost = Some(AbilityCost::Tap);
+            }
+            18 => {
+                let foreign = parse_oracle_ir(
+                    &U14_ASHLING.replace("enters tapped.", "enters untapped."),
+                    "Ashling's Prerogative",
+                    &[],
+                    &["Enchantment".into()],
+                    &[],
+                );
+                doc.items[2].source = foreign.items[2].source.clone();
+            }
+            19 => {
+                let OracleNodeIr::Replacement(ir) = &mut doc.items[2].node else {
+                    unreachable!()
+                };
+                ir.definition.condition =
+                    Some(crate::types::ability::ReplacementCondition::UnlessYourTurn);
+            }
+            _ => unreachable!(),
+        }
+        let identities: Vec<_> = doc
+            .items
+            .iter()
+            .map(|item| (item.id, item.source.clone()))
+            .collect();
+        apply_source_parity_statics(&mut doc, &[relation]);
+        for (item, (id, source)) in doc.items.iter().zip(identities) {
+            assert_eq!(item.id, id);
+            assert_eq!(item.source, source);
+        }
+        if corruption == 0 {
+            assert!(
+                matches!(&doc.items[1].node, OracleNodeIr::Static(ir) if ir.definition.affected.as_ref().is_some_and(|filter| target_filter_uses_filter_prop(filter, &|prop| matches!(prop, FilterProp::ManaValueParity { parity: ParitySource::SourceChosen }))))
+            );
+            assert!(
+                matches!(&doc.items[2].node, OracleNodeIr::Replacement(ir) if ir.definition.valid_card.as_ref().is_some_and(|filter| target_filter_uses_filter_prop(filter, &|prop| matches!(prop, FilterProp::ManaValueParity { parity: ParitySource::SourceChosen }))))
+            );
+        } else {
+            for (index, category) in [
+                (1, UnsupportedAbilityCategory::StaticStructure),
+                (2, UnsupportedAbilityCategory::ReplacementStructure),
+            ] {
+                assert!(
+                    matches!(&doc.items[index].node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.category == category),
+                    "corruption {corruption}: {doc:#?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn u14_source_parity_relation_two_layers() {
     // SHAPE: runtime entry and haste are exercised by jev_chosen_parity.
     for text in [
@@ -19,7 +337,8 @@ fn u14_source_parity_relation_two_layers() {
                 DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
                     chooser,
                     statics,
-                }) => Some((*chooser, statics)),
+                    replacements,
+                }) if replacements.is_empty() => Some((*chooser, statics)),
                 _ => None,
             })
             .expect("exact linked parity relation");
@@ -169,7 +488,7 @@ fn u14_relation_refuses_ambiguous_or_unowned_static() {
 }
 
 #[test]
-fn u14_full_ashling_keeps_entry_gap() {
+fn u15_full_ashling_closes_delivered_entry_gap() {
     let mut doc = parse_oracle_ir(
         U14_ASHLING,
         "Ashling's Prerogative",
@@ -200,9 +519,7 @@ fn u14_full_ashling_keeps_entry_gap() {
         abilities: parsed.abilities,
         ..Default::default()
     };
-    assert!(crate::game::coverage::card_face_gaps(&face)
-        .iter()
-        .any(|g| g == crate::game::coverage::ENTRY_PROJECTION_GAP));
+    assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
 }
 
 const U13_IMMARD: &str = "Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
@@ -35791,6 +36108,7 @@ fn u14_relation_is_transactional_and_exact_item_bound() {
         if let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::SourceParityStatic {
             chooser,
             statics,
+            replacements: _,
         }) = &mut relation
         {
             match corruption {

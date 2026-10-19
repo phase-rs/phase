@@ -7079,8 +7079,11 @@ pub(crate) fn parse_mana_value_suffix(
         return Some((prop, text.len() - after.len()));
     }
 
-    if let Ok((after, _)) = (
-        parse_suffix_subject_head,
+    if let Ok((after, (negative, _, _, _))) = (
+        alt((
+            value(false, parse_suffix_subject_head),
+            value(true, tag("without ")),
+        )),
         tag::<_, _, OracleError<'_>>("mana value of "),
         alt((
             tag::<_, _, OracleError<'_>>("the chosen quality"),
@@ -7090,9 +7093,16 @@ pub(crate) fn parse_mana_value_suffix(
     )
         .parse(trimmed)
     {
+        let prop = FilterProp::ManaValueParity {
+            parity: ParitySource::LastNamedChoice,
+        };
         return Some((
-            FilterProp::ManaValueParity {
-                parity: ParitySource::LastNamedChoice,
+            if negative {
+                FilterProp::Not {
+                    prop: Box::new(prop),
+                }
+            } else {
+                prop
             },
             text.len() - after.len(),
         ));
@@ -11149,6 +11159,60 @@ pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn u15_negative_quality_suffix_is_complete_and_composable() {
+        for head in ["with ", "that have ", "that each have ", "without "] {
+            for quality in ["the chosen quality", "that quality"] {
+                let text = format!("{head}mana value of {quality}");
+                let (prop, consumed) =
+                    parse_mana_value_suffix(&text, &mut ParseContext::default()).unwrap();
+                assert_eq!(consumed, text.len());
+                let parity = FilterProp::ManaValueParity {
+                    parity: ParitySource::LastNamedChoice,
+                };
+                assert_eq!(
+                    prop,
+                    if head == "without " {
+                        FilterProp::Not {
+                            prop: Box::new(parity),
+                        }
+                    } else {
+                        parity
+                    }
+                );
+                let bad = format!("{text}ness");
+                assert!(parse_mana_value_suffix(&bad, &mut ParseContext::default()).is_none());
+            }
+        }
+        assert!(
+            parse_mana_value_suffix("without mana value 3", &mut ParseContext::default()).is_none()
+        );
+        for noun in ["creature", "creatures", "each creature"] {
+            for (qualifier, controller) in [
+                ("", None),
+                (" you control", Some(ControllerRef::You)),
+                (" your opponents control", Some(ControllerRef::Opponent)),
+            ] {
+                for quality in ["the chosen quality", "that quality"] {
+                    let text = format!("{noun}{qualifier} without mana value of {quality}");
+                    let (filter, rest) = parse_target(&text);
+                    assert!(rest.is_empty(), "{text}: {rest}");
+                    assert_eq!(
+                        filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: controller.clone(),
+                            properties: vec![FilterProp::Not {
+                                prop: Box::new(FilterProp::ManaValueParity {
+                                    parity: ParitySource::LastNamedChoice,
+                                })
+                            }],
+                        })
+                    );
+                }
+            }
+        }
+    }
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::AttackerBlockStatus;
