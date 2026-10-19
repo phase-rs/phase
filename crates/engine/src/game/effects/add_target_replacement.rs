@@ -578,10 +578,12 @@ pub fn resolve(
         let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
         bind_replacement_to_trigger_source(&mut replacement, state);
         // CR 113.7a + CR 608.2h: the floating rider still refers to its source
-        // ("this enchantment"); anchor that host so source-relative quantities
+        // ("this enchantment"); anchor that host so the pending scan's host-relative
+        // gates and the entry-modifier quantities (via `replacement_source_host`)
         // read the installing source, not the ObjectId(0) storage sentinel.
         // Battlefield only: a source not on the battlefield at resolution keeps
-        // the sentinel (LKI handling is the resolution-time snapshot's job).
+        // the sentinel; CR 608.2h last-known information for that case is not
+        // implemented here.
         super::install_floating_damage_replacement(
             state,
             replacement,
