@@ -2059,7 +2059,7 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
 ) -> bool {
     let casting_spell = if fused {
         CastSpellContext {
-            object_id: object_id,
+            object_id,
             casting_variant: CastingVariant::Fuse,
         }
     } else {
@@ -2158,7 +2158,7 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 ) -> bool {
     let casting_spell = if fused {
         CastSpellContext {
-            object_id: object_id,
+            object_id,
             casting_variant: CastingVariant::Fuse,
         }
     } else {

@@ -17655,7 +17655,7 @@ pub mod tests {
             let mut complete = true;
             crate::game::filter::rewrite_filter_props(
                 &mut filter,
-                &mut |_| {},
+                &mut |_, _, _| {},
                 &mut |prop| {
                     if let FilterProp::ManaValueParity {
                         parity: value @ ParitySource::SourceChosen,
@@ -17665,7 +17665,10 @@ pub mod tests {
                         leaves += 1;
                     }
                 },
+                &mut |_| {},
                 &mut complete,
+                false,
+                None,
             );
             assert!(complete);
             assert_eq!(leaves, 1);

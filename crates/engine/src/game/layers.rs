@@ -20054,6 +20054,7 @@ mod tests {
                 state,
                 ZoneMoveRequest {
                     object_id,
+                    expected_origin: None,
                     to: Zone::Graveyard,
                     cause: ZoneChangeCause::Effect { source: object_id },
                     mods: EntryMods::default(),
@@ -20393,6 +20394,7 @@ mod tests {
                 state,
                 ZoneMoveRequest {
                     object_id,
+                    expected_origin: None,
                     to: Zone::Graveyard,
                     cause: ZoneChangeCause::Effect { source: object_id },
                     mods: EntryMods::default(),

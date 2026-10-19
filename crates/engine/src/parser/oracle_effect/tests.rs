@@ -89490,10 +89490,10 @@ fn token_definition_rejects_multiple_creators_and_document_boundary_leaks() {
                 .any(|def| def.effect.unimplemented_description().is_some())
         );
     }
-    let document = crate::parser::oracle::parse_oracle_ir(&format!("Create a 1/2 green Bear creature token. Target creature gets +1/+1 until end of turn.\n{definition}"), "Synthetic paragraph boundary", &[], &["Instant".into()], &[]);
+    let mut document = crate::parser::oracle::parse_oracle_ir(&format!("Create a 1/2 green Bear creature token. Target creature gets +1/+1 until end of turn.\n{definition}"), "Synthetic paragraph boundary", &[], &["Instant".into()], &[]);
     let encoded = serde_json::to_value(&document).unwrap();
     assert!(!encoded.to_string().contains("token_definition_owner"));
-    let lowered = crate::parser::oracle::lower_oracle_ir(&document);
+    let lowered = crate::parser::oracle::lower_oracle_ir(&mut document);
     assert!(matches!(
         *lowered.abilities[0].effect,
         Effect::Token {
@@ -89502,7 +89502,7 @@ fn token_definition_rejects_multiple_creators_and_document_boundary_leaks() {
             ..
         }
     ));
-    let modal = crate::parser::oracle::parse_oracle_ir(
+    let mut modal = crate::parser::oracle::parse_oracle_ir(
         &format!("Choose one —\n• Create a 1/2 green Bear creature token.\n• {definition}"),
         "Synthetic mode boundary",
         &[],
@@ -89511,7 +89511,7 @@ fn token_definition_rejects_multiple_creators_and_document_boundary_leaks() {
     );
     let encoded = serde_json::to_value(&modal).unwrap();
     assert!(!encoded.to_string().contains("token_definition_owner"));
-    let lowered = crate::parser::oracle::lower_oracle_ir(&modal);
+    let lowered = crate::parser::oracle::lower_oracle_ir(&mut modal);
     assert_eq!(
         lowered
             .modal

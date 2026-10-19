@@ -13430,7 +13430,7 @@ mod tests {
             let mut complete = true;
             rewrite_filter_props(
                 &mut control,
-                &mut |_| {},
+                &mut |_, _, _| {},
                 &mut |prop| {
                     if let FilterProp::ManaValueParity {
                         parity: value @ ParitySource::SourceChosen,
@@ -13440,7 +13440,10 @@ mod tests {
                         count += 1;
                     }
                 },
+                &mut |_| {},
                 &mut complete,
+                false,
+                None,
             );
             assert!(complete);
             assert_eq!(count, 1);
@@ -27214,6 +27217,8 @@ mod jev_shared_color_filter_tests {
 mod u13_exact_damage_subject_filter_tests {
     use super::*;
     use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::Comparator;
+    use crate::types::counter::CounterType;
     #[test]
     fn u13_recursive_snapshot_properties_do_not_read_the_returned_object_or_unkeyed_lki() {
         let mut s = GameScenario::new();

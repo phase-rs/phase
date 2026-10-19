@@ -13276,7 +13276,7 @@ mod tests {
         );
         assert!(find_applicable_replacements(&state, &liminal, replacement_registry()).is_empty());
         let creation = ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            .quantity_modification(QuantityModification::Double);
+            .quantity_modification(QuantityModification::DOUBLE);
         state.pending_damage_replacements.push(creation);
         let candidates = find_applicable_replacements(&state, &ordinary, replacement_registry());
         assert_eq!(
@@ -13451,7 +13451,7 @@ mod tests {
         let mut complete = true;
         crate::game::filter::rewrite_filter_props(
             sourced.valid_card.as_mut().unwrap(),
-            &mut |_| {},
+            &mut |_, _, _| {},
             &mut |prop| {
                 if let FilterProp::ManaValueParity { parity } = prop {
                     *parity = crate::types::ability::ParitySource::Fixed(
@@ -13459,7 +13459,10 @@ mod tests {
                     );
                 }
             },
+            &mut |_| {},
             &mut complete,
+            false,
+            None,
         );
         assert!(complete);
         state.pending_damage_replacements = vec![sourced];
@@ -13538,7 +13541,7 @@ mod tests {
         assert!(
             matches!(&changed, ProposedEvent::CreateToken { spec, copy: Some(copy), .. }
             if spec.enter_with_counters == [(CounterType::Plus1Plus1, 1)]
-                && !super::effects::token_copy::copy_token_uses_liminal_entry(copy, &spec.enter_with_counters))
+                && !crate::game::effects::token_copy::copy_token_uses_liminal_entry(copy, &spec.enter_with_counters))
         );
         assert_eq!(
             find_applicable_replacements(&state, &changed, replacement_registry()).len(),

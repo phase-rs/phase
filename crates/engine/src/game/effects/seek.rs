@@ -141,6 +141,7 @@ pub fn resolve(
 pub(crate) mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_nom::primitives::parse_mana_cost;
     use crate::types::ability::{
         CardPredicateChoice, ChoiceValue, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
         TypedFilter,
@@ -149,6 +150,7 @@ pub(crate) mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+    use nom::{combinator::all_consuming, Parser};
 
     /// Ordinary shared fixture: real public cast reaches a second producer's
     /// first replacement pause, with a prior named result already populated.
@@ -183,11 +185,11 @@ pub(crate) mod tests {
                 vec![],
             )],
         );
-        scenario.add_enchantment_from_oracle(P0, "Rest in Peace", "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.").with_mana_cost("{1}{W}".parse().unwrap());
+        scenario.add_enchantment_from_oracle(P0, "Rest in Peace", "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.").with_mana_cost(all_consuming(parse_mana_cost).parse("{1}{W}").unwrap().1);
         scenario
             .add_enchantment_from_oracle(P0, "Black reference", "")
             .with_color(vec![crate::types::mana::ManaColor::Black]);
-        scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.").with_mana_cost("{2}{B}{B}".parse().unwrap());
+        scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.").with_mana_cost(all_consuming(parse_mana_cost).parse("{2}{B}{B}").unwrap().1);
         let prior = scenario
             .add_spell_to_library_top(P0, "Private prior artifact", false)
             .as_artifact()

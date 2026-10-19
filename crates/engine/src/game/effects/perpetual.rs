@@ -1847,7 +1847,7 @@ mod sought_exact_recipient_tests {
             .return_result_frames
             .insert(child, std::collections::BTreeMap::new());
         state.active_return_result_occurrence = Some(child);
-        for object in state.objects.values_mut() {
+        for (_, object) in state.objects.iter_mut() {
             object.color.clear();
             object.base_color.clear();
         }

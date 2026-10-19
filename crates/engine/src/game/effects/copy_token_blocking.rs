@@ -280,8 +280,9 @@ mod tests {
         let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::CopyTokenBlockingAttacker {
                 source_filter: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::creature()
-                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                    crate::types::ability::TypedFilter::creature().properties(vec![
+                        crate::types::ability::FilterProp::Attacking { defender: None },
+                    ]),
                 ),
                 owner: TargetFilter::Controller,
             },
@@ -300,8 +301,9 @@ mod tests {
         let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::CopyTokenBlockingAttacker {
                 source_filter: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::creature()
-                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                    crate::types::ability::TypedFilter::creature().properties(vec![
+                        crate::types::ability::FilterProp::Attacking { defender: None },
+                    ]),
                 ),
                 owner: TargetFilter::Controller,
             },
@@ -320,8 +322,9 @@ mod tests {
         let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::CopyTokenBlockingAttacker {
                 source_filter: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::creature()
-                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                    crate::types::ability::TypedFilter::creature().properties(vec![
+                        crate::types::ability::FilterProp::Attacking { defender: None },
+                    ]),
                 ),
                 owner: TargetFilter::Controller,
             },
@@ -340,8 +343,9 @@ mod tests {
         let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::CopyTokenBlockingAttacker {
                 source_filter: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::creature()
-                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                    crate::types::ability::TypedFilter::creature().properties(vec![
+                        crate::types::ability::FilterProp::Attacking { defender: None },
+                    ]),
                 ),
                 owner: TargetFilter::Controller,
             },
@@ -360,8 +364,9 @@ mod tests {
         let (state, _events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::CopyTokenBlockingAttacker {
                 source_filter: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::creature()
-                        .properties(vec![crate::types::ability::FilterProp::Attacking]),
+                    crate::types::ability::TypedFilter::creature().properties(vec![
+                        crate::types::ability::FilterProp::Attacking { defender: None },
+                    ]),
                 ),
                 owner: TargetFilter::Controller,
             },

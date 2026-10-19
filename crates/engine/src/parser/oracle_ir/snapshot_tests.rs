@@ -123,8 +123,8 @@ fn ordinary_reveal_scalar_two_layers() {
             }
         ));
         if count == 1 && scope.is_some() {
-            insta::assert_yaml_snapshot!("jev_ordinary_reveal_scalar_ir", ir);
-            insta::assert_yaml_snapshot!("jev_ordinary_reveal_scalar_lowered", lowered);
+            insta::assert_json_snapshot!("jev_ordinary_reveal_scalar_ir", ir);
+            insta::assert_json_snapshot!("jev_ordinary_reveal_scalar_lowered", lowered);
         }
     }
     let full = "At the beginning of your upkeep, each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.";
@@ -184,8 +184,8 @@ fn ordinary_reveal_scalar_two_layers() {
         }
     ));
     assert!(lowered.parse_warnings.is_empty(), "{lowered:#?}");
-    insta::assert_yaml_snapshot!("jev_game_preserve_ir", ir);
-    insta::assert_yaml_snapshot!("jev_game_preserve_lowered", lowered);
+    insta::assert_json_snapshot!("jev_game_preserve_ir", ir);
+    insta::assert_json_snapshot!("jev_game_preserve_lowered", lowered);
 }
 
 const OUTER_ORDINARY_SPIRIT: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.";
@@ -734,7 +734,7 @@ fn white_suns_twilight_outer_and_token_owners() {
         assert!(static_abilities
             .iter()
             .any(|s| s.mode == crate::types::statics::StaticMode::CantBlock
-                && s.affected == TargetFilter::SelfRef));
+                && s.affected == Some(TargetFilter::SelfRef)));
         let destroy = chain
             .iter()
             .find(|d| matches!(*d.effect, Effect::DestroyAll { .. }))

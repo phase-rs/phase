@@ -6303,7 +6303,7 @@ pub(crate) mod tests {
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source,
@@ -6582,7 +6582,7 @@ pub(crate) mod tests {
             &[],
         );
         assert_eq!(parsed_counter.replacements.len(), 1);
-        immediate.values.replacement_definitions = parsed_counter.replacements;
+        immediate.values.replacement_definitions = parsed_counter.replacements.into();
         assert!(!copy_token_uses_liminal_entry(&immediate, &[]));
         assert_eq!(
             copy_token_entry_counters(&immediate, &[]),
@@ -7119,7 +7119,7 @@ pub(crate) mod tests {
             tail.sub_ability = Some(Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Controller,
+                    player: TargetFilter::Controller,
                 },
                 vec![],
                 source,

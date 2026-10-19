@@ -775,7 +775,7 @@ mod tests {
                             scope: crate::types::ability::ObjectScope::AmassedArmy,
                         },
                     },
-                    target: crate::types::ability::TargetFilter::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
                 vec![],
                 ability.source_id,

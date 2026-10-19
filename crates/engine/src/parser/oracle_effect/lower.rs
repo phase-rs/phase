@@ -16765,7 +16765,10 @@ mod dq_d_player_set_lift_tests {
         for_each_repeatable_repeat_for, strip_for_each_repeat_suffix, strip_player_scope_subject,
     };
     use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
-    use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityExpr, QuantityRef};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, MultiTargetSpec, PlayerFilter, QuantityExpr,
+        QuantityRef,
+    };
 
     // Matrix #3 — the shared `split_for_each_suffix` refactor is byte-identical:
     // each input yields the SAME `(Option<QuantityExpr>, String)` as pre-refactor.
@@ -17185,7 +17188,8 @@ mod dq_d_player_set_lift_tests {
     fn nested_attack_creation_keeps_inner_cleanup_and_end_combat_sibling_boundaries() {
         for (text,end) in [("Whenever you attack this turn, create two 1/1 red Warrior creature tokens that are tapped and attacking. Sacrifice them at the beginning of the next end step.",crate::types::phase::Phase::End),("Create a colorless Construct artifact creature token named Twin that's attacking. Its power is equal to this creature's power and its toughness is equal to this creature's toughness. Sacrifice the token at end of combat.",crate::types::phase::Phase::EndCombat)] {
             let chain=super::super::parse_effect_chain(text,AbilityKind::Spell);
-            fn has_cleanup(def:&AbilityDefinition,end:crate::types::phase::Phase)->bool {match def.effect.as_ref() {Effect::CreateDelayedTrigger {condition,effect,..}=>{if matches!(condition,crate::types::ability::DelayedTriggerCondition::AtNextPhase {phase} if *phase==end)&&matches!(effect.effect.as_ref(),Effect::Sacrifice {..}) {return true;}if has_cleanup(effect,end){return true;}},_=>{}}def.sub_ability.as_deref().is_some_and(|sub|has_cleanup(sub,end))}
+            fn has_cleanup(def:&AbilityDefinition,end:crate::types::phase::Phase)->bool {match def.effect.as_ref() {Effect::CreateDelayedTrigger {condition,effect,..}=>{if matches!(condition,crate::types::ability::DelayedTriggerCondition::AtNextPhase {phase} if *phase==end)&&matches!(effect.effect.as_ref(),Effect::Sacrifice {..}) {return true;}
+                if has_cleanup(effect,end){return true;}},_=>{}}def.sub_ability.as_deref().is_some_and(|sub|has_cleanup(sub,end))}
             assert!(has_cleanup(&chain,end),"full nested payload retains ordinary delayed sacrifice: {chain:?}");
         }
     }

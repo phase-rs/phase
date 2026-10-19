@@ -336,7 +336,7 @@ mod tests {
     }
     #[test]
     fn populate_completion_synchronous() {
-        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::Populate,
             super::super::token_copy::tests::CreationPauseCase::Synchronous,
         );
@@ -369,7 +369,7 @@ mod tests {
     }
     #[test]
     fn populate_completion_queued_child() {
-        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::Populate,
             super::super::token_copy::tests::CreationPauseCase::Queued,
         );
@@ -402,7 +402,7 @@ mod tests {
     }
     #[test]
     fn populate_completion_counter_pause() {
-        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::Populate,
             super::super::token_copy::tests::CreationPauseCase::Counter,
         );
@@ -435,7 +435,7 @@ mod tests {
     }
     #[test]
     fn populate_completion_queued_child_current_reload() {
-        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::Populate,
             super::super::token_copy::tests::CreationPauseCase::ReloadQueued,
         );
@@ -468,7 +468,7 @@ mod tests {
     }
     #[test]
     fn populate_completion_counter_current_reload() {
-        let (state, events) = super::super::token_copy::tests::creation_wrapper_case(
+        let (_state, events) = super::super::token_copy::tests::creation_wrapper_case(
             Effect::Populate,
             super::super::token_copy::tests::CreationPauseCase::ReloadCounter,
         );
@@ -514,7 +514,7 @@ mod tests {
             ability.sub_ability = Some(Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Controller,
+                    player: TargetFilter::Controller,
                 },
                 vec![],
                 source,

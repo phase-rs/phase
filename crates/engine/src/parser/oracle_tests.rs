@@ -134,7 +134,9 @@ fn u15_joint_multiple_readers_preserve_unrelated_and_local_items() {
 #[test]
 fn u15_external_subject_refuses_residual_and_self_fallback() {
     let positive = "Each creature without mana value of the chosen quality enters tapped.";
-    assert!(super::oracle_replacement::parse_replacement_line(positive, "Synthetic").is_some());
+    assert!(
+        crate::parser::oracle_replacement::parse_replacement_line(positive, "Synthetic").is_some()
+    );
     for text in [
         "Each creature without mana value of the chosen qualityness enters tapped.",
         "Each creature without mana value of the chosen quality enters tapped and draw a card.",
@@ -143,11 +145,11 @@ fn u15_external_subject_refuses_residual_and_self_fallback() {
         "This enchantment enters tapped. Draw a card.",
     ] {
         assert!(
-            super::oracle_replacement::parse_replacement_line(text, "Synthetic").is_none(),
+            crate::parser::oracle_replacement::parse_replacement_line(text, "Synthetic").is_none(),
             "{text}"
         );
     }
-    assert!(super::oracle_replacement::parse_replacement_line(
+    assert!(crate::parser::oracle_replacement::parse_replacement_line(
         "This enchantment enters tapped.",
         "Synthetic"
     )
@@ -187,7 +189,7 @@ fn u15_joint_reader_transaction_refuses_every_stale_half() {
                 let mut complete = true;
                 rewrite_filter_props(
                     filter,
-                    &mut |_| {},
+                    &mut |_, _, _| {},
                     &mut |prop| {
                         if let FilterProp::ManaValueParity {
                             parity: parity @ ParitySource::SourceChosen,
@@ -196,7 +198,10 @@ fn u15_joint_reader_transaction_refuses_every_stale_half() {
                             *parity = ParitySource::LastNamedChoice;
                         }
                     },
+                    &mut |_| {},
                     &mut complete,
+                    false,
+                    None,
                 );
                 assert!(complete);
             }
@@ -251,7 +256,7 @@ fn u15_joint_reader_transaction_refuses_every_stale_half() {
                     unreachable!()
                 };
                 ir.definition.quantity_modification =
-                    Some(crate::types::ability::QuantityModification::Double);
+                    Some(crate::types::ability::QuantityModification::DOUBLE);
             }
             14 => {
                 let mut second = doc.items[0].clone();
@@ -1273,7 +1278,7 @@ fn assert_white_sun_shape(parsed: &ParsedAbilities, draw: bool) {
     assert!(keywords.contains(&Keyword::Toxic(1)));
     assert!(static_abilities
         .iter()
-        .any(|s| s.mode == StaticMode::CantBlock && s.affected == TargetFilter::SelfRef));
+        .any(|s| s.mode == StaticMode::CantBlock && s.affected == Some(TargetFilter::SelfRef)));
     let destroy = chain
         .iter()
         .find(|d| matches!(*d.effect, Effect::DestroyAll { .. }))
@@ -1373,7 +1378,7 @@ fn unquoted_cant_block_retains_static_owner() {
     assert!(parsed
         .statics
         .iter()
-        .any(|s| s.mode == StaticMode::CantBlock && s.affected == TargetFilter::SelfRef));
+        .any(|s| s.mode == StaticMode::CantBlock && s.affected == Some(TargetFilter::SelfRef)));
     assert_white_sun_shape(&scope_spell(FULL_WHITE_SUN), false);
 }
 
@@ -36548,13 +36553,16 @@ fn u14_relation_is_transactional_and_exact_item_bound() {
                     let mut complete = true;
                     rewrite_filter_props(
                         ir.definition.affected.as_mut().unwrap(),
-                        &mut |_| {},
+                        &mut |_, _, _| {},
                         &mut |p| {
                             if let FilterProp::ManaValueParity { parity } = p {
                                 *parity = ParitySource::LastNamedChoice;
                             }
                         },
+                        &mut |_| {},
                         &mut complete,
+                        false,
+                        None,
                     );
                     assert!(complete);
                 }

@@ -29565,6 +29565,7 @@ mod loyalty_symbol_effect_tests {
 #[cfg(test)]
 mod jev_seek_imperative_tests {
     use super::*;
+    use crate::types::CounterType;
 
     #[test]
     fn jev_seek_family_propagates_rejected_filter_details() {

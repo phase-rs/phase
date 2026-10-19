@@ -6506,7 +6506,7 @@ mod token_owner_tests {
         for owner in [None, Some(ClauseId(999))] {
             ir.clauses.last_mut().unwrap().token_definition_owner = owner;
             let def = assemble_effect_chain(&ir);
-            assert!(std::iter::successors(Some(&def), |d| d.sub_ability.as_deref()).any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { description, .. } if description == ir.clauses.last().unwrap().source.fragment().unwrap())));
+            assert!(std::iter::successors(Some(&def), |d| d.sub_ability.as_deref()).any(|d| matches!(d.effect.as_ref(), Effect::Unimplemented { description, .. } if description.as_deref() == Some(ir.clauses.last().unwrap().source.fragment().unwrap()))));
         }
         // A real owner id with the wrong output shape must not select the other Token.
         ir.clauses[0].parsed = crate::parser::oracle_ir::ast::parsed_clause(Effect::Draw {

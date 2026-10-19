@@ -14723,6 +14723,7 @@ mod tests {
 #[cfg(test)]
 mod token_materialization_completion_tests {
     use super::*;
+    use crate::types::player::PlayerId;
     #[test]
     fn persistent_token_materialization_waits_for_queued_and_counter_children_after_reload() {
         use crate::game::effects::token_copy::tests::{
@@ -14767,7 +14768,9 @@ mod token_materialization_completion_tests {
             );
             state.waiting_for = WaitingFor::PayAmountChoice {
                 player: PlayerId(0),
-                resource: PayableResource::LoopCollapse,
+                resource: PayableResource::LoopCollapse {
+                    axis: crate::types::game_state::LoopCollapseAxis::Mixed,
+                },
                 min: 1,
                 max: 1,
                 accumulated: 0,

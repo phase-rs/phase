@@ -12398,7 +12398,7 @@ mod tests {
                         sub.sub_ability = Some(Box::new(ResolvedAbility::new(
                             Effect::GainLife {
                                 amount: QuantityExpr::Fixed { value: 1 },
-                                target: TargetFilter::Controller,
+                                player: TargetFilter::Controller,
                             },
                             vec![],
                             src,

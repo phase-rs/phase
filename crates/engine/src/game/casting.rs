@@ -22523,7 +22523,6 @@ pub(super) fn can_feasibly_pay_mana_cost(
     can_feasibly_pay_mana_cost_with_probe(state, player, source_id, cost, None)
 }
 /// CR 601.2b: selected no-probe spell payment.
-
 #[cfg(test)]
 pub(crate) fn has_manual_mana_ability_for_spell_payment(
     state: &GameState,
@@ -35262,7 +35261,7 @@ mod selected_cast_intent_tests {
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: vec![],
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }
