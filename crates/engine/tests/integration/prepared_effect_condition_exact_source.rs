@@ -47,7 +47,10 @@ use engine::types::ability::EffectKind;
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{
+    GameState, ManaChoice, ManaChoicePrompt, PersistedGameState, PersistedRestoreFinalization,
+    WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1408,4 +1411,187 @@ fn negated_prepared_mana_ability_self_sacrifice_dispatches_life_gain_from_unprep
         "the exit was unprepared — the life gain must dispatch"
     );
     assert_eq!(gain_life_dispatches(&events, witness), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Mana-ability colour-choice cohort: "Add one mana of any color" (the printed
+// grammar of Wild Cantor's "Sacrifice this creature: Add one mana of any
+// color.") cannot resolve without a choice, so the sacrifice is paid, the
+// activation parks on `WaitingFor::ChooseManaColor`, and production plus the
+// inline sub-chain run only when the colour is answered (CR 605.3b + CR
+// 106.1a). The announcement-captured incarnation must survive that pending
+// continuation, including a persisted round-trip of the parked prompt, so the
+// resumed sub-chain's source-subject condition still reads the exit last-known
+// information (CR 400.7 + CR 602.2a + CR 608.2h + CR 113.7a) instead of the
+// live graveyard card at the same storage id.
+// ---------------------------------------------------------------------------
+
+const SELF_SACRIFICE_ANY_COLOR_PREPARED_ORACLE: &str =
+    "Sacrifice this creature: Add one mana of any color. You gain 1 life if this creature is prepared.";
+const SELF_SACRIFICE_ANY_COLOR_UNPREPARED_ORACLE: &str =
+    "Sacrifice this creature: Add one mana of any color. You gain 1 life if this creature isn't prepared.";
+
+/// The engine's own save/undo/P2P restore pipeline (`PersistedGameState`), so
+/// the parked colour choice's pending mana ability is carried exactly as a
+/// resumed session would carry it.
+fn round_trip(runner: &GameRunner) -> GameRunner {
+    let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("state serializes");
+    let state = serde_json::from_str::<PersistedGameState>(&json)
+        .expect("persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("persisted state is admissible")
+        .finalize_after_rehydration(|_| Ok(()))
+        .expect("restored state is publishable");
+    GameRunner::from_state(state)
+}
+
+/// Life gained and `GainLife` dispatches for this witness once its colour
+/// choice is answered.
+struct ColorChoiceOutcome {
+    life_delta: i32,
+    gain_life_dispatches: usize,
+}
+
+/// Activate the any-colour witness publicly, require the post-sacrifice
+/// colour prompt, round-trip the parked state, then answer the prompt through
+/// `GameAction::ChooseManaColor` and require completion into Priority.
+fn answer_color_choice_after_self_sacrifice(
+    runner: GameRunner,
+    witness: ObjectId,
+) -> ColorChoiceOutcome {
+    let mut runner = runner;
+    let incarnation_before = runner.state().objects[&witness].incarnation;
+    let life_before = life_total(runner.state(), P0);
+    let index = activation_index(&runner, witness);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: witness,
+            ability_index: index,
+        })
+        .expect("the mana activation is accepted");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::SingleColor { options },
+                ..
+            } if options.contains(&ManaType::Blue)
+        ),
+        "an any-colour mana ability must park on its colour choice: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the sacrifice cost is paid before the colour is chosen"
+    );
+    assert_ne!(
+        runner.state().objects[&witness].incarnation,
+        incarnation_before,
+        "the sacrifice advances the storage incarnation — a live read names the moved object"
+    );
+    assert!(
+        runner.state().objects[&witness].prepared.is_none(),
+        "the departed graveyard card's live designation is cleared"
+    );
+    assert_eq!(
+        life_total(runner.state(), P0),
+        life_before,
+        "nothing resolves before the colour is chosen"
+    );
+
+    let mut runner = round_trip(&runner);
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "the persisted round-trip keeps the parked colour choice"
+    );
+    let events = runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("the colour choice resumes the mana ability")
+        .events;
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the resumed mana ability must complete into a Priority window"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Blue),
+        1,
+        "the chosen colour is produced on resume"
+    );
+    ColorChoiceOutcome {
+        life_delta: life_total(runner.state(), P0) - life_before,
+        gain_life_dispatches: gain_life_dispatches(&events, witness),
+    }
+}
+
+/// Colour-choice discriminator: a prepared exit gains 1 life after the colour
+/// is answered. A live read of the graveyard card at resume would suppress.
+#[test]
+fn prepared_any_color_mana_ability_dispatches_life_gain_from_announced_exit_after_color_choice() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_ANY_COLOR_PREPARED_ORACLE);
+    prepare_witness(&mut runner, witness);
+
+    let outcome = answer_color_choice_after_self_sacrifice(runner, witness);
+
+    assert_eq!(
+        outcome.life_delta, 1,
+        "the announced incarnation's exit-prepared state must gain 1 life on resume"
+    );
+    assert_eq!(outcome.gain_life_dispatches, 1);
+}
+
+/// Paired suppression control: an unprepared exit gains nothing on resume, so
+/// the positive case above cannot be vacuous.
+#[test]
+fn prepared_any_color_mana_ability_suppresses_life_gain_from_unprepared_exit_after_color_choice() {
+    let (runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_ANY_COLOR_PREPARED_ORACLE);
+
+    let outcome = answer_color_choice_after_self_sacrifice(runner, witness);
+
+    assert_eq!(outcome.life_delta, 0, "the exit was unprepared");
+    assert_eq!(outcome.gain_life_dispatches, 0);
+}
+
+/// Negated colour-choice discriminator: "isn't prepared" reads the prepared
+/// exit and suppresses on resume. A live read of the unprepared graveyard card
+/// would gain 1 life.
+#[test]
+fn negated_prepared_any_color_mana_ability_suppresses_life_gain_from_prepared_exit_after_color_choice(
+) {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_ANY_COLOR_UNPREPARED_ORACLE);
+    prepare_witness(&mut runner, witness);
+
+    let outcome = answer_color_choice_after_self_sacrifice(runner, witness);
+
+    assert_eq!(
+        outcome.life_delta, 0,
+        "the exit was prepared — 'isn't prepared' must suppress despite the unprepared live card"
+    );
+    assert_eq!(outcome.gain_life_dispatches, 0);
+}
+
+/// Negated positive twin: an unprepared exit satisfies "isn't prepared" and
+/// gains 1 life on resume.
+#[test]
+fn negated_prepared_any_color_mana_ability_dispatches_life_gain_from_unprepared_exit_after_color_choice(
+) {
+    let (runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_ANY_COLOR_UNPREPARED_ORACLE);
+
+    let outcome = answer_color_choice_after_self_sacrifice(runner, witness);
+
+    assert_eq!(outcome.life_delta, 1, "the exit was unprepared");
+    assert_eq!(outcome.gain_life_dispatches, 1);
 }
