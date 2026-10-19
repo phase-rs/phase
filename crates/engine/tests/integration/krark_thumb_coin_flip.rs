@@ -942,12 +942,12 @@ fn every_kept_completion_reports_resolved_once() {
     ));
 }
 
-// --- Persisted pre-merge saves (resolution wire version 6) ------------------
+// --- Persisted pre-merge saves (resolution wire version 7) ------------------
 
 /// Mirror March, verbatim Oracle text.
 const MIRROR_MARCH: &str = "Whenever a nontoken creature you control enters, flip a coin until you lose a flip. For each flip you won, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.";
 
-/// What [`downgrade_coin_flips_to_v6`] rewrote, by legacy shape.
+/// What [`downgrade_coin_flips_to_v7`] rewrote, by legacy shape.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DowngradeCount {
     /// `FlipCoins { flips: Exactly { Fixed 1 } }` became the legacy `FlipCoin`.
@@ -961,12 +961,12 @@ struct DowngradeCount {
 }
 
 /// Test-local inverse of the persisted-boundary migration: rewrites a current-wire
-/// `ResolutionStateWire` JSON value into the shapes a pre-merge (version 6) build wrote.
+/// `ResolutionStateWire` JSON value into the shapes a pre-merge (version 7) build wrote.
 ///
 /// Walks every `effect` / `replacement_effect` payload (the migration's own scope, which
 /// covers a spell's ability, Krark's replacement `execute` and a trigger's `execute`) and
-/// every coin-flip frame `kind`, then stamps `resolution_state_version: 6`.
-fn downgrade_coin_flips_to_v6(wire: &mut serde_json::Value) -> DowngradeCount {
+/// every coin-flip frame `kind`, then stamps `resolution_state_version: 7`.
+fn downgrade_coin_flips_to_v7(wire: &mut serde_json::Value) -> DowngradeCount {
     use serde_json::{json, Value};
 
     fn downgrade_effect(effect: &mut Value, count: &mut DowngradeCount) {
@@ -1053,7 +1053,7 @@ fn downgrade_coin_flips_to_v6(wire: &mut serde_json::Value) -> DowngradeCount {
         object.contains_key("resolution_state_version"),
         "the wire carries its version"
     );
-    object.insert("resolution_state_version".to_string(), json!(6));
+    object.insert("resolution_state_version".to_string(), json!(7));
     count
 }
 
@@ -1152,7 +1152,7 @@ fn assert_resting_at_priority(runner: &GameRunner) {
 /// spell, Krark's `FlipCoins { count }` replacement and a `Single` frame) restores at the
 /// persisted boundary and finishes the paused flip.
 #[test]
-fn legacy_v6_single_flip_save_restores_and_completes() {
+fn legacy_v7_single_flip_save_restores_and_completes() {
     let effect = single_flip_with_win_life(2);
     let (mut runner, spell, results) =
         pause_at_first_keep(&effect, |results| results.contains(&true));
@@ -1195,9 +1195,9 @@ fn legacy_v6_single_flip_save_restores_and_completes() {
     keep_win(&mut runner);
 
     // The pre-merge save: legacy effect tags (the spell AND Krark's replacement count), the
-    // `Single` frame kind and wire version 6.
+    // `Single` frame kind and wire version 7.
     let mut legacy = current;
-    let rewrites = downgrade_coin_flips_to_v6(&mut legacy);
+    let rewrites = downgrade_coin_flips_to_v7(&mut legacy);
     assert!(
         rewrites.flip_coin > 0,
         "the spell effect is rewritten: {rewrites:?}"
@@ -1222,7 +1222,7 @@ fn legacy_v6_single_flip_save_restores_and_completes() {
 /// CR 705.1 + CR 614.1a: a legacy `FlipN` frame with a `FlipCoins { count }` effect, paused at
 /// the first of three keeps, restores and drives the remaining two flips.
 #[test]
-fn legacy_v6_flip_n_save_restores_and_completes() {
+fn legacy_v7_flip_n_save_restores_and_completes() {
     let effect = Effect::FlipCoins {
         flips: CoinFlipRun::Exactly {
             count: QuantityExpr::Fixed { value: 3 },
@@ -1235,7 +1235,7 @@ fn legacy_v6_flip_n_save_restores_and_completes() {
     let current = wire_json(&runner);
 
     let mut legacy = current.clone();
-    let rewrites = downgrade_coin_flips_to_v6(&mut legacy);
+    let rewrites = downgrade_coin_flips_to_v7(&mut legacy);
     assert!(
         rewrites.flip_coins >= 2,
         "the spell AND Krark's replacement become `FlipCoins {{ count }}`: {rewrites:?}"
@@ -1263,13 +1263,13 @@ fn legacy_v6_flip_n_save_restores_and_completes() {
 /// CR 705.2: a legacy `UntilLose { wins_so_far: 0 }` frame with a `FlipCoinUntilLose` effect
 /// restores and runs to the kept loss.
 #[test]
-fn legacy_v6_until_lose_frame_without_wins_restores() {
+fn legacy_v7_until_lose_frame_without_wins_restores() {
     let (mut runner, spell, _) = pause_at_first_keep(&until_loss_gain_life(), |_| true);
     let start_life = life_of(&runner, P0);
     let current = wire_json(&runner);
 
     let mut legacy = current.clone();
-    let rewrites = downgrade_coin_flips_to_v6(&mut legacy);
+    let rewrites = downgrade_coin_flips_to_v7(&mut legacy);
     assert!(rewrites.flip_coin_until_lose > 0, "{rewrites:?}");
     assert!(rewrites.flip_coins > 0, "Krark's replacement: {rewrites:?}");
     assert_eq!(rewrites.frames, 1);
@@ -1302,7 +1302,7 @@ fn legacy_v6_until_lose_frame_without_wins_restores() {
 /// CR 705.2 + CR 608.2c: a legacy `UntilLose { wins_so_far: n > 0 }` frame restores
 /// losslessly, so the rewards already owed are still paid after the kept loss.
 #[test]
-fn legacy_v6_until_lose_frame_with_owed_rewards_pays_them() {
+fn legacy_v7_until_lose_frame_with_owed_rewards_pays_them() {
     let (mut runner, spell, results) =
         pause_at_first_keep(&until_loss_gain_life(), |results| results.contains(&true));
     let start_life = life_of(&runner, P0);
@@ -1328,7 +1328,7 @@ fn legacy_v6_until_lose_frame_with_owed_rewards_pays_them() {
     let current = wire_json(&runner);
 
     let mut legacy = current.clone();
-    let rewrites = downgrade_coin_flips_to_v6(&mut legacy);
+    let rewrites = downgrade_coin_flips_to_v7(&mut legacy);
     assert_eq!(rewrites.frames, 1);
     assert!(
         legacy
@@ -1382,7 +1382,7 @@ fn legacy_v6_until_lose_frame_with_owed_rewards_pays_them() {
 /// trigger and Krark's replacement stored as legacy definitions) restores to definitions equal
 /// to a fresh parse, and plays: one hasty copy token per kept win.
 #[test]
-fn legacy_v6_definitions_restore_and_play() {
+fn legacy_v7_definitions_restore_and_play() {
     let mut reached = false;
     for seed in 0..64u64 {
         let mut scenario = GameScenario::new();
@@ -1407,7 +1407,7 @@ fn legacy_v6_definitions_restore_and_play() {
             .clone();
 
         let mut legacy = wire_json(&runner);
-        let rewrites = downgrade_coin_flips_to_v6(&mut legacy);
+        let rewrites = downgrade_coin_flips_to_v7(&mut legacy);
         assert!(
             rewrites.flip_coin_until_lose > 0,
             "Mirror March's trigger is rewritten: {rewrites:?}"
