@@ -192,9 +192,10 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +81: v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`,
 //      and `ShortcutProposal.leading_aims`.
 // +83: v154 adds `FilterProp::Prepared` (CR 722.3a), the prepared-designation
-//      leaf for source-context trigger conditions in `GameState`, and
-//      `ResolvedAbility.announced_source_incarnation` (CR 400.7 + CR 602.2a),
-//      the source epoch captured when an activation is announced.
+//      leaf for source-context trigger conditions in `GameState`; the
+//      announcement source epoch on both carriers — `ResolvedAbility`
+//      (CR 400.7 + CR 602.2a) and `PendingManaAbility` (CR 605.3b) — which
+//      lets a self-moving cost keep the condition on the announced object.
 // +82: v153 adds the optional kind selector to GrantAllActivatedAbilitiesOf
 // and removes the loyalty-grant sibling variant.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 83;

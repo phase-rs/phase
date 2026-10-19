@@ -22336,9 +22336,12 @@ pub(crate) fn evaluate_condition(
         // blink return, is therefore never mistaken for a live one (CR 400.7).
         // An ability with neither captured epoch — a delayed ability keeps the
         // `source_incarnation` its creation captured — falls back the same
-        // way; spells, mana abilities (CR 605.3b), and pre-activation decision
-        // aids asking about the current board keep the live read (CR 602.2:
-        // activation already required the source to be legal).
+        // way; spells and pre-activation decision aids asking about the current
+        // board keep the live read (CR 602.2: activation already required the
+        // source to be legal). A mana ability captures its own announcement
+        // epoch on `PendingManaAbility` (CR 605.3b: it resolves inline, but its
+        // cost is still paid after the announcement), so a self-sacrifice cost
+        // cannot rebind the condition to the moved object either.
         AbilityCondition::SourceMatchesFilter { filter } => match ability.trigger_source.as_ref() {
             Some(source) => {
                 crate::game::filter::source_subject_matches_filter(state, source, filter)

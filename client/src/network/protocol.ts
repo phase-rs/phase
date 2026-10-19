@@ -107,7 +107,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *  136 — GameState carries trigger conditions that can name the prepared
- *       designation (FilterProp Prepared, CR 722.3a). A v135 peer cannot
+ *       designation (FilterProp Prepared, CR 722.3a) and an activation's
+ *       announcement source epoch (CR 400.7 + CR 602.2a), including the
+ *       inline mana-ability carrier (CR 605.3b). A v135 peer cannot
  *       deserialize the new tagged variant, so first contact rejects the
  *       skew. Bumped with full-game protocol 154.
  *  135 — game_setup and state_update carry GameState, whose activated grants

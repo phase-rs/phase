@@ -1238,3 +1238,174 @@ fn negated_prepared_activation_self_sacrifice_dispatches_after_unprepared_exit()
         "resolution must complete into a Priority window"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mana-ability cohort: CR 605.3b resolves a mana ability inline, without the
+// stack, but its cost is still paid after the ability is announced. A
+// self-sacrifice cost therefore advances the storage incarnation before the
+// inline sub-chain resolves, so the source-subject condition gate must read
+// the announcement-captured incarnation's exit last-known information — the
+// same authority the stack path reads — never the live moved object.
+// ---------------------------------------------------------------------------
+
+const SELF_SACRIFICE_MANA_PREPARED_ORACLE: &str =
+    "Sacrifice this creature: Add {G}. You gain 1 life if this creature is prepared.";
+const SELF_SACRIFICE_MANA_UNPREPARED_ORACLE: &str =
+    "Sacrifice this creature: Add {G}. You gain 1 life if this creature isn't prepared.";
+
+fn life_total(state: &GameState, player: PlayerId) -> i32 {
+    state
+        .players
+        .iter()
+        .find(|seated| seated.id == player)
+        .expect("the player is seated")
+        .life
+}
+
+fn gain_life_dispatches(events: &[GameEvent], source: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::GainLife,
+                    source_id,
+                    ..
+                } if *source_id == source
+            )
+        })
+        .count()
+}
+
+/// Activate the witness's mana ability through the production action route
+/// (CR 605.3b: it resolves inline, so there is no stack window). The sacrifice
+/// cost is the only cost, so no mana-payment prompt is expected.
+fn activate_mana_ability_publicly(runner: &mut GameRunner, source: ObjectId) -> Vec<GameEvent> {
+    let index = activation_index(runner, source);
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+        })
+        .expect("the mana activation is accepted");
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the inline mana resolution must complete into a Priority window"
+    );
+    result.events
+}
+
+/// Parsed public-activation control: a prepared self-sacrificing mana ability
+/// gains 1 life from the announced incarnation's exit snapshot. A live read of
+/// the post-cost graveyard object would see an unprepared card and suppress.
+#[test]
+fn prepared_mana_ability_self_sacrifice_dispatches_life_gain_from_announced_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_MANA_PREPARED_ORACLE);
+    prepare_witness(&mut runner, witness);
+    let incarnation_before = runner.state().objects[&witness].incarnation;
+    let life_before = life_total(runner.state(), P0);
+
+    let events = activate_mana_ability_publicly(&mut runner, witness);
+
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the self-sacrifice cost must have moved the source before the sub-chain"
+    );
+    assert_ne!(
+        runner.state().objects[&witness].incarnation,
+        incarnation_before,
+        "the sacrifice advances the storage incarnation — a live read names the moved object"
+    );
+    assert!(
+        runner.state().objects[&witness].prepared.is_none(),
+        "the departed graveyard card's live designation is cleared — the exit snapshot is the only surviving record"
+    );
+    assert_eq!(
+        life_total(runner.state(), P0),
+        life_before + 1,
+        "the announced incarnation's exit-prepared state must gain 1 life"
+    );
+    assert_eq!(
+        gain_life_dispatches(&events, witness),
+        1,
+        "the life gain must dispatch from the announced source epoch"
+    );
+}
+
+/// Paired suppression control: an unprepared self-sacrifice exit gains nothing,
+/// so the positive control above cannot be vacuous.
+#[test]
+fn prepared_mana_ability_self_sacrifice_suppresses_life_gain_from_unprepared_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_MANA_PREPARED_ORACLE);
+    let life_before = life_total(runner.state(), P0);
+
+    let events = activate_mana_ability_publicly(&mut runner, witness);
+
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the cost must have sacrificed the source"
+    );
+    assert_eq!(
+        life_total(runner.state(), P0),
+        life_before,
+        "the exit was unprepared — the suppressed life gain adds nothing"
+    );
+    assert_eq!(gain_life_dispatches(&events, witness), 0);
+}
+
+/// Negated polarity across the mana route: "isn't prepared" must read the
+/// announced incarnation's exit-prepared state and suppress, even though the
+/// live graveyard card reads unprepared — a live read would invert this verdict.
+#[test]
+fn negated_prepared_mana_ability_self_sacrifice_suppresses_life_gain_from_prepared_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_MANA_UNPREPARED_ORACLE);
+    prepare_witness(&mut runner, witness);
+    let life_before = life_total(runner.state(), P0);
+
+    let events = activate_mana_ability_publicly(&mut runner, witness);
+
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the cost must have sacrificed the source"
+    );
+    assert!(
+        runner.state().objects[&witness].prepared.is_none(),
+        "the departed graveyard card's live designation is cleared"
+    );
+    assert_eq!(
+        life_total(runner.state(), P0),
+        life_before,
+        "the exit was prepared — 'isn't prepared' must suppress despite the unprepared live card"
+    );
+    assert_eq!(gain_life_dispatches(&events, witness), 0);
+}
+
+/// Negated polarity, mana-route positive twin: an unprepared exit satisfies
+/// "isn't prepared" and gains 1 life.
+#[test]
+fn negated_prepared_mana_ability_self_sacrifice_dispatches_life_gain_from_unprepared_exit() {
+    let (mut runner, witness) =
+        setup_self_sacrifice_activation(SELF_SACRIFICE_MANA_UNPREPARED_ORACLE);
+    let life_before = life_total(runner.state(), P0);
+
+    let events = activate_mana_ability_publicly(&mut runner, witness);
+
+    assert_eq!(
+        runner.state().objects[&witness].zone,
+        Zone::Graveyard,
+        "the cost must have sacrificed the source"
+    );
+    assert_eq!(
+        life_total(runner.state(), P0),
+        life_before + 1,
+        "the exit was unprepared — the life gain must dispatch"
+    );
+    assert_eq!(gain_life_dispatches(&events, witness), 1);
+}

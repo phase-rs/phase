@@ -216,7 +216,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
  * 154 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
- *      conditions (and ability/filter definitions) of GameState. A v153 peer
+ *      conditions (and ability/filter definitions) of GameState, and the
+ *      announcement source epoch is carried on ResolvedAbility and
+ *      PendingManaAbility (CR 400.7 + CR 602.2a + CR 605.3b). A v153 peer
  *      cannot deserialize the new tagged variant. P2P moves in lockstep to
  *      wire 136.
  * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
