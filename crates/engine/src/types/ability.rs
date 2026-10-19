@@ -32557,6 +32557,62 @@ impl CoinFlipResult {
     }
 }
 
+/// CR 705.1 + CR 705.2: how many coins one flip instruction flips, and when the run stops.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CoinFlipRun {
+    /// CR 705.1: flip exactly `count` coins. "Flip a coin" is `Fixed 1`; "flip five coins" and
+    /// "flip X coins" bind their count. CR 608.2h: `count` is resolved once, when the run starts.
+    Exactly { count: QuantityExpr },
+    /// CR 705.2: flip until the flipper loses a flip.
+    UntilLoss,
+}
+
+impl CoinFlipRun {
+    /// CR 705.1: the run "flip a coin", a single flip.
+    pub fn single() -> Self {
+        CoinFlipRun::Exactly {
+            count: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// CR 705.1: whether the run is exactly one flip.
+    ///
+    /// Parser invariant: `try_parse_flip_n_coins` never emits `Fixed 1`, so the grammatical
+    /// "flip a coin" form and `is_single_flip()` coincide.
+    pub fn is_single_flip(&self) -> bool {
+        matches!(
+            self,
+            CoinFlipRun::Exactly {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        )
+    }
+
+    /// CR 705.1: the flip count of an `Exactly` run; `UntilLoss` has no count.
+    pub fn count_expr(&self) -> Option<&QuantityExpr> {
+        match self {
+            CoinFlipRun::Exactly { count } => Some(count),
+            CoinFlipRun::UntilLoss => None,
+        }
+    }
+
+    /// Mutable form of [`CoinFlipRun::count_expr`].
+    pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
+        match self {
+            CoinFlipRun::Exactly { count } => Some(count),
+            CoinFlipRun::UntilLoss => None,
+        }
+    }
+
+    /// Visit every quantity expression the run carries (CR 608.2h: the `Exactly` count).
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        if let Some(count) = self.count_expr() {
+            f(count);
+        }
+    }
+}
+
 /// CR 706.2: Typed result-face filter for "Whenever you roll a [result]" die-roll
 /// triggers. `Exact` covers single faces ("roll a 1") AND disjunctions ("roll a 1
 /// or 2") — a set, which no single Comparator can express; `AtLeast` is the GE

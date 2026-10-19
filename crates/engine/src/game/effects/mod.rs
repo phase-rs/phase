@@ -9850,9 +9850,9 @@ fn resolve_legacy_effect(
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => unreachable!("native die dispatch precedes the legacy adapter"),
-        Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
-        Effect::FlipCoins { .. } => flip_coin::resolve_flip_coins(state, ability, events),
-        Effect::FlipCoinUntilLose { .. } => flip_coin::resolve_until_lose(state, ability, events),
+        Effect::FlipCoin { .. } | Effect::FlipCoins { .. } | Effect::FlipCoinUntilLose { .. } => {
+            flip_coin::resolve(state, ability, events)
+        }
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
