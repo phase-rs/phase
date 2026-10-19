@@ -72,9 +72,7 @@ fn board_with_replacements(
         scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING);
     }
     for (name, text) in replacements {
-        if *name == "Chatterfang, Squirrel General" {
-            scenario.add_creature_from_oracle(P0, name, 3, 3, text);
-        } else if *name == "Jinnie Fay, Jetmir's Second" {
+        if *name == "Chatterfang, Squirrel General" || *name == "Jinnie Fay, Jetmir's Second" {
             scenario.add_creature_from_oracle(P0, name, 3, 3, text);
         } else {
             scenario.add_enchantment_from_oracle(P0, name, text);

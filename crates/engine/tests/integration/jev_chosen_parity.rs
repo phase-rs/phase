@@ -100,7 +100,7 @@ fn pause(r: &mut GameRunner, source: ObjectId, expected_modifications: &[Continu
         .static_definitions
         .iter_unchecked()
         .any(|d| d.modifications.as_slice() == expected_modifications
-            && d.affected.as_ref().is_some_and(|f| source_parity(f))));
+            && d.affected.as_ref().is_some_and(source_parity)));
     assert!(object
         .abilities
         .iter()

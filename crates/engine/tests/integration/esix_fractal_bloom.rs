@@ -1495,7 +1495,7 @@ fn current_selected_tail_is_saved_authority_and_legacy_none_is_explicitly_separa
             };
             state.post_replacement_token_choice_applied = Some(tail.replacement_applied.clone());
             state.post_replacement_token_substitution_count = Some(3);
-            state.resolution_stack = Default::default();
+            *state.resolution_stack = Default::default();
             if let WaitingFor::CopyTargetChoice { purpose, .. } = &mut state.waiting_for {
                 *purpose = CopyTargetPurpose::CopyTokenSource { continuation: None };
             }
