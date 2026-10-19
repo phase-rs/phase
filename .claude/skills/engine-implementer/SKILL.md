@@ -21,7 +21,7 @@ This is the orchestrator for the phase.rs implementation pipeline. It runs as a 
 
 **Spawning by runtime.** Skills are invoked as `/name` under Claude Code and `$name` under Codex; both read `.claude/skills/<name>/SKILL.md` (`.agents/skills` and `.codex/skills` link there). Under Claude Code, spawn `general-purpose` agents for Steps 1, 2 and 6 and the `engine-implementation-executor` agent type for Steps 3 and 4, which loads `executor.md`. Under Codex, spawn a worker agent per step and tell it which skill or file to read first — for Steps 3 and 4, `.claude/skills/engine-implementer/executor.md`. A runtime that cannot spawn agents runs each step in a fresh session and hands every reviewer ONLY the artifact under review (the full plan, or the unified diff), the original task, `CLAUDE.md`, the relevant review skill, the attempt history below, and in chartered runs the charter, phase index and deferral allowlist — never the conversation that produced the artifact. Never degrade to reviewing your own work in the same context; that is the failure this skill exists to prevent. If even a fresh session is impossible, say so in the final report and in the PR body under "Validation Failures"; do not claim the review loop ran clean.
 
-Before Step 1, and before Step 6 when its trigger applies, a read-only [scout](scout.md) locates facts for the planner and reviewers. It is not a step and holds no gate.
+Before Step 1, and before Step 6 when its trigger applies, two read-only [scouts](scout.md) locate facts for the planner and reviewers. It is not a step and holds no gate.
 
 The orchestrator never authors content itself. Its only jobs are: spawn agents, route their output to the next step, apply the run limits, own the commit, and close each spawned agent once its output is consumed (under Claude Code, send a `shutdown_request` and wait for the `shutdown_response` ack). The structured report each agent returns is the authoritative step handoff; progress messages are additive.
 
@@ -178,7 +178,7 @@ A single-phase verdict proceeds through the pipeline below. Re-adjudicate every 
 
 Spawn a fresh agent and instruct it to invoke `engine-planner`. The agent returns a plan with every mandatory architectural section.
 
-**Spawn inputs:** original task and attempt history; in-scope file/subsystem hints; the precedent pack from the [scout](scout.md), when one was produced; any prior reviewer findings as constraints (none on first round); the requirement to emit the mandatory Sizing section. In chartered runs, per-phase planners run in phase-plan mode with the inputs [chartered.md](chartered.md) lists.
+**Spawn inputs:** original task and attempt history; in-scope file/subsystem hints; the precedent packs from the [scouts](scout.md), when produced; any prior reviewer findings as constraints (none on first round); the requirement to emit the mandatory Sizing section. In chartered runs, per-phase planners run in phase-plan mode with the inputs [chartered.md](chartered.md) lists.
 
 Do not author or edit the plan in this thread; applying `text` findings in Step 2 is the one exception. If the returned plan is missing sections or is superficial, send the same inputs plus an explicit "missing sections" note to a **fresh** planning agent — do not patch it yourself.
 
@@ -186,7 +186,7 @@ Do not author or edit the plan in this thread; applying `text` findings in Step 
 
 Spawn a fresh agent and instruct it to invoke `review-engine-plan` against the full plan. Each review runs in a fresh context — never reuse the previous reviewer's.
 
-**Reviewer spawn inputs:** the full plan; attempt history; the original task description; the same precedent pack the planner received, with the [scout](scout.md)'s hand-on sentence; the phase-fit context declaration (all Step 2 reviews in this pipeline declare it, so the Sizing consistency check is blocking); in chartered runs, the phase-plan inputs [chartered.md](chartered.md) lists.
+**Reviewer spawn inputs:** the full plan; attempt history; the original task description; the same precedent packs the planner received, with the [scouts](scout.md)' hand-on sentence; the phase-fit context declaration (all Step 2 reviews in this pipeline declare it, so the Sizing consistency check is blocking); in chartered runs, the phase-plan inputs [chartered.md](chartered.md) lists.
 
 - **A design round** (any `behavior` finding): when the run limits allow, a fresh planner revises the plan with the findings as constraints, then a fresh reviewer reviews the whole revised plan.
 - **A round without `behavior` findings closes the loop:** the orchestrator applies each `text` finding itself (below), closes each `machinery` finding by substituting an existing gate or through an expansion case, and the plan is clean. No review follows. Closing a `text` finding changes nothing the plan decides, and re-reviewing applied wording only mints more wording findings. A review follows a behavior change, never an edit to text.
@@ -245,7 +245,7 @@ Use fresh Tilt results when they cover the candidate's source and selected check
 
 ### Step 6 — Review the immutable candidate
 
-Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, reviewed plan, in-scope paths, prior findings (including any small-change-lane constraints), attempt history, and a review pack when the [scout](scout.md)'s trigger applies. It reviews the diff, available results, and checks deferred under Step 5. Additional checks must answer a concrete unresolved claim within the task scope; apply Step 5's timing rule before running them. Evidence deferred to a later boundary does not block this review. Evidence missing when due returns to the orchestrator, not an independent tooling project. After the result, apply the [run limits](#run-limits) before any fix or return to planning.
+Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, reviewed plan, in-scope paths, prior findings (including any small-change-lane constraints), attempt history, and review packs when the [scouts](scout.md)' trigger applies. It reviews the diff, available results, and checks deferred under Step 5. Additional checks must answer a concrete unresolved claim within the task scope; apply Step 5's timing rule before running them. Evidence deferred to a later boundary does not block this review. Evidence missing when due returns to the orchestrator, not an independent tooling project. After the result, apply the [run limits](#run-limits) before any fix or return to planning.
 
 - **A design round** (any `behavior` finding): a fix executor starts from the reviewed `CANDIDATE_SHA` with the findings as constraints, then Steps 4–6 repeat.
 - **A round without `behavior` findings closes the loop:** comment-only corrections (below) are applied by the orchestrator. Other `text` findings go to a fix executor, which applies the supplied text verbatim, followed by Steps 4–5, with no Step 6 re-review, because closing a `text` finding changes nothing the code does. `machinery` findings close as in Step 2.

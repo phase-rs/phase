@@ -943,12 +943,56 @@ pub(crate) fn payable_spell_alternative_cost_details(
     object_id: ObjectId,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
-    if obj.controller != player {
-        return None;
-    }
+    let casting_permission_index = match state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == object_id)
+    {
+        Some(pending) => pending.casting_permission_index,
+        None => super::casting::selected_object_cast_permission_index(state, obj, player, None),
+    };
+    payable_spell_alternative_cost_details_at_index(
+        state,
+        player,
+        object_id,
+        casting_permission_index,
+    )
+}
+
+pub(super) fn payable_spell_alternative_cost_details_at_index(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<PayableSpellAlternativeCost> {
+    let obj = state.objects.get(&object_id)?;
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
     let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
+    // CR 118.9 + CR 601.2b: a spell's own printed alternative cost (Fireblast,
+    // Force of Will) is not a hand-only offer — it applies to any cast that
+    // would otherwise pay the printed mana cost. An impulse-class play
+    // permission (Experimental Synthesizer, Wrenn's Resolve) authorizes exactly
+    // that cast. CR 118.9a keeps the offer away from a cast whose authority
+    // already substitutes the mana cost (see
+    // `exile_cast_pays_printed_mana_cost`).
+    //
+    // CR 601.2a + CR 112.2: the player casting the spell becomes its controller,
+    // and CR 118.9 gives the alternative cost to the spell's controller. For an
+    // impulse cast that player is the GRANTEE, who need not own the card
+    // (Stolen Strategy exiles an opponent's card) — so this route is keyed on
+    // the grant, not on the exiled card's `obj.controller` (its owner, CR 108.4a).
+    let impulse_exile_cast = origin_zone == Zone::Exile
+        && super::casting::exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            player,
+            casting_permission_index,
+        );
+    let own_card = obj.controller == player;
+    if !own_card && !impulse_exile_cast {
+        return None;
+    }
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
     // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
@@ -964,7 +1008,8 @@ pub(crate) fn payable_spell_alternative_cost_details(
     // is not a CR-mandated precedence; honoring full controller choice across a
     // self-option and one or more grants needs a multi-alternative choice
     // surface and is a known limitation tracked for follow-up.
-    let self_option = (origin_zone == Zone::Hand)
+    let self_option_reaches_cast = (own_card && origin_zone == Zone::Hand) || impulse_exile_cast;
+    let self_option = self_option_reaches_cast
         .then(|| obj.casting_options.iter())
         .into_iter()
         .flatten()
@@ -998,6 +1043,10 @@ pub(crate) fn payable_spell_alternative_cost_details(
         });
     if self_option.is_some() {
         return self_option;
+    }
+    // The permanent-granted route below keeps its controller gate unchanged.
+    if !own_card {
+        return None;
     }
 
     // CR 118.9 + CR 113.6e + CR 601.2f: a SELF-granted alternative cost -- a
@@ -2682,10 +2731,70 @@ fn park_cost_payment_triggers_if_paused(
     );
 }
 
+/// CR 603.10a: What an in-flight multi-object cost move carries across a
+/// replacement-choice pause, so the group that left together is stamped once at
+/// terminal completion. Mirrors the pair `PendingCostMoveResume::SacrificeForCost`
+/// carries. Both fields live in `PendingCostMoveResume::Cast` while paused.
+#[derive(Debug, Default)]
+struct CostMoveLedger {
+    /// Cost events emitted in earlier actions of this one logical payment,
+    /// withheld from trigger collection until the group is stamped.
+    deferred_cost_events: Vec<GameEvent>,
+    /// Per-turn LKI record identities of the battlefield departures so far.
+    departure_record_indices: Vec<usize>,
+}
+
+/// CR 603.10a: Whether the selected objects can still leave the battlefield
+/// together in this payment: at least two have left already or still stand on
+/// the battlefield. A single object, or a move from another zone, never forms a
+/// simultaneous-departure group, so its triggers need no withholding.
+fn cost_move_group_may_form(
+    state: &GameState,
+    chosen: &[ObjectId],
+    departure_record_indices: &[usize],
+) -> bool {
+    let on_battlefield = chosen
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+        })
+        .count();
+    on_battlefield + departure_record_indices.len() >= 2
+}
+
+/// CR 603.10a: The selected objects that left the battlefield in `events`, each
+/// once, in departure order. Read from the departures themselves so a resumed
+/// call, whose events are split across actions (the earlier fragments live in
+/// the ledger), recomputes the same group.
+fn selected_battlefield_departures<'a>(
+    chosen: &[ObjectId],
+    events: impl Iterator<Item = &'a GameEvent>,
+) -> Vec<ObjectId> {
+    let mut group = Vec::new();
+    for event in events {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            ..
+        } = event
+        {
+            if chosen.contains(object_id) && !group.contains(object_id) {
+                group.push(*object_id);
+            }
+        }
+    }
+    group
+}
+
 /// CR 601.2h + CR 616.1: Move `chosen[start_at_index..]` through the zone pipeline as
 /// cost moves. A move that parks for a replacement choice leaves the typed `Cast` root
-/// holding `pending` and `completion`, parks the span's already-raised cost triggers,
-/// and returns the live prompt; `None` means every move settled.
+/// holding `pending`, `completion` and the departure `ledger`, parks the span's
+/// already-raised cost triggers (or withholds them in the ledger while a
+/// simultaneous-departure group can still form), and returns the live prompt; `None`
+/// means every move settled.
 #[allow(clippy::too_many_arguments)]
 fn move_cost_objects(
     state: &mut GameState,
@@ -2696,6 +2805,7 @@ fn move_cost_objects(
     destination: Zone,
     completion: &PendingCostMoveCompletion,
     cost_event_start: usize,
+    ledger: &mut CostMoveLedger,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
@@ -2711,6 +2821,21 @@ fn move_cost_objects(
         match zone_pipeline::move_object(state, request, events) {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsChoice(choice_player) => {
+                // CR 603.10a: the departures so far, and (while a group can still
+                // form) their events, travel with the root so terminal completion
+                // stamps the whole group and collects its triggers once.
+                record_sacrifice_cost_departure_records(
+                    &mut ledger.departure_record_indices,
+                    &events[cost_event_start..],
+                    chosen,
+                );
+                let withhold =
+                    cost_move_group_may_form(state, chosen, &ledger.departure_record_indices);
+                if withhold {
+                    ledger
+                        .deferred_cost_events
+                        .extend_from_slice(&events[cost_event_start..]);
+                }
                 state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
                     player,
                     pending: Some(Box::new(pending.clone())),
@@ -2718,6 +2843,8 @@ fn move_cost_objects(
                     paused_at_index: index,
                     destination,
                     completion: completion.clone(),
+                    deferred_cost_events: std::mem::take(&mut ledger.deferred_cost_events),
+                    departure_record_indices: std::mem::take(&mut ledger.departure_record_indices),
                 });
                 // A delivered move can surface its own post-effect prompt; only a live
                 // CR 616.1 ordering choice is synthesized here.
@@ -2725,13 +2852,15 @@ fn move_cost_objects(
                     super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 }
                 let waiting_for = state.waiting_for.clone();
-                park_cost_payment_triggers_if_paused(
-                    state,
-                    events,
-                    cost_event_start,
-                    events.len(),
-                    &waiting_for,
-                );
+                if !withhold {
+                    park_cost_payment_triggers_if_paused(
+                        state,
+                        events,
+                        cost_event_start,
+                        events.len(),
+                        &waiting_for,
+                    );
+                }
                 return Some(waiting_for);
             }
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -2753,6 +2882,7 @@ fn finish_cost_object_moves(
     completion: PendingCostMoveCompletion,
     cost_event_start: usize,
     park_events_after_completion: bool,
+    mut ledger: CostMoveLedger,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(waiting_for) = move_cost_objects(
@@ -2764,9 +2894,55 @@ fn finish_cost_object_moves(
         destination,
         &completion,
         cost_event_start,
+        &mut ledger,
         events,
     ) {
         return Ok(waiting_for);
+    }
+
+    // CR 603.10a: permanents moved together to pay one cost component leave
+    // the battlefield simultaneously; stamp them so a co-departing
+    // leaves-the-battlefield observer sees each (mirrors the stamp in
+    // `finish_sacrifice_for_cost`). The group is read from the departures
+    // themselves: this seam also moves hand/graveyard cards (pitch, Collect
+    // Evidence, craft's graveyard materials), which are never part of it, and a
+    // call resumed after a replacement-choice pause recomputes the whole group
+    // from the ledger it carried.
+    let CostMoveLedger {
+        mut deferred_cost_events,
+        mut departure_record_indices,
+    } = ledger;
+    record_sacrifice_cost_departure_records(
+        &mut departure_record_indices,
+        &events[cost_event_start..],
+        &chosen,
+    );
+    let group = selected_battlefield_departures(
+        &chosen,
+        deferred_cost_events
+            .iter()
+            .chain(events[cost_event_start..].iter()),
+    );
+    crate::game::zones::mark_simultaneous_departures(&mut deferred_cost_events, &group);
+    crate::game::zones::mark_simultaneous_departures(&mut events[cost_event_start..], &group);
+    crate::game::zones::mark_simultaneous_departure_records(
+        state,
+        &departure_record_indices,
+        &group,
+    );
+    let mut pending = pending;
+    if !deferred_cost_events.is_empty() {
+        // CR 603.2 + CR 603.3b: earlier action fragments of this payment were
+        // withheld from trigger collection; collect the fully stamped group once,
+        // together with this action's fragment.
+        settle_sacrifice_for_cost_events(
+            state,
+            Some(&mut pending),
+            deferred_cost_events,
+            events,
+            cost_event_start,
+            events.len(),
+        );
     }
 
     // CR 400.7j + CR 400.7 + CR 608.2k + CR 608.2h: Every cost object move above is now
@@ -2796,7 +2972,6 @@ fn finish_cost_object_moves(
     // Placed after the loop so it is correct regardless of how many zones the
     // move traversed or whether a replacement effect redirected it; the
     // `NeedsChoice` arm above returns early and re-enters here on resume.
-    let mut pending = pending;
     pending.ability.settle_cost_paid_provenance_recursive(
         state,
         &chosen,
@@ -3002,6 +3177,7 @@ fn finish_selected_return_to_hand_after_automatic(
         PendingCostMoveCompletion::FinishPending,
         cost_event_start,
         park_events_after_completion,
+        CostMoveLedger::default(),
         events,
     )
 }
@@ -3066,6 +3242,8 @@ pub(crate) fn resume_interrupted_cost_payment(
             paused_at_index,
             destination,
             completion,
+            deferred_cost_events,
+            departure_record_indices,
         }) = state.pending_cost_move_resume.take()
         else {
             unreachable!("matched a cast cost-move continuation")
@@ -3085,6 +3263,10 @@ pub(crate) fn resume_interrupted_cost_payment(
             completion,
             replacement_action_cost_event_start.unwrap_or(events.len()),
             true,
+            CostMoveLedger {
+                deferred_cost_events,
+                departure_record_indices,
+            },
             events,
         );
     }
@@ -3575,6 +3757,7 @@ fn pay_delve_at_commit(
         Zone::Exile,
         &completion,
         events.len(),
+        &mut CostMoveLedger::default(),
         events,
     ))
 }
@@ -4630,6 +4813,17 @@ pub(crate) fn handle_return_to_hand_for_cost(
             chosen.len()
         )));
     }
+    // CR 118.3 + CR 601.2h: a cost of N permanents is not paid by returning one
+    // permanent N times.
+    if chosen
+        .iter()
+        .enumerate()
+        .any(|(index, id)| chosen[index + 1..].contains(id))
+    {
+        return Err(EngineError::InvalidAction(
+            "Cannot return the same permanent more than once for a cost".to_string(),
+        ));
+    }
     for id in chosen {
         if !legal_permanents.contains(id) {
             return Err(EngineError::InvalidAction(
@@ -4690,15 +4884,9 @@ pub(crate) fn handle_return_to_hand_for_cost(
         }
     }
 
-    // CR 603.10a co-departed sibling (confirmed-excluded, mirrors the Ward
-    // GAP comment): permanents returned to hand as a cost leave the battlefield
-    // together, so a co-departing leaves-the-battlefield observer among them
-    // would under-observe — the same gap `handle_sacrifice_for_cost` closes with
-    // a `mark_simultaneous_departures` stamp. Not stamped here because
-    // return-to-hand-as-cost is effectively always a single permanent (Daze,
-    // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
-    // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
-    // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
+    // CR 603.10a: permanents returned as one cost leave together;
+    // `finish_cost_object_moves` stamps the group across any replacement-choice
+    // pause via `CostMoveLedger`.
     // A self-return component is paid by `pay_ability_cost` above. Moving
     // that source a second time would emit a spurious Hand -> Hand event.
     let to_return: Vec<_> = chosen
@@ -4722,6 +4910,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
         PendingCostMoveCompletion::FinishPending,
         cost_event_start,
         false,
+        CostMoveLedger::default(),
         events,
     )
 }
@@ -5358,6 +5547,7 @@ pub(crate) fn handle_behold_for_cost(
             PendingCostMoveCompletion::FinishPending,
             cost_event_start,
             false,
+            CostMoveLedger::default(),
             events,
         );
     } else if !revealed_ids.is_empty() {
@@ -5643,6 +5833,7 @@ fn finish_exile_selection_for_cost(
         PendingCostMoveCompletion::FinishPending,
         cost_event_start,
         false,
+        CostMoveLedger::default(),
         events,
     )
 }
@@ -5729,6 +5920,7 @@ pub(crate) fn handle_exile_aggregate_for_cost(
         PendingCostMoveCompletion::PublishExileTrackedSet,
         cost_event_start,
         false,
+        CostMoveLedger::default(),
         events,
     )
 }
@@ -6311,7 +6503,7 @@ fn surface_next_interactive_activation_cost_leg(
             kind: PayCostKind::ReturnToHand,
             choices: eligible,
             count: count as usize,
-            min_count: 0,
+            min_count: count as usize,
             resume: CostResume::Spell {
                 spell: Box::new(pending.clone()),
             },
@@ -8165,7 +8357,14 @@ fn check_additional_cost_or_pay_with_kept_cost(
             .and_then(|permission| {
                 payable_spell_alternative_cost_for_timing(state, player, object_id, permission)
             })
-            .or_else(|| payable_spell_alternative_cost_details(state, player, object_id));
+            .or_else(|| {
+                payable_spell_alternative_cost_details_at_index(
+                    state,
+                    player,
+                    object_id,
+                    casting_permission_index,
+                )
+            });
         if let Some(alt_cost) = alt_cost {
             // CR 118.9 + CR 601.2b: carry the once-per-turn grant source (As
             // Foretold) across the choice round-trip so its per-turn slot is
@@ -9900,7 +10099,7 @@ fn pay_additional_cost_with_source(
                 kind: PayCostKind::ReturnToHand,
                 choices: eligible,
                 count: count as usize,
-                min_count: 0,
+                min_count: count as usize,
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
                 },
@@ -12163,6 +12362,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
             },
             cost_event_start,
             false,
+            CostMoveLedger::default(),
             events,
         );
     }

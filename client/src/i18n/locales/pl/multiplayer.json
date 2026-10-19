@@ -285,7 +285,8 @@
     "botGameNotice": "Hostujesz grę z Discorda {{code}}. Połączenie i prywatność określa post na Discordzie.",
     "botSeedIgnored": "Niektórych ustawień z posta na Discordzie nie można tu użyć — sprawdź format i liczbę graczy.",
     "botP2PNotice": "Twoje urządzenie prowadzi grę. Pozostaw aplikację otwartą i nie rozłączaj się.",
-    "botServerNotice": "Grę prowadzi serwer dedykowany. Może zwolnić lub przejść w tryb offline."
+    "botServerNotice": "Grę prowadzi serwer dedykowany. Może zwolnić lub przejść w tryb offline.",
+    "poolBracketConflict": "Żadna z {{selected}} wybranych talii nie jest legalna przy obecnych filtrach, więc losowi przeciwnicy korzystają ze wszystkich {{total}} talii."
   },
   "page": {
     "deckRejected": "Talia została odrzucona przez gospodarza.",

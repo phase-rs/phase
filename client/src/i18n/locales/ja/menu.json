@@ -135,7 +135,19 @@
       "precon": "構築済み"
     },
     "brain": "使用するAI",
-    "brainEngine": "エンジンAI"
+    "brainEngine": "エンジンAI",
+    "poolBracketConflict": "選択中の{{selected}}デッキは現在のフィルターで1つも使用できないため、ランダムな対戦相手は全{{total}}デッキから選択します。"
+  },
+  "randomPool": {
+    "titleHuman": "あなたのランダムプール",
+    "titleAi": "AIのランダムプール",
+    "hint": "フォルダやデッキのチェックを外すとランダム選択から除外されます。",
+    "count": "{{total}}件中{{selected}}件",
+    "emptyWarning": "すべて除外されているため、ランダムは全{{total}}デッキから選択します。",
+    "reset": "リセット",
+    "precons": "構築済みデッキ",
+    "playable": "有効{{playable}}件",
+    "nonePlayable": "選択中の{{selected}}デッキは現在のフィルターで1つも使用できないため、ランダムは全{{total}}デッキから選択します。"
   },
   "feedManager": {
     "title": "フィードを管理",
@@ -298,7 +310,8 @@
     "sectionStarred": "スター付き",
     "sectionUnfiled": "未分類",
     "collapseAll": "すべて折りたたむ",
-    "expandAll": "すべて展開"
+    "expandAll": "すべて展開",
+    "poolBracketConflict": "選択中の{{selected}}デッキは現在のフィルターで1つも使用できないため、あなたのランダムデッキは全{{total}}デッキから選択されます。"
   },
   "subscriptions": {
     "emptyTitle": "フィードを購読していません",

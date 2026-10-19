@@ -454,6 +454,7 @@ describe("GameProvider native AI routing", () => {
     vi.mocked(buildLegalAiDeckCatalog).mockReset();
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("ai-deck", ["Mountain"], null)],
+      allCandidates: [aiCandidate("ai-deck", ["Mountain"], null)],
     });
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
@@ -1578,6 +1579,10 @@ describe("GameProvider native AI routing", () => {
         aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
         aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
       ],
+      allCandidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
+      ],
     });
 
     render(
@@ -1616,6 +1621,10 @@ describe("GameProvider native AI routing", () => {
         aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
         aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
       ],
+      allCandidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
+      ],
     });
 
     render(
@@ -1645,6 +1654,10 @@ describe("GameProvider native AI routing", () => {
         aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
         aiCandidate("saved:cEDH Deck", ["B5-Card"], 5),
       ],
+      allCandidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:cEDH Deck", ["B5-Card"], 5),
+      ],
     });
 
     render(
@@ -1668,6 +1681,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [1];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 
@@ -1700,6 +1714,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 
@@ -1730,6 +1745,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 
@@ -1760,6 +1776,7 @@ describe("GameProvider native AI routing", () => {
     preferences.aiBracketFilter = [1];
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
       candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+      allCandidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
     });
     const onNoDeck = vi.fn();
 

@@ -1854,7 +1854,8 @@ pub enum DieRollModifier {
     Subtract { value: QuantityExpr },
 }
 
-impl DieRollModifier {
+macro_rules! define_die_roll_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this modifier. Composed into
     /// `Effect::for_each_quantity_expr` (the exhaustive authority over every
     /// quantity an effect resolves in the current chain): the modifier's
@@ -1864,11 +1865,17 @@ impl DieRollModifier {
     ///
     /// Exhaustive match — no wildcard arm — so a newly added variant must be
     /// explicitly classified here.
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
         match self {
             DieRollModifier::Add { value } | DieRollModifier::Subtract { value } => f(value),
         }
     }
+    };
+}
+
+impl DieRollModifier {
+    define_die_roll_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_die_roll_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 }
 
 /// CR 706.6: What a die-roll replacement does with the extra dice it caused to
@@ -3591,7 +3598,8 @@ pub enum ManaProduction {
     TriggerEventManaType,
 }
 
-impl ManaProduction {
+macro_rules! define_mana_production_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this production descriptor.
     /// Composed into `Effect::for_each_quantity_expr` (the exhaustive
     /// authority over every quantity an effect resolves in the current
@@ -3604,7 +3612,7 @@ impl ManaProduction {
     /// Exhaustive match — no wildcard arm — so a newly added variant must be
     /// explicitly classified here rather than silently reporting no
     /// quantities.
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
         match self {
             // --- Dynamic-count productions: `count` resolves at effect
             // --- resolution time.
@@ -3629,6 +3637,12 @@ impl ManaProduction {
             | ManaProduction::TriggerEventManaType => {}
         }
     }
+    };
+}
+
+impl ManaProduction {
+    define_mana_production_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_mana_production_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 }
 
 /// CR 607.2a + CR 406.6 + CR 610.3: Which exile-link relation a mana ability reads
@@ -10652,6 +10666,106 @@ impl LetterQuery {
 }
 
 impl QuantityRef {
+    /// Borrows the same single player-relativity axis as `player_scope_mut`.
+    pub(crate) fn player_scope(&self) -> Option<&PlayerScope> {
+        match self {
+            QuantityRef::HandSize { player }
+            | QuantityRef::LifeTotal { player }
+            | QuantityRef::GraveyardSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::PartySize { player }
+            | QuantityRef::Speed { player }
+            | QuantityRef::SacrificedThisTurn { player, .. }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
+            | QuantityRef::LandsPlayedThisTurn { player, .. }
+            | QuantityRef::PlayerChosenNumber { player }
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+            | QuantityRef::CardsDiscardedThisTurn { player }
+            | QuantityRef::TokensCreatedThisTurn { player, .. }
+            | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
+            QuantityRef::LifeAboveStarting
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::ObjectCount { .. }
+            | QuantityRef::ObjectCountDistinct { .. }
+            | QuantityRef::ObjectCountBySharedQuality { .. }
+            | QuantityRef::PlayerCount { .. }
+            | QuantityRef::CountersOn { .. }
+            | QuantityRef::CountersOnObjects { .. }
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Variable { .. }
+            | QuantityRef::Power { .. }
+            | QuantityRef::BasePower { .. }
+            | QuantityRef::Intensity { .. }
+            | QuantityRef::Toughness { .. }
+            | QuantityRef::ObjectManaValue { .. }
+            | QuantityRef::TargetObjectManaValue { .. }
+            | QuantityRef::ObjectColorCount { .. }
+            | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::NameStickerLetterCount { .. }
+            | QuantityRef::ObjectTypelineComponentCount { .. }
+            | QuantityRef::ManaSymbolsInManaCost { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::PropertyAggregate(_)
+            | QuantityRef::ControlledByEachPlayer { .. }
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::SharedCardTypes { .. }
+            | QuantityRef::DistinctSubtypes { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::ZoneCardCount { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::ExiledFromHandThisResolution
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            | QuantityRef::EnteredThisTurn { .. }
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ZoneChangeCountThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::DamageDealtThisTurn { .. }
+            | QuantityRef::ChosenNumber
+            | QuantityRef::NotedNumber
+            | QuantityRef::AttackedThisTurn { .. }
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::SpellsCastThisGame { .. }
+            | QuantityRef::CounterAddedThisTurn { .. }
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ManaSpentToCast { .. }
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::DistinctColorsAmong { .. }
+            | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::VoteCount { .. } => None,
+        }
+    }
+
     /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
     /// object, by either of the two structural axes a ref can carry it on:
     ///
@@ -15119,7 +15233,8 @@ pub enum CostCategory {
     KeywordCost,
 }
 
-impl AbilityCost {
+macro_rules! define_ability_cost_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this cost, recursing through
     /// the compositional forms (`Composite`, `OneOf`, `PerCounter`) and into
     /// the embedded effect of `EffectCost` (whose body resolves on the source
@@ -15136,7 +15251,7 @@ impl AbilityCost {
     /// Exhaustive match — no wildcard arm — so a newly added variant must be
     /// explicitly classified here rather than silently reporting no
     /// quantities.
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
         match self {
             // --- Direct `QuantityExpr` carriers ---
             AbilityCost::ManaDynamic { quantity } => f(quantity),
@@ -15148,13 +15263,13 @@ impl AbilityCost {
             // --- paying THIS cost, so recurse.
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
                 for cost in costs {
-                    cost.for_each_quantity_expr(f);
+                    cost.$name(f);
                 }
             }
-            AbilityCost::PerCounter { base, .. } => base.for_each_quantity_expr(f),
+            AbilityCost::PerCounter { base, .. } => base.$name(f),
             // CR 118.3: the cost's effect body resolves on the source before
             // the ability's own effect — its quantity slots are live.
-            AbilityCost::EffectCost { effect } => effect.for_each_quantity_expr(f),
+            AbilityCost::EffectCost { effect } => effect.$name(f),
             // --- Quantity-free costs: static mana pips, fixed `u32`/`i32`
             // --- counts and aggregate thresholds, or purely structural
             // --- payments with no `QuantityExpr` field.
@@ -15184,6 +15299,12 @@ impl AbilityCost {
             | AbilityCost::Unimplemented { .. } => {}
         }
     }
+    };
+}
+
+impl AbilityCost {
+    define_ability_cost_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_ability_cost_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 
     /// Visit every node of this cost tree in pre-order, recursing the container
     /// arms (`Composite`, `OneOf`, `PerCounter`). The exhaustive match keeps
@@ -25565,7 +25686,10 @@ impl Effect {
             | Effect::WinTheGame { .. } => false,
         }
     }
+}
 
+macro_rules! define_effect_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this effect —
     /// including the secondary quantity slots that `count_expr()` (the
     /// PRIMARY count/amount accessor) intentionally does not expose, such as
@@ -25605,8 +25729,8 @@ impl Effect {
     /// Exhaustive match — no wildcard arm — so a newly added Effect variant
     /// must be explicitly classified here rather than silently reporting no
     /// quantities (same convention as `count_expr()`/`target_filter()`).
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
-        fn visit_pt<'a>(value: &'a PtValue, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
+        fn visit_pt<'a>(value: &'a $($mut_)? PtValue, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
             match value {
                 PtValue::Fixed(_) | PtValue::Variable(_) => {}
                 PtValue::Quantity(expr) => f(expr),
@@ -25616,8 +25740,8 @@ impl Effect {
         // `RandomWithinTop::n`) are resolved at effect-resolution time by the
         // library-insertion authority; the fixed slots carry no quantity.
         fn visit_library_position<'a>(
-            position: &'a LibraryPosition,
-            f: &mut dyn FnMut(&'a QuantityExpr),
+            position: &'a $($mut_)? LibraryPosition,
+            f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr),
         ) {
             match position {
                 LibraryPosition::Top
@@ -25628,17 +25752,17 @@ impl Effect {
             }
         }
         fn visit_resolved_ability<'a>(
-            ability: &'a ResolvedAbility,
-            f: &mut dyn FnMut(&'a QuantityExpr),
+            ability: &'a $($mut_)? ResolvedAbility,
+            f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr),
         ) {
-            ability.effect.for_each_quantity_expr(f);
-            if let Some(repeat_for) = ability.repeat_for.as_ref() {
+            ability.effect.$name(f);
+            if let Some(repeat_for) = ability.repeat_for.$as_ref() {
                 f(repeat_for);
             }
-            if let Some(sub) = ability.sub_ability.as_deref() {
+            if let Some(sub) = ability.sub_ability.$as_deref() {
                 visit_resolved_ability(sub, f);
             }
-            if let Some(else_branch) = ability.else_ability.as_deref() {
+            if let Some(else_branch) = ability.else_ability.$as_deref() {
                 visit_resolved_ability(else_branch, f);
             }
         }
@@ -25750,10 +25874,14 @@ impl Effect {
             Effect::Dig {
                 count,
                 keep_count_expr,
+                rest_split_top_count,
                 ..
             } => {
                 f(count);
                 if let Some(q) = keep_count_expr {
+                    f(q);
+                }
+                if let Some(q) = rest_split_top_count {
                     f(q);
                 }
             }
@@ -25795,7 +25923,7 @@ impl Effect {
             } => {
                 f(count);
                 if let Some(condition) = target_condition {
-                    f(&condition.rhs);
+                    f(&$($mut_)? condition.rhs);
                 }
             }
             Effect::PutCounterAll { count, .. } => {
@@ -25853,7 +25981,7 @@ impl Effect {
                 // Discard, PayEnergy/PaySpeed, and the recursive
                 // Composite/OneOf/EffectCost/PerCounter forms) resolve when
                 // the cost is paid during THIS effect's resolution.
-                cost.for_each_quantity_expr(f);
+                cost.$name(f);
                 if let Some(q) = scale {
                     f(q);
                 }
@@ -25866,12 +25994,12 @@ impl Effect {
             Effect::CreateDrawReplacement {
                 replacement_effect, ..
             } => {
-                replacement_effect.for_each_quantity_expr(f);
+                replacement_effect.$name(f);
             }
             Effect::CreatePlaneswalkReplacement {
                 replacement_effect, ..
             } => {
-                replacement_effect.for_each_quantity_expr(f);
+                replacement_effect.$name(f);
             }
             Effect::RollDie {
                 count, modifier, ..
@@ -25881,7 +26009,7 @@ impl Effect {
                 // resolved against each natural roll during THIS effect's
                 // resolution (`game/effects/roll_die.rs`).
                 if let Some(m) = modifier {
-                    m.for_each_quantity_expr(f);
+                    m.$name(f);
                 }
             }
             Effect::FlipCoins { count, .. } => {
@@ -25892,7 +26020,7 @@ impl Effect {
                 // AnyOneColor, AnyOneColorAmongPermanents, …) resolve during
                 // THIS effect's resolution (`resolve_count` in
                 // `game/effects/mana.rs`).
-                produced.for_each_quantity_expr(f);
+                produced.$name(f);
             }
             // CR 401.7: the countered spell's replacement destination may be a
             // dynamic library slot, resolved when the counter moves the spell
@@ -25919,7 +26047,7 @@ impl Effect {
             },
             // A proposition guess resolves both comparison sides live
             // (`game/effects/opponent_guess.rs`).
-            Effect::OpponentGuess { subject, .. } => match &**subject {
+            Effect::OpponentGuess { subject, .. } => match &$($mut_)? **subject {
                 GuessSubject::CommittedChoice { .. } => {}
                 GuessSubject::Proposition { lhs, rhs, .. } => {
                     f(lhs);
@@ -25935,7 +26063,7 @@ impl Effect {
                 ..
             } => {
                 for card in cards {
-                    f(&card.count);
+                    f(&$($mut_)? card.count);
                 }
                 if let Some(position) = library_position {
                     visit_library_position(position, f);
@@ -25978,7 +26106,7 @@ impl Effect {
                 }
                 // CR 608.2c + CR 122.1: the printed keeper mark's count.
                 if let Some(mark) = keeper_counter {
-                    f(&mark.count);
+                    f(&$($mut_)? mark.count);
                 }
             }
             Effect::GainEnergy { amount, .. } => {
@@ -26233,6 +26361,12 @@ impl Effect {
             | Effect::Unimplemented { .. } => {}
         }
     }
+    };
+}
+
+impl Effect {
+    define_effect_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 
     /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
     /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
@@ -40301,6 +40435,251 @@ mod tests {
         assert_eq!(visited, vec![count, rhs]);
     }
 
+    #[test]
+    fn shared_and_mutable_quantity_walks_preserve_identity_order_and_secondary_slots() {
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let value = |quantity: &QuantityExpr| match quantity {
+            QuantityExpr::Fixed { value } => *value,
+            _ => panic!("fixed marker expected"),
+        };
+        let mut token: Effect =
+            serde_json::from_value(serde_json::json!({"type":"Token","name":"Marker"})).unwrap();
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            enter_with_counters,
+            ..
+        } = &mut token
+        else {
+            unreachable!()
+        };
+        *power = PtValue::Quantity(fixed(11));
+        *toughness = PtValue::Quantity(fixed(12));
+        *count = fixed(13);
+        *enter_with_counters = vec![(CounterType::Plus1Plus1, fixed(14))];
+        let mut movement: Effect = serde_json::from_value(
+            serde_json::json!({"type":"ChangeZone","destination":"Battlefield"}),
+        )
+        .unwrap();
+        let Effect::ChangeZone {
+            enter_with_counters,
+            conditional_enter_with_counters,
+            ..
+        } = &mut movement
+        else {
+            unreachable!()
+        };
+        *enter_with_counters = vec![(CounterType::Plus1Plus1, fixed(21))];
+        *conditional_enter_with_counters = vec![(TargetFilter::Any, CounterType::Lore, fixed(22))];
+        let dig: Effect = serde_json::from_value(serde_json::json!({"type":"Dig","count":{"type":"Fixed","value":31},"keep_count_expr":{"type":"Fixed","value":32},"rest_split_top_count":{"type":"Fixed","value":33}})).unwrap();
+        let payment = Effect::PayCost {
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayLife { amount: fixed(41) },
+                    AbilityCost::OneOf {
+                        costs: vec![AbilityCost::PerCounter {
+                            counter: CounterType::Age,
+                            target: TargetFilter::SelfRef,
+                            base: Box::new(AbilityCost::EffectCost {
+                                effect: Box::new(Effect::Draw {
+                                    count: fixed(42),
+                                    target: TargetFilter::Controller,
+                                }),
+                            }),
+                        }],
+                    },
+                ],
+            },
+            scale: Some(fixed(43)),
+            payer: TargetFilter::Controller,
+        };
+        let mana = Effect::Mana {
+            produced: ManaProduction::Colorless { count: fixed(51) },
+            target: None,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        };
+        let die = Effect::RollDie {
+            count: fixed(61),
+            sides: 20,
+            modifier: Some(DieRollModifier::Subtract { value: fixed(62) }),
+            results: vec![DieResultBranch {
+                min: 1,
+                max: 20,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: fixed(999),
+                        target: TargetFilter::Controller,
+                    },
+                )),
+            }],
+        };
+        let placement = Effect::PutAtLibraryPosition {
+            target: TargetFilter::ParentTarget,
+            count: fixed(71),
+            position: LibraryPosition::BeneathTop { depth: fixed(72) },
+        };
+        let mut nested = ResolvedAbility::new(
+            Effect::Draw {
+                count: fixed(81),
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        nested.repeat_for = Some(fixed(82));
+        nested.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: fixed(83),
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        )));
+        nested.else_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: fixed(84),
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        )));
+        for (mut effect, expected) in [
+            (token, vec![11, 12, 13, 14]),
+            (movement, vec![21, 22]),
+            (dig, vec![31, 32, 33]),
+            (payment, vec![41, 42, 43]),
+            (mana, vec![51]),
+            (die, vec![61, 62]),
+            (placement, vec![71, 72]),
+            (
+                Effect::EpicCopy {
+                    spell: Box::new(nested),
+                },
+                vec![81, 82, 83, 84],
+            ),
+        ] {
+            let mut addresses = Vec::new();
+            let mut shared = Vec::new();
+            effect.for_each_quantity_expr(&mut |q| {
+                addresses.push(q as *const QuantityExpr as usize);
+                shared.push(value(q));
+            });
+            assert_eq!(
+                shared, expected,
+                "hardcoded carrier order catches a shared omission"
+            );
+            let mut mutable_addresses = Vec::new();
+            effect.for_each_quantity_expr_mut(&mut |q| {
+                mutable_addresses.push(q as *const QuantityExpr as usize);
+                *q = fixed(value(q) + 100);
+            });
+            assert_eq!(mutable_addresses, addresses);
+            // These read the concrete fields, independently of either visitor.
+            match &effect {
+                Effect::Token {
+                    power: PtValue::Quantity(power),
+                    toughness: PtValue::Quantity(toughness),
+                    count,
+                    enter_with_counters,
+                    ..
+                } => {
+                    assert_eq!(
+                        [
+                            value(power),
+                            value(toughness),
+                            value(count),
+                            value(&enter_with_counters[0].1)
+                        ],
+                        [111, 112, 113, 114]
+                    );
+                }
+                Effect::ChangeZone {
+                    enter_with_counters,
+                    conditional_enter_with_counters,
+                    ..
+                } => {
+                    assert_eq!(value(&enter_with_counters[0].1), 121);
+                    assert_eq!(value(&conditional_enter_with_counters[0].2), 122);
+                }
+                Effect::Dig {
+                    count,
+                    keep_count_expr,
+                    rest_split_top_count,
+                    ..
+                } => {
+                    assert_eq!(
+                        [
+                            value(count),
+                            value(keep_count_expr.as_ref().unwrap()),
+                            value(rest_split_top_count.as_ref().unwrap())
+                        ],
+                        [131, 132, 133]
+                    );
+                }
+                Effect::PayCost {
+                    cost: AbilityCost::Composite { costs },
+                    scale,
+                    ..
+                } => {
+                    assert!(
+                        matches!(&costs[0], AbilityCost::PayLife { amount } if *amount == fixed(141))
+                    );
+                    let AbilityCost::OneOf { costs } = &costs[1] else {
+                        unreachable!()
+                    };
+                    let AbilityCost::PerCounter { base, .. } = &costs[0] else {
+                        unreachable!()
+                    };
+                    assert!(
+                        matches!(&**base, AbilityCost::EffectCost { effect } if matches!(&**effect, Effect::Draw { count, .. } if *count == fixed(142)))
+                    );
+                    assert_eq!(scale, &Some(fixed(143)));
+                }
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(value(count), 151),
+                Effect::RollDie {
+                    count,
+                    modifier: Some(DieRollModifier::Subtract { value: modifier }),
+                    results,
+                    ..
+                } => {
+                    assert_eq!([value(count), value(modifier)], [161, 162]);
+                    assert!(
+                        matches!(&*results[0].effect.effect, Effect::Draw { count, .. } if *count == fixed(999)),
+                        "deferred definitions stay outside both walks"
+                    );
+                }
+                Effect::PutAtLibraryPosition {
+                    count,
+                    position: LibraryPosition::BeneathTop { depth },
+                    ..
+                } => assert_eq!([value(count), value(depth)], [171, 172]),
+                Effect::EpicCopy { spell } => {
+                    assert!(
+                        matches!(&spell.effect, Effect::Draw { count, .. } if *count == fixed(181))
+                    );
+                    assert_eq!(spell.repeat_for, Some(fixed(182)));
+                    assert!(
+                        matches!(&spell.sub_ability.as_ref().unwrap().effect, Effect::GainLife { amount, .. } if *amount == fixed(183))
+                    );
+                    assert!(
+                        matches!(&spell.else_ability.as_ref().unwrap().effect, Effect::Draw { count, .. } if *count == fixed(184))
+                    );
+                }
+                _ => panic!("fixture must exercise its concrete carrier"),
+            }
+        }
+    }
+
     /// V-QE: the digital-Alchemy quantity carriers are visited — the noted
     /// `value` of `NoteNumber`, and both delta exprs of a perpetual P/T
     /// modification (live pre-freeze, `Fixed` after). Without these arms a
@@ -45463,6 +45842,80 @@ mod monarch_subject_axis_tests {
             .evaluation_anchor(),
             None
         );
+    }
+
+    #[test]
+    fn quantity_ref_player_scope_borrows_every_actual_axis() {
+        let player = PlayerScope::Target;
+        for mut reference in [
+            QuantityRef::HandSize {
+                player: player.clone(),
+            },
+            QuantityRef::LifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::GraveyardSize {
+                player: player.clone(),
+            },
+            QuantityRef::StartingLifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::LifeLostThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::PartySize {
+                player: player.clone(),
+            },
+            QuantityRef::Speed {
+                player: player.clone(),
+            },
+            QuantityRef::SacrificedThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::LifeGainedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::CardsDrawnThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::LandsPlayedThisTurn {
+                player: player.clone(),
+                from_zones: None,
+            },
+            QuantityRef::PlayerChosenNumber {
+                player: player.clone(),
+            },
+            QuantityRef::LoyaltyAbilitiesActivatedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::CardsDiscardedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::TokensCreatedThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::PlayerActionsThisTurn {
+                player: player.clone(),
+                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+            },
+        ] {
+            assert_eq!(reference.player_scope(), Some(&player));
+            let borrowed = reference.player_scope().unwrap() as *const PlayerScope;
+            assert_eq!(
+                borrowed,
+                reference.player_scope_mut().unwrap() as *const PlayerScope
+            );
+            *reference.player_scope_mut().unwrap() = PlayerScope::ScopedPlayer;
+            assert_eq!(reference.player_scope(), Some(&PlayerScope::ScopedPlayer));
+        }
+        assert!(QuantityRef::SelfManaValue.player_scope().is_none());
+        assert!(QuantityRef::TrackedSetSize.player_scope().is_none());
     }
 
     /// CR 109.4: the mutable player-axis accessor must reach every reference
