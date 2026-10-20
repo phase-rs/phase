@@ -285,7 +285,9 @@
     "loading": "Wird geladen..."
   },
   "turnBanner": {
-    "turn": "Zug {{number}}"
+    "turn": "Zug {{number}}",
+    "yourTurn": "Du bist dran",
+    "opponentTurn": "{{name}} ist dran"
   },
   "diceRoll": {
     "rollingForFirst": "Auswürfeln, wer beginnt",

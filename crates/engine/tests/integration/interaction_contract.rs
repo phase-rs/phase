@@ -3007,7 +3007,8 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
             predicted_winner: Some(P0),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: Vec::new(),
-                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
@@ -3070,7 +3071,8 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -3124,7 +3126,8 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -3212,16 +3215,21 @@ fn preview_offer_with_points(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
-            per_cycle: per_cycle.map(|delta| engine::analysis::resource::PeriodicDelta {
-                frames_per_period: 1,
-                delta,
-                declarable_victims: Vec::new(),
-                victim_slot,
-                seat_life_charge: Vec::new(),
-                cleanup: None,
+            per_cycle: per_cycle.map(|delta| {
+                engine::analysis::resource::PeriodSignature::EveryRepetition(
+                    engine::analysis::resource::PeriodicDelta {
+                        frames_per_period: 1,
+                        delta,
+                        declarable_victims: Vec::new(),
+                        victim_slot,
+                        seat_life_charge: Vec::new(),
+                        cleanup: None,
+                    },
+                )
             }),
         },
         schema: ShortcutDecisionSchema {
@@ -3736,7 +3744,7 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
     //    is a real guard here.
     let basis_struct = extract(&text, "\nstruct ShortcutPreviewBasis<'a> {", "\n}");
     assert!(
-        basis_struct.contains("delta:"),
+        basis_struct.contains("signature:"),
         "reach-guard: the extracted text must be the struct BODY, else this span is not the \
          declaration the ban is written against"
     );
@@ -3929,7 +3937,8 @@ fn respond_window_on(
             predicted_winner: Some(P0),
             count: count.clone(),
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             template: Some(DecisionTemplate {
                 owner: P0,
                 decisions,
@@ -3939,9 +3948,10 @@ fn respond_window_on(
                     DecisionKind::LoopChoice,
                 ),
             }),
-            per_cycle,
+            per_cycle: per_cycle.map(engine::analysis::resource::PeriodSignature::EveryRepetition),
             shortened_by: None,
             published_declaration: None,
+            leading_aims: Vec::new(),
             road: engine::analysis::loop_check::OfferRoad::Ring,
             period: Default::default(),
         },
@@ -4916,57 +4926,63 @@ fn a_multi_subject_schedule_states_the_head_its_drive_announces() {
     }
 }
 
-/// **CR 732.2a — a step announced at the declared count itself takes a ZERO-length segment.**
+/// **CR 732.2a — a step the declared count never reaches is not stated.**
 ///
-/// The partition is successive differences with the last running to the count, so a step whose
-/// start IS the count is declared for no iteration. Its segment is stated as zero rather than
-/// dropped: the allocation is read back against that decision's own published ids, and a
-/// partition one entry short of them is not the one the proposer declared. This is the one shape
-/// whose published amounts are not all positive, which is what the `allocation` field doc — and
-/// through it the client's mirror — has to stay true to.
+/// The partition is successive differences with the last running to the count, over the steps
+/// the count reaches. A step starting AT the count or past it announces at no repetition the
+/// declaration takes, so neither its subject nor a segment is published: the statement is the
+/// announcement sequence the drive performs, and every published amount is positive.
 ///
 /// # Discrimination
 ///
-/// Treat a zero-length segment as unstatable ⇒ the decision is skipped and the reach-guard
-/// fails. Drop zeros from the partition ⇒ it is one entry short of the published ids, the
-/// length check withholds the element, and the `expect` fails.
+/// State the uncut schedule ⇒ the at-count board publishes two subjects with a zero segment and
+/// the past-count board publishes no statement at all, so the seat and amount equalities fail.
+/// The paired positive one repetition later reaches both steps, so the cut is by the count and
+/// not by the step.
 #[test]
-fn a_step_announced_at_the_declared_count_takes_a_zero_length_segment() {
+fn a_step_the_declared_count_never_reaches_is_not_stated() {
     const COUNT: u32 = 3;
-    const STARTS: [u32; 2] = [0, COUNT];
 
-    let reply = respond_reply_of(&respond_window(
-        IterationCount::Fixed(COUNT),
-        Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
-        vec![piecewise_pin(
-            preview_slot(ChoicePoint::AnnouncedTarget, 0),
-            &STARTS,
-            &seat_subjects(&[R_FIRST, R_SECOND]),
-        )],
-    ));
+    let reply_at = |count: u32, starts: &[u32]| {
+        respond_reply_of(&respond_window(
+            IterationCount::Fixed(count),
+            Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
+            vec![piecewise_pin(
+                preview_slot(ChoicePoint::AnnouncedTarget, 0),
+                starts,
+                &seat_subjects(&[R_FIRST, R_SECOND]),
+            )],
+        ))
+    };
+    let stated = |reply: &RespondReply| {
+        assert_eq!(
+            reply.points.len(),
+            1,
+            "reach-guard: the reached step still publishes the decision"
+        );
+        let element = reply
+            .declared
+            .as_ref()
+            .expect("the reached steps' partition is stated");
+        (
+            respond_seats_of(reply, &reply.points[0].candidate_ids),
+            declared_amounts(element),
+            element.count,
+        )
+    };
+
+    for starts in [[0, COUNT], [0, COUNT + 2]] {
+        assert_eq!(
+            stated(&reply_at(COUNT, &starts)),
+            (vec![R_FIRST.0], vec![COUNT], COUNT),
+            "a step starting at {} is never reached by a count of {COUNT}",
+            starts[1]
+        );
+    }
     assert_eq!(
-        reply.points.len(),
-        1,
-        "reach-guard: a legal zero-repetition step stays statable, so the decision publishes"
-    );
-    let element = reply
-        .declared
-        .as_ref()
-        .expect("and its partition is stated over the point's published ids");
-    assert_eq!(
-        declared_amounts(element),
-        vec![COUNT, 0],
-        "the second step is announced at the count, so it is declared for no iteration"
-    );
-    assert_eq!(
-        element.allocation.len(),
-        reply.points[0].candidate_ids.len(),
-        "one amount per announced subject — a dropped zero would leave the partition short of \
-         the ids it is stated over"
-    );
-    assert_eq!(
-        element.count, COUNT,
-        "and the segments still total the declared count"
+        stated(&reply_at(COUNT + 1, &[0, COUNT])),
+        (vec![R_FIRST.0, R_SECOND.0], vec![COUNT, 1], COUNT + 1),
+        "paired positive: one repetition later the second step is reached and stated"
     );
 }
 
@@ -6516,12 +6532,15 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(2),
             // This producer measured no CR 704 threshold — `Default` carries the absence and
             // a capacity at the global cap.
@@ -6750,12 +6769,15 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(2),
             measured_repetition_bound: None,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
@@ -8078,12 +8100,15 @@ fn stage_sequenced_offer(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count,
             // The pair a producer publishes: `None` is an offer that measured nothing, which is
             // what keeps `handle_declare_shortcut`'s `UntilLethal` arm reachable below.
@@ -9192,7 +9217,7 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
     let (count_spec, published) = f4_published(&view);
-    let InteractionShortcutCountSpec::Fixed { min, .. } = count_spec else {
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
 
@@ -9204,6 +9229,11 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
         !published.is_empty(),
         "reach-guard: the offer must publish elements, else this row compares nothing"
     );
+    assert!(
+        published.iter().any(|element| element.allocation.len() > 1),
+        "paired positive: some element spreads its count over more than one announced segment, \
+         which is what makes the allocation observable"
+    );
 
     for element in &published {
         assert!(
@@ -9211,14 +9241,6 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
             "paired positive: every compared element must state magnitudes, else a byte-equality \
              between two empty elements satisfies this row; element {element:?}"
         );
-        if element.count > min {
-            assert!(
-                element.allocation.len() > 1,
-                "paired positive: above the window FLOOR an element spreads its count over more \
-                 than one announced segment, which is what makes the allocation observable; \
-                 element {element:?}"
-            );
-        }
         let preview = f4_preview(
             &state,
             proposer,
@@ -9255,18 +9277,19 @@ fn an_authored_split_is_previewed_per_declared_seat() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
-    let (count_spec, published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    let (count_spec, _published) = f4_published(&view);
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     assert!(
-        point.candidate_ids.len() > 1 && suggested > 2,
+        point.candidate_ids.len() > 1 && own > 2,
         "reach-guard: an UNEQUAL split over MORE THAN ONE announced candidate is what makes a \
-         per-seat attribution observable at all; candidates={} suggested={suggested}",
+         per-seat attribution observable at all; candidates={} own={own}",
         point.candidate_ids.len()
     );
 
@@ -9275,7 +9298,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             &state,
             proposer,
             &interaction_id,
-            suggested,
+            own,
             f4_pins(&points, allocation),
         );
         assert_eq!(
@@ -9288,7 +9311,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             .shortcut_preview
             .expect("a confirmable authored declaration carries its previewed element");
         assert_eq!(
-            element.count, suggested,
+            element.count, own,
             "the element states the count it was declared at"
         );
         assert_eq!(
@@ -9321,24 +9344,24 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             .collect()
     };
 
-    let canonical = published
-        .iter()
-        .find(|element| element.count == suggested)
-        .expect("the producer seeds its element set with the window's suggestion")
-        .clone();
+    // The control is an authored single-segment element at the same count: the entries CR 119.3
+    // does not re-attribute scale with the count alone.
+    let control = element(&[(0, own)]);
     assert!(
-        invariant(&canonical)
+        invariant(&control)
             .iter()
             .any(|entry| entry.player.is_some()),
         "reach-guard: the control needs a SEAT-KEYED entry no allocation may move, else \
          'identical across shapes' is a claim about whole-game entries only; got {:?}",
-        canonical.entries
+        control.entries
     );
 
-    let unequal = element(&[(0, suggested - 1), (1, 1)]);
-    let reordered = element(&[(1, suggested - 1), (0, 1)]);
-    let first_only = element(&[(0, suggested)]);
-    let second_only = element(&[(1, suggested)]);
+    // The final segment holds two announcements: its last one never resolves (CR 603.3d), so a
+    // one-announcement tail would charge its seat nothing.
+    let unequal = element(&[(0, own - 2), (1, 2)]);
+    let reordered = element(&[(1, own - 2), (0, 2)]);
+    let first_only = &control;
+    let second_only = element(&[(1, own)]);
 
     assert_ne!(
         reordered.entries, unequal.entries,
@@ -9347,12 +9370,12 @@ fn an_authored_split_is_previewed_per_declared_seat() {
          pairing would have produced the in-order element's entries here"
     );
     assert_eq!(
-        life_seats(&first_only).len(),
+        life_seats(first_only).len(),
         1,
         "a single-segment declaration charges a single seat"
     );
     assert_ne!(
-        life_seats(&first_only),
+        life_seats(first_only),
         life_seats(&second_only),
         "CR 601.2c: a subset naming the SECOND announced candidate charges the SECOND seat. A \
          positional pairing returns the first seat for both"
@@ -9368,14 +9391,13 @@ fn an_authored_split_is_previewed_per_declared_seat() {
     for (name, element) in [
         ("unequal", &unequal),
         ("reordered", &reordered),
-        ("first-only", &first_only),
         ("second-only", &second_only),
     ] {
         assert_eq!(
             invariant(element),
-            invariant(&canonical),
+            invariant(&control),
             "control: the entries CR 119.3 does not re-attribute are identical across the \
-             canonical and every authored shape; {name} moved one"
+             single-segment control and every other authored shape; {name} moved one"
         );
     }
 }
@@ -9400,7 +9422,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
-    let (count_spec, _published) = f4_published(&view);
+    let (count_spec, published) = f4_published(&view);
     let InteractionShortcutCountSpec::Fixed {
         min,
         max,
@@ -9420,16 +9442,17 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     );
 
     // ── LEG 1's PAIRED POSITIVE: the same declaration WITH its partition stated.
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     let partitioned = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested)]),
+        own,
+        f4_pins(&points, &[(0, own)]),
     );
     assert_eq!(partitioned.status, InteractionPreviewStatus::Confirmable);
     assert!(
@@ -9441,7 +9464,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     );
 
     // ── LEG 1: the same pin, its partition cleared.
-    let unpartitioned: Vec<InteractionShortcutPin> = f4_pins(&points, &[(0, suggested)])
+    let unpartitioned: Vec<InteractionShortcutPin> = f4_pins(&points, &[(0, own)])
         .into_iter()
         .map(|mut pin| {
             if pin.group == point.group {
@@ -9450,7 +9473,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
             pin
         })
         .collect();
-    let preview = f4_preview(&state, proposer, &interaction_id, suggested, unpartitioned);
+    let preview = f4_preview(&state, proposer, &interaction_id, own, unpartitioned);
     assert_eq!(
         preview.status,
         InteractionPreviewStatus::Confirmable,
@@ -9476,7 +9499,15 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
             interaction_id: interaction_id.clone(),
             response: InteractionResponse::Shortcut {
                 decision: InteractionShortcutDecision::AcceptSuggested,
-                pins: f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+                pins: f4_pins(
+                    &points,
+                    &indexed(
+                        &point,
+                        &element_at(&published, suggested)
+                            .expect("the suggested count is published")
+                            .allocation,
+                    ),
+                ),
             },
         },
     );
@@ -10009,15 +10040,16 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
     let (count_spec, _published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     assert!(
-        point.candidate_ids.len() > 1 && suggested > 2,
+        point.candidate_ids.len() > 1 && own > 2,
         "reach-guard: the duplicate-id and subset shapes need more than one announced candidate"
     );
 
@@ -10027,8 +10059,8 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1), (1, 1)]),
     );
     assert_eq!(legal.status, InteractionPreviewStatus::Confirmable);
     assert!(
@@ -10042,17 +10074,17 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     let refusals: Vec<(&str, Vec<InteractionShortcutPin>, InteractionReasonCode)> = vec![
         (
             "sum below the declared count",
-            f4_pins(&points, &[(0, suggested - 1)]),
+            f4_pins(&points, &[(0, own - 1)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
             "a zero segment",
-            f4_pins(&points, &[(0, suggested), (1, 0)]),
+            f4_pins(&points, &[(0, own), (1, 0)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
             "a duplicate choice id",
-            f4_pins(&points, &[(0, suggested - 1), (0, 1)]),
+            f4_pins(&points, &[(0, own - 1), (0, 1)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
@@ -10067,7 +10099,7 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
                             choice_ids: vec![unknown_id.clone()],
                             amounts: vec![AmountAssignment {
                                 choice_id: unknown_id.clone(),
-                                amount: suggested,
+                                amount: own,
                             }],
                         }
                     } else {
@@ -10084,7 +10116,7 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     ];
 
     for (name, pins, reason) in refusals {
-        let preview = f4_preview(&state, proposer, &interaction_id, suggested, pins);
+        let preview = f4_preview(&state, proposer, &interaction_id, own, pins);
         assert_eq!(
             preview.status,
             InteractionPreviewStatus::Rejected { reason },
@@ -10195,17 +10227,18 @@ fn both_preview_entry_points_answer_with_the_same_shortcut_element() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let (count_spec, _published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     let request = f4_request(
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1), (1, 1)]),
     );
 
     let answered = preview_interaction(&state, proposer, &request);
@@ -10243,27 +10276,28 @@ fn the_shortcut_preview_payload_is_additive_on_the_wire() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let (count_spec, _published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
 
     let populated = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1), (1, 1)]),
     );
     let refused = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1)]),
     );
     assert!(matches!(
         refused.status,
@@ -10731,11 +10765,13 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             predicted_winner: Some(P0),
             count: IterationCount::Fixed(3),
             unbounded: Vec::new(),
-            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
+            win_kind_at: None,
             template: Some(declared),
             per_cycle: None,
             shortened_by: None,
             published_declaration: None,
+            leading_aims: Vec::new(),
             road: engine::analysis::loop_check::OfferRoad::Ring,
             period: Default::default(),
         },

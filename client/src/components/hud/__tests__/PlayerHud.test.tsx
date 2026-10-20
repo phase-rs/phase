@@ -10,6 +10,7 @@ import {
   buildGameState,
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
+  chooseTokenHostWaitingForFactory,
   copyRetargetWaitingForFactory,
   retargetChoiceWaitingForFactory,
   returnAsAuraTargetWaitingForFactory,
@@ -158,6 +159,25 @@ describe("PlayerHud", () => {
     it("offers the seat for ReturnAsAuraTarget", () => {
       const { dispatch } = mount(
         returnAsAuraTargetWaitingForFactory
+          .withData({ legal_targets: legal([0]) })
+          .forPlayer(0)
+          .build(),
+      );
+
+      expect(plateTag()).toBe("BUTTON");
+      fireEvent.click(document.querySelector("[data-hud-plate]")!);
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Player: 0 } },
+      });
+    });
+
+    // Digital-only Alchemy (no CR entry): a batch boon's "one of them" host
+    // pick names this seat, so clicking it answers with the player host and
+    // resolution resumes.
+    it("offers the seat for ChooseTokenHost", () => {
+      const { dispatch } = mount(
+        chooseTokenHostWaitingForFactory
           .withData({ legal_targets: legal([0]) })
           .forPlayer(0)
           .build(),

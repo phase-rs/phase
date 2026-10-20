@@ -2,6 +2,7 @@ import { act } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { usePreferencesStore } from "../preferencesStore";
+import { emptyPoolSelection } from "../../services/randomPoolSelection";
 
 describe("preferencesStore", () => {
   it.each([
@@ -20,6 +21,55 @@ describe("preferencesStore", () => {
     }));
     usePreferencesStore.persist.rehydrate();
     expect(usePreferencesStore.getState().boardBackground).toBe(expected);
+  });
+
+  it("normalizes malformed v37 pool selections on migrate", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {
+        humanPoolSelection: {
+          excludedGroups: "unfiled",
+          excludedDecks: ["saved:a", 7],
+          includedDecks: [],
+        },
+        aiPoolSelection: "nope",
+      },
+      version: 37,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().humanPoolSelection).toEqual({
+      excludedGroups: [],
+      excludedDecks: ["saved:a"],
+      includedDecks: [],
+    });
+    expect(usePreferencesStore.getState().aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  it("defaults absent pool selections to include-all", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {},
+      version: 37,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(usePreferencesStore.getState().aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  it("preserves v38 priority-alert choices while adding pool selections", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {
+        priorityAlertVisual: false,
+        priorityAlertSound: true,
+        priorityAlertTitle: false,
+      },
+      version: 38,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    const state = usePreferencesStore.getState();
+    expect(state.priorityAlertVisual).toBe(false);
+    expect(state.priorityAlertSound).toBe(true);
+    expect(state.priorityAlertTitle).toBe(false);
+    expect(state.humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(state.aiPoolSelection).toEqual(emptyPoolSelection());
   });
 
   beforeEach(() => {
@@ -50,6 +100,8 @@ describe("preferencesStore", () => {
         multiplayerSplitLayoutNudgeDismissed: true,
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
+        humanPoolSelection: emptyPoolSelection(),
+        aiPoolSelection: emptyPoolSelection(),
       });
     });
     localStorage.clear();
@@ -74,6 +126,8 @@ describe("preferencesStore", () => {
     expect(state.experimentalTournamentsEnabled).toBe(false);
     expect(state.draftDoubleClickConfirmPick).toBe(true);
     expect(usePreferencesStore.getInitialState().cardAnimationStyle).toBe("webgl");
+    expect(usePreferencesStore.getInitialState().humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(usePreferencesStore.getInitialState().aiPoolSelection).toEqual(emptyPoolSelection());
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -312,6 +366,36 @@ describe("preferencesStore", () => {
     const state = usePreferencesStore.getState();
     expect(state.animationSpeedMultiplier).toBe(1.0);
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
+  });
+
+  it("hydrates a v37 blob without the priority-alert fields with all three on, and reset restores them", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { cardSize: "large" }, version: 37 }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    const hydrated = usePreferencesStore.getState();
+    expect(hydrated.cardSize).toBe("large");
+    expect(hydrated.priorityAlertVisual).toBe(true);
+    expect(hydrated.priorityAlertSound).toBe(true);
+    expect(hydrated.priorityAlertTitle).toBe(true);
+
+    act(() => {
+      hydrated.setPriorityAlertVisual(false);
+      hydrated.setPriorityAlertSound(false);
+      hydrated.setPriorityAlertTitle(false);
+    });
+    expect(usePreferencesStore.getState().priorityAlertVisual).toBe(false);
+    expect(usePreferencesStore.getState().priorityAlertSound).toBe(false);
+    expect(usePreferencesStore.getState().priorityAlertTitle).toBe(false);
+
+    act(() => usePreferencesStore.getState().resetAllPreferences());
+
+    const reset = usePreferencesStore.getState();
+    expect(reset.priorityAlertVisual).toBe(true);
+    expect(reset.priorityAlertSound).toBe(true);
+    expect(reset.priorityAlertTitle).toBe(true);
   });
 
   it("resetAllPreferences wipes everything back to defaults", () => {

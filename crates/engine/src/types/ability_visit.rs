@@ -182,7 +182,8 @@ fn debug_assert_own_resolution_unreachable(scope: ResolutionScope, fn_name: &str
 /// `visit_effect_scoped` descends nested `AbilityDefinition`s under
 /// `Vote.per_choice_effect` / `VoteSubject.outcome_template`,
 /// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoin` / `FlipCoins`,
-/// `FlipCoinUntilLose`, `RollDie.results`, and `ChooseOneOf.branches` (all via
+/// `FlipCoinUntilLose`, `ExileTopCardContest.winner_effect`, `RollDie.results`, and
+/// `ChooseOneOf.branches` (all via
 /// `visit_nested_ability_def_scoped`); this walk does not. A cost sitting on one
 /// of those nested defs — e.g. `ChooseOneOf { branches: [AbilityDefinition {
 /// cost: AbilityCost::Mill { .. }, .. }] }` — is therefore invisible here, which
@@ -428,9 +429,10 @@ where
             visit_copiable_values_scoped(values, scope, visit)?
         }
         // Remaining modifications carry no nested ability/effect carriers.
-        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only hold a
-        // source `TargetFilter`; the granted abilities/triggers are pulled live
-        // from the provider objects at layer collection time, not nested here.
+        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only
+        // hold a source `TargetFilter`; the granted abilities/triggers are
+        // pulled live from the provider objects at layer collection time,
+        // not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
@@ -681,6 +683,9 @@ where
                 visit_nested_ability_def_scoped(outcome_template, scope, visit)?;
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => {
+            visit_nested_ability_def_scoped(winner_effect, scope, visit)?;
+        }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -707,6 +712,17 @@ where
         Effect::CreateDelayedTrigger { effect, .. } => {
             if scope == ResolutionScope::IncludeRegisteredLater {
                 visit_ability_def_scoped(effect, scope, visit)?
+            }
+        }
+        // BOUNDARY CARRIER (digital-only Alchemy, no CR entry): a boon
+        // installs a delayed trigger for its holder that resolves later as
+        // its own ability on the stack (CR 603.3 via CR 603.7). Its payload
+        // is not an instruction THIS ability follows during its own
+        // resolution (CR 608.2c), so `OwnResolutionOnly` stops here — the
+        // same treatment as `CreateDelayedTrigger`.
+        Effect::CreateBoon { trigger, .. } => {
+            if scope == ResolutionScope::IncludeRegisteredLater {
+                visit_trigger_scoped(trigger, scope, visit)?
             }
         }
         Effect::FlipCoin {
@@ -864,6 +880,7 @@ where
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::PhysicalContest { .. }
         | Effect::Behold { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
@@ -984,6 +1001,7 @@ where
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

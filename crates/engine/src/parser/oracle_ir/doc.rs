@@ -1274,7 +1274,7 @@ fn stamp_permission_printed_slot(
         CastingPermission::ExileWithAltCost {
             enters_with_modifications,
             ..
-        } => stamp_retained_mods(enters_with_modifications, slot, kind),
+        } => stamp_retained_mods(&mut enters_with_modifications.modifications, slot, kind),
         CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => {}
         CastingPermission::PlayFromExile { .. }
         | CastingPermission::ExileWithAltAbilityCost { .. }
@@ -1339,8 +1339,8 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
             ..
         } => stamp_retained_mods(additional_modifications, slot, kind),
         Effect::ReturnAsAura { grants, .. } => stamp_retained_mods(grants, slot, kind),
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            stamp_retained_mods(modifications, slot, kind)
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            stamp_retained_mods(&mut rider.modifications, slot, kind)
         }
         Effect::EachPlayerCopyChosen {
             copy_modifications, ..
@@ -1369,6 +1369,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
                 stamp_trigger_printed_slot(td, slot, kind);
             }
         }
+        Effect::CreateBoon { trigger, .. } => {
+            stamp_trigger_printed_slot(trigger, slot, kind);
+        }
         // ---- Nested AbilityDefinition payloads (mirror collect_effects) ------
         Effect::Vote {
             per_choice_effect,
@@ -1384,6 +1387,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
             {
                 stamp_retained_printed_slot(outcome_template, slot, kind);
             }
+        }
+        Effect::ExileTopCardContest { winner_effect } => {
+            stamp_retained_printed_slot(winner_effect, slot, kind);
         }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
@@ -1603,6 +1609,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ChooseFromZone { .. } => {}
         Effect::RememberCard { .. } => {}
         Effect::NoteManaSpent => {}
+        Effect::NoteNumber { .. } => {}
         Effect::ForEachCategory { .. } => {}
         Effect::ChooseObjectsIntoTrackedSet { .. } => {}
         Effect::ChooseAndSacrificeRest { .. } => {}
@@ -1613,6 +1620,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ExileFromTopUntil { .. } => {}
         Effect::RevealUntil { .. } => {}
         Effect::Discover { .. } => {}
+        Effect::PhysicalContest { .. } => {}
         Effect::Heist { .. } => {}
         Effect::HeistExile => {}
         Effect::Cascade => {}

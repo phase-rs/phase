@@ -263,6 +263,7 @@ pub(crate) fn rederive_live_offer_bound(state: &GameState, aimed_at: PlayerId) -
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-cycle signature");
 
     assert_eq!(
@@ -340,6 +341,7 @@ fn charged_slots(state: &GameState) -> Vec<(DecisionSlot, i64)> {
     certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-cycle signature")
         .victim_slot
         .clone()
@@ -403,6 +405,7 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
     let per_cycle = certificate
         .per_cycle
         .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
         .expect("a bounded offer publishes its per-cycle signature");
 
     assert_eq!(*proposer, offer.proposer);
@@ -500,31 +503,57 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
     );
     // CR 732.2a: inclusive at the entry the pinned seat departs on — that entry the declaration
     // still drives; the ones after it charge a seat this declaration no longer names.
-    let suggestion = entries
+    let own = entries
         .iter()
         .find(|(_, seats)| seats.iter().any(|seat| pinned.contains(seat)))
         .or_else(|| entries.last())
         .map(|(repetition, _)| *repetition)
         .expect("a bounded offer's cascade carries at least one entry");
     assert_eq!(
-        schema.iteration_count,
-        IterationCount::Fixed(suggestion),
-        "CR 732.2a: the published suggestion is the count the offer's OWN declaration drives; \
-         cascade {entries:?} cut at the seats it pins {pinned:?}"
+        declaration.replay,
+        engine::analysis::decision_template::ReplayMode::Scheduled {
+            count: IterationCount::Fixed(own)
+        },
+        "CR 732.2a: the published declaration is stamped at the count it drives; cascade \
+         {entries:?} cut at the seats it pins {pinned:?}"
+    );
+    // CR 104.2a: the suggestion eliminates every opponent, each taking ceil(life / loss)
+    // repetitions, the trigger already on the stack (CR 603.3d) being one of its seat's.
+    let winning: u32 = state
+        .players
+        .iter()
+        .filter(|player| player.id != *proposer && !player.is_eliminated)
+        .map(|player| (player.life as u32).div_ceil(loss as u32))
+        .sum();
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(winning));
+    assert_eq!(
+        schema
+            .suggested_declaration
+            .as_ref()
+            .map(|suggestion| suggestion.replay.clone()),
+        Some(engine::analysis::decision_template::ReplayMode::Scheduled {
+            count: IterationCount::Fixed(winning)
+        }),
+        "the suggestion is stamped at the count the offer suggests"
     );
 
     let divisor = rederive_live_offer_bound(state, offer.aimed_at);
     assert!(
-        divisor <= suggestion && suggestion <= bound,
-        "CR 704.5a: the first crossing under ANY declaration cannot outrun the last one under \
-         THIS declaration, and neither outruns the widest count some declaration may specify; \
-         divisor {divisor}, suggestion {suggestion}, ceiling {bound}"
+        own < winning && winning <= bound,
+        "the suggestion drives past the declaration's own count and within the ceiling; \
+         own {own}, suggestion {winning}, ceiling {bound}"
     );
     assert!(
-        divisor < suggestion || suggestion < bound,
+        divisor <= own && own <= bound,
+        "CR 704.5a: the first crossing under ANY declaration cannot outrun the last one under \
+         THIS declaration, and neither outruns the widest count some declaration may specify; \
+         divisor {divisor}, own {own}, ceiling {bound}"
+    );
+    assert!(
+        divisor < own || own < bound,
         "LIVE INSTRUMENT: the three quantifiers must not collapse into one number on this board, \
          or the ordering above is satisfied by a producer that publishes one value three times; \
-         divisor {divisor}, suggestion {suggestion}, ceiling {bound}"
+         divisor {divisor}, own {own}, ceiling {bound}"
     );
 }
 
@@ -614,6 +643,7 @@ fn declarable_victims_are_empty_when_restored_and_populated_when_live() {
         let restored = certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("the restored offer carries its per-cycle signature")
             .declarable_victims
             .clone();
@@ -630,6 +660,7 @@ fn declarable_victims_are_empty_when_restored_and_populated_when_live() {
             !certificate
                 .per_cycle
                 .as_ref()
+                .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
                 .expect("the live offer carries its per-cycle signature")
                 .declarable_victims
                 .is_empty(),
@@ -700,48 +731,39 @@ fn only_a_published_targets_slot_off_the_charged_set_is_unbacked() {
 /// conjunct at all, while `AcceptSuggested` and `Fixed` fall through the SAME pin loop into the
 /// same `declaration_conforms` call. `AcceptSuggested`'s count is the offer's own published
 /// SUGGESTION while its pins are CLIENT-submitted, so "the offer cannot refuse its own published
-/// declaration" does not reach it — this board publishes a legal victim whose own crossing lies
-/// strictly BELOW that suggestion.
+/// declaration" does not reach it — the suggestion's own segments in reverse order aim the
+/// seat that crosses first for a segment longer than its crossing.
 ///
 /// # What attributes the refusal
 ///
 /// `ConstraintUnsatisfied` is not by itself proof this conjunct fired — the ingress returns it
-/// from several places — so the two halves differ in NOTHING but which published victim the pin
-/// aims at, at the same count, on the same board, in the same invocation.
+/// from several places — so the two halves differ in NOTHING but the order of the same
+/// segments, at the same count, on the same board, in the same invocation.
 ///
 /// REVERT-PROBE: delete `declaration_conforms`' aim conjunct ⇒ the first half is accepted and
 /// this row fails on its refusal assertion.
 #[test]
-fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
+fn an_accept_suggested_pin_whose_segment_outlives_its_seat_is_refused() {
     use engine::game::interaction::{
         bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
     };
     use engine::game::visibility::filter_state_for_viewer;
     use engine::types::interaction::{
-        InteractionOpportunityResponse, InteractionReasonCode, InteractionResponse,
-        InteractionResponseSpec, InteractionSessionId, InteractionShortcutCountSpec,
-        InteractionShortcutDecision, InteractionShortcutPin, InteractionShortcutPointKind,
-        InteractionSubmission,
+        AmountAssignment, InteractionOpportunityResponse, InteractionReasonCode,
+        InteractionResponse, InteractionResponseSpec, InteractionSessionId,
+        InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
+        InteractionShortcutPointKind, InteractionSubmission,
     };
 
     let mut state = weird_drain_board();
-    let live = drive_to_live_declarable_offer(&mut state);
+    drive_to_live_declarable_offer(&mut state);
     let WaitingFor::LoopShortcut {
-        proposer,
-        certificate,
-        schema,
-        ..
+        proposer, schema, ..
     } = &state.waiting_for
     else {
         panic!("the helper returns at a declarable offer");
     };
     let (proposer, schema) = (*proposer, schema.clone());
-    let per_cycle = certificate
-        .per_cycle
-        .as_ref()
-        .expect("a bounded offer publishes its per-period signature")
-        .clone();
-    assert_eq!(proposer, live.proposer);
 
     let target_group = schema
         .points
@@ -762,28 +784,6 @@ fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
         legal_seats.len() > 1,
         "reach-guard: the straddle below needs two published legal victims; got {legal_seats:?}"
     );
-
-    // Each victim's own crossing while aimed, from its published life and its own published
-    // per-cycle charge — never spelled.
-    let crossing = |seat: PlayerId| -> u32 {
-        let life = state
-            .players
-            .iter()
-            .find(|player| player.id == seat)
-            .map(|player| player.life)
-            .expect("a published legal victim is seated");
-        let charge = per_cycle
-            .seat_life_charge
-            .iter()
-            .find(|(charged, _)| *charged == seat)
-            .map(|(_, magnitude)| *magnitude)
-            .expect("a published legal victim carries a published per-cycle charge");
-        assert!(
-            life > 0 && charge > 0,
-            "seat={seat:?} life={life} charge={charge}"
-        );
-        (life as u32) / (charge as u32)
-    };
 
     let mut probe = state.clone();
     bind_interaction_authority(
@@ -807,7 +807,13 @@ fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
         })
         .expect("reach-guard: the offer is published as a shortcut schema");
     let InteractionOpportunityResponse::Schema {
-        spec: InteractionResponseSpec::Shortcut { count, points, .. },
+        spec:
+            InteractionResponseSpec::Shortcut {
+                count,
+                points,
+                preview,
+                ..
+            },
         ..
     } = &opportunity.response
     else {
@@ -829,52 +835,73 @@ fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
          which is how the pins below name a seat without spelling an id"
     );
 
-    let low = legal_seats
+    // The suggestion's own allocation, read back as seats: the published element at the
+    // suggested count states it.
+    let suggestion: Vec<(PlayerId, u32)> = preview
         .iter()
-        .copied()
-        .min_by_key(|seat| crossing(*seat))
-        .expect("non-empty by the guard above");
-    let high = legal_seats
+        .find(|element| element.count == suggested)
+        .expect("the window's suggested count is published")
+        .allocation
         .iter()
-        .copied()
-        .max_by_key(|seat| crossing(*seat))
-        .expect("non-empty by the guard above");
-    assert!(
-        crossing(low) < suggested && crossing(high) >= suggested,
-        "reach-guard: this board must STRADDLE the refusal boundary — one published victim whose \
-         own crossing is below the suggestion and one at or above it. A `>` form on the upper \
-         half reds here, because the upper crossing is EXACTLY the suggestion. low={low:?}@{} \
-         high={high:?}@{} suggested={suggested}",
-        crossing(low),
-        crossing(high)
+        .map(|assignment| {
+            let at = points[target_group]
+                .candidate_ids
+                .iter()
+                .position(|id| *id == assignment.choice_id)
+                .expect("the allocation speaks the point's own candidate ids");
+            (legal_seats[at], assignment.amount)
+        })
+        .collect();
+    assert_eq!(
+        suggestion.len(),
+        2,
+        "reach-guard: the suggestion re-aims once, so reversing its segments changes which \
+         victim each aims at; got {suggestion:?}"
     );
+    let reversed: Vec<(PlayerId, u32)> = suggestion.iter().rev().copied().collect();
 
-    // One pin per non-read-only published point; the Targets point's pin names `seat`.
-    let pins_aiming = |seat: PlayerId| -> Vec<InteractionShortcutPin> {
-        let index = legal_seats
-            .iter()
-            .position(|candidate| *candidate == seat)
-            .expect("a published legal victim");
+    // One pin per non-read-only published point; the Targets point's pin carries `allocation`.
+    let pins_allocating = |allocation: &[(PlayerId, u32)]| -> Vec<InteractionShortcutPin> {
+        let id = |seat: PlayerId| {
+            let at = legal_seats
+                .iter()
+                .position(|candidate| *candidate == seat)
+                .expect("a published legal victim");
+            points[target_group].candidate_ids[at].clone()
+        };
         points
             .iter()
             .filter(|point| !point.read_only)
-            .map(|point| InteractionShortcutPin {
-                group: point.group,
-                choice_ids: if point.group == points[target_group].group {
-                    vec![point.candidate_ids[index].clone()]
+            .map(|point| {
+                if point.group == points[target_group].group {
+                    InteractionShortcutPin {
+                        group: point.group,
+                        choice_ids: allocation.iter().map(|(seat, _)| id(*seat)).collect(),
+                        amounts: allocation
+                            .iter()
+                            .map(|(seat, amount)| AmountAssignment {
+                                choice_id: id(*seat),
+                                amount: *amount,
+                            })
+                            .collect(),
+                    }
                 } else {
-                    point
-                        .candidate_ids
-                        .iter()
-                        .take(point.min as usize)
-                        .cloned()
-                        .collect()
-                },
-                amounts: Vec::new(),
+                    InteractionShortcutPin {
+                        group: point.group,
+                        choice_ids: point
+                            .candidate_ids
+                            .iter()
+                            .take(point.min as usize)
+                            .cloned()
+                            .collect(),
+                        amounts: Vec::new(),
+                    }
+                }
             })
             .collect()
     };
-    let submit_decision = |decision: InteractionShortcutDecision, seat: PlayerId| {
+    let submit_decision = |decision: InteractionShortcutDecision,
+                           allocation: &[(PlayerId, u32)]| {
         resolve_interaction_response(
             &probe,
             proposer,
@@ -882,15 +909,14 @@ fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
                 interaction_id: opportunity.interaction_id.clone(),
                 response: InteractionResponse::Shortcut {
                     decision,
-                    pins: pins_aiming(seat),
+                    pins: pins_allocating(allocation),
                 },
             },
         )
     };
 
-    // ── The paired positive: the SAME variant, the SAME count, a pin aiming the victim whose
-    //    crossing is not below the suggestion.
-    let accepted = submit_decision(InteractionShortcutDecision::AcceptSuggested, high)
+    // ── The paired positive: the SAME variant, the SAME count, the suggestion's own segments.
+    let accepted = submit_decision(InteractionShortcutDecision::AcceptSuggested, &suggestion)
         .expect("CR 732.2a: every aim survives, so this submission mints its declaration");
     match &accepted {
         GameAction::DeclareShortcut { count, template } => {
@@ -907,14 +933,15 @@ fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
         other => panic!("the ingress mints a DeclareShortcut, got {other:?}"),
     }
 
-    // ── The refusal: the same variant, the same count, aiming the victim below the suggestion.
+    // ── The refusal: the same variant, the same count, the same segments in reverse order, so
+    //    the seat that crosses first is aimed at first and its segment outlives it.
     assert_eq!(
-        submit_decision(InteractionShortcutDecision::AcceptSuggested, low)
+        submit_decision(InteractionShortcutDecision::AcceptSuggested, &reversed)
             .map_err(|error| error.code),
         Err(InteractionReasonCode::ConstraintUnsatisfied),
-        "CR 732.2a + CR 102.1: at the published suggestion this aim outlives its own seat's \
-         crossing, so the ingress refuses the declaration and mints NO action. The two halves \
-         differ in nothing but which published victim the pin names"
+        "CR 732.2a + CR 608.2b: an aim lands after its own seat's crossing, so the ingress \
+         refuses the declaration and mints NO action. The two halves differ in nothing but which \
+         published victim each segment names"
     );
 
     // ── The adjacent enum variant, which shows the refusal belongs to the shared authority
@@ -924,7 +951,7 @@ fn an_accept_suggested_pin_aiming_a_victim_below_the_suggestion_is_refused() {
             InteractionShortcutDecision::Fixed {
                 iterations: suggested
             },
-            low
+            &reversed
         )
         .map_err(|error| error.code),
         Err(InteractionReasonCode::ConstraintUnsatisfied),
@@ -962,8 +989,13 @@ fn published_aimable_seats(points: &[DecisionPoint]) -> Vec<PlayerId> {
 /// [`crate::fantastic_four_bounded_loop::assert_no_aim_independent_charge`] and its caller here,
 /// so a board demoted out of this shape reds rather than passing vacuously.
 #[test]
-fn both_drain_boards_publish_no_aim_independent_charge_at_their_live_offer() {
-    for mut state in [lethal_lifegain_loss_board(), weird_drain_board()] {
+fn every_certified_offer_dump_publishes_no_aim_independent_charge_at_its_live_offer() {
+    for mut state in [
+        lethal_lifegain_loss_board(),
+        weird_drain_board(),
+        crate::three_opponent_drain_shortcut::load_s(),
+        crate::three_opponent_drain_shortcut::load_fc(),
+    ] {
         drive_to_live_declarable_offer(&mut state);
         let WaitingFor::LoopShortcut {
             certificate,
@@ -983,6 +1015,7 @@ fn both_drain_boards_publish_no_aim_independent_charge_at_their_live_offer() {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature");
         let seats = published_aimable_seats(&schema.points);
         crate::fantastic_four_bounded_loop::assert_no_aim_independent_charge(
@@ -1064,7 +1097,7 @@ fn restores_at_a_certified_offer(path: &Path) -> bool {
 /// extension for about seven seconds of walk. A later reader holding both files in one scope can
 /// take it cheaply.
 #[test]
-fn the_committed_dumps_that_restore_at_a_certified_offer_are_the_two_this_file_drives() {
+fn the_committed_dumps_that_restore_at_a_certified_offer_are_the_aim_independent_rows_boards() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
     collect_gz(&root, &mut files);
@@ -1083,11 +1116,149 @@ fn the_committed_dumps_that_restore_at_a_certified_offer_are_the_two_this_file_d
     assert_eq!(
         restoring,
         BTreeSet::from([
+            "exquisite_blood_tenacity_alternating_offer_4p.json.gz".to_string(),
+            "exquisite_blood_tenacity_three_opponents_4p.json.gz".to_string(),
             "lethal_lifegain_loss_4p.json.gz".to_string(),
             "weird_drain_4p.json.gz".to_string(),
         ]),
         "a committed dump restoring at a certified CR 732.2a offer is one of the boards \
-         `both_drain_boards_publish_no_aim_independent_charge_at_their_live_offer` reads, and the \
-         difference above names the newcomer: add it to that row, or move it out of the corpus"
+         `every_certified_offer_dump_publishes_no_aim_independent_charge_at_its_live_offer` \
+         reads, and the difference above names the newcomer: add it to that row, or move it out \
+         of the corpus"
     );
+}
+
+/// CR 800.4a: P1 stole a creature P0 owns, with a +1/+1 counter on it. P1's departure ends that
+/// control effect and the creature stays under P0, so the repetition P1 leaves on conforms and
+/// accepting the weird-drain board's suggestion still eliminates every opponent.
+#[test]
+fn a_creature_the_departing_seat_stole_returns_and_the_suggested_take_still_wins() {
+    use engine::game::interaction::{
+        bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
+    };
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
+    use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterType;
+    use engine::types::identifiers::CardId;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
+        InteractionSessionId, InteractionShortcutDecision, InteractionShortcutPin,
+        InteractionSubmission,
+    };
+    use engine::types::zones::Zone;
+
+    for stolen in [false, true] {
+        let mut state = weird_drain_board();
+        let live = drive_to_live_declarable_offer(&mut state);
+        let id = engine::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            live.proposer,
+            "Stolen Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types = vec![CoreType::Creature];
+        object.counters.insert(CounterType::Plus1Plus1, 1);
+        if stolen {
+            state.add_transient_continuous_effect(
+                id,
+                PlayerId(1),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id },
+                vec![ContinuousModification::ChangeController],
+                None,
+            );
+            engine::game::layers::mark_layers_full(&mut state);
+            engine::game::layers::evaluate_layers(&mut state);
+        }
+        assert_eq!(
+            state.objects[&id].controller,
+            if stolen { PlayerId(1) } else { live.proposer }
+        );
+
+        bind_interaction_authority(&mut state, InteractionSessionId("stolen".into()))
+            .expect("valid interaction authority binding");
+        let filtered = filter_state_for_viewer(&state, live.proposer);
+        let view = derive_viewer_interaction(&state, &filtered, live.proposer);
+        let opportunity = view
+            .opportunities
+            .iter()
+            .find(|o| {
+                matches!(
+                    &o.response,
+                    InteractionOpportunityResponse::Schema {
+                        spec: InteractionResponseSpec::Shortcut { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("the offer is published as a shortcut schema");
+        let InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Shortcut { points, .. },
+            ..
+        } = &opportunity.response
+        else {
+            unreachable!();
+        };
+        let pins = points
+            .iter()
+            .filter(|point| !point.read_only)
+            .map(|point| InteractionShortcutPin {
+                group: point.group,
+                choice_ids: if matches!(
+                    point.kind,
+                    engine::types::interaction::InteractionShortcutPointKind::Targets
+                ) {
+                    Vec::new()
+                } else {
+                    point
+                        .candidate_ids
+                        .iter()
+                        .take(point.min as usize)
+                        .cloned()
+                        .collect()
+                },
+                amounts: Vec::new(),
+            })
+            .collect();
+        let action = resolve_interaction_response(
+            &state,
+            live.proposer,
+            &InteractionSubmission {
+                interaction_id: opportunity.interaction_id.clone(),
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::AcceptSuggested,
+                    pins,
+                },
+            },
+        )
+        .expect("AcceptSuggested with an empty pin is admitted");
+        apply(&mut state, live.proposer, action).expect("the declaration is dispatched");
+        while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+            apply(
+                &mut state,
+                player,
+                GameAction::RespondToShortcut {
+                    response: engine::analysis::loop_check::ShortcutResponse::Accept,
+                },
+            )
+            .expect("a shortcut response");
+        }
+        let lives: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(live.proposer)
+            },
+            "stolen={stolen}"
+        );
+        assert_eq!(lives, vec![116, 0, 0, 0], "stolen={stolen}");
+        assert!(state.battlefield.contains(&id), "stolen={stolen}");
+        assert_eq!(
+            state.objects[&id].controller, live.proposer,
+            "stolen={stolen}"
+        );
+    }
 }

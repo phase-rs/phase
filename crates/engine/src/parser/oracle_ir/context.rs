@@ -6,8 +6,9 @@
 use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
-    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
+    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -880,6 +881,16 @@ pub(crate) struct ParseContext {
     /// [`Self::clone_for_independent_body`] or [`Self::clone_throwaway`]. See
     /// [`TriggerZoneChangeProvenance`].
     pub trigger_zone_change: TriggerZoneChangeProvenance,
+    /// CR 608.2k: the owner a possessive PRONOUN ("its"/"his"/"her"/"their")
+    /// characteristic binds to while this context is active. Set ONLY by
+    /// quantity interpreters parsing a clause whose subject position is known
+    /// (`parse_where_x_quantity_expression_with_owner`, for boon-granted
+    /// "it"/"that" perpetual tails, where the pronoun names the triggering
+    /// object). `None` (the default every other caller carries) preserves the
+    /// long-standing `Source` binding. Explicit self-references ("~'s",
+    /// "this creature's") NEVER consult this field — only the four genuinely
+    /// anaphoric pronoun surfaces do.
+    pub characteristic_pronoun_owner: Option<ObjectScope>,
 }
 
 impl ParseContext {

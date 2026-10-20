@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
@@ -18,7 +20,8 @@ use super::counter::{
 };
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
-    rebind_cost_paid_object_pt_to_target, strip_leading_quantifier, strip_trailing_where_x,
+    parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
+    strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -1111,29 +1114,37 @@ fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
     Some(expr)
 }
 
-/// CR 606.3: Recognize the printed Chain Veil class — a single ability that
-/// raises the per-permanent CR 606.3 loyalty-activation cap by N for every
-/// planeswalker the controller controls. Two surface forms are accepted:
+/// CR 606.3 + CR 101.1: Recognize the extra loyalty-activation grant on both
+/// recipient axes — the card's text overrides the once-per-permanent limit.
+/// Returns the amount and the `Effect::GrantExtraLoyaltyActivations` recipient.
+/// Two surface families are accepted:
 ///
-///   - "for each planeswalker you control, you may activate one of its loyalty
-///     abilities once this turn as though none of its loyalty abilities have
-///     been activated this turn." — the printed Chain Veil wording. The
-///     "for each planeswalker you control" preamble identifies the beneficiaries
-///     (each planeswalker gets +1 cap), not a repeat count;
-///     `strip_for_each_prefix` bails out on this pattern so the imperative
-///     dispatch sees the full text here.
-///   - "activate each planeswalker's loyalty ability an additional time this
-///     turn" / "an additional N times this turn" — future-proof generalization
-///     after the outer "you may " has been stripped by
-///     `strip_optional_effect_prefix`. Numeric variant supports cards that grant
-///     more than one extra activation in a single resolution.
-fn parse_grant_extra_loyalty_activations(lower: &str) -> Option<QuantityExpr> {
+///   - The printed Chain Veil wording, recipient `Controller` (every planeswalker
+///     the controller controls): "for each planeswalker you control, you may
+///     activate one of its loyalty abilities once this turn as though none of its
+///     loyalty abilities have been activated this turn." The "for each
+///     planeswalker you control" preamble identifies the beneficiaries (each
+///     planeswalker gets +1 cap), not a repeat count; `strip_for_each_prefix`
+///     bails out on this pattern so the imperative dispatch sees the full text
+///     here. This form keeps its own non-strict behavior and is tried first.
+///   - The generalized imperative, after the outer "you may " has been stripped by
+///     `strip_optional_effect_prefix` (see [`parse_extra_loyalty_activation_grant`]):
+///     "activate each planeswalker's loyalty ability an additional time [this
+///     turn]" (recipient `Controller`) and "activate ~'s loyalty ability two more
+///     times [this turn]" (recipient `SelfRef`, Comet, Stellar Pup). The whole
+///     clause must match, so a grant followed by a further instruction is declined
+///     rather than silently truncated.
+fn parse_grant_extra_loyalty_activations(lower: &str) -> Option<(QuantityExpr, TargetFilter)> {
     if let Ok((_, amount)) = parse_chain_veil_for_each_form(lower) {
-        return Some(amount);
+        return Some((amount, TargetFilter::Controller));
     }
-    parse_each_planeswalker_additional_form(lower)
-        .map(|(_, amount)| amount)
-        .ok()
+    all_consuming(terminated(
+        parse_extra_loyalty_activation_grant,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(lower.trim())
+    .ok()
+    .map(|(_, grant)| grant)
 }
 
 /// CR 606.3: "For each planeswalker you control, you may activate one of its
@@ -1170,36 +1181,100 @@ fn parse_single_loyalty_permission(lower: &str) -> nom::IResult<&str, (), Oracle
     Ok((rest, ()))
 }
 
-/// CR 606.3: "activate each planeswalker's loyalty ability an additional time
-/// this turn" / "an additional N times this turn" — generalization after
-/// `strip_optional_effect_prefix` has consumed the outer "you may ".
-fn parse_each_planeswalker_additional_form(
-    lower: &str,
-) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
-    let (rest, _) = (
-        tag("activate "),
-        tag("each planeswalker"),
-        tag("'s "),
-        tag("loyalty ability "),
-    )
-        .parse(lower)?;
-    alt((
-        // "an additional N times this turn" → +N
-        map(
-            (
-                tag::<_, _, OracleError<'_>>("an additional "),
-                nom_primitives::parse_number,
-                tag(" times this turn"),
-            ),
-            |(_, n, _)| QuantityExpr::Fixed { value: n as i32 },
-        ),
-        // "an additional time this turn" → +1
+/// CR 606.3 + CR 101.1: "activate <recipient>'s loyalty ability <count> [this
+/// turn]" — the generalized grant after `strip_optional_effect_prefix` has
+/// consumed the outer "you may ". Recipient × count:
+///
+///   - recipient: "each planeswalker's" → `Controller` (every planeswalker the
+///     controller controls); a self-reference followed by "'s" → `SelfRef` (the
+///     resolving permanent). `parse_self_reference` can also yield
+///     `GrantingObject`, which the resolver would silently take down its player
+///     path, so only `SelfRef` is accepted.
+///   - count: "an additional time" / "one more time" → 1, "<number> more times" →
+///     N. (An "an additional <number> times" form is not accepted: the chunk
+///     loop's repeat-count peel strips a trailing "<count> times" before this
+///     grammar runs, so it could never be reached through the chain. "more" is
+///     not a count, so "two more times" survives the peel.)
+///   - "this turn" is optional because the clause shell peels a trailing "this
+///     turn" into the ability's duration before this grammar sees the clause.
+fn parse_extra_loyalty_activation_grant(
+    input: &str,
+) -> nom::IResult<&str, (QuantityExpr, TargetFilter), OracleError<'_>> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("activate ").parse(input)?;
+    let (rest, recipient) = alt((
         value(
-            QuantityExpr::Fixed { value: 1 },
-            tag::<_, _, OracleError<'_>>("an additional time this turn"),
+            TargetFilter::Controller,
+            tag::<_, _, OracleError<'_>>("each planeswalker's "),
+        ),
+        terminated(
+            verify(nom_target::parse_self_reference, |filter: &TargetFilter| {
+                matches!(filter, TargetFilter::SelfRef)
+            }),
+            tag("'s "),
         ),
     ))
-    .parse(rest)
+    .parse(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("loyalty ability ").parse(rest)?;
+    let (rest, count) = alt((
+        value(1u32, tag::<_, _, OracleError<'_>>("an additional time")),
+        value(1u32, tag("one more time")),
+        terminated(nom_primitives::parse_number, tag(" more times")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn")).parse(rest)?;
+    Ok((
+        rest,
+        (
+            QuantityExpr::Fixed {
+                value: count as i32,
+            },
+            recipient,
+        ),
+    ))
+}
+
+/// CR 107.7: an effect-side loyalty symbol is an instruction of its own. `[+N]`
+/// puts N loyalty counters on the source permanent and `[−N]` removes N of them
+/// ("[+2], then create two 1/1 green Squirrel creature tokens", Comet, Stellar
+/// Pup's result rows). CR 107.7 writes the symbol in an activated ability's cost;
+/// an effect that writes it in its own text gives it the same meaning on the
+/// card's own authority (its ruling), which is not CR text.
+///
+/// The clause must be the symbol alone (an optional full stop aside): a symbol
+/// inside other text, an unsigned `[1]`, `[0]` and the announced-X forms are not
+/// matched here and stay visibly unparsed. CR 306.5c + CR 122.1e: loyalty is the
+/// number of loyalty counters, so the counters are the source's own. CR 704.5i: a
+/// planeswalker left with 0 loyalty is put into its owner's graveyard, and CR 609.3:
+/// removing more than it has removes what it has, so neither is decided here.
+///
+/// The magnitude is lowered as `Fixed(|delta|)`: for `RemoveCounter` a negative
+/// count is the "remove all" sentinel, and the symbol must never produce it.
+fn parse_loyalty_symbol_effect(lower: &str) -> Option<ImperativeFamilyAst> {
+    let (_, delta) = all_consuming(terminated(
+        nom_primitives::parse_loyalty_symbol_delta,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+    match delta.cmp(&0) {
+        Ordering::Greater => Some(ImperativeFamilyAst::ZoneCounter(
+            ZoneCounterImperativeAst::PutCounter {
+                counter_type: crate::types::counter::CounterType::Loyalty,
+                count: QuantityExpr::Fixed { value: delta },
+                target: TargetFilter::SelfRef,
+            },
+        )),
+        Ordering::Less => Some(ImperativeFamilyAst::ZoneCounter(
+            ZoneCounterImperativeAst::RemoveCounter {
+                counter_type: Some(crate::types::counter::CounterType::Loyalty),
+                count: QuantityExpr::Fixed { value: delta.abs() },
+                target: TargetFilter::SelfRef,
+                exact_selection: None,
+                multi_target: None,
+            },
+        )),
+        Ordering::Equal => None,
+    }
 }
 
 pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
@@ -2803,7 +2878,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 source_id: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             },
@@ -12239,6 +12314,103 @@ fn parse_activation_cost_referent(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// Digital-only Alchemy (no CR entry): "note <quantity>" where `<quantity>`
+/// is any shared-grammar quantity ("its power") or the licensed excess
+/// demonstrative ("that excess damage").
+///
+/// CR 120.10: the bare demonstrative "that excess damage" is bound ONLY
+/// outside trigger and replacement bodies (`!ctx.in_trigger &&
+/// !ctx.in_replacement`). Inside a trigger body the antecedent could be the
+/// triggering event — a different resolution whose excess tally was cleared
+/// at depth-0 (Fall of Cair Andros) — while in a spell/activated ability the
+/// damage leg and the note share one resolution (Contest of Claws), so
+/// `PreviousEffectAmount { Excess }` reads correctly. This trigger-context
+/// gate is the same-resolution guarantee the where-X licence
+/// (`rebind_context_dependent_where_x`) enforces via the sibling condition;
+/// the note needs no condition of its own (an ungated note honestly reads 0
+/// when no excess was dealt).
+fn parse_note_number_clause(lower: &str, ctx: &ParseContext) -> Option<ImperativeFamilyAst> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("note ").parse(lower).ok()?;
+    let rest = rest.trim().trim_end_matches('.').trim();
+    if rest.is_empty() {
+        return None;
+    }
+    // Nom-composed like the bare possessive alternatives below: full-string
+    // equality is not a grammar production.
+    if let Ok((_, qty)) = all_consuming(value(
+        QuantityRef::PreviousEffectAmount {
+            channel: crate::types::ability::DamageChannel::Excess,
+            aggregate: crate::types::ability::AggregateFunction::Sum,
+        },
+        tag::<_, _, OracleError<'_>>("that excess damage"),
+    ))
+    .parse(rest)
+    {
+        if ctx.in_trigger || ctx.in_replacement {
+            return None;
+        }
+        return Some(ImperativeFamilyAst::NoteNumber {
+            value: QuantityExpr::Ref { qty },
+        });
+    }
+    // CR 608.2k: in a trigger body the bare possessive ("its power")
+    // anaphors the triggering object (Dragonborn Immolator's dies trigger
+    // notes the DIED creature) — the shared leaf's context-free `Source`
+    // would misbind whenever source and trigger subject differ.
+    if ctx.in_trigger {
+        if let Some(value) = anaphoric_trigger_body_note_value(rest) {
+            return Some(ImperativeFamilyAst::NoteNumber { value });
+        }
+        // Composed forms of bare possessives ("half its power, rounded up")
+        // bind through the trigger subject via the shared owner-threaded
+        // composition: the context-free fallback below would misbind the
+        // pronoun leaf to Source on a non-self trigger. Explicit
+        // self-references ("~'s power") keep Source structurally — the
+        // pronoun grammar never matches them — and remainders the
+        // composition declines still fall through to the fallback.
+        if let Some(value) = parse_where_x_quantity_expression_with_owner(
+            rest,
+            crate::types::ability::ObjectScope::Anaphoric,
+        ) {
+            return Some(ImperativeFamilyAst::NoteNumber { value });
+        }
+    }
+    let (_, value) = all_consuming(nom_quantity::parse_quantity)
+        .parse(rest)
+        .ok()?;
+    Some(ImperativeFamilyAst::NoteNumber { value })
+}
+
+/// CR 608.2k: direct `Anaphoric` binding for the three printed "its …"
+/// note surfaces in trigger bodies (see `parse_note_number_clause`).
+/// Surface-gated: a fixed "~'s power" keeps `Source`, and spells keep
+/// `Source` ("its" there can only be the source).
+fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
+    let (_, qty) = all_consuming(alt((
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its toughness"),
+        ),
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its mana value"),
+        ),
+    )))
+    .parse(rest)
+    .ok()?;
+    Some(QuantityExpr::Ref { qty })
+}
+
 /// CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2: recognize the
 /// `assimilate <target phrase>` keyword action and return the phrase's target
 /// filter.
@@ -12508,24 +12680,31 @@ pub(super) fn parse_imperative_family_ast(
         )));
     }
 
-    // CR 606.3: "activate each planeswalker's loyalty ability an additional
-    // time this turn" — The Chain Veil class. The outer "you may" is
-    // stripped by `strip_optional_effect_prefix`, leaving the imperative
-    // "activate ..." form here. The grant raises the per-permanent CR 606.3
-    // activation cap by `amount` for the rest of the turn (the resolver lives
-    // in `effects::grant_extra_loyalty_activations`).
+    // CR 606.3 + CR 101.1: "activate each planeswalker's loyalty ability an
+    // additional time this turn" (The Chain Veil class, recipient `Controller`)
+    // and "activate ~'s loyalty ability two more times this turn" (Comet, Stellar
+    // Pup, recipient `SelfRef`). The outer "you may" is stripped by
+    // `strip_optional_effect_prefix`, leaving the imperative "activate ..." form
+    // here; the grant is mandatory because the "may" is the later activation
+    // permission (`clause_is_extra_loyalty_activation_grant` reconciles that in
+    // the chain loop). The grant raises the CR 606.3 activation cap by `amount`
+    // for the rest of the turn (the resolver lives in
+    // `effects::grant_extra_loyalty_activations`).
     //
-    // Quantity axes accepted:
-    //   - "an additional time"        → +1
-    //   - "an additional <number> times" → +N (future-proofs cards that grant
-    //     more than one additional activation in a single ability).
-    if let Some(amount) = parse_grant_extra_loyalty_activations(lower) {
+    // Count axes accepted: "an additional time" / "one more time" → +1, and
+    // "<number> more times" → +N.
+    if let Some((amount, target)) = parse_grant_extra_loyalty_activations(lower) {
         return Some(ImperativeFamilyAst::GainKeyword(
-            Effect::GrantExtraLoyaltyActivations {
-                amount,
-                target: TargetFilter::Controller,
-            },
+            Effect::GrantExtraLoyaltyActivations { amount, target },
         ));
+    }
+
+    // CR 107.7: "[+2]" / "[−1]" as an instruction of its own — put or remove loyalty
+    // counters on the source (Comet, Stellar Pup's result rows). An anchored
+    // whole-clause production, like the extra-activation grant above, so a symbol
+    // inside other text never matches and the verb dispatch below is untouched.
+    if let Some(ast) = parse_loyalty_symbol_effect(lower) {
+        return Some(ast);
     }
 
     // CR 723.1: "You control target player during that player's next turn"
@@ -12643,6 +12822,15 @@ pub(super) fn parse_imperative_family_ast(
         .is_ok()
     {
         return Some(ImperativeFamilyAst::NoteManaSpent);
+    }
+
+    // Digital-only Alchemy (no CR entry): "note <quantity>" — record a
+    // number for the resolving player (Dragonborn Immolator's "note its
+    // power"; Mephit's Enthusiasm / Molten Impact's "note that excess
+    // damage"). Runs after the mana-spent pre-check: disjoint surfaces
+    // ("note the type of mana …" never parses as a quantity).
+    if let Some(ast) = parse_note_number_clause(lower.trim(), ctx) {
+        return Some(ast);
     }
 
     // NOTE: when adding verbs here, also add them to CLAUSE_HEAD_VERBS in
@@ -14571,17 +14759,34 @@ fn try_parse_roll_die_with_modifier(
     Some((sides, Some(modifier)))
 }
 
-/// CR 706.2: Try to parse a d20 result table line like "1—9 | Draw two cards",
-/// "20 | Search your library for a card", or "15+ | Scry X, then draw X cards".
-/// Returns `(min, max, effect_text)`. Open-ended upper bounds ("15+") set
-/// `max = u8::MAX` so any modifier-boosted roll above the printed lower bound
-/// resolves to this branch — see CR 706.2 on modifier-shifted results
-/// (Diviner's Portent, Gale's Redirection, etc.).
+/// CR 706.3a: a results-table row names its possible results and an effect. Oracle
+/// closes the result marker with a pipe ("1—9 | …") or an em dash ("1 or 2 — …"), a
+/// printing convention the rule does not specify. `try_parse_die_result_line` tries the pipe
+/// and then the em dash; `try_parse_em_dash_die_result_line` is the em-dash
+/// instantiation of the same grammar alone.
+const DIE_RESULT_PIPE: &str = "|";
+const DIE_RESULT_EM_DASH: &str = "\u{2014}";
+
+/// CR 706.3a + CR 706.3b: Try to parse a results-table row like "1—9 | Draw two
+/// cards", "20 | Search your library for a card", "15+ | Scry X, then draw X
+/// cards" or "1 or 2 — Create two Treasure tokens". Returns `(min, max,
+/// effect_text)`. Open-ended upper bounds ("15+") set `max = u8::MAX` so any
+/// modifier-boosted roll above the printed lower bound resolves to this branch —
+/// see CR 706.2 on modifier-shifted results (Diviner's Portent, Gale's
+/// Redirection, etc.).
 ///
-/// CR 706.3a also admits a striation stating only its upper endpoint
-/// ("9 or less" — Druid of the Emerald Grove). Its resolvable lower endpoint is
-/// 0, because CR 706.2 selects the row using the POST-modifier result and that
-/// result can be clamped to zero. A printed "0 or less" is still refused.
+/// CR 706.3a lists exactly three possible results: a single number, a range
+/// "N1–N2" and a range "N+". Two further wordings are Oracle's own, beyond that
+/// list: "N or less" states only the UPPER endpoint (Druid of the Emerald Grove's
+/// "9 or less") and "N or M" names two adjacent results (Comet, Stellar Pup's
+/// "1 or 2"). "N or less" resolves as `0..=N`: its lower endpoint is 0, because
+/// CR 706.2 selects the row using the final result after all modifiers and that
+/// result can be clamped to zero. A printed "0 or less" is still refused. "N or
+/// M" resolves as `N..=M` and only when the two are adjacent, so a non-adjacent
+/// list ("1 or 3") declines rather than covering a result the card does not name.
+///
+/// The marker is followed by a pipe or by an em dash. An ASCII hyphen or an en
+/// dash is a range glyph inside the marker (`1-9`, `1–9`), never a separator.
 ///
 /// SYMMETRY WITH `"N+"`. The open-ended UPPER form maps to `u8::MAX` so a
 /// modifier-boosted roll above the printed bound still lands in the branch, and
@@ -14598,15 +14803,34 @@ fn try_parse_roll_die_with_modifier(
 /// recognize a results-table row (`oracle.rs`), so the loop and the row
 /// collector share this one row grammar.
 pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
+    parse_die_result_row(text, DIE_RESULT_PIPE)
+        .or_else(|| parse_die_result_row(text, DIE_RESULT_EM_DASH))
+}
+
+/// The em-dash instantiation of the row grammar behind
+/// [`try_parse_die_result_line`]: a row written "1 or 2 — …", and no pipe row.
+/// `game/coverage.rs` asks the parser this question so the accounting that folds
+/// an em-dash row into its header and the grammar that attaches it cannot drift
+/// apart. It is deliberately blind to pipe rows, whose accounting is not part of
+/// this grammar's em-dash extension.
+pub(crate) fn try_parse_em_dash_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
+    parse_die_result_row(text, DIE_RESULT_EM_DASH)
+}
+
+/// The row grammar both entry points instantiate: `separator` is the glyph that
+/// closes the result marker and nothing else differs between the two.
+fn parse_die_result_row<'a>(text: &'a str, separator: &'static str) -> Option<(u8, u8, &'a str)> {
     // CR 706.3a: a result-table header is one complete numeric range followed
-    // by a pipe and a nonempty instruction. Keep the grammar here rather than
-    // manually slicing a pre-tokenized header: current Oracle data contains
-    // ASCII hyphens as well as en/em dashes, and accepting a prefix (for
-    // example `1-6-9`) would silently misroute a result branch.
+    // by the separator the caller names (a pipe or an em dash) and a nonempty
+    // instruction. Keep the grammar here rather than manually slicing a
+    // pre-tokenized header: current Oracle data contains ASCII hyphens as well as
+    // en/em dashes, and accepting a prefix (for example `1-6-9`) would silently
+    // misroute a result branch.
     let mut parser = all_consuming((
         space0::<_, OracleError<'_>>,
         alt((
-            // CR 706.3a: a printed "N or less" row is a results-table striation
+            // Oracle wording beyond CR 706.3a's list (a single number, `N1–N2`,
+            // `N+`): a printed "N or less" row is a results-table striation
             // stating only its UPPER endpoint (Druid of the Emerald Grove's
             // "9 or less"). Its lower endpoint is 0, NOT 1.
             //
@@ -14622,10 +14846,9 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
             // different things, which is why the check is on `max` here rather
             // than in the shared guard below.
             //
-            // Placed first among the numeric arms for readability only — the
-            // whole grammar is `all_consuming`, so the bare-value arm below
-            // cannot shadow this wording at any position: it would leave
-            // " or less" unconsumed and fail.
+            // Placed before the bare-value arm: `alt` commits to its first
+            // success, so a bare arm ahead of this one would consume `9`, leave
+            // " or less" unconsumed and fail the whole row.
             map(
                 verify(terminated(parse_u8, tag(" or less")), |max: &u8| *max >= 1),
                 |max| (0u8, max),
@@ -14645,12 +14868,28 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
                 verify(terminated(parse_u8, tag("+")), |min: &u8| *min >= 1),
                 |min| (min, u8::MAX),
             ),
+            // Oracle wording beyond CR 706.3a's list: "N or M" names two results
+            // and covers `N..=M` only when they are adjacent, so a printed
+            // "1 or 2" is the range 1–2, while a non-adjacent list ("1 or 3"), a
+            // descending one ("2 or 1") and a zero-based one ("0 or 1") decline
+            // instead of covering a result the card does not name. The printed
+            // first result is required to be >= 1, like every sibling arm.
+            //
+            // Placed before the bare-value arm for the same reason as the
+            // "N or less" arm: `alt` commits to its first success, so a bare arm
+            // ahead of this one would consume `1` and fail the row on " or 2".
+            verify(
+                pair(terminated(parse_u8, tag(" or ")), parse_u8),
+                |(first, second): &(u8, u8)| *first >= 1 && first.checked_add(1) == Some(*second),
+            ),
+            // The bare single value must stay LAST: every arm above it names a
+            // wider marker that begins with a bare number.
             map(verify(parse_u8, |value: &u8| *value >= 1), |value| {
                 (value, value)
             }),
         )),
         space0,
-        tag("|"),
+        tag(separator),
         space0,
         take_till(|character| character == '|'),
         space0,
@@ -15833,6 +16072,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
         ImperativeFamilyAst::NoteManaSpent => Effect::NoteManaSpent,
+        ImperativeFamilyAst::NoteNumber { value } => Effect::NoteNumber { value },
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
@@ -28677,7 +28917,7 @@ mod tests {
 /// satisfied by a change that added nothing at all.
 #[cfg(test)]
 mod die_result_row_grammar_tests {
-    use super::try_parse_die_result_line;
+    use super::{try_parse_die_result_line, try_parse_em_dash_die_result_line};
 
     /// POSITIVE REACH-GUARD for every negative below: the new wording form is
     /// actually accepted, and its resolvable lower endpoint is 0.
@@ -28724,10 +28964,11 @@ mod die_result_row_grammar_tests {
         );
     }
 
-    /// HOSTILE, shape 3 — the bare single value. This is the arm the new wording
-    /// form sits above, and `all_consuming` (not ordering) is what keeps them
-    /// apart: applied to `"9 or less | x"` the bare arm leaves `" or less"`
-    /// unconsumed and fails at ANY position in the `alt`.
+    /// HOSTILE, shape 3 — the bare single value. It is the LAST arm of the
+    /// grammar: `alt` commits to its first success, so a bare arm ahead of the
+    /// "N or less" or "N or M" wordings would consume the leading number, leave
+    /// the rest of the marker unconsumed and fail the row. Being last, it cannot
+    /// shadow them, and the bare forms still read as before.
     #[test]
     fn bare_single_value_is_unchanged() {
         assert_eq!(try_parse_die_result_line("20 | x"), Some((20, 20, "x")));
@@ -28766,6 +29007,150 @@ mod die_result_row_grammar_tests {
         assert_eq!(try_parse_die_result_line("9 or les | x"), None);
         assert_eq!(try_parse_die_result_line("9 or lesser | x"), None);
         assert_eq!(try_parse_die_result_line("or less | x"), None);
+    }
+
+    /// CR 706.3a + CR 706.3b: the em dash closes a marker as the pipe does, so each
+    /// shape of marker reads as the range it names. POSITIVE REACH-GUARD for every
+    /// negative in this module that concerns the em dash or the "N or M" wording.
+    #[test]
+    fn em_dash_rows_read_the_ranges_they_name() {
+        for (line, expected) in [
+            ("1 \u{2014} x", (1, 1)),
+            ("3 \u{2014} x", (3, 3)),
+            ("6 \u{2014} x", (6, 6)),
+            ("1 or 2 \u{2014} x", (1, 2)),
+            ("4 or 5 \u{2014} x", (4, 5)),
+            ("19 or 20 \u{2014} x", (19, 20)),
+            ("254 or 255 \u{2014} x", (254, 255)),
+            ("9 or less \u{2014} x", (0, 9)),
+            ("1\u{2014}9 \u{2014} x", (1, 9)),
+            ("15+ \u{2014} x", (15, u8::MAX)),
+            // The same "N or M" wording behind a pipe.
+            ("1 or 2 | x", (1, 2)),
+        ] {
+            assert_eq!(
+                try_parse_die_result_line(line),
+                Some((expected.0, expected.1, "x")),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// "N or M" is a two-result striation: it covers `N..=M` only for adjacent
+    /// results, so a list that would cover a result the card does not name, a
+    /// descending or zero-based pair, and anything longer or bodiless all decline.
+    #[test]
+    fn two_result_lists_decline_unless_they_are_adjacent() {
+        assert_eq!(
+            try_parse_die_result_line("1 or 2 \u{2014} x"),
+            Some((1, 2, "x")),
+            "reach-guard"
+        );
+        for line in [
+            "1 or 3 \u{2014} x",
+            "2 or 1 \u{2014} x",
+            "0 or 1 \u{2014} x",
+            "1 or 1 \u{2014} x",
+            "255 or 256 \u{2014} x",
+            "1 or 2 or 3 \u{2014} x",
+            "1 or 2 \u{2014} ",
+            "1 or 2 \u{2014}",
+            "1 or 2 \u{2014} x | y",
+            "1 or \u{2014} x",
+            "or 2 \u{2014} x",
+        ] {
+            assert_eq!(try_parse_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// An ASCII hyphen and an en dash are range glyphs inside a marker, never
+    /// separators: only the pipe and the em dash close one.
+    #[test]
+    fn a_hyphen_or_an_en_dash_does_not_close_a_marker() {
+        assert_eq!(
+            try_parse_die_result_line("1 \u{2014} x"),
+            Some((1, 1, "x")),
+            "reach-guard: the em dash separates"
+        );
+        for line in [
+            "1 - x",
+            "1 \u{2013} x",
+            "1 or 2 - x",
+            "1 or 2 \u{2013} x",
+            "9 or less - x",
+        ] {
+            assert_eq!(try_parse_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// The em-dash entry point is the em-dash instantiation of the same grammar:
+    /// it reads every em-dash row and none of the pipe rows. The positive reach-guard
+    /// is the first loop.
+    #[test]
+    fn the_em_dash_entry_point_reads_em_dash_rows_and_no_pipe_row() {
+        for line in ["1 or 2 \u{2014} x", "3 \u{2014} x", "9 or less \u{2014} x"] {
+            assert!(
+                try_parse_em_dash_die_result_line(line).is_some(),
+                "reach-guard: {line:?}"
+            );
+        }
+        for line in [
+            "1 or 2 | x",
+            "9 or less | x",
+            "10\u{2014}19 | x",
+            "20+ | x",
+            "20 | x",
+        ] {
+            assert_eq!(try_parse_em_dash_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// Agreement: for every em-dash row both entry points return the same triple,
+    /// and for every pipe row only the general entry point accepts. Every row is
+    /// also a positive reach-guard for the comparison.
+    #[test]
+    fn the_two_entry_points_agree_on_em_dash_rows_and_split_on_pipe_rows() {
+        for line in [
+            "1 or 2 \u{2014} x",
+            "3 \u{2014} x",
+            "6 \u{2014} x",
+            "9 or less \u{2014} x",
+            "1\u{2014}9 \u{2014} x",
+            "15+ \u{2014} x",
+        ] {
+            let general = try_parse_die_result_line(line);
+            assert!(general.is_some(), "reach-guard: {line:?}");
+            assert_eq!(general, try_parse_em_dash_die_result_line(line), "{line:?}");
+        }
+        for line in [
+            "1 or 2 | x",
+            "1\u{2014}9 | x",
+            "15+ | x",
+            "20 | x",
+            "9 or less | x",
+        ] {
+            assert!(
+                try_parse_die_result_line(line).is_some(),
+                "reach-guard: {line:?}"
+            );
+            assert_eq!(try_parse_em_dash_die_result_line(line), None, "{line:?}");
+        }
+    }
+
+    /// A planeswalker's next loyalty ability is not a row: the collector that stops
+    /// at the first non-row line depends on the grammar refusing it.
+    #[test]
+    fn a_loyalty_ability_line_is_not_a_row() {
+        assert!(
+            try_parse_die_result_line("1 \u{2014} Draw a card.").is_some(),
+            "reach-guard"
+        );
+        assert_eq!(
+            try_parse_die_result_line(
+                "[\u{2212}2]: Heist! \u{2014} Exile the top two cards of target opponent's library."
+            ),
+            None
+        );
     }
 }
 
@@ -28856,6 +29241,309 @@ mod exile_graveyard_producer_shape {
                 assert_no_compound_remainder(tail, remainder);
             })
             .is_err());
+        }
+    }
+}
+
+/// CR 606.3 + CR 101.1: the extra loyalty-activation grant, on both recipient
+/// axes (every planeswalker the controller controls, or the source permanent).
+#[cfg(test)]
+mod extra_loyalty_activation_grant_tests {
+    use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain;
+
+    const SOURCE_GRANT: &str = "You may activate ~'s loyalty ability two more times this turn.";
+    const SOURCE_GRANT_AFTER_DRAW: &str =
+        "Draw a card, and you may activate ~'s loyalty ability two more times this turn.";
+
+    /// The grant's `(count, recipient)` when `def`'s own effect is the grant.
+    fn grant_of(def: &AbilityDefinition) -> Option<(i32, &TargetFilter)> {
+        match &*def.effect {
+            Effect::GrantExtraLoyaltyActivations {
+                amount: QuantityExpr::Fixed { value },
+                target,
+            } => Some((*value, target)),
+            _ => None,
+        }
+    }
+
+    /// Every effect reachable through the `sub_ability` chain, root first.
+    fn chain_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut effects = vec![&*def.effect];
+        let mut next = def.sub_ability.as_deref();
+        while let Some(sub) = next {
+            effects.push(&*sub.effect);
+            next = sub.sub_ability.as_deref();
+        }
+        effects
+    }
+
+    fn has_unimplemented(def: &AbilityDefinition) -> bool {
+        chain_effects(def)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
+    }
+
+    /// Both recipient axes, each with and without the " this turn" the
+    /// clause shell may already have peeled, and with an optional final period.
+    #[test]
+    fn grant_grammar_accepts_both_recipient_axes() {
+        let grant = |text: &str| parse_grant_extra_loyalty_activations(text);
+        let source = |n: i32| Some((QuantityExpr::Fixed { value: n }, TargetFilter::SelfRef));
+        let controller =
+            |n: i32| Some((QuantityExpr::Fixed { value: n }, TargetFilter::Controller));
+
+        for tail in ["", " this turn", " this turn.", "."] {
+            assert_eq!(
+                grant(&format!(
+                    "activate ~'s loyalty ability two more times{tail}"
+                )),
+                source(2),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                grant(&format!("activate ~'s loyalty ability one more time{tail}")),
+                source(1),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                grant(&format!("activate ~'s loyalty ability 3 more times{tail}")),
+                source(3),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                grant(&format!(
+                    "activate each planeswalker's loyalty ability an additional time{tail}"
+                )),
+                controller(1),
+                "tail {tail:?}"
+            );
+        }
+        assert_eq!(
+            grant(
+                "for each planeswalker you control, you may activate one of its loyalty \
+                 abilities once this turn as though none of its loyalty abilities have been \
+                 activated this turn."
+            ),
+            controller(1),
+            "the printed Chain Veil wording is unchanged"
+        );
+    }
+
+    /// Declines. Each is paired with the accepted base form in the same
+    /// test, so a decline is a decision about the varied part, not an upstream
+    /// short-circuit.
+    #[test]
+    fn grant_grammar_declines_each_paired_with_a_positive_in_the_same_test() {
+        let accepted = "activate ~'s loyalty ability two more times this turn";
+        assert!(
+            parse_grant_extra_loyalty_activations(accepted).is_some(),
+            "positive reach-guard"
+        );
+        for declined in [
+            // plural noun
+            "activate ~'s loyalty abilities two more times this turn",
+            // no count
+            "activate ~'s loyalty ability this turn",
+            // a further instruction must not be silently truncated
+            "activate ~'s loyalty ability two more times this turn, then draw a card",
+            // a recipient that is neither each planeswalker nor the source
+            "activate target planeswalker's loyalty ability two more times this turn",
+            "activate its loyalty ability two more times this turn",
+            // the dropped "an additional <number> times" arm fails closed
+            "activate each planeswalker's loyalty ability an additional two times this turn",
+        ] {
+            assert_eq!(
+                parse_grant_extra_loyalty_activations(declined),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    /// (a) The bare "you may activate ~'s loyalty ability N more times" clause
+    /// is one mandatory source-scoped grant: the "may" is the later activation
+    /// permission (CR 608.2d), not a resolution-time choice.
+    #[test]
+    fn bare_clause_is_one_mandatory_source_grant() {
+        let def = parse_effect_chain(SOURCE_GRANT, AbilityKind::Activated);
+        assert!(!has_unimplemented(&def), "{def:#?}");
+        assert_eq!(
+            grant_of(&def),
+            Some((2, &TargetFilter::SelfRef)),
+            "{def:#?}"
+        );
+        assert!(!def.optional, "the grant is mandatory: {def:#?}");
+        assert!(def.sub_ability.is_none(), "{def:#?}");
+    }
+
+    /// (b) A grant conjoined with a prior clause splits at ", and you may" and
+    /// stays mandatory in its own sub-ability.
+    #[test]
+    fn grant_after_a_prior_clause_is_a_mandatory_sub_ability() {
+        let def = parse_effect_chain(SOURCE_GRANT_AFTER_DRAW, AbilityKind::Activated);
+        assert!(!has_unimplemented(&def), "{def:#?}");
+        assert!(matches!(&*def.effect, Effect::Draw { .. }), "{def:#?}");
+        assert!(!def.optional, "{def:#?}");
+        let sub = def.sub_ability.as_deref().expect("grant sub-ability");
+        assert_eq!(grant_of(sub), Some((2, &TargetFilter::SelfRef)), "{def:#?}");
+        assert!(!sub.optional, "the grant is mandatory: {def:#?}");
+    }
+
+    /// (c) Sibling controls: the reconciliation clears optionality for the
+    /// grant only. Each pairs with (a) / (b), which prove the chain reached the
+    /// same seam.
+    #[test]
+    fn reconciliation_leaves_other_may_clauses_alone() {
+        let draw = parse_effect_chain("You may draw a card.", AbilityKind::Activated);
+        assert!(matches!(&*draw.effect, Effect::Draw { .. }), "{draw:#?}");
+        assert!(draw.optional, "an ordinary \"you may\" stays optional");
+
+        let land = parse_effect_chain(
+            "You may play an additional land this turn.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            !land.optional,
+            "the land permission stays mandatory: {land:#?}"
+        );
+    }
+
+    /// (d) The printed Chain Veil text still lowers to the player-wide grant.
+    #[test]
+    fn printed_chain_veil_is_still_the_player_wide_grant() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of your end step, if you didn't activate a loyalty ability of a \
+             planeswalker this turn, you lose 2 life.\n{4}, {T}: For each planeswalker you \
+             control, you may activate one of its loyalty abilities once this turn as though \
+             none of its loyalty abilities have been activated this turn.",
+            "The Chain Veil",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let index = parsed
+            .abilities
+            .iter()
+            .position(|ability| grant_of(ability).is_some())
+            .expect("The Chain Veil keeps its grant ability");
+        let def = &parsed.abilities[index];
+        assert_eq!(
+            grant_of(def),
+            Some((1, &TargetFilter::Controller)),
+            "{def:#?}"
+        );
+        assert!(!def.optional, "{def:#?}");
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn), "{def:#?}");
+    }
+}
+
+/// CR 107.7: the effect-side loyalty symbol — "[+2]" / "[−1]" as an instruction of
+/// its own that puts or removes loyalty counters on the source (Comet, Stellar
+/// Pup's result rows).
+#[cfg(test)]
+mod loyalty_symbol_effect_tests {
+    use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::counter::CounterType;
+
+    /// The single node a symbol clause lowers to: no sub-ability and no gap.
+    fn one_clause(text: &str) -> AbilityDefinition {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(def.sub_ability.is_none(), "{text:?}: {def:#?}");
+        def
+    }
+
+    fn puts(def: &AbilityDefinition, count: i32) -> bool {
+        matches!(
+            &*def.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Loyalty,
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::SelfRef,
+            } if *value == count
+        )
+    }
+
+    fn removes(def: &AbilityDefinition, count: i32) -> bool {
+        matches!(
+            &*def.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Loyalty),
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::SelfRef,
+            } if *value == count
+        )
+    }
+
+    /// A positive symbol puts that many loyalty counters on the source, through the
+    /// existing counter effect — no new effect — for every printed spelling.
+    #[test]
+    fn a_positive_symbol_puts_loyalty_counters_on_the_source() {
+        for (text, count) in [("[+2]", 2), ("[+1]", 1), ("[+10]", 10), ("[+1].", 1)] {
+            let def = one_clause(text);
+            assert!(puts(&def, count), "{text:?}: {def:#?}");
+        }
+    }
+
+    /// A negative symbol removes that many, in every minus spelling. The count is
+    /// the magnitude: `Fixed(-1)` is the "remove all counters" sentinel of
+    /// `RemoveCounter`, and a symbol that produced it would empty the planeswalker.
+    #[test]
+    fn a_negative_symbol_removes_its_count_and_never_the_remove_all_sentinel() {
+        for (text, count) in [
+            ("[\u{2212}1]", 1),
+            ("[\u{2212}2].", 2),
+            ("[\u{2013}1]", 1),
+            ("[-1]", 1),
+            ("[\u{2212}12]", 12),
+        ] {
+            let def = one_clause(text);
+            assert!(removes(&def, count), "{text:?}: {def:#?}");
+        }
+    }
+
+    /// The symbol is recognized as a WHOLE clause only. The positive reach-guard is
+    /// the first assertion; everything after it is declined by the intercept and
+    /// stays visibly unparsed: `[0]` puts zero counters, the X forms are costs, an
+    /// unsigned count and a number word are not the symbol, and a symbol with text
+    /// around it belongs to another grammar.
+    #[test]
+    fn only_a_signed_nonzero_symbol_alone_is_the_clause() {
+        assert!(parse_loyalty_symbol_effect("[+2]").is_some(), "reach-guard");
+        for declined in [
+            "[0]",
+            "[+0]",
+            "[+x]",
+            "[\u{2212}x]",
+            "[1]",
+            "[+two]",
+            "+2",
+            "[+2] extra",
+            "extra [+2]",
+            "[+2], then draw a card",
+            "put [+2] on it",
+            "",
+        ] {
+            assert!(
+                parse_loyalty_symbol_effect(declined).is_none(),
+                "{declined:?}"
+            );
+        }
+    }
+
+    /// The symbols that appear inside other printed text (a cost modification, a
+    /// drafting ability) are not instructions: the whole-clause intercept leaves
+    /// them alone. Paired with the accepted form above.
+    #[test]
+    fn a_symbol_inside_other_text_is_not_an_instruction() {
+        assert!(parse_loyalty_symbol_effect("[+1]").is_some(), "reach-guard");
+        for text in [
+            "this ability costs an additional [+1] to activate",
+            "draft a [+1] ability.",
+            "loyalty abilities of planeswalkers you control cost an additional [\u{2212}1] to activate",
+        ] {
+            assert!(parse_loyalty_symbol_effect(text).is_none(), "{text:?}");
         }
     }
 }

@@ -586,6 +586,15 @@ struct ObjectFingerprint {
     is_commander: bool,
     loyalty: Option<u32>,
     loyalty_activations_this_turn: u32,
+    /// CR 606.3 + CR 101.1: the per-permanent extra-activation grant raises the
+    /// loyalty-ability cap `planeswalker::loyalty_activation_cap` reads, so the
+    /// legality verdict depends on it.
+    extra_loyalty_activations_this_turn: u32,
+    /// CR 613.1f: the cap read above applies only to a characteristic loyalty
+    /// ability, decided by where the ability index sits against this boundary
+    /// (`GameObject::activated_ability_provenance`). `Eq`-only: the `Hash` impl
+    /// stays a subset of `PartialEq`.
+    granted_abilities_from: Option<usize>,
     abilities: Arc<Vec<AbilityDefinition>>,
     trigger_definitions: Definitions<TriggerDefinition>,
     replacement_definitions: Definitions<ReplacementDefinition>,
@@ -718,6 +727,8 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         is_commander: obj.is_commander,
         loyalty: obj.loyalty,
         loyalty_activations_this_turn: obj.loyalty_activations_this_turn,
+        extra_loyalty_activations_this_turn: obj.extra_loyalty_activations_this_turn,
+        granted_abilities_from: obj.granted_abilities_from,
         abilities: obj.abilities.clone(),
         trigger_definitions: obj
             .trigger_definitions
@@ -2404,6 +2415,52 @@ mod tests {
             object_fingerprint(&s, a),
             object_fingerprint(&s, b),
             "mana cost must be in the fingerprint"
+        );
+    }
+
+    /// CR 606.3 + CR 613.1f: every input the loyalty-activation cap reads is part of
+    /// the fingerprint, so two otherwise-equal planeswalkers that differ in any of
+    /// them never share a memoized legality verdict. The control (two fresh equal
+    /// planeswalkers) compares equal, which is the reach-guard that each pair
+    /// below differs only in the named field.
+    #[test]
+    fn fingerprint_membership_guards_loyalty_cap_inputs() {
+        let mut s = GameState::new_two_player(4);
+        let a = make_object(&mut s, 100, 0, "Probe Walker");
+        let b = make_object(&mut s, 100, 0, "Probe Walker");
+        assert_eq!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "control: two fresh equal planeswalkers share a fingerprint"
+        );
+
+        s.objects.get_mut(&b).unwrap().loyalty_activations_this_turn = 1;
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the loyalty-activation count must be in the fingerprint"
+        );
+        s.objects.get_mut(&b).unwrap().loyalty_activations_this_turn = 0;
+
+        s.objects
+            .get_mut(&b)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 2;
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the per-permanent extra grant must be in the fingerprint"
+        );
+        s.objects
+            .get_mut(&b)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 0;
+
+        s.objects.get_mut(&b).unwrap().granted_abilities_from = Some(1);
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the gained-ability boundary must be in the fingerprint"
         );
     }
 

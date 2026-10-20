@@ -50,7 +50,7 @@ expression: "&lowered"
                 {
                   "mode": "Continuous",
                   "affected": {
-                    "type": "SelfRef"
+                    "type": "ParentTarget"
                   },
                   "modifications": [
                     {

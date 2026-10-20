@@ -285,7 +285,8 @@
     "botGameNotice": "Hospedando a partida do Discord {{code}}. A conexão e a privacidade vêm da publicação no Discord.",
     "botSeedIgnored": "Algumas configurações da publicação no Discord não puderam ser usadas aqui — verifique o formato e o número de jogadores.",
     "botP2PNotice": "Seu dispositivo executa a partida. Mantenha o app aberto e conectado.",
-    "botServerNotice": "Um servidor dedicado executa a partida. Ele pode ficar lento ou sair do ar."
+    "botServerNotice": "Um servidor dedicado executa a partida. Ele pode ficar lento ou sair do ar.",
+    "poolBracketConflict": "Nenhum dos {{selected}} decks selecionados é legal com os filtros atuais, então os oponentes aleatórios escolhem entre os {{total}} decks."
   },
   "page": {
     "deckRejected": "O deck foi rejeitado pelo anfitrião.",

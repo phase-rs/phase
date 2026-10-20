@@ -869,7 +869,9 @@ fn stack_entry_from_exiled_spell_object(
     }
     let card_id = obj.card_id;
     let ability_def = spell_ability_definition(&obj.abilities)?;
-    let resolved = build_resolved_from_def(&ability_def, object_id, controller);
+    let mut resolved = build_resolved_from_def(&ability_def, object_id, controller);
+    // CR 707.12: a copy of a card declares only the targets chosen for it.
+    resolved.start_target_record_recursive();
     Some(StackEntry {
         id: object_id,
         source_id: object_id,

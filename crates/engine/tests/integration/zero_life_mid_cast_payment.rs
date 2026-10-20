@@ -15,9 +15,9 @@
 use engine::ai_support::legal_actions_full;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-    PlayerFilter, QuantityExpr, QuantityModification, ReplacementDefinition, TargetFilter,
-    TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, ManaContribution,
+    ManaProduction, PlayerFilter, QuantityExpr, QuantityModification, ReplacementDefinition,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -439,6 +439,7 @@ fn life_loss_rider() -> ReplacementDefinition {
                         player: TargetFilter::Controller,
                     },
                 )],
+                kind: ChooseOneOfKind::Ordinary,
             },
         ))
 }

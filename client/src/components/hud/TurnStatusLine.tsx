@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { usePriorityAttentionClass } from "../../hooks/usePriorityAttention.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
@@ -22,6 +23,7 @@ export function TurnStatusLine() {
   // Hook must run unconditionally (before the early return). Resolves NEUTRAL
   // for a null seat, which is never rendered thanks to the guard below.
   const waitingSeatColor = useSeatColor(waitingSeatId);
+  const attentionClass = usePriorityAttentionClass(canIActNow);
 
   // Nothing pending to narrate (between turns, mid-animation, game over).
   if (waitingSeatId == null) return null;
@@ -29,13 +31,10 @@ export function TurnStatusLine() {
   const reasonText = reason ? t(reason.key, reason.params) : "";
 
   // Your decision reads as a positive prompt; waiting on someone else reads as
-  // a muted, patient state. The pill's own border/background carries the state
-  // axis; when waiting on another seat, the dot AND the player name carry that
-  // seat's identity color (mirroring the HUD plate's dot+label convention) so
-  // "waiting for X" is visually anchored to X's plate. `animate-pulse` keeps the
-  // attention affordance regardless of hue. The name is colored inline via
-  // <Trans> so the tint stays inside the localized sentence regardless of word
-  // order — no sentence splitting, no new keys.
+  // a muted, patient state. The controller's pending alert adds a CSS-only
+  // ring/glow, stronger after escalation, when visual alerts are enabled.
+  // Reduced motion keeps the ring static. Other seats retain their identity
+  // color in the name, inside <Trans> so localization can reorder the sentence.
   const tone = canIActNow
     ? "border-emerald-400/40 bg-emerald-950/70 text-emerald-50"
     : "border-white/12 bg-slate-950/75 text-slate-200";
@@ -43,7 +42,7 @@ export function TurnStatusLine() {
   // The pill carries WHO holds the pending decision; a small icon badge overlapping
   // its corner carries WHAT that decision is (attack / block / target / pay / …),
   // so the "who + what" reads at a glance without a long sentence. The badge
-  // supersedes the old leading dot — it owns the seat-color tint + attention pulse
+  // supersedes the old leading dot — it owns the seat-color tint
   // AND the reason glyph in one mark. The full sentence still lives in the
   // hover/focus tooltip (reusing the pre-existing verbose `*Reason` strings — no new
   // i18n keys), which only mounts when a reason exists. `group`/`relative` are
@@ -58,7 +57,7 @@ export function TurnStatusLine() {
     <div
       role="status"
       aria-live="polite"
-      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${tone} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
+      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${tone} ${attentionClass} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
     >
       <span
         aria-hidden

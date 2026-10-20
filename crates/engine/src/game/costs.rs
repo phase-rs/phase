@@ -537,6 +537,9 @@ fn move_self_activation_cost(
                 paused_at_index: 0,
                 destination,
                 completion: PendingCostMoveCompletion::FinishPending,
+                // A self-move is one object, so no group can form.
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             });
             // A mandatory replacement may have delivered this cost move and
             // surfaced its own post-effect prompt. Only a still-pending CR

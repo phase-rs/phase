@@ -13,6 +13,7 @@
 //!    (`retarget_slot_violation`).
 
 use engine::ai_support::candidate_actions;
+use engine::game::ability_utils::assign_targets_in_chain;
 use engine::game::effects::change_targets;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
@@ -366,16 +367,22 @@ fn retarget_with_no_legal_alternative_resolves_as_no_change() {
         .unwrap()
         .card_types
         .core_types = vec![CoreType::Instant];
-    let defense_ability = ResolvedAbility::new(
+    let mut defense_ability = ResolvedAbility::new(
         defense_parsed.abilities[0].effect.as_ref().clone(),
-        // CR 115.7a: an illegal-but-recorded current target. A stack entry with
-        // NO current targets no-ops earlier in `change_targets::resolve`, which
-        // would satisfy this row's assertion without the empty-pool guard ever
-        // running.
-        vec![TargetRef::Object(doomed)],
+        vec![],
         defense_id,
         P0,
     );
+    // CR 115.7a: an illegal-but-recorded current target. A stack entry with
+    // NO current targets no-ops earlier in `change_targets::resolve`, which
+    // would satisfy this row's assertion without the empty-pool guard ever
+    // running.
+    assign_targets_in_chain(
+        runner.state(),
+        &mut defense_ability,
+        &[TargetRef::Object(doomed)],
+    )
+    .expect("the spell takes one target");
     runner.state_mut().stack.push_back(StackEntry {
         id: defense_id,
         source_id: defense_id,

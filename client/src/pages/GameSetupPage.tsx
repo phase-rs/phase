@@ -13,6 +13,11 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
+import {
+  catalogRequestKey,
+  useAiDeckCatalog,
+  useSettledAiCatalog,
+} from "../services/aiDeckCatalog";
 import { PileSourceChoice } from "../components/menu/PileSourceChoice";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
@@ -109,6 +114,22 @@ export function GameSetupPage() {
   const [selectedCompat, setSelectedCompat] = useState<DeckCompatibilityResult | null>(null);
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
   const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
+  // One legal-catalog analysis shared by the AI seats and the human pool's
+  // bracket base (per-deck legality + bracket estimates run sequentially, so a
+  // second call would double the "Analyzing decks" pass).
+  const aiCatalog = useAiDeckCatalog({
+    selectedFormat: formatConfig?.format,
+    selectedMatchType: effectiveMatchType,
+  });
+  // Last settled catalog for the human pool, bound to the format/match
+  // request that produced it: inventory rescans within the same request keep
+  // the previous legal universe until the fresh one lands, while a parameter
+  // change (or a failed new request) exposes nothing rather than a stale
+  // differently-keyed snapshot.
+  const settledAiCatalog = useSettledAiCatalog(
+    aiCatalog,
+    catalogRequestKey(formatConfig?.format, effectiveMatchType),
+  );
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(selectedFormat);
@@ -362,6 +383,7 @@ export function GameSetupPage() {
             randomSelectionMode="defer"
             bare
             onActiveDeckCompatChange={setSelectedCompat}
+            aiCatalog={settledAiCatalog}
           />
 
           {/* Sidebar */}
@@ -645,6 +667,7 @@ export function GameSetupPage() {
                 selectedMatchType={effectiveMatchType}
                 opponentCount={Math.max(1, playerCount - 1)}
                 onCandidateCountChange={setLegalAiDeckCount}
+                catalog={aiCatalog}
               />
 
               {setupError && (

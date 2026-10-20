@@ -928,6 +928,31 @@ fn effective_activation_limit(
     activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
 }
 
+/// CR 606.3 + CR 611.3a: The loyalty-activation cap's static term — the max
+/// `new_limit` over `ModifyActivationLimit { keyword: "loyalty" }` statics
+/// (Oath of Teferi class) whose controller is `player` and whose affected
+/// filter matches the planeswalker `source_id`. Base limit 1; max semantics
+/// (multiple Oaths do not stack, per the card's ruling). Read live at
+/// activation time — nothing is latched. Fills `None` gates via the O(1)
+/// presence index.
+pub(crate) fn loyalty_activation_cap_from_statics(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    gates: Option<&ActivationRestrictionStaticGates>,
+) -> u32 {
+    match gates {
+        Some(gates) => activation_limit_from_statics(state, player, source_id, "loyalty", gates),
+        None => activation_limit_from_statics(
+            state,
+            player,
+            source_id,
+            "loyalty",
+            &ActivationRestrictionStaticGates::compute(state),
+        ),
+    }
+}
+
 /// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
 /// raise the activation cap for `keyword`-tagged abilities on `source_id`. The
 /// static is scope-agnostic (it reads no per-turn/per-game counter), so both the

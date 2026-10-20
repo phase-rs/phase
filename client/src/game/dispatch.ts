@@ -38,6 +38,19 @@ import { applySpellPaymentPreference } from "./castPaymentMode";
  */
 const SLAM_DEFERRED_SFX = new Set(["DamageDealt", "GroupedDamageFlurry"]);
 
+/** Localized, upper-cased turn-banner headline. The whole template goes
+ *  through i18n so a translated player name never lands inside an English
+ *  sentence. */
+export function turnBannerText(turnPlayerId: number, isYourTurn: boolean): string {
+  const text = isYourTurn
+    ? i18n.t("turnBanner.yourTurn")
+    : i18n.t("turnBanner.opponentTurn", { name: getOpponentDisplayName(turnPlayerId) });
+  return text.toLocaleUpperCase(i18n.language);
+}
+
+/** Step-synced SFX not yet played; cancelled when the tab is hidden mid-animation. */
+const scheduledSfxTimers = new Set<ReturnType<typeof setTimeout>>();
+
 /** Schedule SFX for each animation step, offset to sync with visual timing. */
 function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
   let offset = 0;
@@ -49,7 +62,11 @@ function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
         audioManager.playSfxForStep(immediate);
       } else {
         const delay = offset;
-        setTimeout(() => audioManager.playSfxForStep(immediate), delay);
+        const timer = setTimeout(() => {
+          scheduledSfxTimers.delete(timer);
+          audioManager.playSfxForStep(immediate);
+        }, delay);
+        scheduledSfxTimers.add(timer);
       }
     }
     offset += step.duration * multiplier;
@@ -83,8 +100,38 @@ interface PendingRemoteUpdate {
   logEntries?: GameLogEntry[];
   /** See `processRemoteUpdateInner`: `undefined` and `[]` mean different things. */
   rewindTargets?: RewindOption[];
+  /**
+   * How many remote updates this entry stands for (1 + the number coalesced
+   * into it while it waited). A large count means the client is far behind
+   * the table, so the entry commits without replaying animations.
+   */
+  coalesced: number;
+  /** Every caller merged into this entry; settled together, in arrival order. */
+  waiters: RemoteWaiter[];
   resolve: () => void;
   reject: (err: unknown) => void;
+}
+
+interface RemoteWaiter {
+  resolve: () => void;
+  reject: (err: unknown) => void;
+}
+
+/**
+ * One settlement shared by every caller merged into a queued remote entry.
+ * Built outside `enqueueRemoteUpdate` so its closures retain only the waiter
+ * list, never a superseded snapshot, and settle iteratively rather than
+ * through a chain of nested callbacks.
+ */
+function sharedRemoteSettlement(waiters: RemoteWaiter[]): Pick<PendingRemoteUpdate, "resolve" | "reject"> {
+  return {
+    resolve: () => {
+      for (const waiter of waiters.splice(0)) waiter.resolve();
+    },
+    reject: (err) => {
+      for (const waiter of waiters.splice(0)) waiter.reject(err);
+    },
+  };
 }
 
 type PendingWork = PendingLocalAction | PendingRemoteUpdate;
@@ -102,8 +149,58 @@ type GameSessionPreferenceAction = Extract<
 /** Module-level mutex — replaces useRef from the hook version. */
 let isAnimating = false;
 
-/** Unified queue for local actions and remote state updates. */
+/**
+ * Unified queue for local actions and remote state updates.
+ *
+ * Bounded: adjacent remote updates are coalesced (see `enqueueRemoteUpdate`),
+ * so it retains at most one engine snapshot per run of consecutive remote
+ * updates. Without that, a backgrounded tab (timers throttled to >= 1 s, far
+ * slower when intensively throttled) accumulates every update the server
+ * pushes, each holding a full multi-MB snapshot, until the tab is discarded.
+ */
 const pendingQueue: PendingWork[] = [];
+
+/**
+ * Remote updates replay their animations only while the client is caught up.
+ * Once more than this many entries wait behind the one being processed (or the
+ * entry itself stands for more than this many coalesced updates), animating
+ * each would only stretch the lag, so the update commits immediately.
+ */
+const MAX_ANIMATED_BACKLOG = 2;
+
+/** True while the tab is in the background, where timers are throttled and nobody watches. */
+function isDocumentHidden(): boolean {
+  return typeof document !== "undefined" && document.hidden;
+}
+
+/**
+ * Waits out an animation, but never on a hidden tab: it returns at once if the
+ * tab is already hidden and ends early if it becomes hidden mid-wait. Hidden
+ * timers are throttled (down to about once a minute), which would otherwise
+ * stall every queued update, including a P2P host's AI actions, behind one wait.
+ */
+function waitForAnimation(ms: number): Promise<void> {
+  if (isDocumentHidden()) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
+      resolve();
+    };
+    const onVisibility = () => {
+      if (!isDocumentHidden()) return;
+      // Nobody is watching: drop the presentation still in flight (queued
+      // animation steps and pending step SFX) so it cannot replay stale on
+      // return, then let the update commit straight to its final state.
+      for (const timer of scheduledSfxTimers) clearTimeout(timer);
+      scheduledSfxTimers.clear();
+      useAnimationStore.getState().clearQueue();
+      finish();
+    };
+    const timer = setTimeout(finish, ms);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
+  });
+}
 
 /**
  * Identifies the game state for which the current dispatch pipeline is valid.
@@ -564,29 +661,32 @@ async function processAction(
   // 5. Flash turn banner directly (bypasses animation queue for reliability)
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
-    const myId = getPlayerId();
-    let bannerText: string;
-    if (turnPlayerId === myId) {
-      bannerText = "YOUR TURN";
-    } else {
-      const oppName = getOpponentDisplayName(turnPlayerId);
-      bannerText = `${oppName.toUpperCase()}'S TURN`;
-    }
+    const isYourTurn = turnPlayerId === getPlayerId();
+    const bannerText = turnBannerText(turnPlayerId, isYourTurn);
     // CR 500: per-player turn count (skipped turns excluded). Engine increments
     // turns_taken before TurnStarted fires, so newState already has the value.
     const turnNumber = newState.players[turnPlayerId]?.turns_taken ?? 1;
-    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber, isYourTurn);
   }
+
+  // A hidden tab (e.g. a P2P host whose AI keeps acting in the background)
+  // skips presentation entirely: queued animation steps, notices and SFX would
+  // only pile up behind throttled timers and replay stale on return.
+  const skipPresentation = isDocumentHidden();
 
   // 5b. Surface in-game dice/coin rolls out-of-band (DiceRollOverlay), the same
   // way the turn banner bypasses the animation queue. These events are marked
   // NON_VISUAL so normalizeEvents skips them below.
-  flashInGameRolls(events);
-  flashCompletedScry(events);
+  if (!skipPresentation) {
+    flashInGameRolls(events);
+    flashCompletedScry(events);
+  }
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
+  const steps = skipPresentation
+    ? []
+    : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
 
   // 7. Play animations (unless instant — multiplier === 0). Fold in stack
   //    pressure so per-resolution timing collapses under depth OR recent churn —
@@ -608,7 +708,7 @@ async function processAction(
       (sum, step) => sum + step.duration * multiplier,
       0,
     );
-    await new Promise<void>((resolve) => setTimeout(resolve, totalDuration));
+    await waitForAnimation(totalDuration);
   } else if (steps.length > 0) {
     // Instant speed: fire all SFX immediately
     for (const step of steps) {
@@ -693,6 +793,7 @@ async function processQueue(generation: number): Promise<void> {
           next.logEntries,
           generation,
           next.rewindTargets,
+          next.coalesced,
         );
       }
       next.resolve();
@@ -941,36 +1042,47 @@ async function processRemoteUpdateInner(
   logEntries: GameLogEntry[] = [],
   generation: number,
   rewindTargets?: RewindOption[],
+  coalesced = 1,
 ): Promise<void> {
   if (!isCurrentDispatchGeneration(generation)) return;
   const state = snapshot.state;
+  // Hidden tab or a deep backlog: skip the animation wait entirely (the same
+  // effect as a zero speed multiplier), and stay silent — an SFX burst for a
+  // board nobody is looking at, or for updates already stale, is noise.
+  const skipAnimation =
+    isDocumentHidden()
+    || pendingQueue.length > MAX_ANIMATED_BACKLOG
+    // A merged batch carries only its latest snapshot, so animating earlier
+    // updates' events against it can misplace their objects (e.g. a token the
+    // later update already removed). Any merge commits without animation.
+    || coalesced > 1;
 
   // 1. Capture positions before updating state (for lookups during animation)
   currentSnapshot = useAnimationStore.getState().captureSnapshot();
 
-  // 2. Flash turn banner
-  const turnEvent = events.find((e) => e.type === "TurnStarted");
+  // 2. Flash turn banner (the latest turn start: a coalesced batch can span several)
+  const turnEvent = [...events].reverse().find((e) => e.type === "TurnStarted");
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
-    const myId = getPlayerId();
-    let bannerText: string;
-    if (turnPlayerId === myId) {
-      bannerText = "YOUR TURN";
-    } else {
-      const oppName = getOpponentDisplayName(turnPlayerId);
-      bannerText = `${oppName.toUpperCase()}'S TURN`;
-    }
+    const isYourTurn = turnPlayerId === getPlayerId();
+    const bannerText = turnBannerText(turnPlayerId, isYourTurn);
     // CR 500: per-player turn count from the post-update state.
     const turnNumber = state.players[turnPlayerId]?.turns_taken ?? 1;
-    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber, isYourTurn);
   }
 
-  flashInGameRolls(events);
-  flashCompletedScry(events);
+  // A skipped (hidden or catch-up) batch queues no per-event notices: they would
+  // replay one by one long after the board caught up. The log still has them.
+  if (!skipAnimation) {
+    flashInGameRolls(events);
+    flashCompletedScry(events);
+  }
 
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
+  const steps = skipAnimation
+    ? []
+    : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
 
   // 4. Play animations (unless instant — multiplier === 0)
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
@@ -984,7 +1096,7 @@ async function processRemoteUpdateInner(
       (sum, step) => sum + step.duration * multiplier,
       0,
     );
-    await new Promise<void>((resolve) => setTimeout(resolve, totalDuration));
+    await waitForAnimation(totalDuration);
   } else if (steps.length > 0) {
     for (const step of steps) {
       audioManager.playSfxForStep(step.effects);
@@ -1034,9 +1146,7 @@ export async function processRemoteUpdate(
   rewindTargets?: RewindOption[],
 ): Promise<void> {
   if (isAnimating) {
-    return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "remote", snapshot, events, logEntries, rewindTargets, resolve, reject });
-    });
+    return enqueueRemoteUpdate(snapshot, events, logEntries, rewindTargets);
   }
 
   const generation = dispatchGeneration;
@@ -1046,6 +1156,68 @@ export async function processRemoteUpdate(
   } finally {
     releaseDispatchMutex(generation);
   }
+}
+
+/**
+ * Queue a remote update behind the work in flight, coalescing it into the
+ * queue's last entry when that entry is also a remote update.
+ *
+ * Remote updates are full engine snapshots, so only the newest one matters for
+ * state; the older ones contribute history. The merged entry therefore keeps
+ * the higher-`seq` snapshot (the same ordering `commitEngineSnapshot` gates
+ * on, so an out-of-order older update never wins), concatenates events and log
+ * entries in arrival order so the game log stays complete, and carries the
+ * rewind targets published alongside the winning snapshot. A queued local
+ * action is never overtaken: coalescing only looks at the LAST entry, so a
+ * `remote, local, remote` queue keeps all three in order.
+ *
+ * Every coalesced caller's promise settles together with the merged entry.
+ */
+function enqueueRemoteUpdate(
+  snapshot: EngineSnapshot,
+  events: GameEvent[],
+  logEntries: GameLogEntry[] | undefined,
+  rewindTargets: RewindOption[] | undefined,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const last = pendingQueue[pendingQueue.length - 1];
+    if (last?.kind !== "remote") {
+      const waiters: RemoteWaiter[] = [{ resolve, reject }];
+      pendingQueue.push({
+        kind: "remote",
+        snapshot,
+        events,
+        logEntries,
+        rewindTargets,
+        coalesced: 1,
+        waiters,
+        ...sharedRemoteSettlement(waiters),
+      });
+      return;
+    }
+
+    const incomingIsNewest = snapshot.seq >= last.snapshot.seq;
+    if (incomingIsNewest) last.snapshot = snapshot;
+    // From its first merge the entry owns its sidecar arrays (the first
+    // caller's arrays are not mutated); later merges append in place rather
+    // than recopying the accumulated history on every update.
+    if (last.coalesced === 1) {
+      last.events = [...last.events];
+      if (last.logEntries) last.logEntries = [...last.logEntries];
+    }
+    for (const event of events) last.events.push(event);
+    if (logEntries && logEntries.length > 0) {
+      const merged = (last.logEntries ??= []);
+      for (const entry of logEntries) merged.push(entry);
+    }
+    // `undefined` means "this transport publishes no rewind targets" and must
+    // not erase a list that was published; otherwise the winner's list wins.
+    last.rewindTargets = incomingIsNewest
+      ? (rewindTargets ?? last.rewindTargets)
+      : (last.rewindTargets ?? rewindTargets);
+    last.coalesced += 1;
+    last.waiters.push({ resolve, reject });
+  });
 }
 
 /**

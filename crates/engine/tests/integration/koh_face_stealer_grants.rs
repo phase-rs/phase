@@ -78,6 +78,7 @@ fn koh_grant_statics() -> Vec<StaticDefinition> {
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: pinned_chosen_card_source(),
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: pinned_chosen_card_source(),

@@ -71,6 +71,27 @@ pub enum WireFormat {
     Unknown,
 }
 
+/// Optional timing hints for application JSON Ping/Pong diagnostics.
+/// These describe client JSON pings, not the native WebSocket Ping cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatContract {
+    pub ping_interval_ms: u64,
+    pub silence_budget_ms: u64,
+}
+
+/// Connection-scoped command ownership, never player authority or idempotency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandId(pub u64);
+
+/// Optional command-completion correlation supported by a native server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandCorrelation {
+    CommandIdV1,
+    #[serde(other)]
+    Unknown,
+}
+
 pub use engine::starter_decks::DeckData;
 
 /// AI seat configuration sent by the client when creating a game with AI opponents.
@@ -439,6 +460,16 @@ pub enum ClientMessage {
     Emote {
         emote: String,
     },
+    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries the
+    /// engine-authored identity of the contest it is for (so a frame delayed from an
+    /// earlier contest is dropped, never counted as activity in a later one) and a
+    /// per-contest sequence number (duplicate / reorder protection): the sender is
+    /// the authenticated seat and the instant is the server's own clock, so a client
+    /// can claim neither a win nor a timestamp.
+    ContestClick {
+        contest: u64,
+        seq: u32,
+    },
     SpectatorJoin {
         game_code: String,
     },
@@ -680,6 +711,12 @@ pub enum ServerMessage {
         /// Binary envelopes this server can negotiate after the text hello.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         wire_formats: Vec<WireFormat>,
+        /// Present when application Ping replies are independent of game CPU work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat: Option<HeartbeatContract>,
+        /// Completion ownership is optional transport-envelope metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_correlation: Option<CommandCorrelation>,
     },
     GameCreated {
         game_code: String,
@@ -972,6 +1009,15 @@ pub enum ServerMessage {
     Emote {
         from_player: PlayerId,
         emote: String,
+    },
+    /// Live click counters of the running contest, sent between full state
+    /// transitions (display only — the counts never decide the winner).
+    ContestProgress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        /// The contest these counters belong to; a client ignores any other.
+        contest: u64,
+        clicks: Vec<(PlayerId, u32)>,
     },
     TimerUpdate {
         player: PlayerId,
@@ -2118,6 +2164,43 @@ mod tests {
         }
     }
 
+    /// `ContestClick` carries only a contest identity and a sequence number: no seat,
+    /// timestamp or count for a client to forge. The exact wire shape is pinned because the TypeScript adapter
+    /// (`ws-adapter.ts` `submitContestClick`) writes it by hand.
+    #[test]
+    fn client_message_contest_click_roundtrips_with_only_a_sequence() {
+        let json =
+            serde_json::to_string(&ClientMessage::ContestClick { contest: 3, seq: 7 }).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestClick","data":{"contest":3,"seq":7}}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::ContestClick { contest: 3, seq: 7 }
+        ));
+    }
+
+    #[test]
+    fn server_message_contest_progress_roundtrips() {
+        let msg = ServerMessage::ContestProgress {
+            full_key: None,
+            contest: 3,
+            clicks: vec![(PlayerId(0), 12), (PlayerId(1), 9)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestProgress","data":{"contest":3,"clicks":[[0,12],[1,9]]}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::ContestProgress { clicks, .. } => {
+                assert_eq!(clicks, vec![(PlayerId(0), 12), (PlayerId(1), 9)]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     #[test]
     fn server_message_timer_update_roundtrips() {
         let msg = ServerMessage::TimerUpdate {
@@ -2350,8 +2433,18 @@ mod tests {
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
             wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            heartbeat: Some(HeartbeatContract {
+                ping_interval_ms: 5_000,
+                silence_budget_ms: 45_000,
+            }),
+            command_correlation: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            wire["data"]["heartbeat"],
+            serde_json::json!({"ping_interval_ms": 5000, "silence_budget_ms": 45000})
+        );
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::ServerHello {
@@ -2362,6 +2455,8 @@ mod tests {
                 lobby_protocol_version,
                 public_url,
                 wire_formats,
+                heartbeat,
+                command_correlation: _,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -2370,6 +2465,13 @@ mod tests {
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
                 assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert_eq!(
+                    heartbeat,
+                    Some(HeartbeatContract {
+                        ping_interval_ms: 5_000,
+                        silence_budget_ms: 45_000,
+                    })
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2388,6 +2490,8 @@ mod tests {
             lobby_protocol_version: None,
             public_url: None,
             wire_formats: Vec::new(),
+            heartbeat: None,
+            command_correlation: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -2401,6 +2505,29 @@ mod tests {
             !json.contains("wire_formats"),
             "empty list must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn legacy_hello_does_not_advertise_compute_independent_heartbeats() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "0.109.0",
+                "build_commit": "legacy",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full"
+            }
+        });
+        let parsed: ServerMessage = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::ServerHello {
+                heartbeat: None,
+                ..
+            }
+        ));
+        let encoded = serde_json::to_value(parsed).unwrap();
+        assert!(encoded["data"].get("heartbeat").is_none());
     }
 
     #[test]
@@ -3346,6 +3473,43 @@ mod tests {
         }
     }
 
+    /// v153: `GrantAllActivatedAbilitiesOf` gains the optional `kind` selector
+    /// and the loyalty-grant sibling variant is removed. A v152 peer
+    /// drops the defaulted field silently and over-grants, so it must be
+    /// refused before it receives v153 state.
+    ///
+    /// v152: `ShortcutDecisionSchema` gains `suggested_declaration` and
+    /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
+    /// drops them, so it must be refused before it receives v152 state.
+    /// v151: populated Bestow form payloads require a versioned full-game peer.
+    /// v149: `GameState::deferred_spell_delivery` is gone and
+    /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
+    /// paused instant or sorcery still owes; a v148 peer drops the key and would
+    /// move the spell before its paused instructions finish, so it must be refused
+    /// before it receives v149 state.
+    /// v148: Timesifter's top-card exile contest — `Effect::ExileTopCardContest`
+    /// in serialized ability definitions and the parked
+    /// `BatchCompletion::TopCardContestRoundComplete`; a v147 peer cannot parse
+    /// either tag, so it must be refused before it receives v148 state.
+    /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
+    /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
+    /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
+    /// `ServerMessage::ContestProgress`; a v146 peer cannot parse the new tags, so
+    /// it must be refused before it receives v147 state.
+    /// v146: `ConfirmedPeriod` gains `counted_by` (CR 732.2a counted loop offers) and `performance`,
+    /// and a loop offer's `win_kind` becomes optional; a v145 peer drops the field
+    /// or cannot parse the offer, so it must be refused before it receives v146 state.
+    /// v145: `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
+    /// serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
+    /// peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
+    /// messages unchanged.
+    ///
+    /// v144: one-time boons (#7495) add `Effect::CreateBoon`, `Effect::NoteNumber`,
+    /// the `HasBoon` conditions, and `WaitingFor::ChooseTokenHost` tags, and
+    /// retype the perpetual P/T edit's `power_delta`/`toughness_delta` to
+    /// required `QuantityExpr` `power`/`toughness`. A v143 peer cannot parse
+    /// the new shapes, so it must be refused before it receives v144 state.
+    ///
     /// v143: `GameState::modal_modes_chosen_this_turn` / `_this_game` retype to
     /// `(ObjectIncarnationRef, usize)` (CR 400.7 incarnation-keyed modal
     /// history); a v142 peer cannot decode the object-shaped key, so it must be
@@ -3558,8 +3722,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_143_for_modal_history_incarnation_keys() {
-        assert_eq!(PROTOCOL_VERSION, 143);
+    fn protocol_version_is_153_for_kind_selected_grants() {
+        assert_eq!(PROTOCOL_VERSION, 153);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3570,7 +3734,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_143_for_modal_history_incarnation_keys` stays
+    /// `protocol_version_is_153_for_kind_selected_grants` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -3844,6 +4008,40 @@ mod tests {
         assert!(
             !json.contains("resolved_by"),
             "None must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn optional_command_correlation_hello_preserves_old_server_fallback() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "test",
+                "build_commit": "test",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full",
+            },
+        });
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(legacy.clone()).unwrap(),
+            ServerMessage::ServerHello {
+                command_correlation: None,
+                ..
+            }
+        ));
+        let mut negotiated = legacy;
+        negotiated["data"]["command_correlation"] = serde_json::json!("CommandIdV1");
+        let hello: ServerMessage = serde_json::from_value(negotiated.clone()).unwrap();
+        assert!(matches!(
+            &hello,
+            ServerMessage::ServerHello {
+                command_correlation: Some(CommandCorrelation::CommandIdV1),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(hello).unwrap()["data"]["command_correlation"],
+            "CommandIdV1"
         );
     }
 }

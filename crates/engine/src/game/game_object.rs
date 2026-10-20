@@ -71,13 +71,25 @@ pub struct PreparedState;
 
 /// CR 702.103b: Bestow form marker — `Some(_)` while this object has the
 /// type-changing effect that turns it into an Aura with "enchant creature".
-/// Parallels `PreparedState` — empty struct in `Option` instead of bare `bool`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct BestowFormState;
+/// Parallels `PreparedState` — a typed struct in `Option` instead of bare `bool`.
+///
+/// CR 205.1a: a bestowed Aura is not a creature, so the creature types of its
+/// printed face are removed while it is bestowed. The form rewrites
+/// `base_card_types` directly (the stack is not layered), so the removed
+/// subtypes are recorded here and restored by `revert_bestow_aura_form` when
+/// the object ceases to be bestowed (CR 702.103e-g). Like `CleaveFormState`,
+/// the payload captures what the revert must restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BestowFormState {
+    /// The creature-set subtypes removed from `base_card_types` by the form,
+    /// in printed order. Empty for a legacy marker and for a face with none.
+    #[serde(default)]
+    pub removed_creature_subtypes: Vec<String>,
+}
 
 /// CR 702.140a-c: Mutate form marker — `Some(_)` while this object is a
 /// mutating creature spell on the stack (cast for its mutate cost). Parallels
-/// `BestowFormState`: an empty typed marker (not a bool) set when the mutate
+/// `PreparedState`: an empty typed marker (not a bool) set when the mutate
 /// cost is paid (`apply_mutate_form`) and cleared by `revert_mutate_form` when
 /// the spell's target is illegal at resolution (CR 702.140b) so the spell
 /// resolves as a plain creature spell. It does NOT persist onto the merged
@@ -94,7 +106,7 @@ pub struct MutateFormState;
 ///
 /// This adapter must not be used for markers that carry payload. Adding payload
 /// requires a deliberately versioned wire representation rather than silently
-/// discarding it behind this presence bit.
+/// discarding it behind this presence bit (see `bestow_form_serde`).
 mod unit_marker_option_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -114,6 +126,59 @@ mod unit_marker_option_serde {
             Some(true) | None => Ok(Some(T::default())),
             Some(false) => Ok(None),
         }
+    }
+}
+
+/// Serde adapter for `GameObject::bestow_form`, the one marker with payload.
+///
+/// Wire shapes: `Some` with an empty payload is the legacy-canonical bool `true`
+/// (so states saved before the payload existed, and payload-free forms, are
+/// unchanged); `Some` with a non-empty payload is the struct object. On read,
+/// `null` / `true` restore an empty payload (a legacy marker: the old engine
+/// never removed creature subtypes, so there is nothing to restore), `false`
+/// restores `None`, and an object restores its payload.
+mod bestow_form_serde {
+    use super::BestowFormState;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum WireOut<'a> {
+        Flag(bool),
+        Payload(&'a BestowFormState),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireIn {
+        Flag(Option<bool>),
+        Payload(BestowFormState),
+    }
+
+    pub(super) fn serialize<S>(
+        value: &Option<BestowFormState>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(form) if !form.removed_creature_subtypes.is_empty() => {
+                WireOut::Payload(form).serialize(serializer)
+            }
+            other => WireOut::Flag(other.is_some()).serialize(serializer),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<BestowFormState>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match WireIn::deserialize(deserializer)? {
+            WireIn::Flag(Some(false)) => None,
+            WireIn::Flag(Some(true) | None) => Some(BestowFormState::default()),
+            WireIn::Payload(form) => Some(form),
+        })
     }
 }
 
@@ -154,14 +219,12 @@ pub struct SignatureSpellState {}
 /// cleave text-changing effect is live (the spell was cast for its cleave cost
 /// and the bracket-removed ability set is currently installed on the object).
 ///
-/// Unlike `BestowFormState` (an empty marker whose revert is formulaic — re-add
-/// Creature, drop the synthesized Aura subtype/keyword), a cleave revert cannot
-/// be recomputed: the text-changing effect swaps in a separately parsed ability
-/// set, so restoring the printed form requires the captured snapshot of the four
-/// ability classes as they were before the swap. This struct carries that
-/// snapshot so `apply_zone_exit_cleanup` can restore it when the spell leaves
-/// the stack (CR 702.148a: the abilities function only while the spell is on the
-/// stack). Parallels `BestowFormState` — a typed `Option` marker, never a bool.
+/// A cleave revert restores the captured snapshot of the four ability classes
+/// as they were before the text-changing effect installed a separately parsed
+/// ability set. This struct carries that snapshot so `apply_zone_exit_cleanup`
+/// can restore it when the spell leaves the stack (CR 702.148a: the abilities
+/// function only while the spell is on the stack). Like `BestowFormState`, it
+/// stores the restoration payload in a typed `Option`, never a bool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleaveFormState {
     pub abilities: Arc<Vec<AbilityDefinition>>,
@@ -1151,7 +1214,7 @@ pub struct GameObject {
     /// CR 702.103e–g (illegal target, unattach, zone exit).
     #[serde(
         default,
-        with = "unit_marker_option_serde",
+        with = "bestow_form_serde",
         skip_serializing_if = "Option::is_none"
     )]
     pub bestow_form: Option<BestowFormState>,
@@ -1269,15 +1332,35 @@ pub struct GameObject {
     pub blocked_abilities: Vec<AbilityBlockEntry>,
 
     /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
-    /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
-    /// for the controller by `GameState::extra_loyalty_activations_this_turn`
-    /// (The Chain Veil class). The gate logic lives in
+    /// the current turn. Default cap is 1 (CR 606.3 "once per turn"), or the value a
+    /// `ModifyActivationLimit` static sets (Oath of Teferi); raised by two grants,
+    /// both composed in `planeswalker::loyalty_activation_cap`: for
+    /// the controller's planeswalkers by `GameState::extra_loyalty_activations_this_turn`
+    /// (The Chain Veil class), and for this permanent's own characteristic loyalty
+    /// abilities by `GameObject::extra_loyalty_activations_this_turn` (the
+    /// Comet, Stellar Pup class). The gate logic lives in
     /// `planeswalker::can_activate_loyalty_ability`. The historical bool
     /// "loyalty_activated_this_turn" is replaced by `count > 0`. Cleared at
     /// turn start (CR 606.3 "that turn" reset) and on battlefield re-entry
     /// (CR 400.7 — a re-entering permanent is a new object with no memory).
     #[serde(skip_deserializing, default, skip_serializing_if = "is_zero_u32_field")]
     pub loyalty_activations_this_turn: u32,
+
+    /// CR 606.3 + CR 101.1: Extra loyalty-ability activations a resolved
+    /// `Effect::GrantExtraLoyaltyActivations { target: SelfRef }` granted to THIS
+    /// permanent for the current turn. Added to the cap on top of the player-wide
+    /// `GameState::extra_loyalty_activations_this_turn`, and only for this
+    /// permanent's own characteristic loyalty abilities (the card's ruling, not
+    /// CR text; a layer-6-gained ability is not covered, CR 613.1f).
+    ///
+    /// Runtime-only and never on the wire: `#[serde(skip)]` omits it from
+    /// serialization, so serialized bytes are identical to a build without the
+    /// field, and a restored object starts at 0 together with
+    /// `loyalty_activations_this_turn` (which `skip_deserializing` also resets).
+    /// Shares that counter's lifecycle: cleared at turn start (CR 514.2) and on
+    /// battlefield re-entry (CR 400.7), and not copied (CR 707.2).
+    #[serde(skip)]
+    pub extra_loyalty_activations_this_turn: u32,
 
     // Commander: whether this object is a commander card
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1816,6 +1899,10 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         available_mana_pips: _,
         blocked_abilities: _,
         loyalty_activations_this_turn: _,
+        // Per-turn accumulator, omitted from the strict comparator like the sibling
+        // above: runtime-only and wire-skipped, compensated analysis-locally by
+        // `loyalty_activation_counts_match`.
+        extra_loyalty_activations_this_turn: _,
         is_commander: _,
         signature_spell: _,
         commander_tax: _,
@@ -2203,7 +2290,9 @@ impl GameObject {
         modification: &crate::types::ability::PerpetualModification,
         all_creature_types: &[String],
     ) {
-        use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+        use crate::types::ability::{
+            PerpetualGrantModification, PerpetualModification, QuantityExpr,
+        };
         use crate::types::card_type::CoreType;
         match modification {
             PerpetualModification::SetBasePowerToughness { power, toughness } => {
@@ -2216,9 +2305,31 @@ impl GameObject {
                 self.layer_base_toughness = Some(*toughness);
             }
             PerpetualModification::ModifyPowerToughness {
-                power_delta,
-                toughness_delta,
+                power,
+                toughness,
+                keywords,
             } => {
+                // Digital-only Alchemy (no CR entry): live (non-`Fixed`)
+                // exprs cannot be installed — this installer has no game
+                // state to evaluate against. `effects/perpetual.rs` (the
+                // single caller) freezes exprs to `Fixed` first. A live
+                // expr reaching here is a bug: refuse to install AND refuse
+                // to record (the post-match `perpetual_mods` push must never
+                // persist an uninstalled mod — cf. the `GrantAbility`
+                // wildcard note below).
+                let (
+                    QuantityExpr::Fixed { value: power_delta },
+                    QuantityExpr::Fixed {
+                        value: toughness_delta,
+                    },
+                ) = (power, toughness)
+                else {
+                    debug_assert!(
+                        false,
+                        "live P/T exprs must be frozen by effects/perpetual.rs"
+                    );
+                    return;
+                };
                 let base_power = self
                     .base_power
                     .or(self.power)
@@ -2233,6 +2344,16 @@ impl GameObject {
                 self.base_toughness = Some(base_toughness);
                 self.layer_base_power = Some(base_power);
                 self.layer_base_toughness = Some(base_toughness);
+                // Mixed "perpetually gets +N/+M and gains [keywords]" (Jaheira):
+                // same live+base grant as the standalone GrantKeywords arm.
+                for keyword in keywords {
+                    if !self.keywords.contains(keyword) {
+                        self.keywords.push(keyword.clone());
+                    }
+                    if !self.base_keywords.contains(keyword) {
+                        self.base_keywords.push(keyword.clone());
+                    }
+                }
             }
             PerpetualModification::GrantKeywords { keywords } => {
                 for keyword in keywords {
@@ -3045,6 +3166,7 @@ impl GameObject {
             available_mana_pips: Vec::new(),
             blocked_abilities: Vec::new(),
             loyalty_activations_this_turn: 0,
+            extra_loyalty_activations_this_turn: 0,
             is_commander: false,
             signature_spell: None,
             commander_tax: None,
@@ -3210,6 +3332,10 @@ impl GameObject {
         self.damage_marked = 0;
         self.dealt_deathtouch_damage = false;
         self.loyalty_activations_this_turn = 0;
+        // CR 400.7 + CR 606.3: a re-entering permanent is a new object, so a
+        // per-permanent extra-activation grant made to its previous incarnation
+        // does not carry over.
+        self.extra_loyalty_activations_this_turn = 0;
         self.is_suspected = false;
         self.is_renowned = false;
         self.monstrous = false;
@@ -4497,6 +4623,31 @@ mod tests {
             obj.gift_recipient.is_none(),
             "gift_recipient must clear on battlefield entry (CR 400.7d)"
         );
+    }
+
+    /// CR 400.7 + CR 606.3: a permanent re-entering the battlefield is a new
+    /// object, so a per-permanent extra loyalty-activation grant (and the
+    /// activation count it extends) made to the previous incarnation is gone.
+    /// The incarnation bump is the reach-guard: it proves the entry reset ran
+    /// over an object that held a non-zero grant.
+    #[test]
+    fn reset_for_battlefield_entry_clears_extra_loyalty_activations() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Probe Walker".to_string(),
+            Zone::Exile,
+        );
+        obj.loyalty_activations_this_turn = 1;
+        obj.extra_loyalty_activations_this_turn = 2;
+        let incarnation = obj.incarnation;
+
+        obj.reset_for_battlefield_entry(1, 1);
+
+        assert_eq!(obj.incarnation, incarnation + 1, "the entry reset ran");
+        assert_eq!(obj.extra_loyalty_activations_this_turn, 0);
+        assert_eq!(obj.loyalty_activations_this_turn, 0);
     }
 
     /// CR 400.7d + CR 603.4 (issue #5943 review round): the zone-change

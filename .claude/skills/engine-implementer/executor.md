@@ -26,7 +26,7 @@ When the orchestrator's spawn inputs include a phase charter, a phase index, and
 
 1. **Maintainer-simulation matrix:** a row whose consuming function or hostile fixture is deferral-listed to a named later phase is written `DEFERRED(phase n)` — not left incomplete and not escalated as a stop-and-return item. A row the phase's own code forecloses is still a stop-and-return item.
 2. **In-scope game infrastructure command** ("build necessary in-scope game infrastructure as part of the change"): charter-deferred work is *chartered*, not "deferred by default." Build what the phase scopes; defer exactly what the charter defers; stop-and-return still applies to any **uncharted** incompleteness.
-3. **Discriminating-test gate:** a changed behavioral seam whose discriminating test is charter-deferred (the defining property of an infrastructure→consumer seam) records `DEFERRED(phase n)` in the production-path coverage map instead of stop-and-returning. The phase's *own* chartered discriminating test(s) and structural verification (green tree, existing suites, unit-level assertions) remain mandatory, and "if any changed behavioral seam has no mapped production-path test, add one or return it as a stop-and-return item" still applies to every seam that is **not** charter-deferred.
+3. **Discriminating-test gate:** a changed behavioral seam whose discriminating test is charter-deferred (the defining property of an infrastructure→consumer seam) records `DEFERRED(phase n)` in the production-path coverage map instead of stop-and-returning. The phase's *own* chartered discriminating tests and unit-level assertions must still be authored; execution and build-backed structural verification follow Step 5's deferral policy, and "if any changed behavioral seam has no mapped production-path test, add one or return it as a stop-and-return item" still applies to every seam that is **not** charter-deferred.
 4. **New-field threading sweep:** needs no new vocabulary — its existing `defaults intentionally because <reason>` status absorbs chartered deferral with the charter as the reason: `defaults intentionally because DEFERRED(phase n)`.
 
 Everything else — the project rules, preparatory verification blocks, and the stable-HEAD rules — is unchanged in phase mode.
@@ -77,7 +77,7 @@ A "stop and return" is success, not failure. Bandaids that ship are far worse th
 
 ### Implementation/fix mode: preparatory evidence only
 
-Run the following only after implementation/fix edits land. Record the commands, starting SHA, ending SHA, and result as `PREPARATORY`; none completes the candidate gate. Per-commit checks are formatting and a focused test run only — no clippy, no full suite, no card-data generation; those run once, at the acceptance candidate ([SKILL.md Step 5](SKILL.md#step-5--verify-the-committed-candidate)). Existing discriminating-test, maintainer-simulation, selected-authority/provenance, coverage-honesty, and CR-annotation gates below remain single-sourced and mandatory for implementation/fix mode.
+Apply [SKILL.md Step 5](SKILL.md#step-5--verify-the-committed-candidate): if verification can wait, defer it. After edits, run formatting and cheap source/diff gates. Author the required tests and report the focused selection for a batched final run; do not compile or run tests, clippy, coverage, semantic audits or card-data generation merely to finish an executor handoff. Run a build-backed check early only when its result is needed to proceed, and state that dependency. Record any executed commands, starting SHA, ending SHA, and result as `PREPARATORY`; mark unexecuted checks as deferred, never passed. Existing discriminating-test, maintainer-simulation, selected-authority/provenance, coverage-honesty, and CR-annotation gates below remain single-sourced and mandatory for implementation/fix mode.
 
 After edits land, derive `RUST_PATHS` from the frozen authorized path list (only `*.rs` entries). If it is empty, skip formatting. Otherwise format only those exact paths; never run workspace-wide formatting in `IMPLEMENTATION_WORKTREE`, because it can create an out-of-scope delta. `cargo fmt` formats every workspace target whatever paths follow `--`, and plain `rustfmt` follows `mod` declarations into child files, so call `rustfmt` with `skip_children`:
 
@@ -85,13 +85,13 @@ After edits land, derive `RUST_PATHS` from the frozen authorized path list (only
 (cd "$IMPLEMENTATION_WORKTREE" && rustfmt --edition 2021 --config skip_children=true "${RUST_PATHS[@]}")
 ```
 
-For Rust / engine / parser work, run the focused set: every test the change adds or edits, the tests in each module the diff touches, and the tests that scan the source tree (named `*census*` by convention), since an edit anywhere can move their counts. Select every package that holds one of those tests (`phase-ai` tests do not run under `-p phase-engine`): `FOCUSED_PACKAGE_ARGS` carries one `-p <package>` per package. `FOCUSED_FEATURES` is `phase-engine/test-support` plus, package-qualified, every feature a selected test needs to be compiled: its target's `required-features` (`oracle-gen` tests need `phase-engine/cli`) or a `#[cfg(feature = …)]` gate on its module (`phase-engine/proptest`). A filter cannot select a test its features leave uncompiled. Building that run is the per-commit compile check. Report the packages, features and `FOCUSED_FILTER` (a nextest filterset) with the result:
+For Rust / engine / parser work, select the focused set for the due verification boundary: every test the change adds or edits, the tests in each module the diff touches, and the tests that scan the source tree (named `*census*` by convention), since an edit anywhere can move their counts. Select every package that holds one of those tests (`phase-ai` tests do not run under `-p phase-engine`): `FOCUSED_PACKAGE_ARGS` carries one `-p <package>` per package. `FOCUSED_FEATURES` is `phase-engine/test-support` plus, package-qualified, every feature a selected test needs to be compiled: its target's `required-features` (`oracle-gen` tests need `phase-engine/cli`) or a `#[cfg(feature = …)]` gate on its module (`phase-engine/proptest`). A filter cannot select a test its features leave uncompiled. Do not build it per commit by default. Report the packages, features and `FOCUSED_FILTER` (a nextest filterset), with the result or deferred status. When due:
 
 ```bash
 (cd "$IMPLEMENTATION_WORKTREE" && cargo nextest run "${FOCUSED_PACKAGE_ARGS[@]}" --features "$FOCUSED_FEATURES" -E "$FOCUSED_FILTER")
 ```
 
-For frontend work, run the test files the change adds, edits, or whose subject it touches. If there are none, skip the run and report why; `vitest run` with no file arguments runs the whole suite:
+For frontend work, select the test files the change adds, edits, or whose subject it touches, and execute them when due under Step 5. If there are none, skip the run and report why; `vitest run` with no file arguments runs the whole suite:
 
 ```bash
 (cd "$IMPLEMENTATION_WORKTREE/client" && pnpm vitest run "${FOCUSED_TEST_FILES[@]}")
@@ -114,15 +114,15 @@ If any modified or new file is under `crates/engine/src/parser/`, inspect added 
   | grep -v '#\[test\]' | grep -v '#\[cfg(test)\]'
 ```
 
-The `rfind`/`split`/`split_once`/`rsplit` arms are deliberate: `scripts/check-parser-combinators.sh` does not catch them, so a green gate is not proof of combinator compliance — this inline grep covers that blind spot. Any output is a hard failure unless it is a test, comment, explicitly annotated non-dispatch structural use, or `oracle_util.rs` dual-string `TextPair` helper work.
+This scan includes untracked executor files as well as the tracked diff; it supplements `scripts/check-parser-combinators.sh`, which checks overlapping string-method dispatch patterns. This scan also includes `.rsplit()` and non-string-literal arguments. Inspect matches using the script's structural-use exemptions and `allow-noncombinator` annotation convention. Parsing dispatch is a failure; test code, comments, justified structural operations, and `TextPair` dual-string operations are not. For phrase scanning, use the shared `oracle_nom::primitives::scan_at_word_boundaries` family instead of copying a `.find(' ')` loop.
 
-For parser changes always run additionally as preparatory checks:
+For parser changes run the non-compiling preparatory gate:
 
 ```bash
 (cd "$IMPLEMENTATION_WORKTREE" && ./scripts/check-parser-combinators.sh)
-(cd "$IMPLEMENTATION_WORKTREE" && cargo coverage)
-(cd "$IMPLEMENTATION_WORKTREE" && cargo semantic-audit)
 ```
+
+Defer `cargo coverage`, `cargo semantic-audit`, card-data generation and parser-output measurement to the batched final verification boundary unless their results are needed to proceed. Do not duplicate them as mandatory preparatory checks.
 
 `./scripts/gen-card-data.sh` and `cargo coverage` may support preparatory inspection but are never fresh candidate measurement evidence. The candidate semantic-impact result is produced only by `measurement-only` mode below.
 
@@ -136,7 +136,7 @@ When projecting, pin the read-only `AtomicCards.json` once and use it for both s
 
 Every behavioral change MUST ship at least one test that drives the real pipeline (`apply()` / the scenario runner / the cast-pipeline harness) and **would fail if the fix were reverted**. A test that only asserts the parsed AST shape — an `assert_eq!` on a parsed `AbilityDefinition` / `Effect` / `StaticMode` without resolving it through the engine — does NOT satisfy this gate. It is a shape test, not a regression test.
 
-Write cast-pipeline tests via the `card-test` recipe (`GameScenario` + `GameRunner::cast(..).resolve()` + `CastOutcome` deltas) — it structurally prevents the six recurring test-harness foot-guns. Two of its rules bear repeating here:
+Choose the matching production entry point and completion assertions from [card-test](../card-test/SKILL.md): casting, activation, event-generated triggers, or public choice actions. A returned outcome or empty stack alone does not prove a paused resolution completed. Two of its rules bear repeating here:
 
 - **No vacuous negatives.** A negative assertion must be paired with a positive reach-guard in the same test proving the input got past any upstream short-circuit (e.g. `check_swallowed_clauses` early-returns on `Effect::Unimplemented`, making bare `!has_swallowed_clause(...)` assertions vacuous).
 - **Verbatim Oracle text.** Build test cards from the real card's exact Oracle text, never a paraphrase — paraphrases can take a different parser branch and go green while the real card stays broken.
@@ -146,14 +146,7 @@ Confirm discrimination concretely before returning:
 - For the primary fix, name the assertion that flips when the fix is reverted. If you cannot name one, the test does not discriminate — add one that does.
 - Trace each test fixture through the fix's first input-shape dispatches (`is_none()` / `is_empty()` / variant `match` / "has-X" guards). If every fixture is degenerate in the same way (no ability, no targets, empty or single-element collection, all-generic cost), the test likely takes a different internal branch than production inputs and silently passes — reach the real arm instead. (Precedent: an Emerge cost-reduction test whose all-generic sacrifice made the wrong reduction coincide with the right one; an Undaunted test that called a function the reduction never runs in, so the positive case could not pass.)
 
-Before returning, produce a production-path coverage map for every behavioral claim in the plan, PR summary, or implementation report:
-
-- behavioral claim
-- changed seam/function
-- production entry point that reaches the seam
-- test name that reaches that entry point
-- assertion that fails if this exact change is reverted
-- sibling/negative cases covered, or why they are intentionally out of scope
+Record the production-path coverage map in the maintainer-simulation matrix below: one table serves both requirements for every behavioral claim in the plan, PR summary, or implementation report. Reuse and complete the planner's verification matrix instead of writing a second map.
 
 Hard failures:
 
@@ -165,16 +158,17 @@ This is the single most common defect the `review-engine-impl` loop catches (sha
 
 ### New-field threading sweep
 
-If the diff adds a field to an existing enum variant or struct, grep the variant/struct name across the workspace and list **every** construction and consumption site with a status: `threads the field` or `defaults intentionally because <reason>`. The recurring drop points are resume/continuation paths, single-pick vs multi-pick branches, batch handlers, and WASM/adapter/serialization payload constructors — a field that parses but is dropped at one of these seams is a silent no-op in production. An unlisted site is a stop-and-return item.
+For a new field, or a changed meaning, cardinality, scope, or binding of an existing field/variant, search its constructions and consumers across the workspace. Record affected sites in the same matrix with `threads the field` or `defaults intentionally because <reason>`; for unchanged consumers, state why the existing behavior remains correct. The recurring drop points are resume/continuation paths, single-pick vs multi-pick branches, batch handlers, AST visitors, and WASM/adapter/serialization payload constructors. Reuse `types/ability_visit.rs` for traversal when its scope fits; choose `OwnResolutionOnly` vs `IncludeRegisteredLater` deliberately rather than flattening those boundaries. An unaccounted-for affected site is a stop-and-return item.
 
 ### Maintainer-simulation matrix
 
-Before returning, produce a matrix for every behavioral claim or changed seam. This is the artifact the orchestrator and `review-engine-impl` use to catch the failure modes maintainers have been flagging in PR review.
+Before returning, complete one matrix for every behavioral claim or changed seam. It is also the production-path coverage map; the orchestrator and `review-engine-impl` consume the same rows.
 
 Each row MUST include:
 
 - behavioral claim / changed seam
 - production entry point and the first production branch the fixture reaches (`is_empty`, `is_none`, enum match arm, variant guard, etc.)
+- test name, assertion that fails on reverting the change, and sibling/negative cases covered or intentionally out of scope
 - selected authority, if any: permission, source, cost, controller, owner, target, choice, tracked-set id, or replacement id
 - bound value or id type, and when it is bound: announcement, resolution, replacement application, event emission, continuation resume, etc.
 - binding mode: live predicate vs. snapshotted / latched value, with CR rationale when rules-bearing
@@ -212,10 +206,10 @@ Your final message is a structured report to the orchestrator and is the contrac
 
 1. **Diff summary** — files touched, grouped by subsystem, with a one-line purpose per file.
 2. **Worktree record** — `START_SHA`, `IMPLEMENTATION_WORKTREE`, clean-start and stable-HEAD/end-of-edit check results. State explicitly that preparatory evidence is not completion evidence.
-3. **PREPARATORY verification results** — which Tilt resources are green; any failures with `tilt logs` excerpts (own vs unrelated). State explicitly that this is not completion evidence.
+3. **PREPARATORY verification results** — checks actually run, available relevant Tilt results, and any failures (own vs unrelated); list deferred checks, focused test selection and due boundary. Do not wait for Tilt just to complete this report. State explicitly that this is not completion evidence.
 4. **Parser preparatory gate** — pass/fail with offending lines if any.
-5. **Discriminating-test gate** — the existing full production-path coverage map for every behavioral claim, including changed seam/function, production entry point, test name, revert-failing assertion, and sibling/negative cases. Explicitly list any unmapped seam as a stop-and-return item. Confirm no production-reachable arm is left covered only by a degenerate fixture. State if any test is shape-only and whether that is acceptable because semantics remain unsupported/red.
-6. **Maintainer-simulation matrix** — the existing full matrix. Explicitly list incomplete rows as stop-and-return items.
+5. **Discriminating-test gate** — summarize the result from the matrix in item 6; do not duplicate its rows. Explicitly list any unmapped seam as a stop-and-return item. Confirm no production-reachable arm is left covered only by a degenerate fixture. State if any test is shape-only and whether that is acceptable because semantics remain unsupported/red.
+6. **Maintainer-simulation matrix / production-path coverage map** — the single completed matrix, including the consumer sweep. Explicitly list incomplete rows as stop-and-return items.
 7. **CR-annotation diff gate** — the grep result; list any `UNVERIFIED:` rule, or confirm zero.
 8. **Judgement calls** — any place you had to choose between two readings of the plan, with the reasoning.
 9. **Stop-and-return items** — any places you stopped rather than improvise.

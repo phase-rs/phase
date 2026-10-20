@@ -109,6 +109,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // enchant-player Auras). Legal picks come from `getWaitingForClickTargetRefs`
     // (viewmodel/gameStateView.ts), which every click surface reads.
     "ReturnAsAuraTarget",
+    // Digital-only Alchemy (no CR entry): batch boon "one of them" token-host
+    // pick. Same board/HUD click route as ReturnAsAuraTarget above.
+    "ChooseTokenHost",
     "EquipTarget",
     "CrewVehicle",
     "StationTarget",
@@ -152,6 +155,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseAnnouncingOpponent",
     "ChooseGiftRecipient",
     "ClashCardPlacement",
+    // Eye to Eye / Mouth to Mouth: real-time clicking contest (ContestOverlay).
+    "PhysicalContest",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).
     "AssistChoosePlayer",
