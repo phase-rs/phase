@@ -5543,15 +5543,21 @@ fn keyword_label(kw: &Keyword) -> String {
         .unwrap_or_else(|| format!("{kw:?}"))
 }
 
+/// CR 702.16i: a PRINTED (face) color-set protection keyword is never expanded
+/// (only a continuous grant is, by the layer applier), so it protects from
+/// nothing. The single authority for `keyword_supported`, `keyword_gap_label` and
+/// the structural tag `extract_card_features` emits for the same face keyword;
+/// deliberately separate from `keyword_is_inert_protection_grant`, which must stay
+/// false for an `EachColor` inside a static's modifications.
+fn printed_color_set_protection_is_unexpanded(kw: &Keyword) -> bool {
+    matches!(kw, Keyword::Protection(ProtectionTarget::EachColor(_)))
+}
+
 fn keyword_supported(kw: &Keyword) -> bool {
     match kw {
         Keyword::Unknown(_) => false,
         Keyword::CumulativeUpkeep(cost) => cost.supports_cumulative_upkeep_payment(),
-        // CR 702.16i: a PRINTED color-set protection keyword is never expanded
-        // (only a continuous grant is, by the layer applier), so it protects from
-        // nothing. Kept in step with the structural tag `extract_card_features`
-        // emits for the same face keyword.
-        Keyword::Protection(ProtectionTarget::EachColor(_)) => false,
+        kw if printed_color_set_protection_is_unexpanded(kw) => false,
         _ => true,
     }
 }
@@ -5562,7 +5568,7 @@ fn keyword_gap_label(kw: &Keyword) -> Option<String> {
         Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
             Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
         }
-        Keyword::Protection(ProtectionTarget::EachColor(_)) => {
+        kw if printed_color_set_protection_is_unexpanded(kw) => {
             Some("Keyword:ProtectionColorSetUnexpanded".to_string())
         }
         _ => None,
@@ -9564,7 +9570,7 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
         // continuous grant is, by the layer applier), so as a face keyword it
         // matches nothing and is as inert as an unsatisfiable card-type quality.
         if keyword_is_inert_protection_grant(keyword)
-            || matches!(keyword, Keyword::Protection(ProtectionTarget::EachColor(_)))
+            || printed_color_set_protection_is_unexpanded(keyword)
         {
             emit_structural(features, StructuralFeature::InertProtectionQualityGrant);
         }
@@ -14052,8 +14058,9 @@ mod tests {
         super::extract_card_features(&printed, &mut printed_features);
         assert!(printed_features.contains_key(TAG));
         // Every coverage entry point agrees: the gap list and the parse details
-        // report the printed color-set keyword as unsupported too, while the
-        // Plate's expanded static grant leaves its keyword items supported.
+        // report the printed color-set keyword as unsupported too, while the Plate
+        // (whose set lives in a static grant, not on the face) has no gap and
+        // every parse item supported.
         assert!(
             super::card_face_gaps(&printed)
                 .iter()
@@ -14071,10 +14078,15 @@ mod tests {
             "build_parse_details must mark the printed color-set keyword unsupported"
         );
         assert!(
-            !super::card_face_gaps(&plate)
+            super::card_face_gaps(&plate).is_empty(),
+            "an expanded color-set grant leaves the Plate with no coverage gap: {:?}",
+            super::card_face_gaps(&plate)
+        );
+        assert!(
+            super::build_parse_details(&plate, &trigger_registry, &static_registry)
                 .iter()
-                .any(|gap| gap.starts_with("Keyword:")),
-            "the Plate's keywords (Equip) and expanded grant carry no keyword gap"
+                .all(|item| item.supported),
+            "every Plate parse item is supported"
         );
     }
 
