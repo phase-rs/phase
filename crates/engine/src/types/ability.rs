@@ -34611,6 +34611,12 @@ pub struct ReplacementDefinition {
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 614.12a: optional upper bound on an as-enters life payment
+    /// (Nameless Race: "...can't be more than ..."). Read only by the
+    /// pre-entry payment prompt constructor, which clamps the prompt maximum
+    /// to the evaluated cap. `None` (every other card) means uncapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_payment_max: Option<QuantityExpr>,
 }
 
 impl ReplacementDefinition {
@@ -34725,12 +34731,20 @@ impl ReplacementDefinition {
             origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
             granting_object: None,
+            entry_payment_max: None,
         }
     }
 
     /// CR 110.2a: Builder for the self-ETB controller override (see field docs).
     pub fn enters_under(mut self, controller: ControllerRef) -> Self {
         self.enters_under = Some(controller);
+        self
+    }
+
+    /// CR 614.12a: bound an as-enters life payment by a dynamic cap
+    /// (Nameless Race). Chainable, mirroring [`Self::enters_under`].
+    pub fn entry_payment_max(mut self, max: QuantityExpr) -> Self {
+        self.entry_payment_max = Some(max);
         self
     }
 

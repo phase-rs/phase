@@ -11676,6 +11676,124 @@ fn parse_mana_and_life_payment(rest_orig: &str) -> Option<AbilityCost> {
     })
 }
 
+/// CR 118.1 + CR 119.4 + CR 107.1c: parse the residue after a `pay ` prefix
+/// into an `AbilityCost` — mana+life combos, `pay <amount> life`, any-amount
+/// energy/life/mana payments, `{E}` counts, and bare mana symbols. Single
+/// authority shared by the imperative `CostResource` family and the as-enters
+/// payment replacement builder (`parse_as_enters_pay`, which requires the
+/// any-amount-life shape). `rest` is the lowercased remainder, `rest_orig` the
+/// original-case remainder for case-sensitive mana parsing.
+pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<AbilityCost> {
+    if let Some(cost) = parse_mana_and_life_payment(rest_orig) {
+        return Some(cost);
+    }
+    // CR 118.8 + CR 119.4: `pay <amount> life` — literal count, X variable,
+    // or dynamic reference (`pay life equal to its power`). Dispatched with
+    // nom combinators over the post-"pay " remainder.
+    if let Some(amount) = parse_pay_life_amount(rest) {
+        return Some(AbilityCost::PayLife { amount });
+    }
+    // CR 107.14: "pay any amount of {E}" → variable energy payment
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of {e}").parse(rest) {
+        return Some(AbilityCost::PayEnergy {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        });
+    }
+    // CR 119.4 + CR 107.1c: "pay any amount of life" → variable life payment;
+    // the amount paid binds X for the downstream "draw/look at that many"
+    // step. The word-boundary guard (eof or " .,") blocks "lifelink" /
+    // "lifeforce" from false-matching.
+    if terminated(
+        tag::<_, _, OracleError<'_>>("any amount of life"),
+        peek(alt((
+            value((), eof),
+            value((), nom::combinator::recognize(one_of(" .,"))),
+        ))),
+    )
+    .parse(rest)
+    .is_ok()
+    {
+        return Some(AbilityCost::PayLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        });
+    }
+    // CR 118.1 + CR 107.3: "pay any amount of mana" → variable generic
+    // mana payment. Join forces uses the total paid this way as X for the
+    // following effect chain.
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of mana").parse(rest) {
+        return Some(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::X],
+                generic: 0,
+            },
+        });
+    }
+    // "pay an amount of {e} equal to ..." → dynamic energy payment.
+    // Delegates to the single-authority combinator
+    // `parse_dynamic_energy_unless_cost`; the `Variable("X")` fallback
+    // below covers "equal to" tails the quantity parser cannot resolve.
+    if tag::<_, _, OracleError<'_>>("an amount of {e} equal to ")
+        .parse(rest)
+        .is_ok()
+    {
+        if let Some(amount) = super::parse_dynamic_energy_unless_cost(rest) {
+            return Some(AbilityCost::PayEnergy { amount });
+        }
+        // Fallback: variable energy payment
+        return Some(AbilityCost::PayEnergy {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        });
+    }
+    // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → AbilityCost::PayEnergy.
+    // The sigil count doubles as the presence gate (identical to the former
+    // `contains` check); the trailing-sigil strip is bytewise (`{e}` is ASCII,
+    // so every slice boundary is safe) to keep string-method dispatch out of
+    // the parser.
+    let energy_sigils = rest.matches("{e}").count();
+    if energy_sigils > 0 {
+        let energy_count = energy_sigils as u32;
+        let cleaned = rest.replace("{e}", "").replace(' ', "");
+        if cleaned.is_empty() {
+            // Pure {E} symbols: "pay {e}{e}"
+            return Some(AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed {
+                    value: energy_count as i32,
+                },
+            });
+        }
+        // "pay N {e}" / "pay eight {e}" — number prefix + {e} suffix
+        if rest.as_bytes().ends_with(b"{e}") {
+            let mut prefix = rest;
+            while prefix.as_bytes().ends_with(b"{e}") {
+                prefix = &prefix[..prefix.len() - "{e}".len()];
+            }
+            let prefix = prefix.trim();
+            if let Ok((_, n)) = nom_primitives::parse_number.parse(prefix) {
+                return Some(AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: n as i32 },
+                });
+            }
+        }
+    }
+    // "pay {2}{B}" → AbilityCost::Mana (CR 117.1)
+    if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
+        return Some(AbilityCost::Mana { cost: mana_cost });
+    }
+    None
+}
+
 pub(super) fn parse_cost_resource_ast(
     text: &str,
     lower: &str,
@@ -11698,121 +11816,8 @@ pub(super) fn parse_cost_resource_ast(
         nom_on_lower(text, lower, |input| value((), tag("pay ")).parse(input))
     {
         let rest = &lower[lower.len() - rest_orig.len()..];
-        if let Some(cost) = parse_mana_and_life_payment(rest_orig) {
+        if let Some(cost) = parse_pay_residue_cost(rest, rest_orig) {
             return Some(CostResourceImperativeAst::Pay { cost });
-        }
-        // CR 118.8 + CR 119.4: `pay <amount> life` — literal count, X variable,
-        // or dynamic reference (`pay life equal to its power`). Dispatched with
-        // nom combinators over the post-"pay " remainder.
-        if let Some(amount) = parse_pay_life_amount(rest) {
-            return Some(CostResourceImperativeAst::Pay {
-                cost: AbilityCost::PayLife { amount },
-            });
-        }
-        // CR 107.14: "pay any amount of {E}" → variable energy payment
-        if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of {e}").parse(rest) {
-            return Some(CostResourceImperativeAst::Pay {
-                cost: AbilityCost::PayEnergy {
-                    amount: QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
-                    },
-                },
-            });
-        }
-        // CR 119.4 + CR 107.1c: "pay any amount of life" → variable life payment;
-        // the amount paid binds X for the downstream "draw/look at that many"
-        // step. The word-boundary guard (eof or " .,") blocks "lifelink" /
-        // "lifeforce" from false-matching.
-        if terminated(
-            tag::<_, _, OracleError<'_>>("any amount of life"),
-            peek(alt((
-                value((), eof),
-                value((), nom::combinator::recognize(one_of(" .,"))),
-            ))),
-        )
-        .parse(rest)
-        .is_ok()
-        {
-            return Some(CostResourceImperativeAst::Pay {
-                cost: AbilityCost::PayLife {
-                    amount: QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
-                    },
-                },
-            });
-        }
-        // CR 118.1 + CR 107.3: "pay any amount of mana" → variable generic
-        // mana payment. Join forces uses the total paid this way as X for the
-        // following effect chain.
-        if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of mana").parse(rest) {
-            return Some(CostResourceImperativeAst::Pay {
-                cost: AbilityCost::Mana {
-                    cost: crate::types::mana::ManaCost::Cost {
-                        shards: vec![crate::types::mana::ManaCostShard::X],
-                        generic: 0,
-                    },
-                },
-            });
-        }
-        // "pay an amount of {e} equal to ..." → dynamic energy payment.
-        // Delegates to the single-authority combinator
-        // `parse_dynamic_energy_unless_cost`; the `Variable("X")` fallback
-        // below covers "equal to" tails the quantity parser cannot resolve.
-        if tag::<_, _, OracleError<'_>>("an amount of {e} equal to ")
-            .parse(rest)
-            .is_ok()
-        {
-            if let Some(amount) = super::parse_dynamic_energy_unless_cost(rest) {
-                return Some(CostResourceImperativeAst::Pay {
-                    cost: AbilityCost::PayEnergy { amount },
-                });
-            }
-            // Fallback: variable energy payment
-            return Some(CostResourceImperativeAst::Pay {
-                cost: AbilityCost::PayEnergy {
-                    amount: QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
-                    },
-                },
-            });
-        }
-        // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → AbilityCost::PayEnergy
-        if rest.contains("{e}") {
-            let energy_count = rest.matches("{e}").count() as u32;
-            let cleaned = rest.replace("{e}", "").replace(' ', "");
-            if cleaned.is_empty() {
-                // Pure {E} symbols: "pay {e}{e}"
-                return Some(CostResourceImperativeAst::Pay {
-                    cost: AbilityCost::PayEnergy {
-                        amount: QuantityExpr::Fixed {
-                            value: energy_count as i32,
-                        },
-                    },
-                });
-            }
-            // "pay N {e}" / "pay eight {e}" — number prefix + {e} suffix
-            if rest.ends_with("{e}") {
-                let prefix = rest.trim_end_matches("{e}").trim();
-                if let Ok((_, n)) = nom_primitives::parse_number.parse(prefix) {
-                    return Some(CostResourceImperativeAst::Pay {
-                        cost: AbilityCost::PayEnergy {
-                            amount: QuantityExpr::Fixed { value: n as i32 },
-                        },
-                    });
-                }
-            }
-        }
-        // "pay {2}{B}" → AbilityCost::Mana (CR 117.1)
-        if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
-            return Some(CostResourceImperativeAst::Pay {
-                cost: AbilityCost::Mana { cost: mana_cost },
-            });
         }
     }
     // CR 106.4 + CR 505.1: Dispatch to the mana detector for a bare "add …"

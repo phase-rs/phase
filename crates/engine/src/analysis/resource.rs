@@ -5551,6 +5551,7 @@ fn floating_replacement_can_name_object(
         source_controller: _,
         origin: _,
         counter_replacement_subject: _,
+        entry_payment_max,
     } = def;
     execute.is_some()
         || runtime_execute.is_some()
@@ -5563,6 +5564,8 @@ fn floating_replacement_can_name_object(
         || additional_token_spec.is_some()
         || ensure_token_specs.is_some()
         || granting_object.is_some()
+        // CR 614.12a: a capped entry payment reads the cap live (Nameless Race).
+        || entry_payment_max.is_some()
         // A host both frames hold is read live, as an object the comparison compares.
         || source_object
             .is_some_and(|host| frames.iter().any(|frame| !frame.objects.contains_key(&host)))

@@ -6701,6 +6701,7 @@ fn replacement_definition_axes(
         origin: _,
         counter_replacement_subject: _,
         granting_object: _,
+        entry_payment_max,
         // The objects these create are scanned once they are live.
         additional_token_spec: _,
         ensure_token_specs: _,
@@ -6741,6 +6742,10 @@ fn replacement_definition_axes(
     }
     if let Some(controller) = enters_under {
         acc = acc.or(scan_controller_ref(controller));
+    }
+    // CR 614.12a: the entry-payment cap reads live game state (Nameless Race).
+    if let Some(max) = entry_payment_max {
+        acc = acc.or(scan_quantity_expr(max, mode));
     }
     match damage_modification {
         Some(DamageModification::Plus { value })

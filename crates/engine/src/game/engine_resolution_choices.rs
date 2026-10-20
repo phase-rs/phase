@@ -3323,6 +3323,16 @@ pub(super) fn handle_resolution_choice(
                     mana_abilities::continue_mana_ability_activation(state, pending, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
+            // CR 614.12a: a pre-entry as-enters life payment answers the parked
+            // battlefield entry, not a resolving ability — no `last_effect_count`
+            // stamp, no continuation. Mirrors the `PendingEntry` branch of the
+            // `NamedChoice` arm; range validation is inherited from the shared
+            // guard above, so an over-cap submission fails closed there.
+            if super::replacement::pending_entry_payment_is_live(state) {
+                let waiting_for =
+                    super::engine_replacement::handle_entry_payment(state, amount, events)?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+            }
             match resource {
                 PayableResource::LoopCollapse { .. } => {
                     // CR 732.2a: an accepted unbounded loop shortcut deferred its finite
@@ -3713,6 +3723,8 @@ pub(super) fn handle_resolution_choice(
                                     player,
                                     total: accumulated.saturating_add(amount),
                                     resume_at_resolution_depth,
+                                    // Resolution-time prompt: no parked entry.
+                                    pending_entry: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -9448,8 +9460,13 @@ pub(crate) fn finish_pay_amount_choice(
         ..
     } = &mut waiting_for
     {
-        *next_accumulated = total;
-        state.waiting_for = waiting_for.clone();
+        // CR 614.12a: a nested pre-entry payment is a FRESH, independent
+        // payment (Phyrexian Processor put onto the battlefield mid-chain) —
+        // the outer total must not leak into its accumulator.
+        if !super::replacement::pending_entry_payment_is_live(state) {
+            *next_accumulated = total;
+            state.waiting_for = waiting_for.clone();
+        }
     }
     waiting_for
 }

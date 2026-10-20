@@ -166,6 +166,16 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "As ~ enters, pay any amount of life" → Moved replacement whose
+    //     execute is the life payment (Phyrexian Processor class). CR 614.1c +
+    //     CR 614.12a: the payment is made before the permanent enters; the
+    //     engine parks the entry on a pre-entry prompt and latches the paid
+    //     amount. Dispatched beside its as-enters-choose sibling, ahead of
+    //     shock lands. ---
+    if let Some(def) = parse_as_enters_pay(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "As ~ becomes attached, choose a [type]" → Attached replacement with
     //     persisted Choose (Psychic Paper). The attach-time analogue of the
     //     enters-choose handler above. ---
@@ -2453,6 +2463,133 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
+}
+
+/// CR 614.1c + CR 614.12a: "As ~ enters, pay any amount of life" → a mandatory
+/// `Moved` self-replacement whose execute is the life payment (Phyrexian
+/// Processor class). The engine parks the entry on a pre-entry
+/// `PayAmountChoice` prompt and latches the paid amount as
+/// `ChosenAttribute::Number` (see `as_enters_payment_shape`).
+///
+/// The frame strip is ANCHORED at the line start (the F7 structural guard): a
+/// `when`-framed line (Vizkopa Confessor's trigger) declines here even if the
+/// coarse classifier ever claims it. The payment residue delegates to the
+/// `CostResource` single authority and must be the any-amount-life shape —
+/// fixed payments ("pay 2 life"), mana, and energy all decline. A trailing
+/// second sentence is the Nameless Race cap ("The amount you pay can't be
+/// more than …"); anything else trailing declines the whole line.
+fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let (residue, _) = preceded(
+        tag::<_, _, OracleError<'_>>("as "),
+        alt((
+            tag("this artifact enters, "),
+            tag("this creature enters, "),
+            tag("~ enters, "),
+        )),
+    )
+    .parse(norm_lower)
+    .ok()?;
+    // Split the payment sentence from a following cap sentence (Nameless
+    // Race). `first_sentence` cuts at the first period; a lone trailing
+    // period leaves no remainder.
+    let payment_text = first_sentence(residue);
+    let trailing = residue[payment_text.len()..].trim_start_matches('.').trim();
+    // The `CostResource` authority takes the post-"pay " residue.
+    let (pay_residue, _) = tag::<_, _, OracleError<'_>>("pay ")
+        .parse(payment_text)
+        .ok()?;
+    let cost = super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
+    let AbilityCost::PayLife { amount } = &cost else {
+        return None;
+    };
+    if !crate::game::effects::pay::is_pay_any_amount(amount) {
+        return None;
+    }
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PayCost {
+            cost,
+            scale: None,
+            payer: TargetFilter::Controller,
+        },
+    );
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(execute)
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Battlefield)
+        .description(original_text.to_string());
+    if !trailing.is_empty() {
+        def.entry_payment_max = Some(parse_entry_payment_cap(trailing)?);
+    }
+    Some(def)
+}
+
+/// CR 614.12a (Nameless Race): "The amount you pay can't be more than \<A\>
+/// plus \<B\>" → the entry payment's maximum as a `QuantityExpr::Sum`
+/// (Abomination-of-Llanowar-shaped composition).
+///
+/// The left half delegates to the CDA quantity interpreter after stripping
+/// the semantically-vacuous "total" ("the total number of X" and "the number
+/// of X" both denote |X|): the legacy controlled-type fall-through heads on
+/// "the number of " without it (P-U4 row 10 vs 11), and that frozen file is
+/// deliberately untouched — the strip is Nameless-local.
+fn parse_entry_payment_cap(trailing: &str) -> Option<QuantityExpr> {
+    // Structural trailing-period cleanup on the pre-split sentence (not
+    // dispatch): the cap sentence arrives with its printed period.
+    let sentence = trailing.trim_end().trim_end_matches('.').trim();
+    let (cap_body, _) = tag::<_, _, OracleError<'_>>("the amount you pay can't be more than ")
+        .parse(sentence)
+        .ok()?;
+    let (_, (left_text, right_text)) = nom_primitives::split_once_on(cap_body, " plus ").ok()?;
+    let (left_text, right_text) = (left_text.trim(), right_text.trim());
+    if left_text.is_empty() || right_text.is_empty() {
+        return None;
+    }
+    let left_input = match tag::<_, _, OracleError<'_>>("the total number of ").parse(left_text) {
+        Ok((rest, _)) => format!("the number of {rest}"),
+        Err(_) => left_text.to_owned(),
+    };
+    let left = super::oracle_quantity::parse_cda_quantity(&left_input)?;
+    let right = parse_nameless_their_zone_count(right_text)?;
+    Some(QuantityExpr::Sum {
+        exprs: vec![left, right],
+    })
+}
+
+/// Nameless-local right-half composer: "the total number of white cards in
+/// their graveyards" → `ZoneCardCount` with the color in the supported
+/// `filter` slot (Cavernous Maw precedent) and the opponents scope.
+///
+/// The "their" binds Nameless-locally to the "your opponents" named in the
+/// cap's left half — a positional anaphora on this one card. The bare "their"
+/// possessive stays TargetPlayer-anaphoric everywhere else, so the their-arm
+/// (`parse_their_opponents_zone_ref`) is registered in NO global alt, and this
+/// composer lives at the cap site rather than in the quantity grammar.
+fn parse_nameless_their_zone_count(input: &str) -> Option<QuantityExpr> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the total number of "),
+        tag("the number of "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (rest, color) = nom_primitives::parse_color(rest).ok()?;
+    let (rest, _) = nom_quantity::parse_card_word(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" in ").parse(rest).ok()?;
+    let (rest, (zone, scope)) = nom_quantity::parse_their_opponents_zone_ref(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let color_filter = TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::HasColor { color }]),
+    );
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::ZoneCardCount {
+            zone,
+            card_types: vec![TypeFilter::Card],
+            scope,
+            filter: Some(color_filter),
+        },
+    })
 }
 
 /// Parse the object-filter of an as-enters permanent choice. Accepts either the
@@ -19968,6 +20105,139 @@ mod tests {
                 ..
             } if excluded.is_empty()
         ));
+    }
+
+    /// CR 614.1c + CR 614.12a: the Phyrexian Processor class line lowers to a
+    /// mandatory `Moved` self-replacement whose execute is the any-amount life
+    /// payment (no cap).
+    #[test]
+    fn as_enters_pay_any_life_builds_payment_replacement() {
+        for (line, name) in [
+            (
+                "As Phyrexian Processor enters, pay any amount of life.",
+                "Phyrexian Processor",
+            ),
+            (
+                "As Minion of the Wastes enters, pay any amount of life.",
+                "Minion of the Wastes",
+            ),
+        ] {
+            let def = parse_replacement_line(line, name)
+                .unwrap_or_else(|| panic!("{name} entry line must produce a replacement"));
+            assert_eq!(def.event, ReplacementEvent::Moved, "{name}");
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+            assert_eq!(def.destination_zone, Some(Zone::Battlefield), "{name}");
+            assert!(matches!(def.mode, ReplacementMode::Mandatory), "{name}");
+            assert!(def.condition.is_none(), "{name}");
+            assert!(def.entry_payment_max.is_none(), "{name}: uncapped");
+            let execute = def.execute.as_ref().unwrap();
+            assert!(execute.sub_ability.is_none(), "{name}");
+            assert!(
+                matches!(
+                    *execute.effect,
+                    Effect::PayCost {
+                        cost: AbilityCost::PayLife {
+                            amount: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { .. },
+                            },
+                        },
+                        ..
+                    }
+                ),
+                "{name}: execute is the any-amount life payment"
+            );
+        }
+    }
+
+    /// CR 614.12a (Nameless Race): the two-sentence line lowers to the payment
+    /// replacement PLUS the exact cap — `Sum(ObjectCount(white nontoken
+    /// opponents' permanents), ZoneCardCount(white cards, opponents'
+    /// graveyards, white filter))`.
+    #[test]
+    fn as_enters_pay_nameless_cap_shape_is_exact() {
+        let def = parse_replacement_line(
+            "As Nameless Race enters, pay any amount of life. The amount you pay can't be more than the total number of white nontoken permanents your opponents control plus the total number of white cards in their graveyards.",
+            "Nameless Race",
+        )
+        .expect("Nameless entry line must produce a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        let Some(QuantityExpr::Sum { exprs }) = &def.entry_payment_max else {
+            panic!("cap must be a Sum, got {:?}", def.entry_payment_max);
+        };
+        assert_eq!(exprs.len(), 2, "two cap halves");
+        assert!(
+            matches!(
+                    &exprs[0],
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(filter),
+                        },
+                    } if filter.type_filters == vec![TypeFilter::Permanent]
+                        && filter.controller == Some(ControllerRef::Opponent)
+                        && filter.properties.contains(&FilterProp::HasColor {
+                            color: ManaColor::White,
+                        })
+                        && filter.properties.contains(&FilterProp::NonToken)
+            ),
+            "left half is the white nontoken opponents'-permanents count, got {:?}",
+            exprs[0]
+        );
+        assert!(
+            matches!(
+                &exprs[1],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types,
+                        scope: CountScope::Opponents,
+                        filter: Some(TargetFilter::Typed(color_filter)),
+                    },
+                } if *card_types == vec![TypeFilter::Card]
+                    && color_filter.properties.contains(&FilterProp::HasColor {
+                        color: ManaColor::White,
+                    })
+            ),
+            "right half is the white-cards-in-opponents'-graveyards count, got {:?}",
+            exprs[1]
+        );
+    }
+
+    /// F7 NEGATIVE: Vizkopa Confessor's `when`-framed line declines the
+    /// anchored builder even though it carries the pay phrase (its trigger
+    /// parser owns it).
+    #[test]
+    fn as_enters_pay_declines_when_framed_trigger_line() {
+        assert!(
+            parse_as_enters_pay(
+                "when this creature enters, pay any amount of life. target opponent reveals that many cards from their hand. you choose one of them and exile it.",
+                "When this creature enters, pay any amount of life. Target opponent reveals that many cards from their hand. You choose one of them and exile it.",
+            )
+            .is_none(),
+            "the anchored frame must decline when-framed lines"
+        );
+    }
+
+    /// NEGATIVE: fixed life payments, mana/energy residues, and cap-headed
+    /// lines without a payment sentence all decline (the builder requires the
+    /// any-amount-life shape plus, when present, a well-formed cap).
+    #[test]
+    fn as_enters_pay_declines_non_any_amount_shapes() {
+        for norm_lower in [
+            "as ~ enters, pay 2 life.",
+            "as ~ enters, pay {2}{b}.",
+            "as ~ enters, pay any amount of {e}.",
+            // Cap sentence without the payment sentence.
+            "as ~ enters. the amount you pay can't be more than the total number of white cards in their graveyards.",
+            // Cap head with an unparseable body.
+            "as ~ enters, pay any amount of life. the amount you pay can't be more than a lot.",
+        ] {
+            assert!(
+                parse_as_enters_pay(norm_lower, norm_lower).is_none(),
+                "{norm_lower}"
+            );
+        }
     }
 
     #[test]

@@ -5520,6 +5520,11 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
     if let Some(cref) = &repl.enters_under {
         d.push(("enters under".into(), format!("{cref:?}")));
     }
+    // CR 614.12a: project the entry-payment cap (Nameless Race) so a fix that
+    // only changes it cannot produce a byte-identical signature.
+    if let Some(max) = &repl.entry_payment_max {
+        d.push(("entry payment max".into(), format!("{max:?}")));
+    }
     if let Some(expiry) = &repl.expiry {
         d.push(("expiry".into(), format!("{expiry:?}")));
     }

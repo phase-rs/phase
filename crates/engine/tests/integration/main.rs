@@ -1302,6 +1302,7 @@ mod perrie_the_pulverizer_attack_trigger_6219;
 mod peter_parker_modal_back_face_cast;
 mod phantom_general_token_anthem;
 mod phyrexian_fleshgorger_ward;
+mod phyrexian_processor_entry_payment;
 mod physical_contest;
 mod pitfall_trap_attacking_count_alt_cost;
 mod plaguecrafter_etb_class;

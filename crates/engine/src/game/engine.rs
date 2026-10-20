@@ -9367,10 +9367,26 @@ fn drain_pending_deferred_life_cost_resume(
                 }
             }
             crate::types::game_state::DeferredLifeCostResume::PayAmount {
-                player, total, ..
-            } => Ok(super::engine_resolution_choices::finish_pay_amount_choice(
-                state, player, total, events,
-            )),
+                player,
+                total,
+                pending_entry,
+                // The depth gate fired upstream (the caller compares
+                // `resolution_stack.len()` against the recorded boundary); the
+                // fork below only routes, so it binds no depth.
+                ..
+            } => match pending_entry {
+                // CR 614.12a: a pre-entry payment's deferral resumes the parked
+                // ENTRY (latch already recorded at answer time), never a
+                // resolution chain — no `last_effect_count` stamp. The fork keys
+                // on the resume marker, never on `waiting_for`: the drain fires
+                // at Priority, long after the inner prompt closed.
+                Some(pending) => {
+                    engine_replacement::complete_entry_payment(state, *pending, events)
+                }
+                None => Ok(super::engine_resolution_choices::finish_pay_amount_choice(
+                    state, player, total, events,
+                )),
+            },
             crate::types::game_state::DeferredLifeCostResume::ManaRoot {
                 player,
                 resume,

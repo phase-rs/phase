@@ -7907,6 +7907,13 @@ pub enum DeferredLifeCostResume {
         /// Resolution-stack depth containing the outer pay-amount chain.
         /// The replacement's child work drains above it first.
         resume_at_resolution_depth: usize,
+        /// CR 614.12a: the parked battlefield entry this payment answers, when
+        /// the prompt is a pre-entry as-enters life payment (Phyrexian
+        /// Processor class). `Some` routes the drain to `complete_entry_payment`
+        /// (entry resume, no `last_effect_count` stamp); `None` keeps the
+        /// ordinary resolution path through `finish_pay_amount_choice`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_entry: Option<Box<PendingReplacement>>,
     },
     /// Resume a resolution/special-action mana-payment root after all selected
     /// Phyrexian life components and their replacement children settle.
@@ -45457,6 +45464,7 @@ mod tests {
         };
         state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
             player: PlayerId(0),
+            pending_entry: None,
             total: 3,
             resume_at_resolution_depth: 0,
         });

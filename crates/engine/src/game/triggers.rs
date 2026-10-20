@@ -42135,6 +42135,7 @@ pub mod tests {
             player: PlayerId(0),
             total: 3,
             resume_at_resolution_depth: 0,
+            pending_entry: None,
         });
         assert!(!resolution_completion_can_settle(&state));
 

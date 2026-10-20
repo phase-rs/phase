@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, CombatDamageScope,
-    ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute,
+    CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
     ManaSpendPermission, PermissionGrantee, PostReplacementContinuation, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
@@ -24,10 +24,10 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
-    ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
-    ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
-    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    NamedChoiceSourceBinding, PayableResource, PendingReplacement, PostReplacementDrain,
+    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -1116,6 +1116,13 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
     // CR 614.12a: likewise preserve the authenticated pre-entry as-enters
     // prompt of the parked entry (and only that `NamedChoice`).
     if pending_entry_named_choice_is_live(state) {
+        return state.waiting_for.clone();
+    }
+    // CR 614.12a: likewise preserve the authenticated pre-entry life-payment
+    // prompt of the parked entry (Phyrexian Processor class). Without this
+    // the zone pipeline's post-`NeedsChoice` render would clobber the
+    // `PayAmountChoice` with a degenerate one-candidate ordering prompt.
+    if pending_entry_payment_is_live(state) {
         return state.waiting_for.clone();
     }
     // CR 616.1 / CR 614: each option carries its source object so the frontend
@@ -9570,6 +9577,80 @@ pub(super) fn current_self_enter_replacement_choice(
         .cloned()
 }
 
+/// CR 614.12a + CR 707.9: surface a copied as-enters life payment (Clone
+/// entering as Minion of the Wastes) after the copy resolves. The payment
+/// sibling of `current_self_enter_replacement_choice`: the interactive copy
+/// choice resolves post-move, so the acquired payment never passes through
+/// the entry pipeline — park it on a synthetic battlefield-to-battlefield
+/// proposal and raise its prompt. The answer latches straight onto the live
+/// object (there is no delivery to resume — see the completion tail's
+/// copy-surface short-circuit); a determined 0 latches inline with no prompt
+/// (the F5 analogue). Answer-once: an object that already carries a latched
+/// Number never re-surfaces. `None` (no payment, off-battlefield, already
+/// latched, or determined-0) lets the copy finish continue untouched, so
+/// ordinary Clones observe zero behavior change.
+pub(crate) fn surface_copied_entry_payment(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let live = state.objects.get(&source_id)?;
+    if live.zone != Zone::Battlefield {
+        return None;
+    }
+    if live
+        .chosen_attributes
+        .iter()
+        .any(|attr| matches!(attr, ChosenAttribute::Number(_)))
+    {
+        return None;
+    }
+    let payer = live.controller;
+    let mut proposed =
+        ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    if let ProposedEvent::ZoneChange {
+        controller_override,
+        ..
+    } = &mut proposed
+    {
+        // The copy's live controller pays (CR 118.1) — the entering object's
+        // controller, not necessarily its owner (Threaten-style copies).
+        *controller_override = Some(payer);
+    }
+    let registry = replacement_registry();
+    let rid = find_applicable_replacements(state, &proposed, registry)
+        .into_iter()
+        .filter(|rid| rid.source == source_id)
+        .find(|rid| {
+            replacement_definition_for_id(state, *rid).is_some_and(as_enters_payment_shape)
+        })?;
+    let (max, player) = as_enters_pay_terms(state, &proposed, rid)?;
+    if max == 0 {
+        // Determined 0 (CR 609.3): latch inline, no prompt.
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.chosen_attributes.push(ChosenAttribute::Number(0));
+            // CR 613.1: re-run layers so CDA readers see the latch.
+            crate::game::layers::mark_layers_full(state);
+        }
+        return None;
+    }
+    let choice = AsEntersPayChoice { player, max };
+    let _ = park_as_enters_pay_choice(state, proposed, 0, rid, choice, events);
+    Some(state.waiting_for.clone())
+}
+
+/// CR 614.12a + CR 707.9: whether the parked entry payment is a copy-surface
+/// park (synthetic battlefield-to-battlefield proposal — the object already
+/// entered). A genuine pre-entry proposal always arrives from a
+/// non-battlefield zone, so the from/to signature is unambiguous.
+pub(crate) fn parked_entry_payment_is_copy_surface(pending: &PendingReplacement) -> bool {
+    matches!(
+        &pending.proposed,
+        ProposedEvent::ZoneChange { from, to, .. }
+            if *from == Zone::Battlefield && *to == Zone::Battlefield
+    )
+}
+
 fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
     match event {
         ProposedEvent::ZoneChange { enter_tapped, .. } => Some(enter_tapped.resolve(false)),
@@ -10113,9 +10194,12 @@ fn apply_single_replacement(
                 // CR 614.12a: an as-enters choice was made before the permanent
                 // enters (`as_enters_named_choice` parks every apply site first);
                 // its answer rides the event's `enter_with_choices`, so there is
-                // no post-entry choice left to run.
+                // no post-entry choice left to run. An as-enters life payment
+                // (`park_as_enters_pay_choice`) is answered the same way — paid
+                // and latched pre-zone-change — so its execute is suppressed too.
                 let post_effect = post_effect.filter(|_| {
-                    !(as_enters_choice_type(repl_def).is_some()
+                    !((as_enters_choice_type(repl_def).is_some()
+                        || as_enters_payment_shape(repl_def))
                         && matches!(
                             &proposed,
                             ProposedEvent::ZoneChange {
@@ -10858,6 +10942,16 @@ fn candidate_materiality(
     if repl_def.enters_under.is_some() {
         return CandidateMateriality::Unconditional;
     }
+    // CR 616.1 + CR 614.12a: an as-enters life payment writes NO event field —
+    // the answer rides `enter_with_choices` exactly like an as-enters `Choose`
+    // (see the `Choose` arm below), so it is ordering-immaterial against
+    // same-carrier/different-field co-candidates (EnterTapped, counters) and
+    // auto-resolves without a degenerate ordering prompt. Every co-candidate
+    // that COULD interact (controller override above, copy/redirect below)
+    // forces materiality via its own `Unconditional` arm.
+    if as_enters_payment_shape(repl_def) {
+        return CandidateMateriality::Disjoint;
+    }
     // CR 615 + CR 616.1: A damage prevention shield modifies the damage amount,
     // so it writes the `Damage` field and is order-material against any other
     // `Damage` writer — a doubler (Furnace of Rath `Double`), Torbran (`Plus`),
@@ -11445,6 +11539,254 @@ pub(crate) fn pending_entry_named_choice_is_live(state: &GameState) -> bool {
         && as_enters_choice_for_entry(state, &pending.proposed, *rid).is_some()
 }
 
+/// CR 614.1c + CR 614.12a: the shape whose life payment is made before the
+/// permanent enters: a mandatory `Moved` self-replacement whose execute is a
+/// single any-amount `PayLife` cost (no follow-up chain, no condition).
+/// Mirrors `as_enters_choice_type`; the payment answer rides the event's
+/// `enter_with_choices` exactly like a pre-entry choice.
+fn as_enters_payment_shape(def: &ReplacementDefinition) -> bool {
+    if def.event != ReplacementEvent::Moved
+        || !matches!(def.mode, ReplacementMode::Mandatory)
+        || def.condition.is_some()
+        || !matches!(def.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    if execute.sub_ability.is_some() || execute.condition.is_some() {
+        return false;
+    }
+    matches!(
+        &*execute.effect,
+        Effect::PayCost {
+            cost: AbilityCost::PayLife { amount },
+            ..
+        } if crate::game::effects::pay::is_pay_any_amount(amount)
+    )
+}
+
+/// CR 614.12a: `rid` is the entrant's own as-enters life payment for this
+/// battlefield entry (whether or not it has been answered yet).
+fn as_enters_payment_for_entry<'a>(
+    state: &'a GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<&'a ReplacementDefinition> {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        ..
+    } = proposed
+    else {
+        return None;
+    };
+    if rid.source != *object_id {
+        return None;
+    }
+    let def = replacement_definition_for_id(state, rid)?;
+    as_enters_payment_shape(def).then_some(def)
+}
+
+/// The prompt a pre-entry as-enters life payment raises.
+struct AsEntersPayChoice {
+    /// CR 110.2 + CR 110.2a: the player who will control the permanent as it
+    /// enters — the controller override the entry carries, else its owner —
+    /// mirroring `AsEntersChoice`.
+    player: PlayerId,
+    /// Maximum payable: the shared any-amount helper's team-life/lock clamp,
+    /// further clamped by the entry cap when the definition carries one.
+    max: u32,
+}
+
+/// CR 614.12a: the payment terms for `rid` on this entry — `(max, payer)`
+/// — or `None` when `rid` is not this entry's unanswered as-enters payment.
+/// The cap (`entry_payment_max`, Nameless Race) is evaluated live at raise
+/// time against the payer's board, like every other `resolve_quantity`.
+fn as_enters_pay_terms(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<(u32, PlayerId)> {
+    let def = as_enters_payment_for_entry(state, proposed, rid)?;
+    if proposed.already_applied(&rid) {
+        return None;
+    }
+    let ProposedEvent::ZoneChange {
+        object_id,
+        controller_override,
+        ..
+    } = proposed
+    else {
+        return None;
+    };
+    let entrant = state.entering_or_live_object(*object_id)?;
+    let payer = controller_override.unwrap_or(entrant.owner);
+    let pay_max = crate::game::effects::pay::max_pay_any_life_amount(state, payer);
+    let max = match &def.entry_payment_max {
+        Some(cap) => {
+            let cap_eval =
+                crate::game::quantity::resolve_quantity(state, cap, payer, *object_id).max(0);
+            pay_max.min(u32::try_from(cap_eval).unwrap_or(0))
+        }
+        None => pay_max,
+    };
+    Some((max, payer))
+}
+
+/// CR 614.12a: the entry-payment prompt for `rid`, or `None` when no prompt is
+/// due (not this entry's payment, already applied, or a determined 0 — the
+/// funnel auto-commits that case inline instead of prompting).
+fn as_enters_pay_choice(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<AsEntersPayChoice> {
+    let (max, player) = as_enters_pay_terms(state, proposed, rid)?;
+    if max == 0 {
+        return None;
+    }
+    Some(AsEntersPayChoice { player, max })
+}
+
+/// CR 614.12a: raise the as-enters life-payment prompt for the parked entry.
+/// The caller has installed `state.pending_replacement` (the exact proposed
+/// event and the single candidate `rid`); the answer resumes it through
+/// `engine_replacement::handle_entry_payment`.
+fn raise_as_enters_pay_choice(
+    state: &mut GameState,
+    object_id: ObjectId,
+    choice: AsEntersPayChoice,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    let AsEntersPayChoice { player, max } = choice;
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::PayCost,
+        source_id: object_id,
+        subject: None,
+    });
+    state.waiting_for = WaitingFor::PayAmountChoice {
+        player,
+        resource: PayableResource::Life,
+        min: 0,
+        max,
+        accumulated: 0,
+        source_id: object_id,
+        pending_mana_ability: None,
+    };
+    ReplacementResult::NeedsChoice(player)
+}
+
+/// CR 614.12a: park the entry and raise its life-payment prompt, mirroring
+/// `park_as_enters_named_choice` (the pin is owned by the answer, which pins
+/// before the payment can change the proposal).
+fn park_as_enters_pay_choice(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    depth: u16,
+    rid: ReplacementId,
+    choice: AsEntersPayChoice,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    state.pending_replacement = Some(PendingReplacement {
+        proposed,
+        sacrifice_provenance: None,
+        candidates: vec![rid],
+        search_found_candidates: Vec::new(),
+        depth,
+        is_optional: false,
+        choice_player: None,
+        library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+        may_cost_paid: false,
+        may_cost_remaining: None,
+        delivery_boundary: None,
+    });
+    raise_as_enters_pay_choice(state, rid.source, choice, events)
+}
+
+/// CR 614.12a: whether `state.waiting_for` is the live pre-entry as-enters
+/// payment prompt of the parked entry — a `PayAmountChoice{Life}` with no
+/// mana-ability rider whose source is the entrant of a parked single-candidate
+/// battlefield entry whose candidate is that entrant's unanswered as-enters
+/// payment, put by that entry's payer. Consulted ONLY at the `SubmitPayAmount`
+/// answer site, never at the drain (which keys on the resume marker).
+pub(crate) fn pending_entry_payment_is_live(state: &GameState) -> bool {
+    let WaitingFor::PayAmountChoice {
+        player,
+        resource,
+        source_id,
+        pending_mana_ability: None,
+        ..
+    } = &state.waiting_for
+    else {
+        return false;
+    };
+    if !matches!(resource, PayableResource::Life) {
+        return false;
+    }
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    let [rid] = pending.candidates.as_slice() else {
+        return false;
+    };
+    let ProposedEvent::ZoneChange {
+        object_id,
+        controller_override,
+        ..
+    } = &pending.proposed
+    else {
+        return false;
+    };
+    if rid.source != *source_id || *object_id != *source_id {
+        return false;
+    }
+    let Some(entrant) = state.entering_or_live_object(*object_id) else {
+        return false;
+    };
+    if *player != controller_override.unwrap_or(entrant.owner) {
+        return false;
+    }
+    !pending.is_optional
+        && !pending.proposed.already_applied(rid)
+        && as_enters_payment_for_entry(state, &pending.proposed, *rid).is_some()
+}
+
+/// CR 614.12a + CR 609.3: tri-state pre-entry payment funnel shared by all
+/// three park sites. `Some(choice)` parks + raises the prompt; determined-0
+/// latches `Number(0)` inline onto the proposal and falls through (`None`);
+/// shape-absent/already-applied falls through untouched (`None`).
+fn check_and_autocommit_entry_payment(
+    state: &mut GameState,
+    proposed: &mut ProposedEvent,
+    rid: ReplacementId,
+) -> Option<AsEntersPayChoice> {
+    if let Some(choice) = as_enters_pay_choice(state, proposed, rid) {
+        return Some(choice);
+    }
+    // Determined 0 (CR 609.3): the payment is impossible-but-zero, so it
+    // applies with nothing paid — latch `Number(0)` inline and let the
+    // ordinary apply path run. No `pay_life_as_cost` call: paying 0 life is
+    // vacuous (CR 119.4b; `life_costs.rs` short-circuits it identically).
+    as_enters_pay_terms(state, proposed, rid).filter(|(max, _)| *max == 0)?;
+    if let ProposedEvent::ZoneChange {
+        enter_with_choices, ..
+    } = proposed
+    {
+        enter_with_choices
+            .get_or_insert_with(Default::default)
+            .0
+            .push(ChosenAttribute::Number(0));
+    }
+    None
+}
+
 /// CR 614.12 + CR 616.1e: an unanswered pre-entry choice can change what a
 /// competing candidate reads. The choice writes the entrant's characteristics
 /// as it would exist (its own statics that read the choice — the CR 614.12
@@ -11999,6 +12341,13 @@ fn pipeline_loop(
             if let Some(choice) = as_enters_named_choice(state, &proposed, rid) {
                 return park_as_enters_named_choice(state, proposed, depth, rid, choice, events);
             }
+            // CR 614.12a: an as-enters life payment is made before the
+            // permanent enters (determined-0 auto-commits inline via the
+            // funnel and falls through to the ordinary apply below).
+            if let Some(pay_choice) = check_and_autocommit_entry_payment(state, &mut proposed, rid)
+            {
+                return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
+            }
 
             proposed.mark_applied(rid);
             match apply_single_replacement_and_dirty(
@@ -12056,6 +12405,13 @@ fn pipeline_loop(
             // CR 614.12a: an as-enters choice is made before the permanent enters.
             if let Some(choice) = as_enters_named_choice(state, &proposed, rid) {
                 return park_as_enters_named_choice(state, proposed, depth, rid, choice, events);
+            }
+            // CR 614.12a: an as-enters life payment is made before the
+            // permanent enters (determined-0 auto-commits inline via the
+            // funnel and falls through to the ordinary apply below).
+            if let Some(pay_choice) = check_and_autocommit_entry_payment(state, &mut proposed, rid)
+            {
+                return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
             }
             proposed.mark_applied(rid);
             match apply_single_replacement_and_dirty(
@@ -12714,6 +13070,15 @@ fn continue_replacement_impl(
         pending.is_optional = false;
         state.pending_replacement = Some(pending);
         return raise_as_enters_named_choice(state, rid.source, choice, events);
+    }
+    // CR 614.12a: choosing an as-enters payment's turn to apply makes its
+    // payment now, before the permanent enters (determined-0 auto-commits
+    // into the continuing clone and falls through to the ordinary apply).
+    if let Some(pay_choice) = check_and_autocommit_entry_payment(state, &mut proposed, rid) {
+        pending.candidates = vec![rid];
+        pending.is_optional = false;
+        state.pending_replacement = Some(pending);
+        return raise_as_enters_pay_choice(state, rid.source, pay_choice, events);
     }
     proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by
