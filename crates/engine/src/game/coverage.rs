@@ -9456,6 +9456,9 @@ enum StructuralFeature {
     /// The repo already documents this hazard class in `types/keywords.rs`'s
     /// `parse_protection_target_monocolored_is_quality_not_card_type`, which
     /// notes that such a grant "would do nothing".
+    ///
+    /// Also emitted for a PRINTED `Protection(EachColor(_))` face keyword, which
+    /// no layer pass expands (CR 702.16i), so it protects from nothing.
     InertProtectionQualityGrant,
     /// A counter's graveyard-exile rider (CR 608.2c + CR 614.1a) carries a tail
     /// the resolver drops (`effects::counter_exile_rider_runs_tail`). The card
@@ -9549,7 +9552,12 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
     // CR 702.16: the same inert-grant check for a PRINTED keyword line, which
     // lands on the face rather than inside a static's modifications.
     for keyword in &face.keywords {
-        if keyword_is_inert_protection_grant(keyword) {
+        // CR 702.16i: a printed color-set protection is never expanded (only a
+        // continuous grant is, by the layer applier), so as a face keyword it
+        // matches nothing and is as inert as an unsatisfiable card-type quality.
+        if keyword_is_inert_protection_grant(keyword)
+            || matches!(keyword, Keyword::Protection(ProtectionTarget::EachColor(_)))
+        {
             emit_structural(features, StructuralFeature::InertProtectionQualityGrant);
         }
     }
@@ -13965,6 +13973,76 @@ mod tests {
             !clean_features.contains_key(TAG),
             "reach-guard: a face with no replacements must not emit the tag"
         );
+    }
+
+    /// CR 702.16i: Commander's Plate's granted "protection from each color that's
+    /// not in your commander's color identity" is expanded by the layer applier,
+    /// so the card is not flagged inert; a CardType catch-all that names no card
+    /// type (Haktos-style) still is, and so is a PRINTED `EachColor` keyword,
+    /// which no layer pass would ever expand.
+    #[test]
+    fn commanders_plate_protection_grant_is_not_flagged_inert() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget};
+        use std::collections::HashMap;
+
+        const TAG: &str = "structural:inert_protection_quality_grant";
+        const PLATE: &str = "Equipped creature gets +3/+3 and has protection from each color that's not in your commander's color identity.\nEquip commander {3}\nEquip {5}";
+        let parsed = crate::parser::parse_oracle_text(
+            PLATE,
+            "Commander's Plate",
+            &["Equip".to_string()],
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+        );
+        let mut plate = make_face();
+        plate.name = "Commander's Plate".to_string();
+        plate.oracle_text = Some(PLATE.to_string());
+        plate.abilities = parsed.abilities;
+        plate.triggers = parsed.triggers;
+        plate.static_abilities = parsed.statics;
+        plate.replacements = parsed.replacements;
+        plate.keywords = parsed.extracted_keywords;
+        // Reach guard: the grant really is a typed EachColor protection static.
+        assert!(
+            plate.static_abilities.iter().any(|stat| {
+                stat.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                                ProtectionColorSet::OutsideCommanderColorIdentity
+                            )),
+                        }
+                    )
+                })
+            }),
+            "Commander's Plate must parse to a typed EachColor protection grant"
+        );
+        let mut features = HashMap::new();
+        super::extract_card_features(&plate, &mut features);
+        assert!(
+            !features.contains_key(TAG),
+            "an expanded color-set protection grant must not be flagged inert"
+        );
+
+        // Sibling: an untyped CardType quality that names no card type is inert.
+        let mut haktos = make_face();
+        haktos.keywords = vec![Keyword::Protection(ProtectionTarget::CardType(
+            "each mana value other than the chosen number".to_string(),
+        ))];
+        let mut haktos_features = HashMap::new();
+        super::extract_card_features(&haktos, &mut haktos_features);
+        assert!(haktos_features.contains_key(TAG));
+
+        // Printed EachColor keyword: never expanded, so honestly flagged.
+        let mut printed = make_face();
+        printed.keywords = vec![Keyword::Protection(ProtectionTarget::EachColor(
+            ProtectionColorSet::OutsideCommanderColorIdentity,
+        ))];
+        let mut printed_features = HashMap::new();
+        super::extract_card_features(&printed, &mut printed_features);
+        assert!(printed_features.contains_key(TAG));
     }
 
     const TRANSCENDENT_DRAGON_ORACLE: &str = "Flash\nFlying\nWhen this creature enters, if you cast it, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard, then you may cast it without paying its mana cost.";

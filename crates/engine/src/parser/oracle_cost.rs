@@ -2357,16 +2357,7 @@ fn parse_life_equal_to_quantity_nom(
     i: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
     let (i, _) = value((), tag("life equal to the number of colors in ")).parse(i)?;
-    let (i, _) = value(
-        (),
-        alt((
-            tag("your commander's "),
-            tag("your commanders' "),
-            tag("your commanders "),
-        )),
-    )
-    .parse(i)?;
-    let (i, _) = tag("color identity").parse(i)?;
+    let (i, ()) = nom_primitives::parse_your_commanders_color_identity(i)?;
     Ok((i, QuantityRef::ColorsInCommandersColorIdentity))
 }
 

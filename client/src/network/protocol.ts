@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  138 — game_setup and state_update carry GameState whose static definitions may
+ *       hold ProtectionTarget EachColor (CR 702.16i); a v137 peer cannot parse it.
+ *       Bumped in lockstep with full-game protocol 156.
  *  137 — game_setup and state_update carry GameState whose parked ChangeZone
  *       frame stores each remaining member with its pre-event entry
  *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves
@@ -732,7 +735,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 137 as const;
+export const WIRE_PROTOCOL_VERSION = 138 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
