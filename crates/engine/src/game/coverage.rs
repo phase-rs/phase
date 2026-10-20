@@ -5547,6 +5547,11 @@ fn keyword_supported(kw: &Keyword) -> bool {
     match kw {
         Keyword::Unknown(_) => false,
         Keyword::CumulativeUpkeep(cost) => cost.supports_cumulative_upkeep_payment(),
+        // CR 702.16i: a PRINTED color-set protection keyword is never expanded
+        // (only a continuous grant is, by the layer applier), so it protects from
+        // nothing. Kept in step with the structural tag `extract_card_features`
+        // emits for the same face keyword.
+        Keyword::Protection(ProtectionTarget::EachColor(_)) => false,
         _ => true,
     }
 }
@@ -5556,6 +5561,9 @@ fn keyword_gap_label(kw: &Keyword) -> Option<String> {
         Keyword::Unknown(s) => Some(format!("Keyword:{s}")),
         Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
             Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
+        }
+        Keyword::Protection(ProtectionTarget::EachColor(_)) => {
+            Some("Keyword:ProtectionColorSetUnexpanded".to_string())
         }
         _ => None,
     }
@@ -14043,6 +14051,31 @@ mod tests {
         let mut printed_features = HashMap::new();
         super::extract_card_features(&printed, &mut printed_features);
         assert!(printed_features.contains_key(TAG));
+        // Every coverage entry point agrees: the gap list and the parse details
+        // report the printed color-set keyword as unsupported too, while the
+        // Plate's expanded static grant leaves its keyword items supported.
+        assert!(
+            super::card_face_gaps(&printed)
+                .iter()
+                .any(|gap| gap == "Keyword:ProtectionColorSetUnexpanded"),
+            "card_face_gaps must report the printed color-set keyword"
+        );
+        let trigger_registry = super::build_trigger_registry();
+        let static_registry = super::build_static_registry();
+        let printed_details =
+            super::build_parse_details(&printed, &trigger_registry, &static_registry);
+        assert!(
+            printed_details
+                .iter()
+                .any(|item| item.category == ParseCategory::Keyword && !item.supported),
+            "build_parse_details must mark the printed color-set keyword unsupported"
+        );
+        assert!(
+            !super::card_face_gaps(&plate)
+                .iter()
+                .any(|gap| gap.starts_with("Keyword:")),
+            "the Plate's keywords (Equip) and expanded grant carry no keyword gap"
+        );
     }
 
     const TRANSCENDENT_DRAGON_ORACLE: &str = "Flash\nFlying\nWhen this creature enters, if you cast it, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard, then you may cast it without paying its mana cost.";
