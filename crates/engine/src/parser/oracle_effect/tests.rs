@@ -21331,6 +21331,952 @@ fn deal_damage_divided_fixed_among_one_or_two_targets_forked_bolt() {
     );
 }
 
+/// Every `AbilityDefinition` the parser produced for a card: static/activated
+/// abilities, trigger and replacement bodies, their whole sub-ability chains,
+/// modal branches and boon grants. The CR 115.6 rows below use it to assert on
+/// the node a printed clause actually lowered to.
+fn all_ability_defs(parsed: &crate::parser::oracle::ParsedAbilities) -> Vec<&AbilityDefinition> {
+    let mut roots = Vec::new();
+    collect_parsed_roots(parsed, true, &mut roots);
+    let mut defs = Vec::new();
+    for root in roots {
+        defs.extend(chain_defs(root));
+    }
+    defs
+}
+
+fn attach_defs<'a>(defs: &[&'a AbilityDefinition]) -> Vec<&'a AbilityDefinition> {
+    defs.iter()
+        .copied()
+        .filter(|def| matches!(def.effect.as_ref(), Effect::Attach { .. }))
+        .collect()
+}
+
+/// A non-excluded effect that surfaces a declared target: the detector unit
+/// rows use it as the announced-target stand-in so only the P1/P2 text evidence
+/// and the effect-capacity exclusions are under test. The target is a printed
+/// typed slot, not `TargetFilter::Any`, so the fixup unit rows also reach the
+/// write-side guards a real clause reaches.
+fn destroy_stand_in() -> Effect {
+    Effect::Destroy {
+        target: TargetFilter::Typed(TypedFilter::default()),
+        cant_regenerate: false,
+    }
+}
+
+#[test]
+fn optional_target_detector_recovers_quantifier_before_first_target_phrase() {
+    for (text, expected) in [
+        (
+            "Put up to two target creature cards from a single graveyard onto the battlefield under your control.",
+            MultiTargetSpec::fixed(0, 2),
+        ),
+        (
+            "Until end of turn, up to one target creature gets +2/+2 for each Treasure you control.",
+            MultiTargetSpec::fixed(0, 1),
+        ),
+        (
+            "Any number of target creatures each get +1/+1 and gain flying until end of turn.",
+            MultiTargetSpec::unlimited(0),
+        ),
+    ] {
+        assert_eq!(
+            extract_optional_target_multi_target(text, &destroy_stand_in()),
+            Some(expected),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn optional_target_detector_declines_a_mandatory_first_target_phrase() {
+    // The FIRST target phrase is mandatory; the "up to one" governs a LATER
+    // conjunct, so the two offsets disagree and the clause is not restamped
+    // (Capricious Efreet / Black Hole class).
+    assert_eq!(
+        extract_optional_target_multi_target(
+            "Destroy target creature and up to one target artifact.",
+            &destroy_stand_in(),
+        ),
+        None
+    );
+    // Positive reach-guard: the same quantifier on the FIRST phrase is found.
+    assert_eq!(
+        extract_optional_target_multi_target(
+            "Destroy up to one target creature and target artifact.",
+            &destroy_stand_in(),
+        ),
+        Some(MultiTargetSpec::fixed(0, 1))
+    );
+}
+
+#[test]
+fn optional_target_detector_declines_a_resource_quantifier() {
+    // "up to three" governs the +1/+1 counters (a resource count), not the
+    // target; the first target phrase is "target creature", which the
+    // quantifier does not reach, so the two offsets disagree.
+    assert_eq!(
+        extract_optional_target_multi_target(
+            "Put up to three +1/+1 counters on target creature.",
+            &destroy_stand_in(),
+        ),
+        None
+    );
+    // Positive reach-guard: the same resource count with an optional TARGET
+    // phrase ("up to one target creature") is detected; only the governed
+    // article's offset decides.
+    assert_eq!(
+        extract_optional_target_multi_target(
+            "Put up to three +1/+1 counters on up to one target creature.",
+            &destroy_stand_in(),
+        ),
+        Some(MultiTargetSpec::fixed(0, 1))
+    );
+}
+
+#[test]
+fn optional_target_detector_masks_quoted_granted_abilities() {
+    // The only "up to one target" phrase sits inside a quoted granted ability;
+    // the byte-preserving masker removes it from the scan, so the outer clause
+    // (whose first target is mandatory) is not restamped.
+    assert_eq!(
+        extract_optional_target_multi_target(
+            "Target creature gets +2/+2 until end of turn and has \"{T}: Up to one target creature gets +1/+1.\"",
+            &destroy_stand_in(),
+        ),
+        None
+    );
+    // Positive reach-guard: the same phrase unquoted is detected.
+    assert_eq!(
+        extract_optional_target_multi_target(
+            "Up to one target creature gets +1/+1.",
+            &destroy_stand_in(),
+        ),
+        Some(MultiTargetSpec::fixed(0, 1))
+    );
+}
+
+#[test]
+fn optional_target_detector_declines_effects_without_a_declined_target_representation() {
+    // CR 115.1 + CR 115.6: these eight effects have no representation for a
+    // declined optional target yet, so the detector keeps their base behavior.
+    // Every row pairs the declining effect with the same text under
+    // `destroy_stand_in`: the text evidence alone is sufficient, so only the
+    // effect capacity declines.
+
+    // `Effect::Counter` has no field for an announced count (Double Negative,
+    // Katara's Reversal, Repel Intruders, Repulsive Mutation, Tishana's
+    // Tidebinder), so "counter up to N target …" cannot carry the spec.
+    let counter = Effect::Counter {
+        target: TargetFilter::Any,
+        source_rider: None,
+        countered_spell_zone: None,
+    };
+    let counter_text = "Counter up to one target spell.";
+    assert_eq!(
+        extract_optional_target_multi_target(counter_text, &counter),
+        None
+    );
+    assert!(extract_optional_target_multi_target(counter_text, &destroy_stand_in()).is_some());
+
+    // The Attach host frame is captured by `imperative.rs`, never by this
+    // detector; writing the host's count into `multi_target` would bind the
+    // attachment operand (Luxior, Ignited; The Aetherspark; Sting, Bilbo's
+    // Sword).
+    let attach = Effect::Attach {
+        attachment: TargetFilter::SelfRef,
+        target: TargetFilter::Any,
+        selection: AttachSelection::AtResolution {
+            count: crate::types::ability::AttachCardinality::One,
+        },
+    };
+    let attach_text = "Attach this Equipment to up to one target creature you control.";
+    assert_eq!(
+        extract_optional_target_multi_target(attach_text, &attach),
+        None
+    );
+    assert!(extract_optional_target_multi_target(attach_text, &destroy_stand_in()).is_some());
+
+    // `Effect::CopySpell` copies ONE object; a zero-target decline would copy
+    // the top of the stack instead (Display of Power).
+    let copy_text = "Copy any number of target instant and/or sorcery spells.";
+    let copy = parse_effect(copy_text);
+    assert!(matches!(copy, Effect::CopySpell { .. }), "{copy:?}");
+    assert_eq!(extract_optional_target_multi_target(copy_text, &copy), None);
+    assert_eq!(
+        extract_optional_target_multi_target(copy_text, &destroy_stand_in()),
+        Some(MultiTargetSpec::unlimited(0))
+    );
+
+    // `Effect::BecomeCopy` errors `MissingParam` on a declined copy source
+    // (Fleeting Reflection).
+    let become_text = "Until end of turn, it becomes a copy of up to one other target creature.";
+    let become_copy = parse_effect(become_text);
+    assert!(
+        matches!(become_copy, Effect::BecomeCopy { .. }),
+        "{become_copy:?}"
+    );
+    assert_eq!(
+        extract_optional_target_multi_target(become_text, &become_copy),
+        None
+    );
+    assert_eq!(
+        extract_optional_target_multi_target(become_text, &destroy_stand_in()),
+        Some(MultiTargetSpec::fixed(0, 1))
+    );
+
+    // `Effect::MoveCounters` reads only `ability.optional_targeting` in its
+    // engine arms, so the stamped spec would be dropped and a declined target
+    // still demanded (Heroic Sacrifice; Donatello, Mutant Mechanic; Graft
+    // Surgeon; Host of the Hereafter).
+    let move_text = "put its counters on up to one target creature you control";
+    let move_counters = parse_effect(move_text);
+    assert!(
+        matches!(move_counters, Effect::MoveCounters { .. }),
+        "{move_counters:?}"
+    );
+    assert_eq!(
+        extract_optional_target_multi_target(move_text, &move_counters),
+        None
+    );
+    assert_eq!(
+        extract_optional_target_multi_target(move_text, &destroy_stand_in()),
+        Some(MultiTargetSpec::fixed(0, 1))
+    );
+
+    // `Effect::Token` treats a declined `attach_to` host as named and creates
+    // no token (Cut In; Eriette's Whisper; Gadwick's First Duel; Living
+    // Lectern; Shatter the Oath; Twisted Fealty; Witch's Mark).
+    for text in [
+        "Create a Young Hero Role token attached to up to one target creature you control.",
+        "Create a Wicked Role token attached to up to one target creature you control.",
+        "Create a Wicked Role token attached to up to one target creature.",
+        "Create a Cursed Role token attached to up to one target creature.",
+        "Create a Sorcerer Role token attached to up to one other target creature you control.",
+    ] {
+        let token = parse_effect(text);
+        assert!(matches!(token, Effect::Token { .. }), "{text}: {token:?}");
+        assert_eq!(
+            extract_optional_target_multi_target(text, &token),
+            None,
+            "{text}"
+        );
+        assert_eq!(
+            extract_optional_target_multi_target(text, &destroy_stand_in()),
+            Some(MultiTargetSpec::fixed(0, 1)),
+            "{text}"
+        );
+    }
+
+    // `Effect::DealDamage` is one segment of a damage compound; a declined
+    // segment would inherit the PREVIOUS segment's player target through
+    // `inherited_parent_occurrences` (which gates only object targets on an
+    // independent slot), so the "creature or planeswalker" recipient would
+    // silently become the parent's "target opponent" (Rakdos Firewheeler,
+    // Burning Sun's Avatar, Ravager of the Fells, Dragonspark Reactor, Chandra,
+    // Pyromaster, Soul of Shandalar, Trick Shot, Conduct Electricity).
+    let damage_text = "2 damage to up to one target creature or planeswalker";
+    let damage = Effect::DealDamage {
+        amount: QuantityExpr::Fixed { value: 2 },
+        target: TargetFilter::Any,
+        damage_source: None,
+        excess: None,
+    };
+    assert_eq!(
+        extract_optional_target_multi_target(damage_text, &damage),
+        None
+    );
+    assert_eq!(
+        extract_optional_target_multi_target(damage_text, &destroy_stand_in()),
+        Some(MultiTargetSpec::fixed(0, 1))
+    );
+
+    // `Effect::Transform` maps an empty subject list to `ability.source_id`
+    // (`[] => source_id`), so a declined DECLARED target would transform the
+    // source and abort the chain (Waxing Moon loses the trample sibling).
+    let transform_text = "Transform up to one target Werewolf you control.";
+    let transform = Effect::Transform {
+        target: TargetFilter::Any,
+        scope: EffectScope::Single,
+    };
+    assert_eq!(
+        extract_optional_target_multi_target(transform_text, &transform),
+        None
+    );
+    assert_eq!(
+        extract_optional_target_multi_target(transform_text, &destroy_stand_in()),
+        Some(MultiTargetSpec::fixed(0, 1))
+    );
+}
+
+#[test]
+fn optional_target_fixup_is_a_no_op_when_the_clause_already_has_a_spec() {
+    // P5: a typed spec set by the clause's own parser (the distribution class'
+    // finite {0,3}) is never overridden.
+    let mut clause = parsed_clause(destroy_stand_in());
+    clause.multi_target = Some(MultiTargetSpec::fixed(0, 3));
+    apply_optional_target_fixup(&mut clause, "Destroy up to two target creatures.");
+    assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+}
+
+#[test]
+fn optional_target_fixup_declines_a_context_reference_target() {
+    // A SelfRef/`ParentTarget` body surfaces no announced target, so the
+    // quantifier cannot govern a target phrase here.
+    let mut context_ref = parsed_clause(Effect::Regenerate {
+        target: TargetFilter::SelfRef,
+    });
+    apply_optional_target_fixup(&mut context_ref, "Up to one target creature gets +1/+1.");
+    assert!(context_ref.multi_target.is_none());
+
+    // Positive reach-guard: an announced target takes the spec.
+    let mut announced = parsed_clause(destroy_stand_in());
+    apply_optional_target_fixup(&mut announced, "Up to one target creature gets +1/+1.");
+    assert_eq!(announced.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+}
+
+#[test]
+fn optional_target_fixup_declines_an_untyped_any_slot() {
+    // CR 115.1 + CR 115.4 + CR 601.2c: an untyped `Any` slot means the clause's
+    // lowering dropped the printed object type, so an announced count on it
+    // would be inert — the slot would offer every target while the effect still
+    // reads its own referent (Razorgrass Invoker's subject `Pump`).
+    let pump_text =
+        "This creature and up to one other target creature each get +3/+3 until end of turn.";
+    let mut pump = parsed_clause(Effect::Pump {
+        power: PtValue::Fixed(3),
+        toughness: PtValue::Fixed(3),
+        target: TargetFilter::Any,
+    });
+    apply_optional_target_fixup(&mut pump, pump_text);
+    assert!(pump.multi_target.is_none(), "{pump:#?}");
+
+    // Positive reach-guard: the same quantifier on a printed typed slot takes it.
+    let typed_text = "Until end of turn, up to one target creature gets +3/+3.";
+    let mut typed = parsed_clause(Effect::Pump {
+        power: PtValue::Fixed(3),
+        toughness: PtValue::Fixed(3),
+        target: TargetFilter::Typed(TypedFilter::default()),
+    });
+    apply_optional_target_fixup(&mut typed, typed_text);
+    assert_eq!(typed.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+
+    // Damage keeps the spec: "any target" is a printed untyped recipient
+    // (CR 115.4). `EachSourceDealsDamage`'s shared recipient is the live
+    // carve-out (a `DealDamage` clause is excluded outright by the detector).
+    let mut shared_any = parsed_clause(Effect::EachSourceDealsDamage {
+        sources: TargetFilter::Typed(TypedFilter::default()),
+        amount: QuantityExpr::Fixed { value: 1 },
+        recipient: crate::types::ability::EachDamageRecipient::Shared(TargetFilter::Any),
+    });
+    apply_optional_target_fixup(
+        &mut shared_any,
+        "Each creature you control deals 1 damage to up to one target creature.",
+    );
+    assert_eq!(
+        shared_any.multi_target,
+        Some(MultiTargetSpec::fixed(0, 1)),
+        "{shared_any:#?}"
+    );
+}
+
+const LUXIOR_ORACLE: &str = "Equipped creature gets +1/+1 for each counter on Luxior, Ignited.\n[+1]: Attach this Equipment to up to one target creature you control.\n[\u{2212}2]: Equipped creature gets +2/+2 and gains double strike until end of turn.";
+
+#[test]
+fn luxior_attach_host_is_optional_and_carries_no_multi_target() {
+    let parsed = parse_card(
+        LUXIOR_ORACLE,
+        "Luxior, Ignited",
+        &[],
+        &["Artifact", "Planeswalker"],
+    );
+    let defs = all_ability_defs(&parsed);
+    let attaches = attach_defs(&defs);
+    assert_eq!(attaches.len(), 1, "one Attach expected: {defs:#?}");
+    let attach = attaches[0];
+    // CR 115.6: the HOST operand is optional — the only writer of the flag.
+    assert!(attach.optional_targeting, "{attach:#?}");
+    // The host's "up to one" never becomes the clause's announced count.
+    assert_eq!(attach.multi_target, None, "{attach:#?}");
+    assert!(
+        matches!(
+            attach.effect.as_ref(),
+            Effect::Attach {
+                selection: AttachSelection::AtResolution { .. },
+                ..
+            }
+        ),
+        "{attach:#?}"
+    );
+}
+
+const AETHERSPARK_ORACLE: &str = "As long as The Aetherspark is attached to a creature, The Aetherspark can't be attacked and has \"Whenever equipped creature deals combat damage during your turn, put that many loyalty counters on The Aetherspark.\"\n[+1]: Attach The Aetherspark to up to one target creature you control. Put a +1/+1 counter on that creature.\n[\u{2212}5]: Draw two cards.\n[\u{2212}10]: Add ten mana of any one color.";
+
+#[test]
+fn aetherspark_attach_host_is_optional_and_keeps_its_counter_rider() {
+    let parsed = parse_card(
+        AETHERSPARK_ORACLE,
+        "The Aetherspark",
+        &[],
+        &["Artifact", "Planeswalker"],
+    );
+    let defs = all_ability_defs(&parsed);
+    let attaches = attach_defs(&defs);
+    assert_eq!(attaches.len(), 1, "one Attach expected: {defs:#?}");
+    let attach = attaches[0];
+    assert!(attach.optional_targeting, "{attach:#?}");
+    assert_eq!(attach.multi_target, None, "{attach:#?}");
+    assert!(
+        chain_defs(attach)
+            .iter()
+            .any(|def| matches!(def.effect.as_ref(), Effect::PutCounter { .. })),
+        "the counter rider must stay on the attach chain: {attach:#?}"
+    );
+}
+
+const STING_ORACLE: &str = "Flash\nWhen Sting enters, put a hone counter on Sting for each creature target opponent controls. Attach Sting to up to one target creature you control. (Each hone counter on an Equipment grants +1/+0 to equipped creature.)\nEquip {3}";
+
+#[test]
+fn sting_trigger_attach_host_is_optional_and_carries_no_multi_target() {
+    let parsed = parse_card(
+        STING_ORACLE,
+        "Sting, Bilbo's Sword",
+        &["Flash"],
+        &["Artifact"],
+    );
+    // The trigger's execute chain owns the printed attach sentence: its Attach
+    // sub carries the host-optional stamp and NO announced count.
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("ETB trigger execute");
+    let trigger_attaches: Vec<_> = chain_defs(execute)
+        .into_iter()
+        .filter(|def| matches!(def.effect.as_ref(), Effect::Attach { .. }))
+        .collect();
+    assert_eq!(trigger_attaches.len(), 1, "{execute:#?}");
+    assert!(trigger_attaches[0].optional_targeting, "{execute:#?}");
+    assert_eq!(trigger_attaches[0].multi_target, None, "{execute:#?}");
+
+    // The Equip activation is a printed-target attachment operand: no host flag.
+    let equip = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.description.as_deref() == Some("Equip {3}"))
+        .expect("Equip {3} activation");
+    assert!(!equip.optional_targeting, "{equip:#?}");
+    assert_eq!(equip.multi_target, None, "{equip:#?}");
+}
+
+#[test]
+fn pull_recovers_up_to_two_and_keeps_the_single_graveyard_constraint() {
+    let def = parse_effect_chain(
+        "Put up to two target creature cards from a single graveyard onto the battlefield under your control.",
+        AbilityKind::Spell,
+    );
+    // CR 115.1 + CR 115.6: "put" is not one of the verb-anchored extractors'
+    // stems; the clause-level fixup is the authority.
+    assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
+    assert!(!def.optional_targeting);
+    assert_eq!(
+        def.target_constraints,
+        vec![TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard,
+        }]
+    );
+}
+
+#[test]
+fn gold_rush_second_sentence_pump_recovers_up_to_one() {
+    let def = parse_effect_chain(
+        "Create a Treasure token. Until end of turn, up to one target creature gets +2/+2 for each Treasure you control.",
+        AbilityKind::Spell,
+    );
+    let pumps: Vec<_> = chain_defs(&def)
+        .into_iter()
+        .filter(|node| matches!(node.effect.as_ref(), Effect::Pump { .. }))
+        .collect();
+    assert_eq!(pumps.len(), 1, "{def:#?}");
+    assert_eq!(pumps[0].multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    // CR 115.6: a non-Attach clause is optional through `multi_target`, never
+    // through the Attach host flag.
+    assert!(!pumps[0].optional_targeting);
+}
+
+#[test]
+fn token_attach_to_keeps_base_behavior_while_the_effect_is_excluded() {
+    // Residual (labelled, not a spec claim): `Effect::Token` treats a declined
+    // `attach_to` host as named — the token is never created — so the detector
+    // excludes the effect and these clauses keep base behavior (no announced
+    // count). Follow-up: `token.rs`'s host-request derivation must treat a
+    // declined optional host as `NotRequested`, then lift the exclusion.
+    // Witnesses: the seven printed Role carriers.
+    for (name, text) in [
+        (
+            "Cut In",
+            "Create a Young Hero Role token attached to up to one target creature you control.",
+        ),
+        (
+            "Eriette's Whisper",
+            "Create a Wicked Role token attached to up to one target creature you control.",
+        ),
+        (
+            "Gadwick's First Duel",
+            "Create a Cursed Role token attached to up to one target creature.",
+        ),
+        (
+            "Living Lectern",
+            "Create a Sorcerer Role token attached to up to one other target creature you control.",
+        ),
+        (
+            "Shatter the Oath",
+            "Create a Wicked Role token attached to up to one target creature you control.",
+        ),
+        (
+            "Twisted Fealty",
+            "Create a Wicked Role token attached to up to one target creature.",
+        ),
+        (
+            "Witch's Mark",
+            "Create a Wicked Role token attached to up to one target creature you control.",
+        ),
+    ] {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::Token {
+                    attach_to: Some(_),
+                    ..
+                }
+            ),
+            "{name}: {:?}",
+            clause.effect
+        );
+        assert_eq!(
+            clause.multi_target, None,
+            "{name}: {:?}",
+            clause.multi_target
+        );
+        // CR 115.6: the Attach-host flag is the only other optionality
+        // authority and belongs to Attach; a Token clause never carries it.
+        assert!(!clause.optional_targeting, "{name}");
+    }
+}
+
+#[test]
+fn display_of_power_and_fleeting_reflection_keep_base_behavior_while_excluded() {
+    // Residual (labelled, not a spec claim): `Effect::CopySpell` copies one
+    // object (a zero-target decline would copy the top of the stack) and
+    // `Effect::BecomeCopy` errors `MissingParam` on a declined copy source, so
+    // the detector excludes both and these clauses keep base behavior.
+    // Follow-up: `copy_spell.rs` needs an explicit zero-target decline;
+    // `become_copy.rs` already honours `multi_target` in its slot path, but its
+    // resolver needs an explicit empty-source no-op (`become_copy.rs:64-74`).
+    let display = parse_effect_clause(
+        "Copy any number of target instant and/or sorcery spells.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(display.effect, Effect::CopySpell { .. }),
+        "{:?}",
+        display.effect
+    );
+    assert_eq!(display.multi_target, None, "{:?}", display.multi_target);
+    assert!(!display.optional_targeting);
+
+    let reflection = parse_effect_clause(
+        "Until end of turn, it becomes a copy of up to one other target creature.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(reflection.effect, Effect::BecomeCopy { .. }),
+        "{:?}",
+        reflection.effect
+    );
+    assert_eq!(
+        reflection.multi_target, None,
+        "{:?}",
+        reflection.multi_target
+    );
+    assert!(!reflection.optional_targeting);
+}
+
+#[test]
+fn excluded_transform_clauses_keep_base_behavior() {
+    // Residual (labelled, not a spec claim): `Effect::Transform` cannot tell a
+    // declined DECLARED target from its printed no-target self-transform —
+    // `transform_effect::resolve` maps the empty subject list to
+    // `ability.source_id` (`[] => source_id`), so a declined target transforms
+    // the source and the error aborts the chain (Waxing Moon loses the trample
+    // sibling). The detector excludes the effect; every row parses with no spec
+    // and no `Unimplemented` on the Transform node. Follow-up: make the resolver
+    // no-op on a declined declared optional target, then lift the exclusion.
+    for (name, text, types, expect_trigger_flag) in [
+        (
+            "Waxing Moon",
+            "Transform up to one target Werewolf you control. Creatures you control gain trample until end of turn.",
+            &["Sorcery"][..],
+            false,
+        ),
+        (
+            "Attentive Skywarden",
+            "Flying\nWhenever this creature deals combat damage to a player or battle, transform up to one target Incubator token you control.",
+            &["Creature"][..],
+            // Base behaviour: the pre-existing trigger `has_up_to` ability stamp.
+            true,
+        ),
+        (
+            "The Golden-Gear Colossus",
+            "Vigilance, trample\nWhenever The Golden-Gear Colossus enters or attacks, transform up to one other target double-faced artifact you control. Create two 1/1 colorless Gnome artifact creature tokens.",
+            &["Artifact", "Creature"][..],
+            // Base behaviour: the pre-existing trigger `has_up_to` ability stamp.
+            true,
+        ),
+    ] {
+        let parsed = parse_card(text, name, &[], types);
+        let defs = all_ability_defs(&parsed);
+        let transform = defs
+            .iter()
+            .copied()
+            .find(|def| matches!(def.effect.as_ref(), Effect::Transform { .. }))
+            .unwrap_or_else(|| panic!("{name}: no Transform node: {defs:#?}"));
+        assert_eq!(transform.multi_target, None, "{name}: {transform:#?}");
+        assert_eq!(
+            transform.optional_targeting, expect_trigger_flag,
+            "{name}: {transform:#?}"
+        );
+        assert!(
+            chain_defs(transform)
+                .iter()
+                .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
+            "{name}: {transform:#?}"
+        );
+    }
+}
+
+#[test]
+fn razorgrass_invoker_subject_pump_keeps_base_behavior() {
+    // Residual (labelled, not a spec claim): the subject-compound lowering
+    // gives the `Pump` the untyped `TargetFilter::Any`, so an announced count
+    // would be inert (the slot would offer every target while the effect still
+    // reads the subject's referent). The write-side guard declines it and the
+    // ability keeps base behavior. Follow-up: lower the subject conjunct's
+    // "other target creature" into the Pump's typed filter, then lift the
+    // `Any` guard.
+    let parsed = parse_card(
+        "Vigilance (Attacking doesn't cause this creature to tap.)\n{8}: This creature and up to one other target creature each get +3/+3 until end of turn.",
+        "Razorgrass Invoker",
+        &["Vigilance"],
+        &["Creature"],
+    );
+    let defs = all_ability_defs(&parsed);
+    let pumps: Vec<_> = defs
+        .iter()
+        .copied()
+        .filter(|def| matches!(def.effect.as_ref(), Effect::Pump { .. }))
+        .collect();
+    assert_eq!(pumps.len(), 1, "{defs:#?}");
+    assert!(
+        matches!(
+            pumps[0].effect.as_ref(),
+            Effect::Pump {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "{:#?}",
+        pumps[0]
+    );
+    assert_eq!(pumps[0].multi_target, None, "{:#?}", pumps[0]);
+    assert!(!pumps[0].optional_targeting);
+    assert!(
+        chain_defs(pumps[0])
+            .iter()
+            .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
+        "{:#?}",
+        pumps[0]
+    );
+}
+
+#[test]
+fn heroic_sacrifice_compound_head_move_counters_keeps_base_behavior() {
+    // Residual (labelled, not a spec claim): `Effect::MoveCounters` has no
+    // representation for a declined optional target — its engine arms
+    // (`game/ability_utils.rs`) read only `ability.optional_targeting`, so a
+    // stamped min-0 spec would be dropped and the engine would still demand a
+    // target. The detector therefore excludes the effect and the compound head
+    // keeps base behavior (no announced count). Follow-up: move the
+    // MoveCounters arms to `targeting_is_optional()`, then lift the exclusion.
+    let clause = parse_effect_clause(
+        "put its counters on up to one target creature you control and draw a card",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(clause.effect, Effect::MoveCounters { .. }),
+        "{:?}",
+        clause.effect
+    );
+    assert_eq!(clause.multi_target, None, "{:?}", clause.multi_target);
+    assert!(!clause.optional_targeting);
+}
+
+#[test]
+fn reasonable_doubt_suspect_recovers_up_to_one() {
+    let clause = parse_effect_clause(
+        "Suspect up to one target creature",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(clause.effect, Effect::Suspect { .. }),
+        "{:?}",
+        clause.effect
+    );
+    assert_eq!(
+        clause.multi_target,
+        Some(MultiTargetSpec::fixed(0, 1)),
+        "{:?}",
+        clause.multi_target
+    );
+}
+
+#[test]
+fn excluded_damage_continuations_keep_base_behavior() {
+    // Residual (labelled, not a spec claim): a declined DAMAGE continuation
+    // inherits the previous segment's PLAYER target — `inherited_parent_occurrences`
+    // gates only object targets on `has_independent_target_slot` — so the second
+    // segment would deal its damage to the first segment's opponent. The
+    // detector excludes `Effect::DealDamage`; every row parses both segments
+    // with no "up to N" spec on either. Follow-up: gate the player arm on
+    // `!has_independent_target_slot`, then lift the exclusion.
+    for (name, text, types) in [
+        (
+            "Rakdos Firewheeler",
+            "When this creature enters, it deals 2 damage to target opponent and 2 damage to up to one target creature or planeswalker.",
+            &["Creature"][..],
+        ),
+        (
+            "Burning Sun's Avatar",
+            "When this creature enters, it deals 3 damage to target opponent or planeswalker and 3 damage to up to one target creature.",
+            &["Creature"][..],
+        ),
+        (
+            "Conduct Electricity",
+            "Conduct Electricity deals 6 damage to target creature and 2 damage to up to one target creature token.",
+            &["Instant"][..],
+        ),
+        (
+            "Trick Shot",
+            "Trick Shot deals 6 damage to target creature and 2 damage to up to one other target creature token.",
+            &["Instant"][..],
+        ),
+        (
+            "Soul of Shandalar",
+            "First strike\n{3}{R}{R}: This creature deals 3 damage to target player or planeswalker and 3 damage to up to one target creature that player or that planeswalker's controller controls.\n{3}{R}{R}, Exile this card from your graveyard: It deals 3 damage to target player or planeswalker and 3 damage to up to one target creature that player or that planeswalker's controller controls.",
+            &["Creature"][..],
+        ),
+        (
+            "Dragonspark Reactor",
+            "Whenever this artifact or another artifact you control enters, put a charge counter on this artifact.\n{4}, Sacrifice this artifact: It deals damage equal to the number of charge counters on it to target player and that much damage to up to one target creature.",
+            &["Artifact"][..],
+        ),
+        (
+            "Chandra, Pyromaster",
+            "[+1]: Chandra deals 1 damage to target player or planeswalker and 1 damage to up to one target creature that player or that planeswalker's controller controls. That creature can't block this turn.\n[0]: Exile the top card of your library. You may play it this turn.\n[\u{2212}7]: Exile the top ten cards of your library. Choose an instant or sorcery card exiled this way and copy it three times. You may cast the copies without paying their mana costs.",
+            &["Planeswalker"][..],
+        ),
+        (
+            "Ravager of the Fells",
+            "Trample\nWhenever this creature transforms into Ravager of the Fells, it deals 2 damage to target opponent or planeswalker and 2 damage to up to one target creature that player or that planeswalker's controller controls.\nAt the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.",
+            &["Creature"][..],
+        ),
+    ] {
+        let parsed = parse_card(text, name, &[], types);
+        let defs = all_ability_defs(&parsed);
+        let damages: Vec<_> = defs
+            .iter()
+            .copied()
+            .filter(|def| matches!(def.effect.as_ref(), Effect::DealDamage { .. }))
+            .collect();
+        assert!(damages.len() >= 2, "{name}: both segments: {defs:#?}");
+        for damage in damages {
+            assert_eq!(damage.multi_target, None, "{name}: {damage:#?}");
+            assert!(
+                chain_defs(damage)
+                    .iter()
+                    .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
+                "{name}: {damage:#?}"
+            );
+        }
+    }
+}
+
+const EARTH_RUMBLE_ORACLE: &str = "Earthbend 2. When you do, up to one target creature you control fights target creature an opponent controls. (To earthbend 2, target land you control becomes a 0/0 creature with haste that's still a land. Put two +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped. Creatures that fight each deal damage equal to their power to the other.)";
+
+#[test]
+fn earth_rumble_head_stays_unstamped_and_the_fight_takes_up_to_one() {
+    // Sticky multi-sentence chunk: the earthbend head is claimed by its own
+    // parser, so the reflexive body's quantifier can never bleed onto it.
+    let def = parse_effect_chain(EARTH_RUMBLE_ORACLE, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Animate { .. }),
+        "earthbend head must stay Animate: {def:#?}"
+    );
+    assert_eq!(def.multi_target, None, "head must stay unstamped: {def:#?}");
+
+    let fight = parse_effect_clause(
+        "up to one target creature you control fights target creature an opponent controls",
+        &mut ParseContext::default(),
+    );
+    assert!(matches!(fight.effect, Effect::Fight { .. }), "{fight:#?}");
+    assert_eq!(fight.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+}
+
+#[test]
+fn serene_remembrance_second_subject_recovers_up_to_three() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and up to three target cards from a single graveyard into their owners' libraries.",
+        AbilityKind::Spell,
+    );
+    // The head is SelfRef: a context reference, so it is never stamped.
+    assert_eq!(def.multi_target, None, "{def:#?}");
+    assert_eq!(
+        def.target_constraints,
+        vec![TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard,
+        }]
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("second subject sub-ability");
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::fixed(0, 3)),
+        "{sub:#?}"
+    );
+}
+
+#[test]
+fn stolen_goodies_distribution_spec_is_not_overridden_by_assembly() {
+    let def = parse_effect_chain(
+        "Distribute three +1/+1 counters among any number of target creatures you control.",
+        AbilityKind::Spell,
+    );
+    // The distribution family returns from `parse_effect_clause_inner` before
+    // the clause junction and owns its finite spec; the assembly ladder must not
+    // replace it with the generalized "any number of" form.
+    assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+    assert!(
+        matches!(def.distribute, Some(DistributionUnit::Counters(_))),
+        "{:?}",
+        def.distribute
+    );
+    assert!(!def.optional_targeting);
+}
+
+const BARRET_ORACLE: &str = "Reach\nAvalanche! \u{2014} Whenever an Equipment you control enters, create a 2/2 red Rebel creature token.\nAt the beginning of combat on your turn, attach up to one target Equipment you control to target Rebel you control.";
+
+#[test]
+fn barret_attachment_operand_is_optional_and_the_host_is_not_flagged() {
+    let parsed = parse_card(
+        BARRET_ORACLE,
+        "Barret, Avalanche Leader",
+        &["Reach"],
+        &["Creature"],
+    );
+    let defs = all_ability_defs(&parsed);
+    let attaches = attach_defs(&defs);
+    assert_eq!(attaches.len(), 1, "{defs:#?}");
+    let attach = attaches[0];
+    // CR 115.1 + CR 601.2c: the printed-target ATTACHMENT operand carries the
+    // announced count.
+    assert_eq!(attach.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    // The HOST operand prints no "up to": the capture declines.
+    assert!(!attach.optional_targeting, "{attach:#?}");
+    assert!(
+        matches!(
+            attach.effect.as_ref(),
+            Effect::Attach {
+                selection: AttachSelection::Targeted,
+                ..
+            }
+        ),
+        "{attach:#?}"
+    );
+}
+
+const THORIN_ORACLE: &str = "Trample\nWhen Thorin enters, attach any number of target Equipment you control to target creature you control. When one or more Equipment become attached to that creature this way, that creature deals damage equal to its power to up to one target creature.";
+
+#[test]
+fn thorin_attachment_operand_is_unlimited_and_the_rider_recovers_up_to_one() {
+    let parsed = parse_card(
+        THORIN_ORACLE,
+        "Thorin, Mountain-King",
+        &["Trample"],
+        &["Creature"],
+    );
+    let defs = all_ability_defs(&parsed);
+    let attaches = attach_defs(&defs);
+    assert_eq!(attaches.len(), 1, "{defs:#?}");
+    assert_eq!(
+        attaches[0].multi_target,
+        Some(MultiTargetSpec::unlimited(0))
+    );
+    assert!(!attaches[0].optional_targeting, "{:#?}", attaches[0]);
+
+    // Second trigger: "... deals damage equal to its power to up to one target
+    // creature." The clause fixup stamps the damage recipient.
+    let riders: Vec<_> = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .flat_map(chain_defs)
+        .filter(|def| matches!(def.effect.as_ref(), Effect::DealDamage { .. }))
+        .filter(|def| def.multi_target.is_some())
+        .collect();
+    assert_eq!(riders.len(), 1, "{defs:#?}");
+    assert_eq!(riders[0].multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+}
+
+#[test]
+fn hunters_bow_and_novel_nunchaku_hosts_are_mandatory() {
+    // CR 115.6 + CR 601.2c: both Attach heads print a MANDATORY host ("attach it
+    // to target creature you control"). The clause-level host capture writes
+    // nothing for them, and the trigger `has_up_to` stamp no longer stands in for
+    // an Attach host, so the execute is not optional (Hunter's Bow's later damage
+    // clause and Novel Nunchaku's reflexive fight do not make the host optional).
+    for (name, text) in [
+        (
+            "Hunter's Bow",
+            "When this Equipment enters, attach it to target creature you control. That creature deals damage equal to its power to up to one target creature you don't control.",
+        ),
+        (
+            "Novel Nunchaku",
+            "When this Equipment enters, attach it to target creature you control. When you do, equipped creature fights up to one target creature an opponent controls.",
+        ),
+    ] {
+        let parsed = parse_card(text, name, &[], &["Artifact"]);
+        let defs = all_ability_defs(&parsed);
+        let attaches = attach_defs(&defs);
+        assert_eq!(attaches.len(), 1, "{name}: {defs:#?}");
+        assert!(!attaches[0].optional_targeting, "{name}: {:#?}", attaches[0]);
+        assert_eq!(attaches[0].multi_target, None, "{name}");
+    }
+}
+#[test]
+fn aerial_formation_keeps_its_unlimited_spec_and_no_host_flag() {
+    let clause = parse_effect_clause(
+        "Any number of target creatures each get +1/+1 and gain flying until end of turn.",
+        &mut ParseContext::default(),
+    );
+    // P5 guard: an existing min-0 authority is never re-stamped, and the flag is
+    // Attach-only, so the 454-card "already optional" class cannot flip.
+    assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+    assert!(!clause.optional_targeting);
+}
+
 #[test]
 fn exile_top_of_your_library_parses_as_exile_top() {
     let effect = parse_effect("Exile the top card of your library");
