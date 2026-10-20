@@ -9211,7 +9211,7 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Renown { count: amount, .. }
         | Effect::Bolster { count: amount, .. }
         | Effect::Adapt { count: amount, .. } => out.push(amount),
-        // CR 705.1: the `Exactly` flip count; `UntilLoss` carries none.
+        // Only `Exactly` carries a flip-count expression; `UntilLoss` carries none.
         Effect::FlipCoins { flips, .. } => out.extend(flips.count_expr()),
         Effect::Token {
             count,

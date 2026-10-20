@@ -26725,7 +26725,7 @@ impl Effect {
     /// a new count/amount-bearing Effect variant is added.
     pub fn count_expr(&self) -> Option<&QuantityExpr> {
         match self {
-            // CR 705.1: the flip count of an `Exactly` run; `UntilLoss` has none.
+            // Only an `Exactly` run carries a flip count; `UntilLoss` has none.
             Effect::FlipCoins { flips, .. } => flips.count_expr(),
 
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
@@ -26994,7 +26994,7 @@ impl Effect {
     /// `count_expr` arm-for-arm.
     pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
         match self {
-            // CR 705.1: the flip count of an `Exactly` run; `UntilLoss` has none.
+            // Only an `Exactly` run carries a flip count; `UntilLoss` has none.
             Effect::FlipCoins { flips, .. } => flips.count_expr_mut(),
 
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
@@ -32542,7 +32542,7 @@ impl CoinFlipRun {
         )
     }
 
-    /// CR 705.1: the flip count of an `Exactly` run; `UntilLoss` has no count.
+    /// The flip count of an `Exactly` run; `UntilLoss` has no count.
     pub fn count_expr(&self) -> Option<&QuantityExpr> {
         match self {
             CoinFlipRun::Exactly { count } => Some(count),
