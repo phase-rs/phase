@@ -572,15 +572,18 @@ fn visit_characteristic_leaf<'s>(
         // the triggering-object exclusion. Property aggregates must enumerate
         // the exact same members as object-count quantities.
         CardTypeSetSource::Objects { filter } => {
-            // MED1: a member filter over selected references the resume
-            // path cannot evaluate is refused at shared source admission
-            // (`CardTypeSetSource::validate_admission`, enforced at decode
-            // for every head); this skip is defense-in-depth for hand-built
-            // in-memory values only, and its zero must never count as
-            // support.
-            if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
-                return;
-            }
+            // No MED1 eval-time skip here: this arm enumerates through
+            // `object_count_matching_ids` with the live `FilterContext`,
+            // exactly the population `ObjectCount` counts, so a
+            // parent-targeted member filter reads the same announced
+            // parent `ObjectCount` reads (CR 608.2c + CR 608.2h). A
+            // skip would break the parity the comment above pins.
+            // Admission (`CardTypeSetSource::validate_admission`) still
+            // refuses dependent member filters at decode; only the
+            // `TrackedSet` arm — whose members can evaluate on the
+            // parked resume path with no ability in scope — fails
+            // closed at resolution (see its arm below and
+            // `med1_refused_member_filters_fail_closed_at_resolution`).
             for obj_id in object_count_matching_ids(state, filter, filter_ctx, ctx.source) {
                 let view = characteristic_view_for_object(state, obj_id);
                 if let Some(view) = view {

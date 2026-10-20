@@ -3598,13 +3598,12 @@ fn header_with_unrecognized_tail_refuses_instead_of_dropping_it() {
 }
 
 /// Row A-2 — REGRESSION GUARD (not revert-failing): CR 706.1a word-form
-/// headers with a trailing instruction are refused by the line-initial
-/// dispatch both before and after PR A — before via dead code, after via the
-/// surviving authority's tail check — so all six cards keep their
-/// `RollDie { sides: 6, results: [] }` + `SequentialSibling` shape. The pin is
-/// that the trailing instruction survives as the sibling (Box of Free-Range
-/// Goblins keeps its token creation, Growth Spurt its pump) and that NO table
-/// attaches (`results` stays empty — no `RollDie` consumes the line).
+/// headers with a trailing instruction keep their chain-path d6 roll plus a
+/// `SequentialSibling` trailing instruction. The pin is that the trailing
+/// instruction survives as the sibling (Box of Free-Range Goblins keeps its
+/// token creation, Growth Spurt its pump). Printed tables attach with
+/// row-covering spans (main #10127's attach predicate); only cases with no
+/// printed table keep `results` empty.
 ///
 /// The empty-tail arm at the end is likewise a guard, NOT revert-failing:
 /// measured at the base, the chain path already attaches a following pipe
@@ -3615,13 +3614,23 @@ fn header_with_unrecognized_tail_refuses_instead_of_dropping_it() {
 fn word_form_header_does_not_swallow_its_trailing_instruction() {
     use crate::types::ability::SubAbilityLink;
 
-    // (card, verbatim Oracle text, types, expected sibling check)
-    let cases: &[(&str, &str, &[&str], &str)] = &[
+    // (card, verbatim Oracle text, types, expected sibling check, expected
+    // attached-table spans — the printed rows, or empty when the card prints
+    // no table)
+    type WordFormCase = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static str,
+        &'static [(u8, u8)],
+    );
+    let cases: &[WordFormCase] = &[
         (
             "Box of Free-Range Goblins",
             "Roll a six-sided die. Create a number of 1/1 red Goblin creature tokens equal to the result.",
             &["Sorcery"],
             "token",
+            &[],
         ),
         (
             "Goblin Tutor",
@@ -3631,18 +3640,21 @@ fn word_form_header_does_not_swallow_its_trailing_instruction() {
             // this `unparsed_verb_arguments` where our tree said `have` —
             // equally red; the roll header and sub-link asserts above are unchanged.
             "unparsed_verb_arguments",
+            &[(2, 2), (3, 3), (4, 4), (5, 5), (6, 6)],
         ),
         (
             "Growth Spurt",
             "Roll a six-sided die. Target creature gets +X/+X until end of turn, where X is the result.",
             &["Instant"],
             "pump",
+            &[],
         ),
         (
             "Steamfloggery",
             "Roll a six-sided die. Assemble a number of Contraptions equal to the result. (To assemble a Contraption, put the top card of your Contraption deck face up onto one of your sprockets.)",
             &["Instant"],
             "assemble",
+            &[],
         ),
         (
             "Strategy, Schmategy",
@@ -3651,6 +3663,7 @@ fn word_form_header_does_not_swallow_its_trailing_instruction() {
             // Rebase taxonomy note: same `unparsed_verb_arguments`
             // vocabulary as the Goblin Tutor row above.
             "unparsed_verb_arguments",
+            &[(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)],
         ),
         (
             "Time Out",
@@ -3659,9 +3672,10 @@ fn word_form_header_does_not_swallow_its_trailing_instruction() {
             // Rebase taxonomy note: same `unparsed_verb_arguments`
             // vocabulary as the rows above.
             "unparsed_verb_arguments",
+            &[],
         ),
     ];
-    for (card, text, types, sibling) in cases {
+    for (card, text, types, sibling, spans) in cases {
         let (_, lowered) = parse_two_layer(text, card, types, &[]);
         let Effect::RollDie {
             count,
@@ -3683,10 +3697,14 @@ fn word_form_header_does_not_swallow_its_trailing_instruction() {
             "{card}: single-die roll keeps count 1 (the count axis belongs to Phase 5), got {count:?}"
         );
         assert_eq!(*sides, 6, "{card}: sides");
-        assert!(
-            results.is_empty(),
-            "{card}: no table may attach to the word-form roll — results must stay empty, got {results:?}"
-        );
+        // Printed tables attach via main #10127's row-covering predicate;
+        // the branch pins that the header attaches exactly the printed rows.
+        // Cards with no printed table keep `results` empty.
+        let got: Vec<(u8, u8)> = results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect();
+        assert_eq!(got.as_slice(), *spans, "{card}: attached table spans");
         assert!(
             modifier.is_none(),
             "{card}: no modifier may appear, got {modifier:?}"
