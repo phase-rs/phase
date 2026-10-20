@@ -970,6 +970,7 @@ fn sought_replacement_run(two: bool, reload_at: Option<usize>) -> (Vec<ObjectId>
                     .expect("named result completion");
                 let engine::types::game_state::BatchCompletion::RecordInstructionZoneResult {
                     occurrence_id,
+                    return_result_process,
                     result_id,
                     settled_records,
                 } = completion
@@ -977,7 +978,13 @@ fn sought_replacement_run(two: bool, reload_at: Option<usize>) -> (Vec<ObjectId>
                     panic!("{completion:?}")
                 };
                 assert!(settled_records.is_none());
-                assert!(!runner.state().return_result_frames[occurrence_id].contains_key(result_id));
+                assert_eq!(
+                    runner.state().return_result_frames[occurrence_id].process,
+                    *return_result_process
+                );
+                assert!(!runner.state().return_result_frames[occurrence_id]
+                    .results
+                    .contains_key(result_id));
                 let key = (*occurrence_id, *result_id);
                 if reload_at == Some(prompts) {
                     let trusted = engine::types::game_state::PersistedGameState::capture(

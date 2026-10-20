@@ -1553,7 +1553,7 @@ mod tests {
         // Genesis branch-1 LoseLife encoding: undirected `target: None` with the
         // each-opponent scope lifted onto the ability (the post-fix shape). The
         // amount is fixed here — the bug under test is target routing, not amount
-        // resolution (the dynamic `ZoneChangeAggregateThisTurn` amount is covered
+        // resolution (the dynamic `ZoneChangeAggregate` amount is covered
         // by the AST parser test).
         let mut ability = ResolvedAbility::new(
             Effect::LoseLife {

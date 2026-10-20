@@ -51,9 +51,13 @@ pub fn resolve(
     // context ONCE at prompt time — the pause below destroys
     // resolution-scoped context, and at branch time the event is already None.
     let trigger_context = ResolvingTriggerContext::capture(state);
+    let return_result_occurrence = super::retained_return_result_occurrence(state, ability)?;
     prompt_next(
         state,
         PromptRequest {
+            return_result_occurrence,
+            expected_return_result_process: return_result_occurrence
+                .and(ability.return_result_process),
             controller: ability.controller,
             source_id: ability.source_id,
             branches,
@@ -75,6 +79,8 @@ pub fn resolve(
 }
 
 pub(crate) struct PromptRequest {
+    pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    pub expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     pub controller: PlayerId,
     pub source_id: ObjectId,
     pub branches: Vec<AbilityDefinition>,
@@ -88,6 +94,8 @@ pub(crate) struct PromptRequest {
 
 pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
     let PromptRequest {
+        return_result_occurrence,
+        expected_return_result_process,
         controller,
         source_id,
         branches,
@@ -104,6 +112,8 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
     players.remove(0);
     let branch_descriptions = branch_descriptions(&branches);
     state.waiting_for = WaitingFor::ChooseOneOfBranch {
+        return_result_occurrence,
+        expected_return_result_process,
         player,
         controller,
         source_id,
@@ -126,6 +136,22 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
     // `turn_control::authorized_submitter_for_player` (CR 608.2d).
 }
 
+pub(crate) fn validate_pending_result_owner(
+    state: &GameState,
+    pending: &PendingChooseOneOf,
+) -> Result<(), EffectError> {
+    for branch in &pending.branches {
+        let mut body = build_resolved_from_def(branch, pending.source_id, pending.controller);
+        body.bind_return_result_process(pending.expected_return_result_process);
+        super::validate_selected_instruction_result_owner(
+            state,
+            &body,
+            pending.return_result_occurrence,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. })
         || state.active_choose_one_of().is_none()
@@ -141,6 +167,8 @@ pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>
     prompt_next(
         state,
         PromptRequest {
+            return_result_occurrence: pending.return_result_occurrence,
+            expected_return_result_process: pending.expected_return_result_process,
             controller: pending.controller,
             source_id: pending.source_id,
             branches: pending.branches,
@@ -157,6 +185,8 @@ pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>
 }
 
 pub(crate) struct BranchSelection {
+    pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    pub expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     pub player: PlayerId,
     pub controller: PlayerId,
     pub source_id: ObjectId,
@@ -175,14 +205,45 @@ pub(crate) fn resolve_branch(
     selection: BranchSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    if selection.index >= selection.branches.len() {
+        return Err(EffectError::InvalidParam(
+            "ChooseOneOf branch index out of range".into(),
+        ));
+    }
+    for branch in &selection.branches {
+        let mut body = build_resolved_from_def(branch, selection.source_id, selection.controller);
+        body.bind_return_result_process(selection.expected_return_result_process);
+        super::validate_selected_instruction_result_owner(
+            state,
+            &body,
+            selection.return_result_occurrence,
+        )?;
+    }
+    state.waiting_for = WaitingFor::Priority {
+        player: selection.player,
+    };
+    state.priority_player = selection.player;
+    let occurrence = selection.return_result_occurrence;
+    super::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        resolve_branch_in_occurrence(state, selection, events)
+    })
+}
+
+fn resolve_branch_in_occurrence(
+    state: &mut GameState,
+    selection: BranchSelection,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let BranchSelection {
+        return_result_occurrence,
+        expected_return_result_process,
         player,
         controller,
         source_id,
         branches,
         parent_occurrences,
         context,
-        continuation,
+        mut continuation,
         replacement_applied,
         remaining_players,
         trigger_context,
@@ -193,6 +254,13 @@ pub(crate) fn resolve_branch(
             "ChooseOneOf branch index {index} out of range"
         )));
     };
+    let local_branch = matches!(
+        crate::types::ability::classify_instruction_result_invocation(
+            &build_resolved_from_def(branch, source_id, controller),
+            crate::types::ability::InstructionResultEntry::SelectedBody
+        )?,
+        crate::types::ability::InstructionResultProcess::Local { .. }
+    );
     let is_final_chooser = remaining_players.is_empty();
     if let Some(binding) = &context.counter_removal_result {
         let operation_matches = match branch.effect.as_ref() {
@@ -227,6 +295,8 @@ pub(crate) fn resolve_branch(
 
     if !is_final_chooser {
         state.push_choose_one_of(PendingChooseOneOf {
+            return_result_occurrence,
+            expected_return_result_process,
             controller,
             source_id,
             branches: branches.clone(),
@@ -242,6 +312,7 @@ pub(crate) fn resolve_branch(
     }
 
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
+    resolved.bind_return_result_process(expected_return_result_process);
     resolved.context = context;
     if matches!(resolved.effect, Effect::PutCounter { .. }) {
         resolved.context.counter_removal_result = None;
@@ -286,6 +357,11 @@ pub(crate) fn resolve_branch(
     // run once, after the final chooser's selected branch. Keeping the runtime
     // continuation in the typed choice carrier preserves its exact resolved
     // context without converting it back into an AbilityDefinition.
+    let outer_tail = if is_final_chooser && local_branch {
+        continuation.take()
+    } else {
+        None
+    };
     if is_final_chooser {
         if let Some(continuation) = continuation {
             crate::game::ability_utils::append_to_sub_chain(&mut resolved, *continuation);
@@ -300,7 +376,25 @@ pub(crate) fn resolve_branch(
     let trigger_snapshot = trigger_context
         .as_ref()
         .map(|ctx| super::super::triggers::push_resolving_trigger_context(state, ctx));
-    let result = super::resolve_ability_chain(state, &resolved, events, 1);
+    let child_boundary = state.resolution_stack.capture_child_boundary();
+    let outer_pending =
+        outer_tail.map(|tail| crate::types::game_state::PendingContinuation::new(tail, state));
+    let result = (|| {
+        super::resolve_selected_ability_chain(state, &resolved, events, 1)?;
+        if let Some(pending) = outer_pending {
+            if super::waits_for_resolution_choice(&state.waiting_for)
+                || state.resolution_stack.capture_child_boundary() > child_boundary
+            {
+                state
+                    .insert_ability_continuation_parent_at_child_boundary(pending, child_boundary)
+                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+            } else {
+                super::restore_continuation_trigger_firing(state, pending.trigger_firing);
+                super::resolve_resume_owned_ability_chain(state, &pending.chain, events, 1)?;
+            }
+        }
+        Ok::<_, EffectError>(())
+    })();
     if let Some(snapshot) = trigger_snapshot {
         super::super::triggers::restore_trigger_event_context(state, snapshot);
     }

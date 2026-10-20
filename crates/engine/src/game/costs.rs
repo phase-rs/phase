@@ -469,6 +469,7 @@ fn effect_pay_cost_mana_resume(
     // it must return to that exact prompt, not manufacture an Effect::PayCost
     // retry that would bypass the player's submitted unless-payment flow.
     if let WaitingFor::UnlessPayment {
+        return_result_occurrence,
         player,
         cost,
         pending_effect,
@@ -478,6 +479,7 @@ fn effect_pay_cost_mana_resume(
     } = &state.waiting_for
     {
         return Some(ManaAbilityResume::UnlessPayment {
+            return_result_occurrence: *return_result_occurrence,
             outer_player: Some(*player),
             cost: Box::new(cost.clone()),
             pending_effect: pending_effect.clone(),
@@ -497,6 +499,7 @@ fn effect_pay_cost_mana_resume(
         return None;
     };
     Some(ManaAbilityResume::EffectPayCost {
+        return_result_occurrence: state.active_return_result_occurrence,
         payer,
         return_to: *return_to,
         ability: Box::new((*ability).clone()),
@@ -731,6 +734,8 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
     cost_move_root: ResolutionCostMoveRoot,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
+    crate::game::quantity::validate_addressed_cost_reads(state, cost, ability)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     pay_ability_cost_inner(
         state,
         payer,
@@ -1350,6 +1355,8 @@ fn pay_ability_cost_inner(
                 state.last_effect_count = Some(count as i32);
             } else {
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    return_result_occurrence: None,
+                    return_result_process: None,
                     player,
                     cards: eligible,
                     count,
@@ -1485,7 +1492,7 @@ fn pay_ability_cost_inner(
                     );
                     let source_could_produce_two_or_more_colors =
                         super::mana_sources::mana_production_could_produce_two_or_more_colors(
-                            state, player, source_id, produced,
+                            state, player, source_id, produced, None,
                         );
                     let mut deposited = false;
                     for color in colors {

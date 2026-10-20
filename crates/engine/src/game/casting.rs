@@ -22900,6 +22900,7 @@ fn settle_exact_mana_ability_prompts(
             player: waiting_player,
             choice,
             context: ManaChoiceContext::ManaAbility(_),
+            ..
         } if *waiting_player == player => match choice {
             ManaChoicePrompt::SingleColor { options } => options
                 .iter()
@@ -30005,7 +30006,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregate { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => {
             target_filter_reads_chosen_target(filter, read)
         }

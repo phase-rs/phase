@@ -15340,7 +15340,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
@@ -45090,6 +45090,7 @@ fn parse_effect_chain_ir_body(
             // binding. Unlike `any_prior_publishes`, this scan deliberately does
             // NOT skip absorbed (`ClauseDisposition::Continue`) clauses — see
             // `clause_ir_is_exile_producer` for why (Hideaway).
+            chain_zone_result: builder.zone_result_antecedent(),
             chain_has_prior_exile_producer: builder
                 .clauses()
                 .iter()

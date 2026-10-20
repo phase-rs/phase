@@ -376,14 +376,23 @@ pub(super) fn handle_multi_target_selection(
     selected: &[crate::types::identifiers::ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (player, legal_targets, min_targets, max_targets, pending_ability) = match waiting_for {
+    let (
+        return_result_occurrence,
+        player,
+        legal_targets,
+        min_targets,
+        max_targets,
+        pending_ability,
+    ) = match waiting_for {
         WaitingFor::MultiTargetSelection {
+            return_result_occurrence,
             player,
             legal_targets,
             min_targets,
             max_targets,
             pending_ability,
         } => (
+            return_result_occurrence,
             player,
             legal_targets,
             min_targets,
@@ -397,38 +406,47 @@ pub(super) fn handle_multi_target_selection(
         }
     };
 
-    if selected.len() < min_targets || selected.len() > max_targets {
-        return Err(EngineError::InvalidAction(format!(
-            "Must select between {} and {} targets, got {}",
-            min_targets,
-            max_targets,
-            selected.len()
-        )));
-    }
-
-    let mut selected_ids = std::collections::HashSet::<ObjectId>::new();
-    for id in selected {
-        if !legal_targets.contains(id) {
-            return Err(EngineError::InvalidAction(
-                "Selected target not in legal set".to_string(),
-            ));
+    effects::validate_selected_instruction_result_owner(
+        state,
+        &pending_ability,
+        return_result_occurrence,
+    )
+    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, return_result_occurrence, |state| {
+        if selected.len() < min_targets || selected.len() > max_targets {
+            return Err(EngineError::InvalidAction(format!(
+                "Must select between {} and {} targets, got {}",
+                min_targets,
+                max_targets,
+                selected.len()
+            )));
         }
-        // CR 115.3: The same target can't be chosen multiple times for one
-        // instance of the word "target" on a spell or ability.
-        if !selected_ids.insert(*id) {
-            return Err(EngineError::InvalidAction(
-                "Selected target more than once".to_string(),
-            ));
+
+        let mut selected_ids = std::collections::HashSet::<ObjectId>::new();
+        for id in selected {
+            if !legal_targets.contains(id) {
+                return Err(EngineError::InvalidAction(
+                    "Selected target not in legal set".to_string(),
+                ));
+            }
+            // CR 115.3: The same target can't be chosen multiple times for one
+            // instance of the word "target" on a spell or ability.
+            if !selected_ids.insert(*id) {
+                return Err(EngineError::InvalidAction(
+                    "Selected target more than once".to_string(),
+                ));
+            }
         }
-    }
 
-    let mut ability = pending_ability;
-    ability.set_unpinned_targets(selected.iter().map(|&id| TargetRef::Object(id)).collect());
+        let mut ability = pending_ability;
+        ability.set_unpinned_targets(selected.iter().map(|&id| TargetRef::Object(id)).collect());
 
-    state.waiting_for = WaitingFor::Priority { player };
-    state.priority_player = player;
-    let _ = effects::resolve_ability_chain(state, &ability, events, 0);
-    resume_pending_continuation_if_priority(state, events)?;
+        state.waiting_for = WaitingFor::Priority { player };
+        state.priority_player = player;
+        effects::resolve_resume_owned_ability_chain(state, &ability, events, 0)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        resume_pending_continuation_if_priority(state, events)?;
 
-    Ok(state.waiting_for.clone())
+        Ok(state.waiting_for.clone())
+    })
 }

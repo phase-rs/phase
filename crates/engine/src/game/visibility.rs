@@ -63,6 +63,12 @@ pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameStat
         context.counter_removal_result = None;
     }
     redact_paid_cast_cleanup_authority(&mut projected.waiting_for);
+    redact_instruction_result_owner(&mut projected.waiting_for);
+    if let Some(order) = projected.pending_trigger_order.as_mut() {
+        if let Some(waiting) = order.resume_after_ordering.as_deref_mut() {
+            redact_instruction_result_owner(waiting);
+        }
+    }
     let object_redactions: Vec<_> = state
         .objects
         .iter()
@@ -97,6 +103,131 @@ pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameStat
         }
     }
     projected
+}
+
+fn redact_instruction_result_owner(waiting: &mut WaitingFor) {
+    match waiting {
+        WaitingFor::EffectZoneChoice {
+            return_result_occurrence,
+            return_result_process,
+            ..
+        } => {
+            *return_result_occurrence = None;
+            *return_result_process = None;
+        }
+        WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence,
+            expected_return_result_process,
+            continuation,
+            ..
+        } => {
+            *return_result_occurrence = None;
+            *expected_return_result_process = None;
+            if let Some(body) = continuation {
+                body.clear_return_result_process_recursive();
+            }
+        }
+        WaitingFor::VoteChoice {
+            return_result_occurrence,
+            expected_return_result_process,
+            ..
+        }
+        | WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence,
+            expected_return_result_process,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            return_result_occurrence,
+            expected_return_result_process,
+            ..
+        }
+        | WaitingFor::SeparatePilesChoice {
+            return_result_occurrence,
+            expected_return_result_process,
+            ..
+        } => {
+            *return_result_occurrence = None;
+            *expected_return_result_process = None;
+        }
+        WaitingFor::ChooseManaColor {
+            return_result_occurrence,
+            context,
+            ..
+        } => {
+            *return_result_occurrence = None;
+            if let crate::types::game_state::ManaChoiceContext::ResolvingEffect(body) = context {
+                body.clear_return_result_process_recursive();
+            }
+        }
+        WaitingFor::ExploreChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::ClashChooseOpponent {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::ChooseFromZoneOpponentChooser {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::MultiTargetSelection {
+            return_result_occurrence,
+            ..
+        } => *return_result_occurrence = None,
+        _ => {}
+    }
+    match waiting {
+        WaitingFor::ExploreChoice {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::ReturnAsAuraTarget {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::ChooseTokenHost {
+            pending_ability: body,
+            ..
+        }
+        | WaitingFor::MultiTargetSelection {
+            pending_ability: body,
+            ..
+        }
+        | WaitingFor::UnlessPayment {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::UnlessPaymentChooseCost {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::WardDiscardChoice {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::WardSacrificeChoice {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::UnlessBounceChoice {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::RepeatDecision { ability: body, .. }
+        | WaitingFor::ClashChooseOpponent { ability: body, .. }
+        | WaitingFor::ChooseFromZoneOpponentChooser { ability: body, .. }
+        | WaitingFor::MoveCountersDistribution {
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::RemoveCountersChoice {
+            pending_effect: body,
+            ..
+        } => body.clear_return_result_process_recursive(),
+        _ => {}
+    }
 }
 
 /// A paid cast offered during resolution carries private ownership of the
@@ -1507,6 +1638,58 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.return_result_frames.clear();
     filtered.active_return_result_occurrence = None;
     filtered.next_return_result_occurrence_id = 1;
+    filtered.next_return_result_process_id = 1;
+    if let WaitingFor::EffectZoneChoice {
+        return_result_occurrence,
+        return_result_process,
+        ..
+    } = &mut filtered.waiting_for
+    {
+        *return_result_occurrence = None;
+        *return_result_process = None;
+    }
+    if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+        return_result_occurrence,
+        ..
+    }) = &mut filtered.pending_library_search_delivery
+    {
+        *return_result_occurrence = None;
+    }
+    if let Some(pending) = &mut filtered.pending_scoped_library_search {
+        pending.return_result_occurrence = None;
+        pending.ability.clear_return_result_process_recursive();
+        if let Some(tail) = pending.after_scope.as_deref_mut() {
+            tail.clear_return_result_process_recursive();
+        }
+    }
+    if let Some(pending) = &mut filtered.pending_player_scope_sacrifice_choice {
+        pending.return_result_occurrence = None;
+        pending.ability.clear_return_result_process_recursive();
+    }
+    if let Some(pending) = &mut filtered.pending_player_scope_unless_payment {
+        pending.return_result_occurrence = None;
+        pending
+            .pending_effect
+            .clear_return_result_process_recursive();
+    }
+    if let Some(fan_out) = filtered
+        .pending_discard_batch
+        .as_mut()
+        .and_then(|pending| pending.fan_out.as_mut())
+    {
+        fan_out.return_result_occurrence = None;
+    }
+    if let Some(pending) = filtered.pending_die_roll_instruction.as_deref_mut() {
+        pending.return_result_occurrence = None;
+        pending.expected_return_result_process = None;
+    }
+    for incarnations in filtered.departed_stack_spells.values_mut() {
+        for departed in incarnations.values_mut() {
+            if let Some(body) = departed.entry.ability_mut() {
+                body.clear_return_result_process_recursive();
+            }
+        }
+    }
     // ChooseOneOf retains its runtime tail inside the authoritative prompt so
     // resolution can resume after the branch selection. Like every other
     // resolved continuation, that carrier can contain private object IDs and
@@ -1515,15 +1698,58 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         WaitingFor::ChooseOneOfBranch {
             continuation,
             context,
+            return_result_occurrence,
+            expected_return_result_process,
             ..
         } => {
             *continuation = None;
+            *return_result_occurrence = None;
+            *expected_return_result_process = None;
             context.counter_removal_result = None;
         }
         WaitingFor::CopyTargetChoice {
             purpose: crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation },
             ..
         } => *continuation = None,
+        WaitingFor::ChooseManaColor {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::VoteChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesChoice {
+            return_result_occurrence,
+            ..
+        } => *return_result_occurrence = None,
+        _ => {}
+    }
+    match &mut filtered.waiting_for {
+        WaitingFor::VoteChoice {
+            expected_return_result_process,
+            ..
+        }
+        | WaitingFor::SeparatePilesChooseOpponent {
+            expected_return_result_process,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            expected_return_result_process,
+            ..
+        }
+        | WaitingFor::SeparatePilesChoice {
+            expected_return_result_process,
+            ..
+        } => *expected_return_result_process = None,
         _ => {}
     }
     // The provenance journal contains exact source identities, restrictions,
@@ -2422,6 +2648,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // (the AI already sees full hidden state for its own search). Multiplayer
     // human↔human secrecy IS enforced here.
     if let WaitingFor::VoteChoice {
+        return_result_occurrence: _,
+        expected_return_result_process: _,
         player,
         remaining_votes,
         ref options,
@@ -2442,6 +2670,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     {
         if visibility == crate::types::ability::VoteVisibility::Secret {
             filtered.waiting_for = WaitingFor::VoteChoice {
+                return_result_occurrence: None,
+                expected_return_result_process: None,
                 player,
                 remaining_votes,
                 options: options.clone(),
@@ -2893,6 +3123,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     }
 
     if let WaitingFor::EffectZoneChoice {
+        return_result_occurrence: _,
+        return_result_process: _,
         player,
         ref cards,
         count,
@@ -2926,6 +3158,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // ids and their identity/origin provenance are not.
         if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
+                return_result_occurrence: None,
+                return_result_process: None,
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
@@ -3999,6 +4233,7 @@ fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    ability.return_result_process = None;
     ability.context.counter_removal_result = None;
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
@@ -4075,16 +4310,23 @@ fn redact_mana_ability_resume_payment(
     use crate::types::game_state::ManaAbilityResume;
     match resume {
         ManaAbilityResume::UnlessPayment {
+            return_result_occurrence,
             pending_effect,
             trigger_event,
             ..
         } => {
+            *return_result_occurrence = None;
             redact_ability_payment(pending_effect, hidden_ids);
             if let Some(event) = trigger_event.as_mut() {
                 redact_hidden_zone_change_event(event, hidden_ids);
             }
         }
-        ManaAbilityResume::EffectPayCost { ability, .. } => {
+        ManaAbilityResume::EffectPayCost {
+            return_result_occurrence,
+            ability,
+            ..
+        } => {
+            *return_result_occurrence = None;
             redact_ability_payment(ability, hidden_ids);
         }
         // CR 605.3a: the outer mana ability whose payment window this one was activated in.
@@ -5457,6 +5699,7 @@ mod tests {
             }];
         state.pending_player_scope_sacrifice_choice = Some(
             crate::types::game_state::PendingPlayerScopeSacrificeChoice {
+                return_result_occurrence: None,
                 ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner)),
                 remaining_players: Vec::new(),
                 selections: Vec::new(),
@@ -5953,6 +6196,7 @@ mod tests {
             (
                 "UnlessPayment trigger_event",
                 WaitingFor::UnlessPayment {
+                    return_result_occurrence: None,
                     player: opponent_id,
                     cost: AbilityCost::PayLife {
                         amount: QuantityExpr::Fixed { value: 2 },
@@ -5966,6 +6210,7 @@ mod tests {
             (
                 "UnlessPaymentChooseCost trigger_event",
                 WaitingFor::UnlessPaymentChooseCost {
+                    return_result_occurrence: None,
                     player: opponent_id,
                     costs: Vec::new(),
                     pending_effect: pending_effect(),
@@ -6474,6 +6719,7 @@ mod tests {
     fn payment_mana_ability(fixture: &PaymentFixture) -> Box<PendingManaAbility> {
         let mut pending = dummy_pending_mana_ability(fixture.owner, ObjectId(9_900));
         pending.resume = ManaAbilityResume::UnlessPayment {
+            return_result_occurrence: None,
             outer_player: None,
             cost: Box::new(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 2 },
@@ -6484,6 +6730,7 @@ mod tests {
             remaining: Vec::new(),
         };
         pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
+            return_result_occurrence: None,
             payer: fixture.owner,
             return_to: fixture.owner,
             ability: Box::new(fixture.ability.clone()),
@@ -6541,6 +6788,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::UnlessPayment {
+                    return_result_occurrence: None,
                     player: opponent_id,
                     cost: pay_life(),
                     pending_effect: effect(),
@@ -6554,6 +6802,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::UnlessPaymentChooseCost {
+                    return_result_occurrence: None,
                     player: opponent_id,
                     costs: Vec::new(),
                     pending_effect: effect(),
@@ -6568,6 +6817,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::WardDiscardChoice {
+                    return_result_occurrence: None,
                     player: opponent_id,
                     cards: Vec::new(),
                     pending_effect: effect(),
@@ -6580,6 +6830,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::WardSacrificeChoice {
+                    return_result_occurrence: None,
                     player: opponent_id,
                     permanents: Vec::new(),
                     pending_effect: effect(),
@@ -6592,6 +6843,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::UnlessBounceChoice {
+                    return_result_occurrence: None,
                     player: opponent_id,
                     permanents: Vec::new(),
                     pending_effect: effect(),
@@ -6603,6 +6855,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::ExploreChoice {
+                    return_result_occurrence: None,
                     player: owner,
                     source_id: paid,
                     choosable: Vec::new(),
@@ -6652,6 +6905,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::MultiTargetSelection {
+                    return_result_occurrence: None,
                     player: owner,
                     legal_targets: Vec::new(),
                     min_targets: 0,
@@ -6669,6 +6923,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::ChooseTokenHost {
+                    return_result_occurrence: None,
                     player: owner,
                     source_id: paid,
                     legal_targets: Vec::new(),
@@ -6680,6 +6935,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::RepeatDecision {
+                    return_result_occurrence: None,
                     player: owner,
                     ability: effect(),
                 }),
@@ -6689,6 +6945,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::ClashChooseOpponent {
+                    return_result_occurrence: None,
                     player: owner,
                     candidates: vec![opponent_id],
                     ability: effect(),
@@ -6699,6 +6956,7 @@ mod tests {
                 "/waiting_for/".to_string(),
                 2,
                 prompt(WaitingFor::ChooseFromZoneOpponentChooser {
+                    return_result_occurrence: None,
                     player: owner,
                     candidates: vec![opponent_id],
                     ability: effect(),
@@ -6797,6 +7055,7 @@ mod tests {
                         options: Vec::new(),
                     },
                     context: ManaChoiceContext::ManaAbility(mana_ability()),
+                    return_result_occurrence: None,
                 }),
             ),
             (
@@ -6809,6 +7068,7 @@ mod tests {
                         options: Vec::new(),
                     },
                     context: ManaChoiceContext::ResolvingEffect(effect()),
+                    return_result_occurrence: None,
                 }),
             ),
             (
@@ -6909,6 +7169,7 @@ mod tests {
                 Box::new(|state: &mut GameState| {
                     state.pending_player_scope_sacrifice_choice =
                         Some(PendingPlayerScopeSacrificeChoice {
+                            return_result_occurrence: None,
                             ability: effect(),
                             remaining_players: Vec::new(),
                             selections: Vec::new(),
@@ -6923,6 +7184,7 @@ mod tests {
                 Box::new(|state: &mut GameState| {
                     state.pending_player_scope_unless_payment =
                         Some(Box::new(PendingPlayerScopeUnlessPayment {
+                            return_result_occurrence: None,
                             pending_effect: effect(),
                             remaining_players: Vec::new(),
                             declining_players: Vec::new(),
@@ -6937,6 +7199,7 @@ mod tests {
                 4,
                 Box::new(|state: &mut GameState| {
                     state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+                        return_result_occurrence: None,
                         ability: effect(),
                         phase: ScopedLibrarySearchPhase::Delivering {
                             search_keys: vec![owner],
@@ -6952,6 +7215,7 @@ mod tests {
                 Box::new(|state: &mut GameState| {
                     state.pending_library_search_delivery =
                         Some(LibrarySearchDeliveryResume::Scoped {
+                            return_result_occurrence: None,
                             player: owner,
                             source_id: paid,
                             search_keys: vec![owner],
@@ -7149,6 +7413,8 @@ mod tests {
             },
         });
         state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: owner,
             controller: owner,
             source_id: paid,
@@ -7316,6 +7582,8 @@ mod tests {
             Zone::Hand,
         );
         state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: PlayerId(0),
             controller: PlayerId(0),
             source_id: ObjectId(9),
@@ -7453,6 +7721,7 @@ mod tests {
         );
         pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 2 },
@@ -8884,6 +9153,7 @@ mod tests {
         );
         let source_id = ObjectId(99);
         state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "test scoped search".to_string(),
@@ -9009,6 +9279,7 @@ mod tests {
         state.active_player = p0;
         state.turn_decision_controller = Some(live_controller);
         state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "latched scoped search test".to_string(),
@@ -14935,7 +15206,7 @@ mod sought_result_privacy_tests {
         let records = state
             .return_result_frames
             .values_mut()
-            .flat_map(|frame| frame.values_mut())
+            .flat_map(|frame| frame.results.values_mut())
             .filter_map(|result| result.zone_changes_mut())
             .find(|records| !records.is_empty())
             .unwrap();

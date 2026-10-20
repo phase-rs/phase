@@ -26,7 +26,7 @@ use crate::types::ability::{
     RepeatContinuation, ResolvedAbility, RoundingMode, SpellCastingOption, StaticCondition,
     StaticDefinition, SubtypeExclusion, TargetDamageSourceBinding, TargetFilter, TargetRef,
     ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnJournalKind,
-    TypeFilter, TypedFilter, ZoneRef,
+    TypeFilter, TypedFilter, ZoneChangeRecordSource, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -726,6 +726,78 @@ pub fn resolve_quantity(
     source_id: ObjectId,
 ) -> i32 {
     resolve_quantity_with_ctx(state, expr, controller, QuantityContext::new(source_id))
+}
+
+/// CR 608.2c + CR 608.2i: select only a completed zone result in the inherited occurrence.
+pub(crate) fn instruction_zone_change_records(
+    state: &GameState,
+    result: crate::types::ability::ReturnResultId,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+) -> Option<&[crate::types::game_state::ZoneChangeRecord]> {
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        state.active_return_result_occurrence,
+        expected,
+        true,
+    )
+    .ok()?;
+    let crate::types::game_state::InstructionResult::ZoneChanges(records) =
+        frame.results.get(&result)?
+    else {
+        return None;
+    };
+    records
+        .iter()
+        .all(crate::game::filter::departure_record_has_coherent_snapshot)
+        .then_some(records.as_slice())
+}
+
+pub(crate) fn addressed_quantity_ref_is_available(
+    state: &GameState,
+    reference: &QuantityRef,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+) -> bool {
+    validate_addressed_quantity_ref(state, reference, expected).is_ok()
+}
+
+pub(crate) fn validate_addressed_quantity_ref(
+    state: &GameState,
+    reference: &QuantityRef,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+) -> Result<(), crate::types::ability::EffectError> {
+    if let Some(result) = reference.instruction_result_id() {
+        crate::types::game_state::checked_return_result_frame(
+            state,
+            state.active_return_result_occurrence,
+            expected,
+            true,
+        )
+        .map_err(crate::types::ability::EffectError::InvalidParam)?;
+        if instruction_zone_change_records(state, result, expected).is_none() {
+            return Err(crate::types::ability::EffectError::InvalidParam(
+                "unavailable addressed zone result".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_addressed_cost_reads(
+    state: &GameState,
+    cost: &crate::types::ability::AbilityCost,
+    ability: &ResolvedAbility,
+) -> Result<(), crate::types::ability::EffectError> {
+    let mut error = None;
+    let mut check = |reference: &QuantityRef| {
+        if let Err(reason) =
+            validate_addressed_quantity_ref(state, reference, ability.return_result_process)
+        {
+            error.get_or_insert(reason);
+        }
+    };
+    cost.for_each_quantity_expr(&mut |expr| expr.for_each_ref(&mut check));
+    cost.for_each_predicate_quantity_ref(&mut check);
+    error.map_or(Ok(()), Err)
 }
 
 /// Resolves a quantity only when its value is available from the present source
@@ -1883,7 +1955,7 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         // above are likewise record-based; only their player scopes can read it.
         QuantityRef::ControlledByEachPlayer { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. }
@@ -2086,7 +2158,7 @@ fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::DistinctCardTypes { .. } | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. } | QuantityRef::DistinctColorsAmong { .. }
         | QuantityRef::PlayerCount { .. } | QuantityRef::ControlledByEachPlayer { .. }
-        | QuantityRef::ZoneChangeCountThisTurn { .. } | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. } | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
@@ -2513,7 +2585,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
@@ -2849,7 +2921,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
@@ -3159,7 +3231,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::TurnsTaken
         // CR 400.7 + CR 700.4: zone-change records store last-known information.
         | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         // CR 120.1: damage records store the amount actually dealt.
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
@@ -3424,7 +3496,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
@@ -6640,25 +6712,44 @@ fn resolve_ref(
         // zone-change snapshots. Mirrors ZoneChangeCountThisTurn's population scan
         // but sums/maxes/mins the per-record P/T/MV (CR 208.1 / CR 202.3) instead
         // of counting.
-        QuantityRef::ZoneChangeAggregateThisTurn {
+        QuantityRef::ZoneChangeAggregate {
+            source,
             from,
             to,
             filter,
             function,
             property,
         } => {
-            let vals = state
-                .zone_changes_this_turn
-                .iter()
+            let records: Vec<_> = match source {
+                ZoneChangeRecordSource::ThisTurn => state.zone_changes_this_turn.iter().collect(),
+                ZoneChangeRecordSource::InstructionResult { result } => {
+                    instruction_zone_change_records(state, *result, ability.and_then(|ability| ability.return_result_process))
+                        .expect("addressed quantities must pass availability validation before scalar evaluation").iter().collect()
+                }
+            };
+            let vals = records
+                .into_iter()
                 .filter(|record| {
                     from.is_none_or(|zone| record.from_zone == Some(zone))
                         && to.is_none_or(|zone| record.to_zone == zone)
-                        && matches_target_filter_on_zone_change_record(
-                            state,
-                            record,
-                            filter,
-                            &filter_ctx,
-                        )
+                        && match source {
+                            ZoneChangeRecordSource::ThisTurn => {
+                                matches_target_filter_on_zone_change_record(
+                                    state,
+                                    record,
+                                    filter,
+                                    &filter_ctx,
+                                )
+                            }
+                            ZoneChangeRecordSource::InstructionResult { .. } => {
+                                crate::game::filter::matches_target_filter_on_departure_record(
+                                    state,
+                                    record,
+                                    filter,
+                                    &filter_ctx,
+                                )
+                            }
+                        }
                 })
                 .filter_map(|record| match property {
                     ObjectProperty::Power => record.power,
@@ -13022,7 +13113,8 @@ mod tests {
                 to: None,
                 filter: other(),
             },
-            QuantityRef::ZoneChangeAggregateThisTurn {
+            QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                 from: None,
                 to: None,
                 filter: other(),
@@ -13111,7 +13203,7 @@ mod tests {
             let filter = match &qty {
                 QuantityRef::ControlledByEachPlayer { filter, .. }
                 | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-                | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+                | QuantityRef::ZoneChangeAggregate { filter, .. }
                 | QuantityRef::SacrificedThisTurn { filter, .. }
                 | QuantityRef::TokensCreatedThisTurn { filter, .. }
                 | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => Some(filter),
@@ -13402,7 +13494,8 @@ mod tests {
                 1,
             ),
             (
-                QuantityRef::ZoneChangeAggregateThisTurn {
+                QuantityRef::ZoneChangeAggregate {
+                    source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                     from: Some(Zone::Battlefield),
                     to: Some(Zone::Graveyard),
                     filter: filter.clone(),
@@ -13435,7 +13528,7 @@ mod tests {
                 | QuantityRef::SacrificedThisTurn { filter, .. }
                 | QuantityRef::TokensCreatedThisTurn { filter, .. }
                 | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-                | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+                | QuantityRef::ZoneChangeAggregate { filter, .. }
                 | QuantityRef::SpellsCastThisTurn {
                     filter: Some(filter),
                     ..
@@ -15824,13 +15917,18 @@ mod tests {
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Dalek".to_string()],
             power: Some(3),
+            toughness: Some(4),
+            mana_value: 2,
             ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Battlefield), Zone::Graveyard)
         };
         let dalek_b = ZoneChangeRecord {
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Dalek".to_string()],
             power: Some(3),
-            ..ZoneChangeRecord::test_minimal(ObjectId(11), Some(Zone::Battlefield), Zone::Graveyard)
+            toughness: Some(5),
+            mana_value: 5,
+            // A repeated departure of the same storage id is another record.
+            ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Battlefield), Zone::Graveyard)
         };
         let non_dalek = ZoneChangeRecord {
             core_types: vec![CoreType::Creature],
@@ -15845,7 +15943,8 @@ mod tests {
         let dalek_filter = TargetFilter::Typed(TypedFilter::default().subtype("Dalek".to_string()));
 
         let sum = QuantityExpr::Ref {
-            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Graveyard),
                 filter: dalek_filter.clone(),
@@ -15854,9 +15953,54 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &sum, PlayerId(0), source), 6);
+        assert_eq!(
+            state.zone_changes_this_turn[0].object_id,
+            state.zone_changes_this_turn[1].object_id
+        );
+        let aggregate = |function, property, destination| QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
+                from: Some(Zone::Battlefield),
+                to: Some(destination),
+                filter: dalek_filter.clone(),
+                function,
+                property,
+            },
+        };
+        for (property, sum, minimum, maximum) in [
+            (ObjectProperty::Power, 6, 3, 3),
+            (ObjectProperty::Toughness, 9, 4, 5),
+            (ObjectProperty::ManaValue, 7, 2, 5),
+        ] {
+            for (function, expected) in [
+                (AggregateFunction::Sum, sum),
+                (AggregateFunction::Min, minimum),
+                (AggregateFunction::Max, maximum),
+            ] {
+                assert_eq!(
+                    resolve_quantity(
+                        &state,
+                        &aggregate(function, property, Zone::Graveyard),
+                        PlayerId(0),
+                        source
+                    ),
+                    expected
+                );
+                assert_eq!(
+                    resolve_quantity(
+                        &state,
+                        &aggregate(function, property, Zone::Exile),
+                        PlayerId(0),
+                        source
+                    ),
+                    0
+                );
+            }
+        }
 
         let max = QuantityExpr::Ref {
-            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Graveyard),
                 filter: dalek_filter.clone(),
@@ -15868,7 +16012,8 @@ mod tests {
 
         // A destination the records never matched yields 0.
         let none_match = QuantityExpr::Ref {
-            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Exile),
                 filter: dalek_filter,
@@ -25786,6 +25931,8 @@ mod tests {
         );
 
         let pending = crate::types::resolution::PendingDieRoll {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: spell,
             controller: root.controller,
             roller: root.controller,
@@ -25881,6 +26028,8 @@ mod tests {
         );
 
         let pending = crate::types::resolution::PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: spell,
             controller: root.controller,
             flipper: root.controller,
@@ -25964,6 +26113,8 @@ mod tests {
         );
 
         state.push_vote_ballot(crate::types::game_state::PendingVoteBallotIteration {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             ability_template: Box::new(ballot_template),
             remaining_voters: vec![root.controller],
             source_id: spell,
@@ -26178,7 +26329,8 @@ mod dandan_scoped_zone_tests {
             ..ZoneChangeRecord::test_minimal(ObjectId(50), Some(Zone::Graveyard), Zone::Hand)
         });
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                 from: Some(Zone::Graveyard),
                 to: Some(Zone::Hand),
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -26743,5 +26895,120 @@ mod jev_color_population_tests {
         );
         // CR 105.1: First Family's union counts white once across both populations.
         assert_eq!(resolve_quantity(&state, &union, PlayerId(0), id), 2);
+    }
+}
+
+#[cfg(test)]
+mod departure_source_boundary_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{ReturnResultId, ZoneChangeRecordSource};
+    use crate::types::game_state::{
+        InstructionResult, ReturnResultFrame, ReturnResultOccurrenceId, ReturnResultProcessId,
+    };
+
+    fn expression(source: ZoneChangeRecordSource) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source,
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        }
+    }
+
+    #[test]
+    fn departure_source_preview_never_borrows_a_result_or_invents_known_zero() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P0, "Supplemental canonical preview source", 5, 5)
+            .id();
+        let mut state = scenario.build().state().clone();
+        let addressed = expression(ZoneChangeRecordSource::InstructionResult {
+            result: ReturnResultId(7),
+        });
+        let fixed = QuantityExpr::Fixed { value: 5 };
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &fixed, P0, source),
+            Some(5)
+        );
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &addressed, P0, source),
+            None
+        );
+        assert!(!quantity_is_cast_stable_for_pre_cast(&addressed));
+        assert!(quantity_is_cast_stable_for_pre_cast(&fixed));
+        state.next_return_result_occurrence_id = 2;
+        state.next_return_result_process_id = 6;
+        state.active_return_result_occurrence = Some(ReturnResultOccurrenceId(1));
+        state.return_result_frames.insert(
+            ReturnResultOccurrenceId(1),
+            ReturnResultFrame {
+                process: Some(ReturnResultProcessId(5)),
+                results: [(ReturnResultId(7), InstructionResult::ZoneChanges(vec![]))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &addressed, P0, source),
+            None,
+            "even a present completed empty result is unavailable to a standalone source-only view"
+        );
+        let mut actual = ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
+        actual.return_result_process = Some(ReturnResultProcessId(5));
+        let QuantityExpr::Ref { qty } = &addressed else {
+            unreachable!()
+        };
+        assert!(validate_addressed_quantity_ref(&state, qty, actual.return_result_process).is_ok());
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &addressed, &actual),
+            0,
+            "a real owned completed empty result is a known zero in its actual execution view"
+        );
+        assert!(validate_addressed_quantity_ref(&state, qty, None).is_err());
+        assert!(
+            validate_addressed_quantity_ref(&state, qty, Some(ReturnResultProcessId(7))).is_err()
+        );
+        state
+            .return_result_frames
+            .get_mut(&ReturnResultOccurrenceId(1))
+            .unwrap()
+            .results
+            .clear();
+        assert!(
+            validate_addressed_quantity_ref(&state, qty, actual.return_result_process).is_err(),
+            "absence is unavailable before scalar evaluation"
+        );
+    }
+
+    #[test]
+    fn departure_quantity_current_and_legacy_source_wire_round_trip_without_reinterpretation() {
+        for source in [
+            ZoneChangeRecordSource::ThisTurn,
+            ZoneChangeRecordSource::InstructionResult {
+                result: ReturnResultId(7),
+            },
+        ] {
+            let current = expression(source);
+            let wire = serde_json::to_value(&current).unwrap();
+            let loaded: QuantityExpr = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(loaded, current);
+            assert_eq!(wire["qty"]["type"], "ZoneChangeAggregate");
+            assert!(wire["qty"].get("source").is_some());
+        }
+        let current = expression(ZoneChangeRecordSource::ThisTurn);
+        let mut legacy = serde_json::to_value(&current).unwrap();
+        legacy["qty"].as_object_mut().unwrap().remove("source");
+        legacy["qty"]["type"] = serde_json::Value::String("ZoneChangeAggregateThisTurn".into());
+        let loaded: QuantityExpr = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded, current);
+        assert_eq!(loaded.instruction_result_ids(), vec![]);
+        let canonical = serde_json::to_value(loaded).unwrap();
+        assert_eq!(canonical["qty"]["type"], "ZoneChangeAggregate");
+        assert_eq!(canonical["qty"]["source"]["kind"], "ThisTurn");
     }
 }

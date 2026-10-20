@@ -3217,7 +3217,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::SacrificedThisTurn { filter, .. }
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregate { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => {
@@ -4863,7 +4863,7 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::SacrificedThisTurn { filter, .. }
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregate { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => rewrite_filter_props(
@@ -6509,6 +6509,46 @@ pub fn matches_target_filter_on_zone_change_record(
     ctx: &FilterContext<'_>,
 ) -> bool {
     zone_change_filter_inner(state, record, record.from_zone, filter, ctx)
+}
+
+/// CR 400.7 + CR 608.2i: exact departure facts are owned by this record, never a later object.
+pub(crate) fn departure_record_has_coherent_snapshot(record: &ZoneChangeRecord) -> bool {
+    let Some(subject) = record.trigger_source_context() else {
+        return false;
+    };
+    subject.identity.reference.object_id == record.object_id
+        && Some(subject.identity.expected_zone) == record.from_zone
+        && subject.lki.controller == record.controller
+        && subject.lki.owner == record.owner
+        && subject.lki.power == record.power
+        && subject.lki.toughness == record.toughness
+        && subject.lki.card_types == record.core_types
+        && subject.lki.subtypes == record.subtypes
+}
+
+/// CR 608.2i: noun, former players and numeric facts share the captured departure authority.
+pub(crate) fn matches_target_filter_on_departure_record(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if !departure_record_has_coherent_snapshot(record) {
+        return false;
+    }
+    let subject = record
+        .trigger_source_context()
+        .expect("coherent departure has its exact snapshot");
+    matches_target_filter_on_exact_snapshot(
+        state,
+        record.object_id,
+        &subject.lki,
+        filter,
+        ctx,
+        Some(subject.identity.reference.incarnation),
+        record.from_zone,
+        Some(subject),
+    )
 }
 
 /// Like [`matches_target_filter_on_zone_change_record`], but the player axis reads the record as

@@ -2973,6 +2973,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
         "reach-guard"
     );
     let WaitingFor::UnlessPayment {
+        return_result_occurrence: _,
         player,
         cost,
         pending_effect,
@@ -3023,6 +3024,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
             &format!("{label} UnlessPayment pending_effect"),
         );
         let WaitingFor::UnlessPayment {
+            return_result_occurrence: _,
             player: view_player,
             cost: view_cost,
             pending_effect: view_effect,

@@ -827,8 +827,9 @@ fn u13_current_removal_pause_requires_both_tickets_from_its_owned_reader() {
                 panic!("genuine bound removal proposal")
             };
             assert_eq!(proposed_binding, binding);
-            let InstructionResult::CounterRemovals(result) =
-                &f.runner.state().return_result_frames[&binding.occurrence][&binding.result]
+            let InstructionResult::CounterRemovals(result) = &f.runner.state().return_result_frames
+                [&binding.occurrence]
+                .results[&binding.result]
             else {
                 panic!("present typed counter result")
             };
@@ -1001,7 +1002,14 @@ fn u13_paused_exact_recipient_and_current_missing_wrong_ticket_refusal() {
                 7 => {
                     let frames = bad["return_result_frames"].as_object_mut().unwrap();
                     let frame = frames.values_mut().next().unwrap().as_object_mut().unwrap();
-                    *frame.values_mut().next().unwrap() = serde_json::json!([]);
+                    *frame
+                        .get_mut("results")
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .values_mut()
+                        .next()
+                        .unwrap() = serde_json::json!([]);
                 }
                 _ => unreachable!(),
             }

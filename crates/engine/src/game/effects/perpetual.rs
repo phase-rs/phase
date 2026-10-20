@@ -42,10 +42,16 @@ pub(crate) fn prepare_sought_cost_grant(
     let occurrence = state
         .active_return_result_occurrence
         .ok_or_else(|| EffectError::MissingParam("seek result occurrence".to_string()))?;
-    let records = state
-        .return_result_frames
-        .get(&occurrence)
-        .and_then(|frame| frame.get(result_id))
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        Some(occurrence),
+        ability.return_result_process,
+        false,
+    )
+    .map_err(EffectError::InvalidParam)?;
+    let records = frame
+        .results
+        .get(result_id)
         .ok_or_else(|| EffectError::MissingParam("settled seek result".to_string()))?;
     let records = records
         .zone_changes()
@@ -1776,11 +1782,22 @@ mod sought_exact_recipient_tests {
     fn sought_grant_preparation_is_frozen_before_repeat_children() {
         let (runner, _, source) = crate::game::effects::seek::tests::sought_pause_fixture();
         let mut state = runner.state().clone();
+        let Some(crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+            return_result_process: expected_process,
+            ..
+        }) = state
+            .active_batch_delivery()
+            .and_then(|batch| batch.completion.as_ref())
+        else {
+            panic!("real producer retains its independent publication authority")
+        };
+        let expected_process = *expected_process;
         let (occurrence, result_id, records) = state
             .return_result_frames
             .iter()
             .find_map(|(occurrence, frame)| {
                 frame
+                    .results
                     .iter()
                     .find(|(_, records)| {
                         records
@@ -1806,6 +1823,7 @@ mod sought_exact_recipient_tests {
             PlayerId(0),
         );
         ability.reads_return_result.as_mut().unwrap().0 = result_id;
+        ability.bind_return_result_process(expected_process);
         ability.targets = vec![TargetRef::Object(source)];
         let tail = ResolvedAbility::new(
             Effect::GainLife {
@@ -1843,9 +1861,10 @@ mod sought_exact_recipient_tests {
             state.next_return_result_occurrence_id,
         );
         state.next_return_result_occurrence_id += 1;
-        state
-            .return_result_frames
-            .insert(child, std::collections::BTreeMap::new());
+        state.return_result_frames.insert(
+            child,
+            crate::types::game_state::ReturnResultFrame::default(),
+        );
         state.active_return_result_occurrence = Some(child);
         for (_, object) in state.objects.iter_mut() {
             object.color.clear();
@@ -1872,6 +1891,7 @@ mod sought_exact_recipient_tests {
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
+            .results
             .insert(
                 result_id,
                 crate::types::game_state::InstructionResult::ZoneChanges(Vec::new()),
@@ -1888,6 +1908,7 @@ mod sought_exact_recipient_tests {
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
+            .results
             .insert(
                 result_id,
                 crate::types::game_state::InstructionResult::RevealedCards(
@@ -1915,11 +1936,22 @@ mod sought_exact_recipient_tests {
     fn jev_seek_result_does_not_change_returned_this_way_count() {
         let (runner, _, source) = crate::game::effects::seek::tests::sought_pause_fixture();
         let mut state = runner.state().clone();
+        let Some(crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+            return_result_process: expected_process,
+            ..
+        }) = state
+            .active_batch_delivery()
+            .and_then(|batch| batch.completion.as_ref())
+        else {
+            panic!("real producer retains its independent publication authority")
+        };
+        let expected_process = *expected_process;
         let (occurrence, _, records) = state
             .return_result_frames
             .iter()
             .find_map(|(occurrence, frame)| {
                 frame
+                    .results
                     .iter()
                     .find(|(_, records)| {
                         records
@@ -1942,6 +1974,7 @@ mod sought_exact_recipient_tests {
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
+            .results
             .insert(
                 result_id,
                 crate::types::game_state::InstructionResult::ZoneChanges(vec![
@@ -1957,6 +1990,7 @@ mod sought_exact_recipient_tests {
         .unwrap();
         let mut delayed =
             crate::game::ability_utils::build_resolved_from_def(reader, source, PlayerId(0));
+        delayed.bind_return_result_process(expected_process);
         delayed.reads_return_result = Some((
             result_id,
             ReturnResultReadSpec {
@@ -1975,11 +2009,12 @@ mod sought_exact_recipient_tests {
         ));
         // A Seek reader on the other key independently retains all completed
         // moved cards; it does not acquire the old delayed-return predicate.
-        assert!(state.return_result_frames[&occurrence].len() >= 2);
+        assert!(state.return_result_frames[&occurrence].results.len() >= 2);
         state
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
+            .results
             .insert(
                 result_id,
                 crate::types::game_state::InstructionResult::RevealedCards(

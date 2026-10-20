@@ -2220,6 +2220,7 @@ fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
     ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(0))));
 
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(0),
         cost: AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2298,6 +2299,7 @@ fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
         PlayerId(0),
     );
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(0),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 1 },
@@ -2368,6 +2370,7 @@ fn unless_pay_success_runs_if_a_player_does_sub_ability() {
     // Player 1 (the unless payer) starts with 20 life and 2 energy to pay.
     state.players[1].energy = 2;
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(1),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2457,6 +2460,7 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
 
     state.players[1].energy = 2;
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(1),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2554,6 +2558,7 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
     }
 
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(1),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2643,6 +2648,7 @@ fn unless_pay_decline_runs_primary_not_if_a_player_does_sub() {
     primary.sub_ability = Some(Box::new(alternative));
 
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(1),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2687,6 +2693,7 @@ fn unless_pay_success_with_no_sub_ability_is_inert() {
 
     state.players[1].energy = 2;
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(1),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2747,6 +2754,7 @@ fn unless_pay_success_clears_stale_cost_payment_failed_flag() {
 
     state.players[1].energy = 2;
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(1),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2780,6 +2788,7 @@ fn unless_energy_payment_deducts_energy_and_skips_effect() {
     );
     state.players[0].energy = 2;
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(0),
         cost: AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 2 },
@@ -2843,6 +2852,7 @@ fn unless_discard_payment_filters_eligible_hand_cards() {
         .core_types = vec![CoreType::Creature];
 
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: PlayerId(0),
         cost: AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
@@ -2933,6 +2943,7 @@ fn multi_target_selection_preserves_nested_effect_zone_choice_continuation() {
     pending_ability.sub_ability = Some(Box::new(sacrifice_ability));
 
     state.waiting_for = WaitingFor::MultiTargetSelection {
+        return_result_occurrence: None,
         player: PlayerId(0),
         legal_targets: vec![target_id],
         min_targets: 1,
@@ -2971,6 +2982,8 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -3049,6 +3062,8 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: PlayerId(0),
         cards: vec![chosen_land, unchosen_land],
         count: 2,
@@ -3102,6 +3117,8 @@ fn effect_zone_choice_up_to_respects_min_count() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -3183,6 +3200,8 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         },
     );
     state.waiting_for = WaitingFor::ChooseOneOfBranch {
+        return_result_occurrence: None,
+        expected_return_result_process: None,
         player: PlayerId(1),
         controller: PlayerId(0),
         source_id,

@@ -5565,7 +5565,10 @@ fn detect_duration_this_turn(
                 | QuantityRef::BattlefieldEntriesThisTurn { .. }
                 | QuantityRef::LandsPlayedThisTurn { .. }
                 | QuantityRef::ZoneChangeCountThisTurn { .. }
-                | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+                | QuantityRef::ZoneChangeAggregate {
+                    source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
+                    ..
+                }
                 | QuantityRef::DamageDealtThisTurn { .. }
                 | QuantityRef::AttackedThisTurn { .. }
                 | QuantityRef::DescendedThisTurn
@@ -15711,5 +15714,47 @@ mod detect_condition_if_replacement_exemption_tests {
             result, " if a player would sacrifice a permanent, exile it instead.",
             "only the represented sentence should have been stripped"
         );
+    }
+}
+
+#[cfg(test)]
+mod departure_source_swallow_tests {
+    use super::*;
+    use crate::types::ability::{
+        AggregateFunction, ObjectProperty, QuantityExpr, QuantityRef, ReturnResultId, TargetFilter,
+        ZoneChangeRecordSource,
+    };
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn departure_instruction_result_never_suppresses_an_unrepresented_this_turn_duration() {
+        let text = "You gain life this turn.";
+        for (source, swallowed) in [
+            (ZoneChangeRecordSource::ThisTurn, false),
+            (
+                ZoneChangeRecordSource::InstructionResult {
+                    result: ReturnResultId(7),
+                },
+                true,
+            ),
+        ] {
+            let effect = Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate {
+                        source,
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Exile),
+                        filter: TargetFilter::Any,
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                    },
+                },
+            };
+            let evidence = UnitEvidence::of_effect(&effect);
+            let mut diagnostics = vec![];
+            detect_duration_this_turn(&text.to_lowercase(), text, &evidence, &mut diagnostics);
+            assert_eq!(diagnostics.iter().any(|diagnostic| matches!(diagnostic, OracleDiagnostic::SwallowedClause { detector, .. } if detector == OracleSemanticFeature::DurationThisTurn.detector_label())), swallowed, "only the turn-journal source represents the existing historical this-turn suffix");
+        }
     }
 }

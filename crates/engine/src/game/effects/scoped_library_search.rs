@@ -1,4 +1,6 @@
-use crate::game::effects::{resolve_ability_chain, search_library};
+#[cfg(test)]
+use crate::game::effects::resolve_ability_chain;
+use crate::game::effects::search_library;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility, SubAbilityLink,
@@ -12,6 +14,28 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+
+fn with_search_occurrence<T>(
+    state: &mut GameState,
+    run: impl FnOnce(&mut GameState) -> Result<T, EffectError>,
+) -> Result<T, EffectError> {
+    let occurrence = state
+        .pending_scoped_library_search
+        .as_ref()
+        .and_then(|pending| pending.return_result_occurrence);
+    if let Some(pending) = &state.pending_scoped_library_search {
+        super::validate_selected_instruction_result_owner(state, &pending.ability, occurrence)?;
+        if let Some(tail) = pending.after_scope.as_deref() {
+            super::validate_selected_instruction_result_owner(state, tail, occurrence)?;
+        }
+    }
+    super::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        if let Some(pending) = &state.pending_scoped_library_search {
+            super::validate_addressed_quantity_reads(state, &pending.ability)?;
+        }
+        run(state)
+    })
+}
 
 /// CR 101.4 + CR 701.23i: A scoped self-library search can use the simultaneous
 /// protocol only when its immediate continuation is a plain parent-target
@@ -209,6 +233,7 @@ pub(crate) fn start(
         }
     };
     let pending = PendingScopedLibrarySearch {
+        return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
         ability: Box::new(ability.clone()),
         phase,
         after_scope,
@@ -254,6 +279,7 @@ pub(crate) fn handle_optional_decision(
     if pending.current_player() != Some(player) || pending.ability.source_id != source_id {
         return Ok(false);
     }
+    with_search_occurrence(state, |_| Ok(()))?;
 
     let mut pending = state
         .pending_scoped_library_search
@@ -283,6 +309,37 @@ pub(crate) fn handle_optional_decision(
 /// simultaneous batch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_selection(
+    state: &mut GameState,
+    player: PlayerId,
+    library_owner: Option<PlayerId>,
+    cards: &[ObjectId],
+    count: usize,
+    reveal: bool,
+    up_to: bool,
+    allows_partial_find: bool,
+    constraint: &crate::types::ability::SearchSelectionConstraint,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    with_search_occurrence(state, |state| {
+        submit_selection_in_occurrence(
+            state,
+            player,
+            library_owner,
+            cards,
+            count,
+            reveal,
+            up_to,
+            allows_partial_find,
+            constraint,
+            chosen,
+            events,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_selection_in_occurrence(
     state: &mut GameState,
     player: PlayerId,
     library_owner: Option<PlayerId>,
@@ -440,6 +497,15 @@ fn advance_acceptance(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    with_search_occurrence(state, |state| {
+        advance_acceptance_in_occurrence(state, events)
+    })
+}
+
+fn advance_acceptance_in_occurrence(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let next = state
         .pending_scoped_library_search
         .as_ref()
@@ -525,6 +591,15 @@ pub(crate) fn complete_replaced_selection(
 /// accepted search against one cloned snapshot and commit the complete group
 /// atomically before the first APNAP selection prompt.
 fn prepare_scoped_group(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    with_search_occurrence(state, |state| {
+        prepare_scoped_group_in_occurrence(state, events)
+    })
+}
+
+fn prepare_scoped_group_in_occurrence(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -630,6 +705,15 @@ fn prepare_scoped_group(
 /// CR 101.4: Collect simultaneous search choices in APNAP order before the
 /// selected cards move together.
 fn advance_selection(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    with_search_occurrence(state, |state| {
+        advance_selection_in_occurrence(state, events)
+    })
+}
+
+fn advance_selection_in_occurrence(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -819,6 +903,7 @@ fn deliver_collected_cards(
         .collect();
     let completion = BatchCompletion::LibrarySearchDeliverySettled {
         resume: LibrarySearchDeliveryResume::Scoped {
+            return_result_occurrence: pending.return_result_occurrence,
             player: pending.ability.controller,
             source_id: pending.ability.source_id,
             search_keys: search_keys.clone(),
@@ -874,11 +959,16 @@ fn deliver_collected_cards(
 
 pub(crate) fn finish_delivery_tail(
     state: &mut GameState,
+    return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
     player: PlayerId,
     source_id: ObjectId,
     after_scope: Option<Box<ResolvedAbility>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    if let Some(tail) = after_scope.as_deref() {
+        super::validate_selected_instruction_result_owner(state, tail, return_result_occurrence)?;
+    }
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChangeZone,
         source_id,
@@ -886,7 +976,9 @@ pub(crate) fn finish_delivery_tail(
     });
     set_priority(state, player);
     if let Some(after_scope) = after_scope {
-        resolve_ability_chain(state, &after_scope, events, 1)?;
+        super::with_inherited_return_result_occurrence(state, return_result_occurrence, |state| {
+            super::resolve_resume_owned_ability_chain(state, &after_scope, events, 1)
+        })?;
     }
     Ok(())
 }
@@ -1360,6 +1452,7 @@ mod tests {
                 })
                 .collect();
             PendingScopedLibrarySearch {
+                return_result_occurrence: None,
                 ability: Box::new(ability),
                 phase: ScopedLibrarySearchPhase::CollectSelections {
                     prepared_choices: Vec::new(),
@@ -1491,6 +1584,7 @@ mod tests {
     fn scoped_phase_deserialization_rejects_duplicate_delivery_keys() {
         let (_state, ability, _cards) = three_player_scoped_search(false);
         let pending = PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(ability),
             phase: ScopedLibrarySearchPhase::Delivering {
                 search_keys: vec![PlayerId(0)],
@@ -1668,6 +1762,7 @@ mod tests {
         .sub_ability(delivery);
         let identity = ObjectIncarnationRef::from_object(&state.objects[&shared]);
         state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(search),
             phase: ScopedLibrarySearchPhase::CollectSelections {
                 prepared_choices: Vec::new(),
@@ -1758,6 +1853,7 @@ mod tests {
                     .destination_zone(Zone::Hand),
             );
         state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(search),
             phase: ScopedLibrarySearchPhase::CollectSelections {
                 prepared_choices: Vec::new(),

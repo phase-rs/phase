@@ -298,10 +298,16 @@ pub fn resolve(
         let occurrence = state
             .active_return_result_occurrence
             .ok_or_else(|| EffectError::MissingParam("return result occurrence".to_string()))?;
-        let records = state
-            .return_result_frames
-            .get(&occurrence)
-            .and_then(|frame| frame.get(result_id))
+        let frame = crate::types::game_state::checked_return_result_frame(
+            state,
+            Some(occurrence),
+            ability.return_result_process,
+            false,
+        )
+        .map_err(EffectError::InvalidParam)?;
+        let records = frame
+            .results
+            .get(result_id)
             .ok_or_else(|| EffectError::MissingParam("settled return result".to_string()))?;
         let records = records
             .zone_changes()

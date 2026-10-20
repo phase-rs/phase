@@ -738,6 +738,8 @@ fn ignoring_a_non_lowest_roll_is_rejected() {
     // have a unique lowest at index 0 but which offers a two-element choice —
     // the shape a tie produces, with a deliberately illegal submission.
     let pending = engine::types::resolution::PendingDieRoll {
+        return_result_occurrence: None,
+        expected_return_result_process: None,
         source_id: source,
         controller: P0,
         roller: P0,
@@ -1152,6 +1154,8 @@ fn ai_candidates_cover_every_ignore_count() {
         runner
             .state_mut()
             .push_die_roll_frame(engine::types::resolution::PendingDieRoll {
+                return_result_occurrence: None,
+                expected_return_result_process: None,
                 source_id: source,
                 controller: P0,
                 roller: P0,
@@ -1388,6 +1392,8 @@ fn a_forced_lowest_roll_cannot_be_kept_by_picking_around_it() {
     runner
         .state_mut()
         .push_die_roll_frame(engine::types::resolution::PendingDieRoll {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: source,
             controller: P0,
             roller: P0,

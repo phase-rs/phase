@@ -2259,7 +2259,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::LifeLostThisTurn { .. }
@@ -4250,6 +4250,7 @@ fn walk_ability(
     acc: &mut RwProfile,
 ) {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         effect,
         sub_ability,
         else_ability,
@@ -6740,13 +6741,24 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             filter,
             from: _,
         } => journal_zone_change_read(filter, to.as_ref()),
-        QuantityRef::ZoneChangeAggregateThisTurn {
+        QuantityRef::ZoneChangeAggregate {
+            source,
             to,
             filter,
             from: _,
             function: _,
             property: _,
-        } => journal_zone_change_read(filter, to.as_ref()),
+        } => match source {
+            crate::types::ability::ZoneChangeRecordSource::ThisTurn => journal_zone_change_read(filter, to.as_ref()),
+            crate::types::ability::ZoneChangeRecordSource::InstructionResult { result: _ } => {
+                // CR 608.2i: frozen records are private to the selected resolving occurrence.
+                let mut profile = reads_frozen_of(StateKind::SetMembership);
+                profile.reads_member_bound = true;
+                profile.merge(rw_target_filter(filter));
+                filter.for_each_nested_quantity_ref(&mut |reference| profile.merge(rw_quantity_ref(reference)));
+                profile
+            }
+        },
         // CR 701.21a: a sacrifice moves the permanent to its owner's graveyard.
         QuantityRef::SacrificedThisTurn { filter, player: _ } => {
             let mut p = board_membership_read(filter);
@@ -10191,5 +10203,96 @@ mod u13_counter_condition_rw_tests {
         );
         assert!(!ability_rw_profile(&plain).reads_member_bound());
         assert!(ability_rw_profile(&plain).writes_external.any());
+    }
+}
+
+#[cfg(test)]
+mod departure_source_profile_tests {
+    use super::*;
+    use crate::types::ability::{
+        AggregateFunction, ObjectProperty, ReturnResultId, ZoneChangeRecordSource,
+    };
+
+    fn quantity(source: ZoneChangeRecordSource, filter: TargetFilter) -> QuantityRef {
+        QuantityRef::ZoneChangeAggregate {
+            source,
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Exile),
+            filter,
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::Power,
+        }
+    }
+
+    #[test]
+    fn departure_frozen_membership_is_member_bound_without_becoming_a_turn_journal_or_new_legacy_tag(
+    ) {
+        let result = ZoneChangeRecordSource::InstructionResult {
+            result: ReturnResultId(7),
+        };
+        let frozen = rw_quantity_ref(&quantity(
+            result,
+            TargetFilter::Typed(TypedFilter::creature()),
+        ));
+        let mut expected = RwProfile::empty();
+        expected.reads_frozen = KindSet::one(StateKind::SetMembership);
+        expected.reads_member_bound = true;
+        assert_eq!(
+            frozen, expected,
+            "the complete profile has no invented current-board/player/event/legacy read"
+        );
+        assert!(!frozen.legacy_batch_prompt());
+        assert!(frozen.reads_member_bound());
+        let mut group = GroupStructure {
+            same_event: true,
+            all_same_source: false,
+            all_sources_self_departed: false,
+            event_object_excludes_sources: false,
+            event_object_present: true,
+            source_census: SourceCensus::unknown(),
+            controller_uniformity: ControllerUniformity::Mixed,
+        };
+        assert!(profiles_conflict(&frozen, &group), "identical raw result numbers on distinct members cannot authorize a shared-function ordering shortcut");
+        assert!(
+            !profiles_conflict(&RwProfile::empty(), &group),
+            "the ordinary source-independent sibling still takes its existing fast path"
+        );
+        group.all_same_source = true;
+        assert!(
+            !profiles_conflict(&frozen, &group),
+            "the existing single-source storage contract is preserved"
+        );
+        let journal = rw_quantity_ref(&quantity(
+            ZoneChangeRecordSource::ThisTurn,
+            TargetFilter::Typed(TypedFilter::creature()),
+        ));
+        assert_ne!(journal, frozen);
+        assert_eq!(journal.reads_membership_zones, ZoneSpan::one(Zone::Exile));
+        let event = rw_quantity_ref(&quantity(result, TargetFilter::EventTarget));
+        assert!(event.reads_event_live);
+        assert!(!event.legacy_batch_prompt());
+        let legacy_event = rw_quantity_ref(&quantity(result, TargetFilter::ParentTarget));
+        assert!(legacy_event.reads_event_live);
+        assert!(
+            legacy_event.legacy_batch_prompt(),
+            "an existing legacy operand retains its own classification"
+        );
+        let mut typed = TypedFilter::creature();
+        typed.properties.push(FilterProp::Cmc {
+            comparator: Comparator::GE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        });
+        let source = rw_quantity_ref(&quantity(result, TargetFilter::Typed(typed)));
+        assert!(source.reads_src.object_pt);
+        assert!(source.current_pt_reads.contains(PtReadScope::Source));
+        assert!(source.reads_member_bound());
+        assert_ne!(
+            source, frozen,
+            "a frozen record's predicate still evaluates its actual source-relative operands"
+        );
     }
 }

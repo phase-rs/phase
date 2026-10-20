@@ -1468,6 +1468,10 @@ fn apply_action_boundary_core(
         lifecycle.discard();
         return Err(error);
     }
+    if let Err(error) = crate::types::game_state::validate_retained_zone_result_owners(state) {
+        lifecycle.discard();
+        return Err(EngineError::InvalidAction(error));
+    }
     // CR 603.3 + CR 603.3b + CR 608.2c: recover an ownerless post-replacement
     // strand on the state AS FOUND, before this action touches it.
     //
@@ -13229,7 +13233,7 @@ fn apply_non_priority_pass_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
-                choice, context, ..
+                choice, context, return_result_occurrence, ..
             },
             GameAction::ChooseManaColor {
                 choice: chosen,
@@ -13288,6 +13292,7 @@ fn apply_non_priority_pass_action(
                         state,
                         pending_effect,
                         choice,
+                        *return_result_occurrence,
                         chosen.clone(),
                         &mut events,
                     )?
@@ -14793,6 +14798,7 @@ fn apply_non_priority_pass_action(
         )?,
         (
             WaitingFor::ExploreChoice {
+                return_result_occurrence,
                 player,
                 remaining,
                 pending_effect,
@@ -14811,13 +14817,11 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             };
-            super::effects::explore::handle_choice(
-                state,
-                chosen,
-                remaining,
-                pending_effect.as_ref(),
-                &mut events,
-            )?
+            effects::validate_selected_instruction_result_owner(state, pending_effect, *return_result_occurrence)
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            effects::with_inherited_return_result_occurrence(state, *return_result_occurrence, |state| {
+                super::effects::explore::handle_choice(state, chosen, remaining, pending_effect.as_ref(), &mut events)
+            })?
         }
         // CR 303.4 + CR 303.4f + CR 303.4g + CR 115.1: Player picked the
         // permanent to enchant for a return-as-Aura sub-effect or a non-spell
@@ -14929,6 +14933,7 @@ fn apply_non_priority_pass_action(
         }
         (
             WaitingFor::ChooseTokenHost {
+                return_result_occurrence,
                 player,
                 source_id: _,
                 legal_targets,
@@ -15016,8 +15021,10 @@ fn apply_non_priority_pass_action(
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
             };
-            super::effects::token::resolve_with_host_override(state, &pending, &mut events, Some(host))
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            super::effects::with_inherited_return_result_occurrence(state, *return_result_occurrence, |state| {
+                super::effects::validate_addressed_quantity_reads(state, &pending)?;
+                super::effects::token::resolve_with_host_override(state, &pending, &mut events, Some(host))
+            }).map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 return Ok(ActionResult::applied(events, state.waiting_for.clone()));
             }
@@ -27347,6 +27354,7 @@ mod cost_move_drain_priority_boundary_tests {
         let mut state = GameState::new_two_player(42);
         state.pending_cost_move_resume =
             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                return_result_occurrence: None,
                 cost: AbilityCost::Mana {
                     cost: ManaCost::generic(2),
                 },

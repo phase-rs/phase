@@ -13,7 +13,7 @@
 //! Revert-to-red anchors (each asserted below):
 //! - Without the `source`/Part-B parser fix, the token lowers to `Unimplemented`
 //!   or a 0/0 `Variable` token — the P/T assertions fail.
-//! - Under the rejected `ZoneChangeAggregateThisTurn` alternative, the
+//! - Under the rejected `ZoneChangeAggregate` alternative, the
 //!   batch-precision test's second token reads 8/8 instead of 5/5.
 //! - A live `Aggregate { creatures you control }` misparse would exclude the
 //!   dead batch (they left the battlefield) and/or include the living survivor —
@@ -102,9 +102,9 @@ fn skullspore_token_pt_equals_died_batch_total_power() {
 
 #[test]
 fn skullspore_batch_precision_second_death_reads_only_its_own_batch() {
-    // Discriminates TriggeringBatch from the rejected ZoneChangeAggregateThisTurn:
+    // Discriminates TriggeringBatch from the rejected ZoneChangeAggregate:
     // two SEPARATE single-creature death events in one turn must each read ONLY
-    // their own batch. ZoneChangeAggregateThisTurn would make the second token
+    // their own batch. ZoneChangeAggregate would make the second token
     // 8/8 (both died this turn); TriggeringBatch keeps it 5/5.
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

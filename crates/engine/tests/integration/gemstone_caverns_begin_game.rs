@@ -418,6 +418,7 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         player,
         choice: ManaChoicePrompt::SingleColor { options },
         context: ManaChoiceContext::ManaAbility(pending),
+        ..
     } = &state.waiting_for
     else {
         panic!(

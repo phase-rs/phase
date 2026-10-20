@@ -500,6 +500,7 @@ pub(crate) fn resolve_with_host_override(
             // side-effect-free up to this point.
             Some(candidates) if candidates.len() > 1 => {
                 state.waiting_for = WaitingFor::ChooseTokenHost {
+                    return_result_occurrence: state.active_return_result_occurrence,
                     player: ability.controller,
                     source_id: ability.source_id,
                     legal_targets: candidates,

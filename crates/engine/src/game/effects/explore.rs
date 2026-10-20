@@ -15,7 +15,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 
-use super::resolve_ability_chain;
+use super::resolve_resume_owned_ability_chain;
 
 /// Add a +1/+1 counter to the exploring creature via the replacement pipeline.
 fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mut Vec<GameEvent>) {
@@ -127,18 +127,18 @@ fn continuation_for_remaining(
     state.next_tracked_set_id += 1;
     state.tracked_object_sets.insert(tracked_set_id, remaining);
 
-    Some(
-        ResolvedAbility::new(
-            Effect::ExploreAll {
-                filter: TargetFilter::TrackedSet { id: tracked_set_id },
-            },
-            vec![],
-            ability.source_id,
-            ability.controller,
-        )
-        .kind(ability.kind)
-        .context(ability.context.clone()),
+    let mut next = ResolvedAbility::new(
+        Effect::ExploreAll {
+            filter: TargetFilter::TrackedSet { id: tracked_set_id },
+        },
+        vec![],
+        ability.source_id,
+        ability.controller,
     )
+    .kind(ability.kind)
+    .context(ability.context.clone());
+    next.bind_return_result_process(ability.return_result_process);
+    Some(next)
 }
 
 fn resolve_single_explorer(
@@ -163,7 +163,8 @@ fn resolve_single_explorer(
         single = single.sub_ability(sub.clone());
     }
 
-    resolve_ability_chain(state, &single, events, 1)
+    single.bind_return_result_process(ability.return_result_process);
+    resolve_resume_owned_ability_chain(state, &single, events, 1)
 }
 
 fn advance_explore_all(
@@ -191,6 +192,7 @@ fn advance_explore_all(
     }
 
     state.waiting_for = WaitingFor::ExploreChoice {
+        return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
         player,
         source_id: ability.source_id,
         choosable,

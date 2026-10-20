@@ -12438,7 +12438,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregate { filter, .. }
         | QuantityRef::CounterAddedThisTurn {
             target: filter,
             ..
@@ -48201,6 +48201,8 @@ pub mod tests {
         // Sacrifice exactly these three (count == pool) via the interactive
         // selection handler.
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![observer, b1, b2],
             count: 3,

@@ -31,6 +31,186 @@ use super::engine_priority;
 use super::mana_abilities;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+fn payment_occurrence(
+    waiting_for: &WaitingFor,
+) -> Result<Option<crate::types::game_state::ReturnResultOccurrenceId>, EngineError> {
+    match waiting_for {
+        WaitingFor::UnlessPayment {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::WardDiscardChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::WardSacrificeChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::UnlessBounceChoice {
+            return_result_occurrence,
+            ..
+        } => Ok(*return_result_occurrence),
+        _ => Err(EngineError::InvalidAction(
+            "missing resolution payment owner".into(),
+        )),
+    }
+}
+
+pub(crate) fn validate_payment_result_owner(
+    state: &GameState,
+    waiting: &WaitingFor,
+) -> Result<(), crate::types::ability::EffectError> {
+    use crate::types::ability::EffectError;
+    let (occurrence, body) = match waiting {
+        WaitingFor::UnlessPayment {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        }
+        | WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        }
+        | WaitingFor::WardDiscardChoice {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        }
+        | WaitingFor::WardSacrificeChoice {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        }
+        | WaitingFor::UnlessBounceChoice {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        } => (*return_result_occurrence, pending_effect.as_ref()),
+        _ => return Ok(()),
+    };
+    effects::validate_selected_instruction_result_owner(state, body, occurrence)?;
+    let mut addressed = Vec::new();
+    let mut read = |reference: &crate::types::ability::QuantityRef| {
+        if let Some(result) = reference.instruction_result_id() {
+            addressed.push(result);
+        }
+    };
+    let mut cost = |cost: &AbilityCost| {
+        cost.for_each_quantity_expr(&mut |expr| expr.for_each_ref(&mut read));
+        cost.for_each_predicate_quantity_ref(&mut read);
+    };
+    match waiting {
+        WaitingFor::UnlessPayment { cost: actual, .. } => cost(actual),
+        WaitingFor::UnlessPaymentChooseCost {
+            costs,
+            remaining_choices,
+            chosen,
+            ..
+        } => {
+            for actual in costs
+                .iter()
+                .chain(remaining_choices.iter().flatten())
+                .chain(chosen)
+            {
+                cost(actual);
+            }
+        }
+        WaitingFor::WardDiscardChoice {
+            filter: Some(filter),
+            ..
+        } => filter.for_each_nested_quantity_ref(&mut read),
+        _ => {}
+    }
+    if !addressed.is_empty() {
+        let frame = crate::types::game_state::checked_return_result_frame(
+            state,
+            occurrence,
+            body.return_result_process,
+            true,
+        )
+        .map_err(EffectError::InvalidParam)?;
+        for result in addressed {
+            if !matches!(frame.results.get(&result), Some(crate::types::game_state::InstructionResult::ZoneChanges(records)) if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+            {
+                return Err(EffectError::InvalidParam(
+                    "unavailable instruction-result quantity in resolution payment".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_payment_reads(state: &GameState, waiting_for: &WaitingFor) -> Result<(), EngineError> {
+    let invalid = |error| EngineError::InvalidAction(format!("{error:?}"));
+    match waiting_for {
+        WaitingFor::UnlessPayment {
+            cost,
+            pending_effect,
+            ..
+        } => {
+            crate::game::quantity::validate_addressed_cost_reads(state, cost, pending_effect)
+                .map_err(invalid)?;
+            effects::validate_addressed_quantity_reads(state, pending_effect).map_err(invalid)?;
+        }
+        WaitingFor::UnlessPaymentChooseCost {
+            costs,
+            remaining_choices,
+            chosen,
+            pending_effect,
+            ..
+        } => {
+            for cost in costs
+                .iter()
+                .chain(remaining_choices.iter().flatten())
+                .chain(chosen)
+            {
+                crate::game::quantity::validate_addressed_cost_reads(state, cost, pending_effect)
+                    .map_err(invalid)?;
+            }
+            effects::validate_addressed_quantity_reads(state, pending_effect).map_err(invalid)?;
+        }
+        WaitingFor::WardDiscardChoice {
+            filter,
+            pending_effect,
+            ..
+        } => {
+            let mut failure = None;
+            if let Some(filter) = filter {
+                filter.for_each_nested_quantity_ref(&mut |reference| {
+                    if let Err(error) = crate::game::quantity::validate_addressed_quantity_ref(
+                        state,
+                        reference,
+                        pending_effect.return_result_process,
+                    ) {
+                        failure.get_or_insert(error);
+                    }
+                });
+            }
+            if let Some(error) = failure {
+                return Err(invalid(error));
+            }
+            effects::validate_addressed_quantity_reads(state, pending_effect).map_err(invalid)?;
+        }
+        WaitingFor::WardSacrificeChoice { pending_effect, .. }
+        | WaitingFor::UnlessBounceChoice { pending_effect, .. } => {
+            effects::validate_addressed_quantity_reads(state, pending_effect).map_err(invalid)?
+        }
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "missing resolution payment payload".into(),
+            ))
+        }
+    }
+    Ok(())
+}
+
 /// CR 605.4a: the sidecar-aware wrapper around the unmodified baseline handler.
 ///
 /// The baseline body — including its `park_observer_triggers_if_paused` call,
@@ -324,6 +504,24 @@ pub(super) fn handle_opponent_may_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    let occurrence = state
+        .active_optional_effect_frame()
+        .and_then(|frame| frame.return_result_occurrence);
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        if let Some(frame) = state.active_optional_effect_frame() {
+            effects::validate_addressed_quantity_reads(state, &frame.ability)
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        }
+        handle_opponent_may_choice_in_occurrence(state, waiting_for, accept, events)
+    })
+}
+
+fn handle_opponent_may_choice_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    accept: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
     let events_before = events.len();
     let produced = super::triggers::with_accepted_triggered_mana_action_scope(state, |state| {
         handle_opponent_may_choice_inner(state, waiting_for, accept, events)
@@ -446,6 +644,8 @@ fn handle_opponent_may_choice_inner(
                             ..
                         }
                     );
+                    let mut payer_view = ability.as_ref().clone();
+                    payer_view.controller = promptee;
                     let legal: Vec<ObjectId> = state
                         .objects
                         .iter()
@@ -457,10 +657,7 @@ fn handle_opponent_may_choice_inner(
                                     state,
                                     obj.id,
                                     target,
-                                    &filter::FilterContext::from_source_with_controller(
-                                        ability.source_id,
-                                        promptee,
-                                    ),
+                                    &filter::FilterContext::from_ability(&payer_view),
                                 )
                         })
                         .map(|(id, _)| *id)
@@ -497,6 +694,10 @@ fn handle_opponent_may_choice_inner(
                         state.park_ability_continuation(PendingContinuation::new(sub, state));
                     }
                     state.waiting_for = WaitingFor::MultiTargetSelection {
+                        return_result_occurrence: effects::retained_return_result_occurrence(
+                            state, &ability,
+                        )
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?,
                         player: promptee,
                         legal_targets: legal,
                         min_targets: 1,
@@ -538,7 +739,7 @@ fn handle_opponent_may_choice_inner(
                     ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
                 }
                 set_active_priority(state);
-                effects::resolve_ability_chain(state, &ability, events, 1)
+                effects::resolve_resume_owned_ability_chain(state, &ability, events, 1)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             }
         }
@@ -594,7 +795,7 @@ fn resolve_all_declined_opponent_may(
                 else_resolved.context = ability.context.clone();
                 else_resolved
                     .set_replacement_applied_recursive(ability.replacement_applied.clone());
-                effects::resolve_ability_chain(state, &else_resolved, events, 1)
+                effects::resolve_resume_owned_ability_chain(state, &else_resolved, events, 1)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             }
         } else if sub
@@ -610,7 +811,7 @@ fn resolve_all_declined_opponent_may(
             // evaluates this same negated condition as false and skips it.)
             let mut sub_resolved = sub.as_ref().clone();
             sub_resolved.context = ability.context.clone();
-            effects::resolve_ability_chain(state, &sub_resolved, events, 1)
+            effects::resolve_resume_owned_ability_chain(state, &sub_resolved, events, 1)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         }
     }
@@ -664,8 +865,24 @@ pub(super) fn handle_unless_payment_choose_cost(
     choice: crate::types::actions::UnlessCostBranch,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_unless_payment_choose_cost_in_occurrence(state, waiting_for, choice, events)
+    })
+}
+
+fn handle_unless_payment_choose_cost_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    choice: crate::types::actions::UnlessCostBranch,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
     use crate::types::actions::UnlessCostBranch;
     let WaitingFor::UnlessPaymentChooseCost {
+        return_result_occurrence: _,
         player,
         costs,
         pending_effect,
@@ -723,6 +940,7 @@ pub(super) fn handle_unless_payment_choose_cost(
             if !remaining_choices.is_empty() {
                 let next_costs = remaining_choices.remove(0);
                 state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+                    return_result_occurrence: state.active_return_result_occurrence,
                     player,
                     costs: next_costs,
                     pending_effect,
@@ -743,6 +961,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                 AbilityCost::Composite { costs: chosen }
             };
             let next = WaitingFor::UnlessPayment {
+                return_result_occurrence: state.active_return_result_occurrence,
                 player,
                 cost: final_cost,
                 pending_effect,
@@ -770,6 +989,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                 cost: ManaCost::zero(),
             });
             let next = WaitingFor::UnlessPayment {
+                return_result_occurrence: state.active_return_result_occurrence,
                 player,
                 cost: stand_in_cost,
                 pending_effect,
@@ -929,6 +1149,7 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
         *owner = TargetFilter::OriginalController;
     }
     state.pending_player_scope_unless_payment = Some(Box::new(PendingPlayerScopeUnlessPayment {
+        return_result_occurrence: state.active_return_result_occurrence,
         pending_effect: Box::new(pending_effect),
         remaining_players: remaining_players.to_vec(),
         declining_players: Vec::new(),
@@ -945,6 +1166,7 @@ fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
         .as_ref()
         .expect("player-scope unless prompt requires aggregate state");
     state.waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: pending.return_result_occurrence,
         player: pending.current_player,
         cost: pending.cost.clone(),
         pending_effect: pending.pending_effect.clone(),
@@ -1003,8 +1225,12 @@ fn settle_player_scope_token_unless_payment(
                 value: pending.declining_players.len() as i32,
             };
         }
-        effects::resolve_ability_chain(state, &effect, events, 0)
-            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+        effects::with_inherited_return_result_occurrence(
+            state,
+            pending.return_result_occurrence,
+            |state| effects::resolve_resume_owned_ability_chain(state, &effect, events, 1),
+        )
+        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
     }
     Ok(state.waiting_for.clone())
 }
@@ -1057,11 +1283,12 @@ fn handle_player_scope_token_unless_payment(
         .pending_effect
         .clone();
     let eligible =
-        eligible_unless_sacrifice_permanents(state, player, pending_effect.source_id, &cost.target);
+        eligible_unless_sacrifice_permanents(state, player, &pending_effect, &cost.target);
     if eligible.is_empty() {
         return finish_player_scope_token_unless_payment(state, player, false, events);
     }
     state.waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: state.active_return_result_occurrence,
         player,
         permanents: eligible,
         pending_effect,
@@ -1072,6 +1299,21 @@ fn handle_player_scope_token_unless_payment(
 }
 
 pub(super) fn handle_unless_payment(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_unless_payment_in_occurrence(state, waiting_for, pay, events)
+    })
+}
+
+fn handle_unless_payment_in_occurrence(
     state: &mut GameState,
     waiting_for: WaitingFor,
     pay: bool,
@@ -1092,6 +1334,7 @@ pub(super) fn handle_unless_payment(
         return handle_player_scope_token_unless_payment(state, waiting_for, pay, events);
     }
     let WaitingFor::UnlessPayment {
+        return_result_occurrence: _,
         player,
         cost,
         pending_effect,
@@ -1259,6 +1502,7 @@ pub(super) fn handle_unless_payment(
                     PaymentOutcome::Paused { .. } => {
                         state.pending_cost_move_resume =
                             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                                return_result_occurrence: state.active_return_result_occurrence,
                                 cost: poll_cost.clone(),
                                 pending_effect: pending_effect.clone(),
                                 trigger_event: trigger_event.clone(),
@@ -1287,12 +1531,10 @@ pub(super) fn handle_unless_payment(
                 );
                 let count = u32::try_from(resolved.max(0)).unwrap_or(0);
 
-                let hand_cards = crate::game::casting::find_eligible_discard_targets(
-                    state,
-                    player,
-                    pending_effect.source_id,
-                    pending_effect.context.granting_object,
-                    filter.as_ref(),
+                let mut payer_view = pending_effect.as_ref().clone();
+                payer_view.controller = player;
+                let hand_cards = crate::game::casting::find_eligible_discard_targets_for_ability(
+                    state, player, pending_effect.source_id, filter.as_ref(), &payer_view,
                 );
                 // CR 702.24a: partial payments aren't allowed — if the controller
                 // can't produce the full count, the unless cost is unpayable and
@@ -1353,6 +1595,7 @@ pub(super) fn handle_unless_payment(
                             state.pending_cost_move_resume =
                                 Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
                                     crate::types::game_state::RandomDiscardUnlessPaymentResume {
+                                        return_result_occurrence: state.active_return_result_occurrence,
                                         source_id: pending_effect.source_id,
                                         pending_effect: pending_effect.clone(),
                                         trigger_event: trigger_event.clone(),
@@ -1366,6 +1609,7 @@ pub(super) fn handle_unless_payment(
                     }
                 } else {
                     state.waiting_for = WaitingFor::WardDiscardChoice {
+                        return_result_occurrence: state.active_return_result_occurrence,
                         player,
                         cards: hand_cards,
                         pending_effect: pending_effect.clone(),
@@ -1383,13 +1627,14 @@ pub(super) fn handle_unless_payment(
                     let eligible = eligible_unless_sacrifice_permanents(
                         state,
                         player,
-                        pending_effect.source_id,
+                        &pending_effect,
                         filter,
                     );
                     if eligible.len() < *count as usize {
                         payment_failed = true;
                     } else {
                         state.waiting_for = WaitingFor::WardSacrificeChoice {
+                            return_result_occurrence: state.active_return_result_occurrence,
                             player,
                             permanents: eligible,
                             pending_effect: pending_effect.clone(),
@@ -1410,7 +1655,7 @@ pub(super) fn handle_unless_payment(
                     let eligible = eligible_unless_sacrifice_permanents(
                         state,
                         player,
-                        pending_effect.source_id,
+                        &pending_effect,
                         filter,
                     );
                     if !sacrifice_pool_meets_aggregate_constraint(
@@ -1423,6 +1668,7 @@ pub(super) fn handle_unless_payment(
                         payment_failed = true;
                     } else {
                         state.waiting_for = WaitingFor::WardSacrificeChoice {
+                            return_result_occurrence: state.active_return_result_occurrence,
                             player,
                             permanents: eligible,
                             pending_effect: pending_effect.clone(),
@@ -1469,8 +1715,9 @@ pub(super) fn handle_unless_payment(
                 ref from_zone,
             } => {
                 let source = pending_effect.source_id;
-                let ctx =
-                    crate::game::filter::FilterContext::from_source_with_controller(source, player);
+                let mut payer_view = pending_effect.as_ref().clone();
+                payer_view.controller = player;
+                let ctx = crate::game::filter::FilterContext::from_ability(&payer_view);
                 // The zone population is scanned ACROSS ALL PLAYERS — the
                 // parsed `filter` is the single authority for narrowing it
                 // (e.g. "your graveyard" stamps `tf.controller = Some(You)`;
@@ -1525,6 +1772,7 @@ pub(super) fn handle_unless_payment(
                     payment_failed = true;
                 } else {
                     state.waiting_for = WaitingFor::UnlessBounceChoice {
+                        return_result_occurrence: state.active_return_result_occurrence,
                         player,
                         permanents: eligible,
                         pending_effect: pending_effect.clone(),
@@ -1784,6 +2032,7 @@ pub(super) fn handle_unless_payment(
                     PaymentOutcome::Paused { .. } => {
                         state.pending_cost_move_resume =
                             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                                return_result_occurrence: state.active_return_result_occurrence,
                                 cost: poll_cost.clone(),
                                 pending_effect: pending_effect.clone(),
                                 trigger_event: trigger_event.clone(),
@@ -1917,6 +2166,7 @@ fn finish_unless_payment(
             .and_then(|head| remaining[head..].split_first())
         {
             state.waiting_for = WaitingFor::UnlessPayment {
+                return_result_occurrence: state.active_return_result_occurrence,
                 player: next,
                 cost: poll_cost,
                 pending_effect: pending_effect.clone(),
@@ -2067,6 +2317,7 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: state.active_return_result_occurrence,
         player,
         cost,
         pending_effect,
@@ -2088,7 +2339,7 @@ fn resolve_ability_chain_for_unless_payment(
     let events_before = events.len();
     let previous_trigger_event = state.current_trigger_event.clone();
     state.current_trigger_event = trigger_event.clone();
-    let result = effects::resolve_ability_chain(state, ability, events, 0);
+    let result = effects::resolve_resume_owned_ability_chain(state, ability, events, 1);
     state.current_trigger_event = previous_trigger_event;
     result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     Ok(events_before)
@@ -2122,7 +2373,23 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
     selection: &ManaSourceSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_unless_payment_tap_land_in_occurrence(state, waiting_for, selection, events)
+    })
+}
+
+fn handle_unless_payment_tap_land_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    selection: &ManaSourceSelection,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::UnlessPayment {
+        return_result_occurrence: _,
         player,
         cost,
         pending_effect,
@@ -2142,6 +2409,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         player,
         selection,
         crate::types::game_state::ManaAbilityResume::UnlessPayment {
+            return_result_occurrence: state.active_return_result_occurrence,
             outer_player: Some(player),
             cost: Box::new(cost.clone()),
             pending_effect: pending_effect.clone(),
@@ -2163,7 +2431,23 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_unless_payment_untap_land_in_occurrence(state, waiting_for, object_id, events)
+    })
+}
+
+fn handle_unless_payment_untap_land_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::UnlessPayment {
+        return_result_occurrence: _,
         player,
         cost,
         pending_effect,
@@ -2179,6 +2463,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
 
     handle_untap_land_for_mana(state, player, object_id, events)?;
     Ok(WaitingFor::UnlessPayment {
+        return_result_occurrence: state.active_return_result_occurrence,
         player,
         cost,
         pending_effect,
@@ -2195,7 +2480,30 @@ pub(super) fn handle_unless_payment_activate_ability(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_unless_payment_activate_in_occurrence(
+            state,
+            waiting_for,
+            source_id,
+            ability_index,
+            events,
+        )
+    })
+}
+
+fn handle_unless_payment_activate_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    source_id: ObjectId,
+    ability_index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::UnlessPayment {
+        return_result_occurrence: _,
         player,
         cost,
         pending_effect,
@@ -2237,6 +2545,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         &ability_def,
         events,
         crate::types::game_state::ManaAbilityResume::UnlessPayment {
+            return_result_occurrence: state.active_return_result_occurrence,
             outer_player: Some(player),
             cost: Box::new(cost),
             pending_effect,
@@ -2254,7 +2563,23 @@ pub(super) fn handle_ward_discard_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_ward_discard_in_occurrence(state, waiting_for, chosen, events)
+    })
+}
+
+fn handle_ward_discard_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::WardDiscardChoice {
+        return_result_occurrence: _,
         player,
         cards: legal_cards,
         pending_effect,
@@ -2293,14 +2618,17 @@ pub(super) fn handle_ward_discard_choice(
     // just-discarded card still keys `state.objects` in the graveyard, so
     // re-derive from hand rather than filtering by `contains_key`).
     if remaining > 1 {
-        let hand_cards = crate::game::casting::find_eligible_discard_targets(
+        let mut payer_view = pending_effect.as_ref().clone();
+        payer_view.controller = player;
+        let hand_cards = crate::game::casting::find_eligible_discard_targets_for_ability(
             state,
             player,
             pending_effect.source_id,
-            pending_effect.context.granting_object,
             filter.as_ref(),
+            &payer_view,
         );
         state.waiting_for = WaitingFor::WardDiscardChoice {
+            return_result_occurrence: state.active_return_result_occurrence,
             player,
             cards: hand_cards,
             pending_effect,
@@ -2324,10 +2652,12 @@ pub(super) fn handle_ward_discard_choice(
 fn eligible_unless_sacrifice_permanents(
     state: &GameState,
     player: PlayerId,
-    sac_source: ObjectId,
+    pending_effect: &crate::types::ability::ResolvedAbility,
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let ctx = crate::game::filter::FilterContext::from_source_with_controller(sac_source, player);
+    let mut payer_view = pending_effect.clone();
+    payer_view.controller = player;
+    let ctx = crate::game::filter::FilterContext::from_ability(&payer_view);
     state
         .battlefield
         .iter()
@@ -2377,6 +2707,7 @@ fn pause_ward_sacrifice_payment(
     choice_player: PlayerId,
 ) -> WaitingFor {
     state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+        return_result_occurrence: state.active_return_result_occurrence,
         player,
         pending_effect,
         resume,
@@ -2424,7 +2755,40 @@ pub(super) fn resume_ward_sacrifice_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = state
+        .pending_cost_move_resume
+        .as_ref()
+        .and_then(|resume| match resume {
+            PendingCostMoveResume::WardSacrificePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::UnlessBouncePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment {
+                return_result_occurrence,
+                ..
+            } => *return_result_occurrence,
+            PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
+                resume.return_result_occurrence
+            }
+            _ => None,
+        });
+    crate::types::game_state::validate_retained_payment_result_owners(state)
+        .map_err(EngineError::InvalidAction)?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        resume_ward_sacrifice_payment_in_occurrence(state, events)
+    })
+}
+
+fn resume_ward_sacrifice_payment_in_occurrence(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let Some(PendingCostMoveResume::WardSacrificePayment {
+        return_result_occurrence: _,
         player,
         pending_effect,
         resume,
@@ -2466,6 +2830,7 @@ pub(super) fn resume_ward_sacrifice_payment(
                     .filter(|&id| id != sacrificed && state.objects.contains_key(&id))
                     .collect();
                 state.waiting_for = WaitingFor::WardSacrificeChoice {
+                    return_result_occurrence: state.active_return_result_occurrence,
                     player,
                     permanents: eligible,
                     pending_effect,
@@ -2549,7 +2914,41 @@ pub(super) fn resume_counter_addition_unless_payment(
     events: &mut Vec<GameEvent>,
     boundary: CostMoveDrainBoundary,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = state
+        .pending_cost_move_resume
+        .as_ref()
+        .and_then(|resume| match resume {
+            PendingCostMoveResume::WardSacrificePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::UnlessBouncePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment {
+                return_result_occurrence,
+                ..
+            } => *return_result_occurrence,
+            PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
+                resume.return_result_occurrence
+            }
+            _ => None,
+        });
+    crate::types::game_state::validate_retained_payment_result_owners(state)
+        .map_err(EngineError::InvalidAction)?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        resume_counter_addition_unless_payment_in_occurrence(state, events, boundary)
+    })
+}
+
+fn resume_counter_addition_unless_payment_in_occurrence(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    boundary: CostMoveDrainBoundary,
+) -> Result<WaitingFor, EngineError> {
     let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        return_result_occurrence: _,
         pending_effect,
         trigger_event,
         ..
@@ -2596,12 +2995,45 @@ pub(super) fn resume_random_discard_unless_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = state
+        .pending_cost_move_resume
+        .as_ref()
+        .and_then(|resume| match resume {
+            PendingCostMoveResume::WardSacrificePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::UnlessBouncePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment {
+                return_result_occurrence,
+                ..
+            } => *return_result_occurrence,
+            PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
+                resume.return_result_occurrence
+            }
+            _ => None,
+        });
+    crate::types::game_state::validate_retained_payment_result_owners(state)
+        .map_err(EngineError::InvalidAction)?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        resume_random_discard_unless_payment_in_occurrence(state, events)
+    })
+}
+
+fn resume_random_discard_unless_payment_in_occurrence(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let Some(PendingCostMoveResume::RandomDiscardUnlessPayment(parked)) =
         state.pending_cost_move_resume.take()
     else {
         unreachable!("random-discard unless-payment resume requires its typed continuation")
     };
     let crate::types::game_state::RandomDiscardUnlessPaymentResume {
+        return_result_occurrence: _,
         pending_effect,
         trigger_event,
         payer,
@@ -2635,6 +3067,7 @@ pub(super) fn resume_random_discard_unless_payment(
                 state.pending_cost_move_resume =
                     Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
                         crate::types::game_state::RandomDiscardUnlessPaymentResume {
+                            return_result_occurrence: state.active_return_result_occurrence,
                             pending_effect,
                             trigger_event,
                             payer,
@@ -2664,7 +3097,23 @@ pub(super) fn handle_ward_sacrifice_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_ward_sacrifice_in_occurrence(state, waiting_for, chosen, events)
+    })
+}
+
+fn handle_ward_sacrifice_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: _,
         player,
         permanents,
         pending_effect,
@@ -2753,6 +3202,7 @@ pub(super) fn handle_ward_sacrifice_choice(
                 .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
                 .collect();
             state.waiting_for = WaitingFor::WardSacrificeChoice {
+                return_result_occurrence: state.active_return_result_occurrence,
                 player,
                 permanents: eligible,
                 pending_effect,
@@ -2773,7 +3223,23 @@ pub(super) fn handle_unless_bounce_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = payment_occurrence(&waiting_for)?;
+    validate_payment_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        validate_payment_reads(state, &waiting_for)?;
+        handle_unless_bounce_in_occurrence(state, waiting_for, chosen, events)
+    })
+}
+
+fn handle_unless_bounce_in_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::UnlessBounceChoice {
+        return_result_occurrence: _,
         player,
         permanents,
         pending_effect,
@@ -2808,6 +3274,7 @@ pub(super) fn handle_unless_bounce_choice(
         ),
         ZoneMoveResult::NeedsChoice(_) => {
             state.pending_cost_move_resume = Some(PendingCostMoveResume::UnlessBouncePayment {
+                return_result_occurrence: state.active_return_result_occurrence,
                 player,
                 moved,
                 permanents,
@@ -2839,6 +3306,7 @@ fn finish_unless_bounce_payment(
             .filter(|&id| id != moved && state.objects.contains_key(&id))
             .collect();
         state.waiting_for = WaitingFor::UnlessBounceChoice {
+            return_result_occurrence: state.active_return_result_occurrence,
             player,
             permanents: eligible,
             pending_effect,
@@ -2864,7 +3332,40 @@ pub(super) fn resume_unless_bounce_cost_move(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = state
+        .pending_cost_move_resume
+        .as_ref()
+        .and_then(|resume| match resume {
+            PendingCostMoveResume::WardSacrificePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::UnlessBouncePayment {
+                return_result_occurrence,
+                ..
+            }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment {
+                return_result_occurrence,
+                ..
+            } => *return_result_occurrence,
+            PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
+                resume.return_result_occurrence
+            }
+            _ => None,
+        });
+    crate::types::game_state::validate_retained_payment_result_owners(state)
+        .map_err(EngineError::InvalidAction)?;
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        resume_unless_bounce_cost_move_in_occurrence(state, events)
+    })
+}
+
+fn resume_unless_bounce_cost_move_in_occurrence(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let Some(PendingCostMoveResume::UnlessBouncePayment {
+        return_result_occurrence: _,
         player,
         moved,
         permanents,
@@ -3316,6 +3817,7 @@ mod tests {
             .collect();
         let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: count },
@@ -3427,6 +3929,7 @@ mod tests {
         state.players[0].life = 20;
         let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 3 },
@@ -3453,6 +3956,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let pending = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::Mana {
                 cost: ManaCost::generic(3),
@@ -3567,6 +4071,7 @@ mod tests {
         );
         pending.set_original_controller_recursive(PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(1),
             cost: AbilityCost::EffectCost {
                 effect: Box::new(Effect::Draw {
@@ -3627,6 +4132,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(1),
             cost: AbilityCost::Sacrifice(SacrificeCost::count(
                 TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
@@ -3664,6 +4170,7 @@ mod tests {
         state.players[1].life = 20;
         let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -3711,6 +4218,7 @@ mod tests {
         state.players[1].life = 20;
         let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(1),
             cost: AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -3737,6 +4245,7 @@ mod tests {
         state.players[0].energy = 5;
         let pending = ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::PayEnergy {
                 amount: QuantityExpr::Fixed { value: 2 },
@@ -3768,6 +4277,7 @@ mod tests {
         state.players[0].life = 20;
         let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: vec![
                 AbilityCost::PayLife {
@@ -3814,6 +4324,7 @@ mod tests {
         state.players[0].life = 20;
         let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: vec![AbilityCost::PayLife {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
@@ -3849,6 +4360,7 @@ mod tests {
         state.players[0].life = 20;
         let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: vec![AbilityCost::PayLife {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
@@ -3880,6 +4392,7 @@ mod tests {
         state.players[0].life = 20;
         let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: vec![AbilityCost::PayLife {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
@@ -3945,6 +4458,7 @@ mod tests {
         state.players[0].life = 20;
         let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: first_costs,
             pending_effect: Box::new(pending),
@@ -4096,6 +4610,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: oneof_wu.clone(),
             pending_effect: Box::new(pending),
@@ -4176,6 +4691,7 @@ mod tests {
         state.players[0].life = 20;
         let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: oneof_wu.clone(),
             pending_effect: Box::new(pending),
@@ -4241,6 +4757,7 @@ mod tests {
         state.objects.get_mut(&land_id).unwrap().card_types = land_types;
         let pending = ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::ReturnToHand {
                 count: 1,
@@ -4398,6 +4915,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(999), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::Mill { count: 2 },
             pending_effect: Box::new(pending),
@@ -4444,6 +4962,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(999), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::Mill { count: 2 },
             pending_effect: Box::new(pending),
@@ -4562,6 +5081,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(999), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::Mill { count: 1 },
             pending_effect: Box::new(pending),
@@ -4615,6 +5135,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(4), vec![], source, PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::RemoveCounter {
                 count: 1,
@@ -4730,6 +5251,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::GetPlayerCounters {
                 counter_kind: PlayerCounterKind::Poison,
@@ -4773,6 +5295,7 @@ mod tests {
 
         let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -4854,6 +5377,7 @@ mod tests {
                 "the prohibition must bite the prompted player"
             );
             state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+                return_result_occurrence: None,
                 player: PlayerId(0),
                 costs: vec![poison.clone(), life.clone()],
                 pending_effect: Box::new(ResolvedAbility::new(
@@ -4993,6 +5517,7 @@ mod dandan_read_sweep_tests {
             P1,
         );
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: P1,
             cost: AbilityCost::Mill { count: 2 },
             pending_effect: Box::new(pending),

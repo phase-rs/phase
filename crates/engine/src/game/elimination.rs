@@ -339,6 +339,7 @@ pub fn eliminate_players_simultaneously(
                     pending.current_player = *next;
                     pending.remaining_players = rest.to_vec();
                     state.waiting_for = WaitingFor::UnlessPayment {
+                        return_result_occurrence: pending.return_result_occurrence,
                         player: pending.current_player,
                         cost: pending.cost.clone(),
                         pending_effect: pending.pending_effect.clone(),
@@ -2150,6 +2151,8 @@ mod tests {
         controller: PlayerId,
     ) -> crate::types::game_state::PendingChangeZoneIteration {
         crate::types::game_state::PendingChangeZoneIteration {
+            return_result_occurrence: None,
+            return_result_process: None,
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
@@ -2836,6 +2839,7 @@ mod tests {
         );
         state.pending_scoped_library_search =
             Some(crate::types::game_state::PendingScopedLibrarySearch {
+                return_result_occurrence: None,
                 ability: Box::new(ability),
                 phase: crate::types::game_state::ScopedLibrarySearchPhase::Delivering {
                     search_keys: vec![PlayerId(0), PlayerId(1), PlayerId(2)],
@@ -2846,6 +2850,7 @@ mod tests {
         batch.completion = Some(
             crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
                 resume: crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                    return_result_occurrence: None,
                     player: PlayerId(0),
                     source_id: ObjectId(902),
                     search_keys: vec![PlayerId(0), PlayerId(1), PlayerId(2)],

@@ -1249,6 +1249,7 @@ mod tests {
 
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::WardSacrificeChoice {
+                return_result_occurrence: None,
                 player: PlayerId(0),
                 permanents: vec![land, artifact],
                 pending_effect: Box::new(ResolvedAbility::new(

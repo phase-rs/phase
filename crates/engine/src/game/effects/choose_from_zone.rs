@@ -81,6 +81,7 @@ pub fn resolve(
             state,
             ability,
             PerPlayerCursor {
+                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
                 remaining: players,
                 current: None,
                 nominee: None,
@@ -146,6 +147,7 @@ pub fn resolve(
             .collect();
         if candidates.len() >= 2 {
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
                 player: ability.controller,
                 candidates,
                 ability: Box::new(ability.clone()),
@@ -487,6 +489,7 @@ fn prompt_next_category_member(
         };
         state.push_per_category_zone_choice(
             crate::types::game_state::PendingPerCategoryZoneChoice {
+                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
                 ability: Box::new(ability.clone()),
                 pool: pool.to_vec(),
                 remaining_member_filters,
@@ -518,6 +521,41 @@ fn prompt_next_category_member(
 /// chain's "cards exiled this way" tracked set (started empty by
 /// `resolve_for_each_category`), then prompts the next member. Mirrors
 /// `drain_active_per_player_zone_choice`.
+pub(crate) fn validate_per_category_result_owner(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filters: &[TargetFilter],
+    occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+) -> Result<(), EffectError> {
+    super::validate_selected_instruction_result_owner(state, ability, occurrence)?;
+    let mut addressed = Vec::new();
+    for filter in filters {
+        filter.for_each_nested_quantity_ref(&mut |reference| {
+            if let Some(result) = reference.instruction_result_id() {
+                addressed.push(result);
+            }
+        });
+    }
+    if !addressed.is_empty() {
+        let frame = crate::types::game_state::checked_return_result_frame(
+            state,
+            occurrence,
+            ability.return_result_process,
+            true,
+        )
+        .map_err(EffectError::InvalidParam)?;
+        for result in addressed {
+            if !matches!(frame.results.get(&result), Some(crate::types::game_state::InstructionResult::ZoneChanges(records)) if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+            {
+                return Err(EffectError::InvalidParam(
+                    "unavailable instruction-result quantity in category member filter".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn drain_active_per_category_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
@@ -530,6 +568,7 @@ pub(crate) fn drain_active_per_category_zone_choice(
         return crate::game::zone_pipeline::BatchMoveResult::Done;
     };
     let crate::types::game_state::PendingPerCategoryZoneChoice {
+        return_result_occurrence,
         ability,
         pool,
         remaining_member_filters,
@@ -587,6 +626,7 @@ pub(crate) fn drain_active_per_category_zone_choice(
             requests,
             Some(
                 crate::types::game_state::BatchCompletion::ForEachCategoryExileComplete {
+                    return_result_occurrence,
                     ability,
                     pool,
                     remaining_member_filters,
@@ -633,22 +673,31 @@ pub(crate) fn drain_active_per_category_zone_choice(
 /// a CR 616.1 replacement choice resolves before the iteration advances.
 pub(crate) fn complete_per_category_exile(
     state: &mut GameState,
+    return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
     ability: Box<ResolvedAbility>,
     pool: Vec<ObjectId>,
     remaining_member_filters: Vec<TargetFilter>,
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
-) {
-    if !chosen.is_empty() {
-        super::publish_tracked_set_with_causes(
-            state,
-            chosen
-                .iter()
-                .map(|&id| (id, Some(crate::types::ability::ThisWayCause::Exiled)))
-                .collect(),
-        );
-    }
-    let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
+) -> Result<(), EffectError> {
+    validate_per_category_result_owner(
+        state,
+        &ability,
+        &remaining_member_filters,
+        return_result_occurrence,
+    )?;
+    super::with_inherited_return_result_occurrence(state, return_result_occurrence, |state| {
+        if !chosen.is_empty() {
+            super::publish_tracked_set_with_causes(
+                state,
+                chosen
+                    .iter()
+                    .map(|&id| (id, Some(crate::types::ability::ThisWayCause::Exiled)))
+                    .collect(),
+            );
+        }
+        prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events)
+    })
 }
 
 fn publish_tracked_set_unique(state: &mut GameState, ids: &[ObjectId]) {
@@ -921,6 +970,7 @@ fn admit_per_player_park(state: &GameState, ability: &ResolvedAbility) -> Result
 
 /// The resumable position of a per-player iteration between prompts.
 struct PerPlayerCursor {
+    return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
     /// Players not yet chosen for (never including `current`).
     remaining: Vec<PlayerId>,
     /// The player whose pool choice is pending; `None` while the order is.
@@ -933,6 +983,7 @@ struct PerPlayerCursor {
 impl PerPlayerCursor {
     fn of(frame: PendingPerPlayerZoneChoice) -> (Box<ResolvedAbility>, Self) {
         let PendingPerPlayerZoneChoice {
+            return_result_occurrence,
             ability,
             remaining_players,
             accumulated,
@@ -942,6 +993,7 @@ impl PerPlayerCursor {
         (
             ability,
             Self {
+                return_result_occurrence,
                 remaining: remaining_players,
                 current,
                 nominee,
@@ -952,6 +1004,7 @@ impl PerPlayerCursor {
 
     fn park(self, ability: &ResolvedAbility) -> PendingPerPlayerZoneChoice {
         PendingPerPlayerZoneChoice {
+            return_result_occurrence: self.return_result_occurrence,
             ability: Box::new(ability.clone()),
             remaining_players: self.remaining,
             accumulated: self.accumulated,
@@ -985,12 +1038,34 @@ fn advance_per_player_iteration(
     cursor: PerPlayerCursor,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::validate_selected_instruction_result_owner(
+        state,
+        ability,
+        cursor.return_result_occurrence,
+    )?;
+    super::with_inherited_return_result_occurrence(
+        state,
+        cursor.return_result_occurrence,
+        |state| {
+            super::validate_addressed_quantity_reads(state, ability)?;
+            advance_per_player_iteration_in_occurrence(state, ability, cursor, events)
+        },
+    )
+}
+
+fn advance_per_player_iteration_in_occurrence(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    cursor: PerPlayerCursor,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let spec = PerPlayerSpec::of(ability)?;
     // CR 608.2 + CR 605.3b + CR 605.4a: admission precedes every outcome —
     // including the empty-pool disposal, which publishes a fresh tracked set
     // and reports completion — so an inadmissible choice changes nothing.
     admit_per_player_park(state, ability)?;
     let PerPlayerCursor {
+        return_result_occurrence,
         mut remaining,
         mut current,
         mut nominee,
@@ -1029,6 +1104,9 @@ fn advance_per_player_iteration(
                     };
                     capture_per_player_trigger_context(state);
                     state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                        return_result_occurrence: super::retained_return_result_occurrence(
+                            state, ability,
+                        )?,
                         player: maker,
                         candidates: eligible,
                         ability: Box::new(ability.clone()),
@@ -1036,6 +1114,7 @@ fn advance_per_player_iteration(
                     };
                     state.push_per_player_zone_choice(
                         PerPlayerCursor {
+                            return_result_occurrence,
                             remaining,
                             current: None,
                             nominee: None,
@@ -1078,6 +1157,7 @@ fn advance_per_player_iteration(
         ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { .. } => Some(base_maker),
     };
     let cursor = PerPlayerCursor {
+        return_result_occurrence,
         remaining,
         current: Some(owner),
         nominee: maker.and(nominee),
@@ -1108,6 +1188,7 @@ fn advance_per_player_iteration(
                 .filter(|&player| players::is_alive(state, player))
                 .collect();
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
                 player: elector,
                 candidates,
                 ability: Box::new(ability.clone()),
@@ -1180,6 +1261,18 @@ fn take_frame_for_prompt(
     if !frame_awaits_prompt || frame.ability.source_id != prompt_ability.source_id {
         return Err(EffectError::InvalidParam(
             "the active per-player iteration is not waiting on this prompt".to_string(),
+        ));
+    }
+    super::validate_selected_instruction_result_owner(
+        state,
+        &frame.ability,
+        frame.return_result_occurrence,
+    )?;
+    if frame.return_result_occurrence != state.active_return_result_occurrence
+        || frame.ability.return_result_process != prompt_ability.return_result_process
+    {
+        return Err(EffectError::InvalidParam(
+            "instruction-result process owner mismatch".into(),
         ));
     }
     let frame = state
@@ -4368,6 +4461,7 @@ mod tests {
         );
         // First resolution: no players left to prompt afterwards, accumulated=false.
         state.push_per_player_zone_choice(crate::types::game_state::PendingPerPlayerZoneChoice {
+            return_result_occurrence: None,
             ability: Box::new(ability),
             remaining_players: vec![],
             accumulated: false,

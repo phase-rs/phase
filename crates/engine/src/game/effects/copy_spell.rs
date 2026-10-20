@@ -178,6 +178,7 @@ pub fn resolve(
                 ability: Some(ref mut a),
                 ..
             } => {
+                a.clear_return_result_process_recursive();
                 set_resolved_source_recursive(a, copy_id);
                 clear_cast_from_zone_recursive(a);
                 // CR 707.10: a copy of a spell isn't cast, so it must never
@@ -190,6 +191,7 @@ pub fn resolve(
             }
             StackEntryKind::Spell { ability: None, .. } => {}
             StackEntryKind::ActivatedAbility { ability, .. } => {
+                ability.clear_return_result_process_recursive();
                 preserve_ability_copy_source_recursive(ability);
                 // CR 610.3a + CR 707.10: the copy is put onto the stack now, so
                 // only "until" events after this point can stop its move; it
@@ -197,6 +199,7 @@ pub fn resolve(
                 ability.clear_duration_events_recursive();
             }
             StackEntryKind::TriggeredAbility { ability, .. } => {
+                ability.clear_return_result_process_recursive();
                 preserve_ability_copy_source_recursive(ability);
             }
             StackEntryKind::KeywordAction { .. } => {}
@@ -4620,5 +4623,138 @@ mod tests {
              got stack of {} entries",
             state.stack.len()
         );
+    }
+
+    #[test]
+    fn departure_all_three_copy_kinds_clear_only_the_independent_copy_process() {
+        use crate::game::scenario::GameRunner;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::ReturnResultProcessId;
+        for kind in 0..3 {
+            let mut state = GameState::new_two_player(42);
+            state.next_object_id = 200;
+            let source = ObjectId(40);
+            state.objects.insert(
+                source,
+                GameObject::new(
+                    source,
+                    CardId(40),
+                    PlayerId(0),
+                    "Supplemental canonical copy source".into(),
+                    Zone::Battlefield,
+                ),
+            );
+            let mut original = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            ));
+            original.bind_return_result_process(Some(ReturnResultProcessId(37)));
+            assert_eq!(
+                original.clone(),
+                original,
+                "same-body cloning retains exact runtime identity"
+            );
+            if kind == 0 {
+                push_spell(
+                    &mut state,
+                    ObjectId(100),
+                    CardId(100),
+                    PlayerId(0),
+                    "Supplemental canonical copied spell",
+                    original.clone(),
+                    CastingVariant::Normal,
+                );
+            } else {
+                state.stack.push_back(StackEntry {
+                    id: ObjectId(100),
+                    source_id: source,
+                    controller: PlayerId(0),
+                    kind: if kind == 1 {
+                        StackEntryKind::ActivatedAbility {
+                            source_id: source,
+                            ability: Box::new(original.clone()),
+                        }
+                    } else {
+                        StackEntryKind::TriggeredAbility {
+                            source_id: source,
+                            ability: Box::new(original.clone()),
+                            condition: None,
+                            trigger_event: None,
+                            description: None,
+                            source_name: "Supplemental canonical copy source".into(),
+                            subject_match_count: None,
+                            die_result: None,
+                            provenance: None,
+                        }
+                    },
+                });
+            }
+            let effect = ResolvedAbility::new(
+                Effect::CopySpell {
+                    target: TargetFilter::Any,
+                    retarget: CopyRetargetPermission::KeepOriginalTargets,
+                    copier: None,
+                    additional_modifications: vec![],
+                    starting_loyalty_from_casualty_sacrifice: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            resolve(&mut state, &effect, &mut vec![])
+                .expect("the actual copy authority clones each supported stack kind");
+            assert_eq!(state.stack.len(), 2);
+            let copy = state.stack.back().unwrap().ability().unwrap();
+            assert_eq!(copy.return_result_process, None);
+            assert_eq!(
+                copy.sub_ability.as_ref().unwrap().return_result_process,
+                None,
+                "every independent copied descendant must clear the old process before storage"
+            );
+            assert_eq!(
+                state
+                    .stack
+                    .front()
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+                    .return_result_process,
+                Some(ReturnResultProcessId(37)),
+                "copying cannot rewrite the original live executable"
+            );
+            let mut runner = GameRunner::from_state(state);
+            for _ in 0..8 {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(runner.state().players[0].life, 26, "both complete ordinary bodies independently resolve through public priority actions");
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().return_result_frames.is_empty());
+        }
     }
 }

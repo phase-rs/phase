@@ -284,6 +284,7 @@ mod tests {
         let ability = ResolvedAbility::new(effect, Vec::new(), source_id, AI);
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::MultiTargetSelection {
+                return_result_occurrence: None,
                 player: AI,
                 legal_targets: Vec::new(),
                 min_targets: 1,

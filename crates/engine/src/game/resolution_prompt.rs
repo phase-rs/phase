@@ -566,6 +566,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
 /// choice question.
 pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         // ---- choice-bearing: folded into the verdict below ----
         effect,
         sub_ability,

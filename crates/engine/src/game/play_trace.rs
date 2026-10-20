@@ -2109,6 +2109,7 @@ mod tests {
             (
                 "explore order",
                 WaitingFor::ExploreChoice {
+                    return_result_occurrence: None,
                     player,
                     source_id: source,
                     choosable: vec![source],

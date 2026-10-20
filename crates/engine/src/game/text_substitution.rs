@@ -464,6 +464,7 @@ fn rewrite_resolved_ability(
     substitution: &TextSubstitution,
 ) -> usize {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         // Rules text: filters, conditions and quantities that carry words.
         effect,
         condition,

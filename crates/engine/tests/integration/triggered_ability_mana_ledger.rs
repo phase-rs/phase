@@ -1271,6 +1271,7 @@ fn ref_less_resolution_mana_cost_records_nothing() {
         P0,
     );
     runner.state_mut().waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: P0,
         cost: AbilityCost::EffectCost {
             effect: Box::new(Effect::Mana {

@@ -395,6 +395,8 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 1,
@@ -475,6 +477,8 @@ mod tests {
             .collect();
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 2,

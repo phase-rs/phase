@@ -1973,8 +1973,13 @@ pub fn display_land_mana_pips(
             // a separate `Colorless` pip so the frame faithfully shows the
             // full option set.
             ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
-                let types =
-                    produceable_mana_types_by_filter(state, land_filter, controller, object_id);
+                let types = produceable_mana_types_by_filter(
+                    state,
+                    land_filter,
+                    controller,
+                    object_id,
+                    None,
+                );
                 let colors: Vec<ManaColor> = types
                     .iter()
                     .copied()
@@ -2680,7 +2685,8 @@ fn profile_kind_from_production(
         | ManaProduction::ChoiceAmongExiledColors { .. }
         | ManaProduction::AnyInCommandersColorIdentity { .. }
         | ManaProduction::AnyOneColorAmongPermanents { .. } => {
-            let options = mana_options_from_production(state, controller, object_id, produced);
+            let options =
+                mana_options_from_production(state, controller, object_id, produced, None);
             if options.is_empty() {
                 return None;
             }
@@ -3510,7 +3516,7 @@ fn emit_source_rows(
         {
             Vec::new()
         }
-        _ => mana_options_from_production(state, controller, object_id, produced)
+        _ => mana_options_from_production(state, controller, object_id, produced, None)
             .into_iter()
             .map(|mana_type| SourceRow {
                 mana_type,
@@ -3578,6 +3584,7 @@ fn mana_options_from_production(
     controller: PlayerId,
     object_id: ObjectId,
     produced: &ManaProduction,
+    current_ability: Option<&ResolvedAbility>,
 ) -> Vec<ManaType> {
     match produced {
         ManaProduction::Fixed { colors, .. } => {
@@ -3619,7 +3626,13 @@ fn mana_options_from_production(
         // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)
         // from lands matching `land_filter` (Reflecting Pool class).
         ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
-            produceable_mana_types_by_filter(state, land_filter, controller, object_id)
+            produceable_mana_types_by_filter(
+                state,
+                land_filter,
+                controller,
+                object_id,
+                current_ability,
+            )
         }
         // CR 605.1a + CR 406.1 + CR 610.3: Compute colors dynamically from cards
         // exiled-with this source via `state.exile_links` (Pit of Offerings).
@@ -3672,17 +3685,27 @@ fn mana_options_from_production(
         // you control". Delegates to the shared resolver so the cost-payment path
         // and direct activation see identical option sets.
         ManaProduction::DistinctColorsAmongPermanents { filter } => {
-            super::effects::mana::distinct_colors_among_permanents(state, None, object_id, filter)
-                .iter()
-                .map(mana_color_to_type)
-                .collect()
+            super::effects::mana::distinct_colors_among_permanents(
+                state,
+                current_ability,
+                object_id,
+                filter,
+            )
+            .iter()
+            .map(mana_color_to_type)
+            .collect()
         }
         // CR 106.1: Determine available mana options from colors among matching permanents.
         ManaProduction::AnyOneColorAmongPermanents { filter, .. } => {
-            super::effects::mana::distinct_colors_among_permanents(state, None, object_id, filter)
-                .iter()
-                .map(mana_color_to_type)
-                .collect()
+            super::effects::mana::distinct_colors_among_permanents(
+                state,
+                current_ability,
+                object_id,
+                filter,
+            )
+            .iter()
+            .map(mana_color_to_type)
+            .collect()
         }
         // CR 106.1 + CR 202.2c: Omnath, Locus of All — colors come from a target
         // object bound at trigger resolution, not available in this mana-source
@@ -3729,7 +3752,7 @@ pub(crate) fn source_could_produce_two_or_more_colors(
         let Effect::Mana { produced, .. } = &*ability.effect else {
             continue;
         };
-        collect_production_colors(state, controller, object_id, produced, &mut colors);
+        collect_production_colors(state, controller, object_id, produced, &mut colors, None);
         if colors.len() >= 2 {
             return true;
         }
@@ -3754,9 +3777,17 @@ pub(crate) fn mana_production_could_produce_two_or_more_colors(
     controller: PlayerId,
     source_id: ObjectId,
     produced: &ManaProduction,
+    current_ability: Option<&ResolvedAbility>,
 ) -> bool {
     let mut colors = Vec::new();
-    collect_production_colors(state, controller, source_id, produced, &mut colors);
+    collect_production_colors(
+        state,
+        controller,
+        source_id,
+        produced,
+        &mut colors,
+        current_ability,
+    );
     colors.len() >= 2
 }
 
@@ -3766,8 +3797,11 @@ fn collect_production_colors(
     source_id: ObjectId,
     produced: &ManaProduction,
     colors: &mut Vec<ManaType>,
+    current_ability: Option<&ResolvedAbility>,
 ) {
-    for mana_type in mana_options_from_production(state, controller, source_id, produced) {
+    for mana_type in
+        mana_options_from_production(state, controller, source_id, produced, current_ability)
+    {
         if mana_type == ManaType::Colorless || colors.contains(&mana_type) {
             continue;
         }
@@ -3834,7 +3868,7 @@ pub(crate) fn opponent_land_color_options(
             // evaluate it as the opponent who controls the land (Command Tower reads
             // that opponent's commander), not as the activator surveying it.
             for mana_type in
-                mana_options_from_production(state, obj.controller, *object_id, produced)
+                mana_options_from_production(state, obj.controller, *object_id, produced, None)
             {
                 if !options.contains(&mana_type) {
                     options.push(mana_type);
@@ -3988,7 +4022,8 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
             // For Fixed production the choices are collapsed to one concrete
             // option; for AnyOneColor each color is a separate choice.
             // `mana_options_from_production` already does this enumeration.
-            let choices = mana_options_from_production(state, controller, object_id, produced);
+            let choices =
+                mana_options_from_production(state, controller, object_id, produced, None);
             if !choices.is_empty() {
                 per_aura.push((active.definition_ref, choices));
             }
@@ -4076,13 +4111,28 @@ pub(crate) fn produceable_mana_types_by_filter(
     land_filter: &TargetFilter,
     controller: PlayerId,
     self_source_id: ObjectId,
+    current_ability: Option<&ResolvedAbility>,
 ) -> Vec<ManaType> {
     use crate::game::filter::{matches_target_filter, FilterContext};
     // CR 109.4: `ControllerRef::You` resolves against the activator. Anchor the
     // filter context to the explicit controller so the "you control" predicate
     // is correct even when the source object has left play (e.g., self-sac
     // costs) or in synthetic test contexts.
-    let filter_ctx = FilterContext::from_source_with_controller(self_source_id, controller);
+    let mut available = true;
+    land_filter.for_each_nested_quantity_ref(&mut |reference| {
+        available &= crate::game::quantity::addressed_quantity_ref_is_available(
+            state,
+            reference,
+            current_ability.and_then(|ability| ability.return_result_process),
+        );
+    });
+    if !available {
+        return Vec::new();
+    }
+    let mut filter_ctx = current_ability
+        .map(FilterContext::from_ability)
+        .unwrap_or_else(|| FilterContext::from_source_with_controller(self_source_id, controller));
+    filter_ctx.source_controller = Some(controller);
     let mut options = Vec::new();
     // CR 730.2: iterate the independent-permanent list (excludes absorbed merge components).
     for object_id in state.battlefield.iter() {
@@ -4126,7 +4176,7 @@ pub(crate) fn produceable_mana_types_by_filter(
             // each surveyed land's ability is evaluated for its own controller,
             // which differs whenever the filter admits another player's lands.
             for mana_type in
-                mana_options_from_production(state, obj.controller, *object_id, produced)
+                mana_options_from_production(state, obj.controller, *object_id, produced, None)
             {
                 if !options.contains(&mana_type) {
                     options.push(mana_type);

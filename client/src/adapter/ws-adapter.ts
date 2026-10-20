@@ -935,7 +935,8 @@ export class NativeEngineVersionMismatchError extends Error {
 // 157: mandatory specified-kind/exact-recipient counter adjustment.
 // 158: exact removal reflexives and private damage-source authority use resolution wire 9.
 // 159: source-bound chosen-parity references in serialized static definitions.
-export const PROTOCOL_VERSION = 159;
+// 160: addressed departure aggregates and retained instruction-result owners.
+export const PROTOCOL_VERSION = 160;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

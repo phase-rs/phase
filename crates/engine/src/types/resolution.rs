@@ -122,6 +122,10 @@ pub enum PendingCoinFlipKind {
 /// multi-flip resolver paused at a Krark's Thumb keep-one choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCoinFlip {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     /// CR 705.2: The player who flips (and therefore wins or loses) the coin.
@@ -154,6 +158,10 @@ pub struct PendingCoinFlip {
 /// `roll_die::resume_after_ignore`, which emits only for the survivors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDieRoll {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     /// CR 706.6: the player who rolled, and therefore the player who chooses
@@ -265,6 +273,10 @@ pub struct PendingDieRoll {
 /// either roll.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDieRollInstruction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     /// CR 706.6: the player who rolls, and therefore the player who breaks an
@@ -4429,7 +4441,13 @@ fn has_current_instruction_result_markers(value: &Value) -> bool {
             frames
                 .values()
                 .filter_map(Value::as_object)
-                .flat_map(|frame| frame.values())
+                .flat_map(|frame| {
+                    frame
+                        .get("results")
+                        .and_then(Value::as_object)
+                        .unwrap_or(frame)
+                        .values()
+                })
                 .any(Value::is_object)
         });
     let mut origins = false;
@@ -4629,7 +4647,7 @@ mod revealed_result_legacy_tests {
             assert!(restored
                 .return_result_frames
                 .values()
-                .flat_map(|frame| frame.values())
+                .flat_map(|frame| frame.results.values())
                 .all(|result| result.zone_changes().is_some()));
             current_writers_preserve_undrained_sought_batch(restored, &cards);
         }
@@ -6667,6 +6685,8 @@ mod tests {
             .expect("empty logical group still needs its pre-delivery latch");
         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(PendingChangeZoneIteration {
+                return_result_occurrence: None,
+                return_result_process: None,
                 pending_return_result_producer: None,
                 logical_zone_change_group,
                 paused_current: None,
@@ -7253,6 +7273,8 @@ mod tests {
     #[test]
     fn direct_choice_gate_must_match_the_waiting_prompt() {
         let frame = ResolutionFrame::CoinFlip(PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: ObjectId(5),
             controller: PlayerId(0),
             flipper: PlayerId(0),
@@ -7317,6 +7339,8 @@ mod tests {
             .pop_expected(FrameKind::AbilityContinuation)
             .expect("test continuation restores the direct-choice top");
         optional_effect.push_inner(ResolutionFrame::CoinFlip(PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: ObjectId(6),
             controller: PlayerId(0),
             flipper: PlayerId(0),
@@ -7631,6 +7655,8 @@ mod tests {
             keep_count: 1,
         };
         let pending = PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: ObjectId(5),
             controller: PlayerId(0),
             flipper: PlayerId(0),
@@ -8051,6 +8077,8 @@ mod tests {
         let mut coin = restore_v1_coin_flip_fixture(
             coin,
             PendingCoinFlip {
+                return_result_occurrence: None,
+                expected_return_result_process: None,
                 source_id: ObjectId(103),
                 controller: PlayerId(0),
                 flipper: PlayerId(0),
@@ -8178,6 +8206,7 @@ mod tests {
             }],
         };
         let frame = PendingRepeatUntil {
+            return_result_occurrence: None,
             ability: Box::new(repeat_ability),
             stop_progress: Some(witness.clone()),
             iteration_progress: Some(crate::types::game_state::RepeatUntilIterationWitness {
@@ -8216,6 +8245,7 @@ mod tests {
         let repeat_for = resume_priority_fixture(restore_v1_repeat_for_fixture(
             repeat_for,
             PendingRepeatIteration {
+                return_result_occurrence: None,
                 ability: Box::new(resolved_draw(111)),
                 tracked_members: Vec::new(),
                 iterated_counter_kinds: Vec::new(),
@@ -8233,6 +8263,7 @@ mod tests {
         let mut repeat_until = resume_priority_fixture(restore_v1_repeat_until_fixture(
             repeat_until,
             PendingRepeatUntil {
+                return_result_occurrence: None,
                 ability: Box::new(repeat_ability),
                 stop_progress: None,
                 iteration_progress: None,
@@ -8487,6 +8518,8 @@ mod tests {
         let mut choose_one_of = restore_v1_choose_one_of_fixture(
             choose_one_of,
             PendingChooseOneOf {
+                return_result_occurrence: None,
+                expected_return_result_process: None,
                 controller: PlayerId(0),
                 source_id: ObjectId(131),
                 branches: Vec::new(),
@@ -8506,6 +8539,8 @@ mod tests {
         let mut vote = restore_v1_vote_ballot_fixture(
             vote,
             PendingVoteBallotIteration {
+                return_result_occurrence: None,
+                expected_return_result_process: None,
                 ability_template: Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::NoOp,
@@ -8540,6 +8575,7 @@ mod tests {
         let mut per_player = restore_v1_per_player_zone_choice_fixture(
             per_player,
             PendingPerPlayerZoneChoice {
+                return_result_occurrence: None,
                 ability: Box::new(choose_from_zone),
                 remaining_players: Vec::new(),
                 accumulated: false,
@@ -8570,6 +8606,7 @@ mod tests {
         let mut per_category = restore_v1_per_category_zone_choice_fixture(
             per_category,
             PendingPerCategoryZoneChoice {
+                return_result_occurrence: None,
                 ability: Box::new(for_each_category),
                 pool: Vec::new(),
                 remaining_member_filters: Vec::new(),
@@ -9430,6 +9467,8 @@ mod tests {
 
         let multiple_direct = GameState::new_two_player(151);
         let pending_coin_flip = PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: ObjectId(151),
             controller: PlayerId(0),
             flipper: PlayerId(0),
@@ -9606,6 +9645,8 @@ mod tests {
 
         let mut mismatched_gate = ResolutionStack::default();
         mismatched_gate.push_inner(ResolutionFrame::CoinFlip(PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: ObjectId(155),
             controller: PlayerId(0),
             flipper: PlayerId(0),

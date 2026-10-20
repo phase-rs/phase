@@ -13669,6 +13669,47 @@ pub(crate) fn parse_counter_suffix_body_combinator(
 pub(crate) fn parse_dynamic_counter_suffix_body(
     input: &str,
 ) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
+    parse_dynamic_counter_suffix_body_with_context(input, &mut ParseContext::default())
+}
+
+#[cfg(test)]
+mod departure_dynamic_counter_tests {
+    use super::*;
+    use crate::parser::oracle_ir::effect_chain::ClauseId;
+    use crate::types::ability::ReturnResultId;
+
+    #[test]
+    fn dynamic_counter_suffix_contextual_and_independent_paths() {
+        let mut ctx = ParseContext::default();
+        ctx.chain_zone_result = Some((ClauseId(9), Zone::Battlefield, Zone::Exile));
+        let text = "a number of +1/+1 counters on it equal to the total power of creatures you controlled that were exiled this way";
+        let (rest, (counter, count)) =
+            parse_dynamic_counter_suffix_body_with_context(text, &mut ctx).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(counter, CounterType::Plus1Plus1);
+        assert_eq!(count.instruction_result_ids(), vec![ReturnResultId(9)]);
+        assert!(parse_dynamic_counter_suffix_body(text).is_err());
+        assert!(parse_dynamic_counter_suffix_body(
+            "a number of +1/+1 counters on it equal to the number of creatures you control"
+        )
+        .is_ok());
+        let before = ctx.chain_zone_result;
+        assert!(parse_dynamic_counter_suffix_body_with_context(
+            &format!("{text} and draw a card"),
+            &mut ctx
+        )
+        .is_err());
+        assert_eq!(ctx.chain_zone_result, before);
+        assert!(ctx.clone_for_independent_body().chain_zone_result.is_none());
+        assert!(ctx.clone_throwaway().chain_zone_result.is_none());
+        assert_eq!(ctx.clone_player_antecedents().chain_zone_result, before);
+    }
+}
+
+pub(crate) fn parse_dynamic_counter_suffix_body_with_context<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> nom::IResult<&'a str, (CounterType, QuantityExpr), OracleError<'a>> {
     let (rest, _) = tag("a number of ").parse(input)?;
     let (rest, type_token) = take_until(" counter").parse(rest)?;
     let counter_type = crate::types::counter::parse_counter_type(type_token);
@@ -13678,12 +13719,14 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
     // Quantity: delegate to the full CDA quantity grammar so composed forms
     // (twice/half/aggregate/difference/sum) parse in enter-with-counters slots.
     let qty_text = rest.trim_end_matches('.').trim();
-    let Some(qty) = parse_cda_quantity(qty_text) else {
+    let mut tentative = ctx.clone();
+    let Some(qty) = parse_cda_quantity_with_context(qty_text, &mut tentative) else {
         return Err(nom::Err::Failure(OracleError::new(
             rest,
             nom::error::ErrorKind::Fail,
         )));
     };
+    *ctx = tentative;
     Ok(("", (counter_type, qty)))
 }
 

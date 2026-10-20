@@ -202,6 +202,8 @@ mod tests {
     ) -> AiDecisionContext {
         AiDecisionContext {
             waiting_for: WaitingFor::SeparatePilesPartition {
+                return_result_occurrence: None,
+                expected_return_result_process: None,
                 player: subject,
                 eligible: eligible.iter().copied().collect(),
                 remaining_subjects: engine::im::Vector::new(),

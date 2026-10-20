@@ -179,6 +179,7 @@ pub(crate) fn put_face_up_exile_into(
         ));
     }
     let ctx = change_zone::ChangeZoneIterationCtx {
+        return_result_process: None,
         source_id,
         controller,
         origin: Some(Zone::Exile),

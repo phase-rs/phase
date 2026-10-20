@@ -150,6 +150,38 @@ pub(crate) fn parse_quantity_ref_with_context(
     ctx: &mut ParseContext,
 ) -> Option<QuantityRef> {
     let trimmed = text.trim().trim_end_matches('.');
+    let historical_text = trimmed.to_lowercase();
+    if nom_quantity::is_historical_zone_aggregate(&historical_text) {
+        let (rest, historical) =
+            nom_quantity::parse_historical_zone_aggregate(&historical_text).ok()?;
+        if !rest.is_empty() {
+            return None;
+        }
+        let (producer, from, to) = ctx.chain_zone_result?;
+        if from != historical.from || to != historical.to {
+            return None;
+        }
+        let controller = super::oracle_ir::context::bind_controller_phrase(
+            &historical.controller,
+            &ctx.player_antecedents(),
+        )?;
+        let filter = TargetFilter::And {
+            filters: vec![
+                historical.filter,
+                TargetFilter::Typed(TypedFilter::default().controller(controller)),
+            ],
+        };
+        return Some(QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                result: crate::types::ability::ReturnResultId(producer.0),
+            },
+            from: Some(from),
+            to: Some(to),
+            filter,
+            function: historical.function,
+            property: historical.property,
+        });
+    }
 
     match nom_quantity::parse_repeated_object_population_with_context(&trimmed.to_lowercase(), ctx)
     {
@@ -492,7 +524,8 @@ pub(crate) fn parse_quantity_ref_with_context(
                     } else {
                         filter
                     };
-                    return Some(QuantityRef::ZoneChangeAggregateThisTurn {
+                    return Some(QuantityRef::ZoneChangeAggregate {
+                        source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                         from: Some(Zone::Battlefield),
                         to: Some(Zone::Graveyard),
                         filter,
@@ -4269,7 +4302,8 @@ mod tests {
     fn total_power_of_subtype_that_died_this_turn_is_zone_change_aggregate() {
         assert_eq!(
             parse_quantity_ref("the total power of Daleks that died this turn"),
-            Some(QuantityRef::ZoneChangeAggregateThisTurn {
+            Some(QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Graveyard),
                 filter: TargetFilter::Typed(TypedFilter::default().subtype("Dalek".to_string())),
@@ -4287,7 +4321,8 @@ mod tests {
             "the total toughness of creatures that died under your control this turn",
         )
         .expect("must parse");
-        let QuantityRef::ZoneChangeAggregateThisTurn {
+        let QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
             from,
             to,
             filter,
@@ -4295,7 +4330,7 @@ mod tests {
             property,
         } = qty
         else {
-            panic!("expected ZoneChangeAggregateThisTurn, got {qty:?}");
+            panic!("expected ZoneChangeAggregate, got {qty:?}");
         };
         assert_eq!(from, Some(Zone::Battlefield));
         assert_eq!(to, Some(Zone::Graveyard));
@@ -9759,5 +9794,146 @@ mod jev_color_quantity_delegate_tests {
             Some(expected)
         );
         assert!(parse_quantity_ref("the number of colors among mysteries you control").is_none());
+    }
+}
+
+#[cfg(test)]
+mod departure_context_grammar_tests {
+    use super::*;
+    use crate::parser::oracle_ir::effect_chain::ClauseId;
+    use crate::types::ability::{ReturnResultId, ZoneChangeRecordSource};
+
+    #[test]
+    fn departure_historical_grammar_composes_property_noun_past_controller_and_aggregate_axes() {
+        for (head, function) in [
+            ("the total", AggregateFunction::Sum),
+            ("the greatest", AggregateFunction::Max),
+            ("the highest", AggregateFunction::Max),
+            ("the largest", AggregateFunction::Max),
+        ] {
+            for (property_text, property) in [
+                ("power", ObjectProperty::Power),
+                ("toughness", ObjectProperty::Toughness),
+                ("mana value", ObjectProperty::ManaValue),
+            ] {
+                for noun in [
+                    "creatures",
+                    "red creatures",
+                    "creatures or artifacts",
+                    "red or green creatures",
+                ] {
+                    for (controller, expected) in [
+                        ("you controlled", ControllerRef::You),
+                        ("they controlled", ControllerRef::ScopedPlayer),
+                        ("that player controlled", ControllerRef::ScopedPlayer),
+                    ] {
+                        let phrase = format!("{head} {property_text} {} {noun} {controller} that were exiled this way", if function == AggregateFunction::Sum { "of" } else { "among" });
+                        let mut context = ParseContext::default();
+                        context.chain_zone_result =
+                            Some((ClauseId(23), Zone::Battlefield, Zone::Exile));
+                        context.declared_player_scope = Some(ControllerRef::ScopedPlayer);
+                        context.prior_player_declaration = true;
+                        let quantity = parse_quantity_ref_with_context(&phrase, &mut context)
+                            .unwrap_or_else(|| {
+                                panic!("complete compositional historical phrase: {phrase}")
+                            });
+                        let QuantityRef::ZoneChangeAggregate {
+                            source,
+                            from,
+                            to,
+                            filter,
+                            function: actual_function,
+                            property: actual_property,
+                        } = quantity
+                        else {
+                            panic!("historical noun must retain its selected departure source: {phrase}");
+                        };
+                        assert_eq!(
+                            source,
+                            ZoneChangeRecordSource::InstructionResult {
+                                result: ReturnResultId(23)
+                            }
+                        );
+                        assert_eq!((from, to), (Some(Zone::Battlefield), Some(Zone::Exile)));
+                        assert_eq!((actual_function, actual_property), (function, property));
+                        let TargetFilter::And { filters } = filter else {
+                            panic!("noun and former controller compose independently");
+                        };
+                        assert_eq!(filters.len(), 2);
+                        assert!(!matches!(
+                            filters[0],
+                            TargetFilter::Any | TargetFilter::None
+                        ));
+                        assert_eq!(
+                            filters[1],
+                            TargetFilter::Typed(TypedFilter::default().controller(expected))
+                        );
+                        assert!(parse_quantity_ref(&phrase).is_none(), "a context-free historical descriptor must not become an executable current population");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn departure_historical_refusal_is_complete_transactional_and_keeps_body_boundaries() {
+        let phrase = "the total power of creatures you controlled that were exiled this way";
+        let mut context = ParseContext::default();
+        assert!(parse_quantity_ref_with_context(phrase, &mut context).is_none());
+        context.chain_zone_result = Some((ClauseId(0), Zone::Battlefield, Zone::Exile));
+        let first = parse_quantity_ref_with_context(phrase, &mut context).unwrap();
+        assert_eq!(
+            first.instruction_result_id(),
+            Some(ReturnResultId(0)),
+            "zero is valid when it is the actual selected clause id"
+        );
+        for malformed in [
+            "the total power of you controlled that were exiled this way",
+            "the total power of nonsuchnoun you controlled that were exiled this way",
+            "the total power of creatures nonsense you controlled that were exiled this way",
+            "the total power of creatures you controlled that were exiled this way tomorrow",
+            "the total power of creatures you control that were exiled this way",
+            "the total power of creatures you controlled that were destroyed this way",
+            "the total power of creatures they controlled that were exiled this way",
+        ] {
+            let before = context.chain_zone_result;
+            assert!(
+                parse_quantity_ref_with_context(malformed, &mut context).is_none(),
+                "strict complete refusal: {malformed}"
+            );
+            assert_eq!(context.chain_zone_result, before);
+            assert_eq!(
+                parse_quantity_ref_with_context(phrase, &mut context),
+                Some(first.clone())
+            );
+        }
+        for (from, to) in [
+            (Zone::Graveyard, Zone::Exile),
+            (Zone::Battlefield, Zone::Hand),
+        ] {
+            let mut incompatible = context.clone();
+            incompatible.chain_zone_result = Some((ClauseId(0), from, to));
+            assert!(parse_quantity_ref_with_context(phrase, &mut incompatible).is_none());
+        }
+        let mut same_body = context.clone_player_antecedents();
+        assert_eq!(
+            parse_quantity_ref_with_context(phrase, &mut same_body),
+            Some(first.clone())
+        );
+        let kept =
+            context.with_player_antecedents(|body| parse_quantity_ref_with_context(phrase, body));
+        assert_eq!(kept, Some(first));
+        for mut independent in [
+            context.clone_for_independent_body(),
+            context.clone_throwaway(),
+            ParseContext::default(),
+        ] {
+            assert_eq!(independent.chain_zone_result, None);
+            assert!(parse_quantity_ref_with_context(phrase, &mut independent).is_none());
+        }
+        assert_eq!(
+            context.chain_zone_result,
+            Some((ClauseId(0), Zone::Battlefield, Zone::Exile))
+        );
     }
 }

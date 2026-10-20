@@ -1511,28 +1511,366 @@ fn retire_unreferenced_return_result_frames(state: &mut GameState) {
 
 fn begin_return_result_occurrence(
     state: &mut GameState,
-) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
+) -> Result<
+    (
+        Option<ReturnResultOccurrenceId>,
+        crate::types::game_state::ReturnResultProcessId,
+    ),
+    EffectError,
+> {
+    use crate::types::game_state::{ReturnResultFrame, ReturnResultProcessId};
     let id = ReturnResultOccurrenceId(state.next_return_result_occurrence_id);
-    state.next_return_result_occurrence_id = state
-        .next_return_result_occurrence_id
+    let process = ReturnResultProcessId(state.next_return_result_process_id);
+    let next_occurrence =
+        id.0.checked_add(1)
+            .filter(|_| id.0 != 0)
+            .ok_or_else(|| EffectError::InvalidParam("return occurrence id overflow".into()))?;
+    let next_process = process
+        .0
         .checked_add(1)
-        .ok_or_else(|| EffectError::InvalidParam("return occurrence id overflow".to_string()))?;
-    state.return_result_frames.insert(id, Default::default());
-    Ok(state.active_return_result_occurrence.replace(id))
+        .filter(|_| process.0 != 0)
+        .ok_or_else(|| EffectError::InvalidParam("return process id overflow".into()))?;
+    // Check both domains before either allocator or frame is mutated.
+    state.next_return_result_occurrence_id = next_occurrence;
+    state.next_return_result_process_id = next_process;
+    state.return_result_frames.insert(
+        id,
+        ReturnResultFrame {
+            process: Some(process),
+            results: Default::default(),
+        },
+    );
+    Ok((state.active_return_result_occurrence.replace(id), process))
 }
 
-/// CR 608.2c: A repeated instruction executes afresh each iteration. Its
-/// settled zone-change result belongs to that iteration, including across a
-/// player-choice pause, while an enclosing instruction keeps its own result.
+/// CR 608.2c: a whole producing iteration executes in a fresh invocation.
 fn with_iteration_return_result_occurrence<T>(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    run: impl FnOnce(&mut GameState) -> Result<T, EffectError>,
+    run: impl FnOnce(&mut GameState, &ResolvedAbility) -> Result<T, EffectError>,
 ) -> Result<T, EffectError> {
-    if !crate::types::game_state::has_return_result_metadata(ability) {
-        return run(state);
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::SelectedBody,
+        run,
+    )
+}
+
+fn with_instruction_result_entry<T>(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    entry: crate::types::ability::InstructionResultEntry,
+    run: impl FnOnce(&mut GameState, &ResolvedAbility) -> Result<T, EffectError>,
+) -> Result<T, EffectError> {
+    use crate::types::ability::{
+        classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
+    };
+    let summary = classify_instruction_result_invocation(ability, entry)?;
+    let mut executable = ability.clone();
+    let previous = match summary {
+        InstructionResultProcess::Local { .. } if entry != InstructionResultEntry::ResumeOwned => {
+            let (previous, process) = begin_return_result_occurrence(state)?;
+            executable.bind_return_result_process(Some(process));
+            previous
+        }
+        InstructionResultProcess::Local { .. } | InstructionResultProcess::Imported { .. } => {
+            let occurrence = state.active_return_result_occurrence.ok_or_else(|| {
+                EffectError::InvalidParam("missing selected instruction-result occurrence".into())
+            })?;
+            let frame = state.return_result_frames.get(&occurrence).ok_or_else(|| {
+                EffectError::InvalidParam("missing selected instruction-result frame".into())
+            })?;
+            if !frame.has_process(ability.return_result_process)
+                || (ability.return_result_process.is_none()
+                    && ability.has_addressed_zone_result_read())
+            {
+                return Err(EffectError::InvalidParam(
+                    "instruction-result process owner mismatch".into(),
+                ));
+            }
+            executable.bind_return_result_process(ability.return_result_process);
+            Some(occurrence)
+        }
+        InstructionResultProcess::Unused => {
+            executable.bind_return_result_process(None);
+            state.active_return_result_occurrence.take()
+        }
+    };
+    let result = run(state, &executable);
+    state.active_return_result_occurrence = previous;
+    retire_unreferenced_return_result_frames(state);
+    result
+}
+
+pub(crate) fn addressed_quantity_ref_is_available(
+    state: &GameState,
+    reference: &QuantityRef,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+) -> bool {
+    crate::game::quantity::addressed_quantity_ref_is_available(state, reference, expected)
+}
+
+/// Authenticate a definition-selected body before restoring its lookup selector.
+pub(crate) fn validate_selected_instruction_result_owner(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+) -> Result<(), EffectError> {
+    use crate::types::ability::{
+        classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
+    };
+    if let InstructionResultProcess::Imported { results } =
+        classify_instruction_result_invocation(ability, InstructionResultEntry::SelectedBody)?
+    {
+        let mut addressed = Vec::new();
+        ability.for_each_own_quantity_ref(&mut |reference| {
+            if let Some(result) = reference
+                .instruction_result_id()
+                .filter(|result| results.contains(result))
+            {
+                addressed.push(result);
+            }
+        });
+        let frame = crate::types::game_state::checked_return_result_frame(
+            state,
+            occurrence,
+            ability.return_result_process,
+            !addressed.is_empty(),
+        )
+        .map_err(EffectError::InvalidParam)?;
+        for result in addressed {
+            if !matches!(frame.results.get(&result), Some(crate::types::game_state::InstructionResult::ZoneChanges(records))
+                if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+            {
+                return Err(EffectError::InvalidParam(
+                    "unavailable selected instruction result".into(),
+                ));
+            }
+        }
     }
-    let previous = begin_return_result_occurrence(state)?;
+    Ok(())
+}
+
+pub(crate) fn validate_definition_waiting_for_result_owner(
+    state: &GameState,
+    waiting: &WaitingFor,
+) -> Result<(), EffectError> {
+    if matches!(waiting, WaitingFor::ChooseFromZoneChoice { .. }) {
+        if let Some(pending) = state.active_per_player_zone_choice() {
+            validate_selected_instruction_result_owner(
+                state,
+                &pending.ability,
+                pending.return_result_occurrence,
+            )?;
+        }
+        if let Some(pending) = state.active_per_category_zone_choice() {
+            choose_from_zone::validate_per_category_result_owner(
+                state,
+                &pending.ability,
+                &pending.remaining_member_filters,
+                pending.return_result_occurrence,
+            )?;
+        }
+    }
+    match waiting {
+        WaitingFor::UnlessPayment { .. }
+        | WaitingFor::UnlessPaymentChooseCost { .. }
+        | WaitingFor::WardDiscardChoice { .. }
+        | WaitingFor::WardSacrificeChoice { .. }
+        | WaitingFor::UnlessBounceChoice { .. } => {
+            return crate::game::engine_payment_choices::validate_payment_result_owner(
+                state, waiting,
+            );
+        }
+        WaitingFor::ExploreChoice {
+            return_result_occurrence,
+            pending_effect: body,
+            ..
+        }
+        | WaitingFor::ClashChooseOpponent {
+            return_result_occurrence,
+            ability: body,
+            ..
+        }
+        | WaitingFor::ChooseFromZoneOpponentChooser {
+            return_result_occurrence,
+            ability: body,
+            ..
+        }
+        | WaitingFor::MultiTargetSelection {
+            return_result_occurrence,
+            pending_ability: body,
+            ..
+        }
+        | WaitingFor::ChooseTokenHost {
+            return_result_occurrence,
+            pending_ability: body,
+            ..
+        }
+        | WaitingFor::RepeatDecision {
+            return_result_occurrence,
+            ability: body,
+            ..
+        } => {
+            return validate_selected_instruction_result_owner(
+                state,
+                body,
+                *return_result_occurrence,
+            );
+        }
+        _ => {}
+    }
+    let (occurrence, expected, source, controller, definitions): (
+        _,
+        _,
+        _,
+        _,
+        Vec<&crate::types::ability::AbilityDefinition>,
+    ) = match waiting {
+        WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence,
+            expected_return_result_process,
+            source_id,
+            controller,
+            branches,
+            ..
+        } => (
+            *return_result_occurrence,
+            *expected_return_result_process,
+            *source_id,
+            *controller,
+            branches.iter().collect(),
+        ),
+        WaitingFor::VoteChoice {
+            return_result_occurrence,
+            expected_return_result_process,
+            source_id,
+            controller,
+            per_choice_effect,
+            outcome_template,
+            ..
+        } => (
+            *return_result_occurrence,
+            *expected_return_result_process,
+            *source_id,
+            *controller,
+            per_choice_effect
+                .iter()
+                .map(Box::as_ref)
+                .chain(outcome_template.as_deref())
+                .collect(),
+        ),
+        WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence,
+            expected_return_result_process,
+            source_id,
+            chooser,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            return_result_occurrence,
+            expected_return_result_process,
+            source_id,
+            chooser,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => (
+            *return_result_occurrence,
+            *expected_return_result_process,
+            *source_id,
+            *chooser,
+            std::iter::once(chosen_pile_effect.as_ref())
+                .chain(unchosen_pile_effect.as_deref())
+                .collect(),
+        ),
+        WaitingFor::SeparatePilesChoice {
+            return_result_occurrence,
+            expected_return_result_process,
+            source_id,
+            player,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => (
+            *return_result_occurrence,
+            *expected_return_result_process,
+            *source_id,
+            *player,
+            std::iter::once(chosen_pile_effect.as_ref())
+                .chain(unchosen_pile_effect.as_deref())
+                .collect(),
+        ),
+        _ => return Ok(()),
+    };
+    for definition in definitions {
+        let mut body =
+            crate::game::ability_utils::build_resolved_from_def(definition, source, controller);
+        body.bind_return_result_process(expected);
+        validate_selected_instruction_result_owner(state, &body, occurrence)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn retained_return_result_occurrence(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
+    use crate::types::ability::{
+        classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
+    };
+    match classify_instruction_result_invocation(ability, InstructionResultEntry::ResumeOwned)? {
+        InstructionResultProcess::Unused => Ok(None),
+        InstructionResultProcess::Local { .. } => {
+            crate::types::game_state::checked_return_result_frame(
+                state,
+                state.active_return_result_occurrence,
+                ability.return_result_process,
+                ability.has_addressed_zone_result_read(),
+            )
+            .map_err(EffectError::InvalidParam)?;
+            Ok(state.active_return_result_occurrence)
+        }
+        InstructionResultProcess::Imported { .. } => {
+            validate_selected_instruction_result_owner(
+                state,
+                ability,
+                state.active_return_result_occurrence,
+            )?;
+            Ok(state.active_return_result_occurrence)
+        }
+    }
+}
+
+/// CR 608.2c + CR 608.2i: unavailable history is an invalid input, not a numeric zero.
+pub(crate) fn validate_addressed_quantity_reads(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<(), EffectError> {
+    let mut unavailable = None;
+    let mut check = |reference: &QuantityRef| {
+        if let Err(error) = crate::game::quantity::validate_addressed_quantity_ref(
+            state,
+            reference,
+            ability.return_result_process,
+        ) {
+            unavailable.get_or_insert(error);
+        }
+    };
+    ability.for_each_direct_quantity_ref(&mut check);
+    unavailable.map_or(Ok(()), Err)
+}
+
+/// A suspended reader resumes the exact selector saved by its own carrier.
+pub(crate) fn with_inherited_return_result_occurrence<T>(
+    state: &mut GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    run: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    let previous = std::mem::replace(&mut state.active_return_result_occurrence, occurrence);
     let result = run(state);
     state.active_return_result_occurrence = previous;
     retire_unreferenced_return_result_frames(state);
@@ -1546,12 +1884,14 @@ pub(crate) fn publish_return_result(
     state: &mut GameState,
     occurrence_id: ReturnResultOccurrenceId,
     result_id: crate::types::ability::ReturnResultId,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
     records: Vec<ZoneChangeRecord>,
 ) -> Result<(), EffectError> {
     publish_instruction_result(
         state,
         occurrence_id,
         result_id,
+        expected,
         crate::types::game_state::InstructionResult::ZoneChanges(records),
     )
 }
@@ -1560,18 +1900,26 @@ fn publish_instruction_result(
     state: &mut GameState,
     occurrence_id: ReturnResultOccurrenceId,
     result_id: crate::types::ability::ReturnResultId,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
     result: crate::types::game_state::InstructionResult,
 ) -> Result<(), EffectError> {
+    crate::types::game_state::checked_return_result_frame(
+        state,
+        Some(occurrence_id),
+        expected,
+        false,
+    )
+    .map_err(EffectError::InvalidParam)?;
     let frame = state
         .return_result_frames
         .get_mut(&occurrence_id)
         .ok_or_else(|| EffectError::MissingParam("return result frame".to_string()))?;
-    if frame.contains_key(&result_id) {
+    if frame.results.contains_key(&result_id) {
         return Err(EffectError::InvalidParam(
             "duplicate return result".to_string(),
         ));
     }
-    frame.insert(result_id, result);
+    frame.results.insert(result_id, result);
     Ok(())
 }
 
@@ -1622,6 +1970,7 @@ pub(crate) fn begin_counter_removal_result(
         state,
         occurrence,
         result,
+        ability.return_result_process,
         crate::types::game_state::InstructionResult::CounterRemovals(
             crate::types::game_state::CounterRemovalInstructionResult {
                 source,
@@ -1635,6 +1984,7 @@ pub(crate) fn begin_counter_removal_result(
         crate::types::game_state::CounterRemovalResultBinding {
             occurrence,
             result,
+            process: ability.return_result_process,
             source,
             recipient,
             counters,
@@ -1646,7 +1996,8 @@ pub(crate) fn counter_removal_binding_is_valid(
     state: &GameState,
     binding: &crate::types::game_state::CounterRemovalResultBinding,
 ) -> bool {
-    matches!(state.return_result_frames.get(&binding.occurrence).and_then(|frame| frame.get(&binding.result)),
+    matches!(crate::types::game_state::checked_return_result_frame(state, Some(binding.occurrence), binding.process, false)
+        .ok().and_then(|frame| frame.results.get(&binding.result)),
         Some(crate::types::game_state::InstructionResult::CounterRemovals(result))
             if result.source == binding.source && result.recipient == binding.recipient && result.counters == binding.counters)
 }
@@ -1676,10 +2027,15 @@ pub(crate) fn counter_reflexive_occurrences_for_occurrence(
 ) -> Result<u32, EffectError> {
     let occurrence =
         occurrence.ok_or_else(|| EffectError::MissingParam("counter reader occurrence".into()))?;
-    let Some(crate::types::game_state::InstructionResult::CounterRemovals(result)) = state
-        .return_result_frames
-        .get(&occurrence)
-        .and_then(|frame| frame.get(&result_id))
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        Some(occurrence),
+        ability.return_result_process,
+        false,
+    )
+    .map_err(EffectError::InvalidParam)?;
+    let Some(crate::types::game_state::InstructionResult::CounterRemovals(result)) =
+        frame.results.get(&result_id)
     else {
         return Err(EffectError::MissingParam(
             "counter-removal instruction result".into(),
@@ -1716,8 +2072,9 @@ pub(crate) fn counter_reflexive_occurrences_for_occurrence(
 fn publish_empty_return_result_for_active(
     state: &mut GameState,
     result_id: crate::types::ability::ReturnResultId,
-    effect: &Effect,
+    ability: &ResolvedAbility,
 ) -> Result<(), EffectError> {
+    let effect = ability.effect.as_ref();
     let occurrence_id = state
         .active_return_result_occurrence
         .ok_or_else(|| EffectError::MissingParam("return result occurrence".to_string()))?;
@@ -1733,7 +2090,13 @@ fn publish_empty_return_result_for_active(
     } else {
         crate::types::game_state::InstructionResult::ZoneChanges(Vec::new())
     };
-    publish_instruction_result(state, occurrence_id, result_id, result)
+    publish_instruction_result(
+        state,
+        occurrence_id,
+        result_id,
+        ability.return_result_process,
+        result,
+    )
 }
 
 pub(crate) fn publish_reveal_result_for_ability(
@@ -1759,6 +2122,7 @@ pub(crate) fn publish_reveal_result_for_ability(
             state,
             occurrence,
             result_id,
+            ability.return_result_process,
             crate::types::game_state::InstructionResult::RevealedCards(
                 crate::types::game_state::RevealedInstructionResult {
                     revealed_cards: members,
@@ -1821,10 +2185,16 @@ pub(crate) fn named_revealed_members_for_occurrence<'a>(
     }
     let occurrence =
         occurrence.ok_or_else(|| EffectError::MissingParam("reveal occurrence".into()))?;
-    let members = state
-        .return_result_frames
-        .get(&occurrence)
-        .and_then(|frame| frame.get(id))
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        Some(occurrence),
+        ability.return_result_process,
+        false,
+    )
+    .map_err(EffectError::InvalidParam)?;
+    let members = frame
+        .results
+        .get(id)
         .and_then(|result| result.revealed_cards())
         .ok_or_else(|| EffectError::MissingParam("named revealed result".into()))?;
     let mut seen = std::collections::HashSet::new();
@@ -1900,15 +2270,17 @@ mod revealed_instruction_authority_tests {
         let id = base.reads_return_result.as_ref().unwrap().0;
         for fault in 0..12 {
             let mut state = GameState::new_two_player(42);
-            begin_return_result_occurrence(&mut state).unwrap();
+            let (_, process) = begin_return_result_occurrence(&mut state).unwrap();
             let occurrence = state.active_return_result_occurrence.unwrap();
             let mut reader = base.clone();
+            reader.bind_return_result_process(Some(process));
             if fault != 0 {
-                let producer = crate::game::ability_utils::build_resolved_from_def(
+                let mut producer = crate::game::ability_utils::build_resolved_from_def(
                     &parsed.abilities[0],
                     ObjectId(100),
                     PlayerId(0),
                 );
+                producer.bind_return_result_process(Some(process));
                 publish_reveal_result_for_ability(&mut state, &producer, Vec::new()).unwrap();
             }
             match fault {
@@ -1917,6 +2289,7 @@ mod revealed_instruction_authority_tests {
                         .return_result_frames
                         .get_mut(&occurrence)
                         .unwrap()
+                        .results
                         .insert(id, InstructionResult::ZoneChanges(Vec::new()));
                 }
                 2 => {
@@ -1952,6 +2325,7 @@ mod revealed_instruction_authority_tests {
                         .return_result_frames
                         .get_mut(&occurrence)
                         .unwrap()
+                        .results
                         .insert(
                             id,
                             InstructionResult::RevealedCards(RevealedInstructionResult {
@@ -2010,12 +2384,13 @@ mod revealed_instruction_authority_tests {
         stale.card_types = vec![crate::types::card_type::CoreType::Land];
         state.lki_cache.insert(member, stale);
         let parsed = crate::parser::parse_oracle_text("Reveal the top card of your library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Synthetic exact reader", &[], &["Instant".into()], &[]);
-        let reader = crate::game::ability_utils::build_resolved_from_def(
+        let mut reader = crate::game::ability_utils::build_resolved_from_def(
             parsed.abilities[0].sub_ability.as_deref().unwrap(),
             ObjectId(100),
             PlayerId(0),
         );
-        begin_return_result_occurrence(state).unwrap();
+        let (_, process) = begin_return_result_occurrence(state).unwrap();
+        reader.bind_return_result_process(Some(process));
         let id = reader.reads_return_result.as_ref().unwrap().0;
         publish_reveal_result_for_ability(
             state,
@@ -2026,6 +2401,7 @@ mod revealed_instruction_authority_tests {
                     PlayerId(0),
                 );
                 producer.declares_return_result = Some(id);
+                producer.bind_return_result_process(Some(process));
                 producer
             },
             vec![member],
@@ -2050,11 +2426,20 @@ mod revealed_instruction_authority_tests {
             &reader
         ));
         let enclosing = state.active_return_result_occurrence;
-        with_iteration_return_result_occurrence(state, &reader, |child| {
+        with_iteration_return_result_occurrence(state, &reader, |child, executable| {
+            assert_eq!(child.active_return_result_occurrence, enclosing);
+            assert_eq!(named_revealed_members(child, executable)?.len(), 1);
+            Ok(())
+        })
+        .unwrap();
+        let local = crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        with_iteration_return_result_occurrence(state, &local, |child, executable| {
             assert_ne!(child.active_return_result_occurrence, enclosing);
-            let mut producer = reader.clone();
-            producer.declares_return_result = Some(id);
-            publish_reveal_result_for_ability(child, &producer, Vec::new())?;
+            publish_reveal_result_for_ability(child, executable, Vec::new())?;
             assert_eq!(
                 crate::game::quantity::resolve_quantity_with_targets(child, lhs, &reader),
                 0
@@ -2366,6 +2751,15 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
 /// caller's `events`, so its zone changes reach trigger collection and a
 /// CR 104.4b draw reaches the action result.
 fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let occurrence = state
+        .active_repeat_until()
+        .and_then(|pending| pending.return_result_occurrence);
+    with_inherited_return_result_occurrence(state, occurrence, |state| {
+        drain_active_repeat_until_in_occurrence(state, events)
+    });
+}
+
+fn drain_active_repeat_until_in_occurrence(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(pending) = state
         .take_active_repeat_until()
         .expect("repeat-until drain may consume only the active repeat-until frame")
@@ -2373,6 +2767,7 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
         return;
     };
     let crate::types::game_state::PendingRepeatUntil {
+        return_result_occurrence,
         ability,
         stop_progress,
         iteration_progress,
@@ -2382,6 +2777,7 @@ fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>)
         // controller whether to repeat the process.
         Some(RepeatContinuation::ControllerChoice) => {
             state.waiting_for = WaitingFor::RepeatDecision {
+                return_result_occurrence: state.active_return_result_occurrence,
                 player: ability.controller,
                 ability,
             };
@@ -2492,6 +2888,7 @@ fn park_repeat_until_after_inner_pause(
     stack_depth_before_iteration: ChildStackDepth,
 ) {
     let pending = crate::types::game_state::PendingRepeatUntil {
+        return_result_occurrence: state.active_return_result_occurrence,
         ability,
         stop_progress,
         iteration_progress,
@@ -2684,11 +3081,29 @@ fn declare_mandatory_loop_draw(state: &mut GameState, events: &mut Vec<GameEvent
 /// a further pause; emits the trailing `EffectResolved` event when the loop
 /// completes.
 fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if crate::types::game_state::validate_retained_zone_result_owners(state).is_err() {
+        return;
+    }
+    let occurrence = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .and_then(|pending| pending.return_result_occurrence);
+    with_inherited_return_result_occurrence(state, occurrence, |state| {
+        drain_pending_change_zone_iteration_in_occurrence(state, events)
+    });
+}
+
+fn drain_pending_change_zone_iteration_in_occurrence(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
     while let Some(frame) = state.active_change_zone_frame().cloned() {
         let Some(pending) = frame.pending else {
             return;
         };
         let crate::types::game_state::PendingChangeZoneIteration {
+            return_result_occurrence,
+            return_result_process,
             mut logical_zone_change_group,
             pending_return_result_producer,
             paused_current,
@@ -2713,6 +3128,18 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_attached_to,
             effect_kind,
         } = pending;
+        if crate::game::effects::change_zone::pending_zone_entry_evaluation_ability(
+            state,
+            source_id,
+            state.active_return_result_occurrence,
+            return_result_process,
+            &conditional_enter_with_counters,
+            enters_modified_if.as_ref(),
+        )
+        .is_err()
+        {
+            return;
+        }
         // CR 608.2c: the object that paused this iteration on a replacement
         // choice was delivered out-of-band by the replacement resume, not by
         // `remaining`. Count only its explicitly captured delivery slice; a
@@ -2768,11 +3195,27 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 crate::game::effects::change_zone::enter_with_counters_for_pending_object(
                     state,
                     source_id,
+                    return_result_process,
                     *obj_id,
                     &enter_with_counters,
                     &conditional_enter_with_counters,
+                    enters_modified_if.as_ref(),
                 );
+            let Ok(per_obj_enter_counters) = per_obj_enter_counters else {
+                return;
+            };
+            let evaluation_view =
+                crate::game::effects::change_zone::pending_zone_entry_evaluation_ability(
+                    state,
+                    source_id,
+                    state.active_return_result_occurrence,
+                    return_result_process,
+                    &conditional_enter_with_counters,
+                    enters_modified_if.as_ref(),
+                )
+                .expect("retained zone work was authenticated before the drain");
             let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
+                return_result_process,
                 source_id,
                 controller,
                 origin,
@@ -2823,7 +3266,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             let delivery_start = events.len();
             let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
-                state, &ctx, *obj_id, events,
+                state,
+                &ctx,
+                evaluation_view.as_ref(),
+                *obj_id,
+                events,
             ) {
                 crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                     logical_zone_change_group
@@ -2864,6 +3311,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.replace_active_change_zone_iteration(
                         crate::types::game_state::PendingChangeZoneIteration {
+                            return_result_occurrence,
+                            return_result_process,
                             logical_zone_change_group,
                             pending_return_result_producer,
                             paused_current: anticipated_pause.map(|mut boundary| {
@@ -2929,6 +3378,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.replace_active_change_zone_iteration_after_child(
                         crate::types::game_state::PendingChangeZoneIteration {
+                            return_result_occurrence,
+                            return_result_process,
                             logical_zone_change_group,
                             pending_return_result_producer,
                             paused_current,
@@ -2980,6 +3431,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 state,
                 occurrence_id,
                 result_id,
+                return_result_process,
                 crate::types::game_state::settled_logical_zone_change_records(
                     &logical_zone_change_group,
                 ),
@@ -3059,11 +3511,21 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
 /// in-line so the loop only pauses again when an inner effect actually
 /// transitions to a player-choice state.
 fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let occurrence = state
+        .active_repeat_for()
+        .and_then(|pending| pending.return_result_occurrence);
+    with_inherited_return_result_occurrence(state, occurrence, |state| {
+        drain_active_repeat_for_in_occurrence(state, events)
+    });
+}
+
+fn drain_active_repeat_for_in_occurrence(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(pending) = state
         .take_active_repeat_for()
         .expect("repeat-for drain may consume only the active repeat-for frame")
     {
         let crate::types::game_state::PendingRepeatIteration {
+            return_result_occurrence,
             ability,
             tracked_members,
             iterated_counter_kinds,
@@ -3085,6 +3547,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 park_repeat_for_after_current_iteration(
                     state,
                     crate::types::game_state::PendingRepeatIteration {
+                        return_result_occurrence: state.active_return_result_occurrence,
                         ability: ability.clone(),
                         tracked_members: tracked_members.clone(),
                         iterated_counter_kinds: iterated_counter_kinds.clone(),
@@ -3129,30 +3592,35 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // that the depth==0 prelude in `resolve_ability_chain` would
             // otherwise reset. The resumed iteration is logically continuing the
             // outer chain, not starting a fresh top-level resolution.
-            let progress =
-                match with_iteration_return_result_occurrence(state, iter_effective, |state| {
-                    resolve_ability_chain_step(state, iter_effective, events, 1)
-                }) {
-                    Ok(progress) => progress,
-                    // Preserve the established void-drain error boundary.
-                    Err(_) => return,
-                };
+            let progress = match with_iteration_return_result_occurrence(
+                state,
+                iter_effective,
+                |state, executable| {
+                    let progress = resolve_ability_chain_step(state, executable, events, 1)?;
+                    let next = iteration + 1;
+                    if progress.is_pending() && next < total_iterations {
+                        park_repeat_for_after_current_iteration(
+                            state,
+                            crate::types::game_state::PendingRepeatIteration {
+                                return_result_occurrence: state.active_return_result_occurrence,
+                                ability: Box::new(executable.clone()),
+                                tracked_members: tracked_members.clone(),
+                                iterated_counter_kinds: iterated_counter_kinds.clone(),
+                                next_iteration: next,
+                                total_iterations,
+                                copy_order_fixed,
+                            },
+                            stack_depth_before_iteration,
+                        );
+                    }
+                    Ok(progress)
+                },
+            ) {
+                Ok(progress) => progress,
+                // Preserve the established void-drain error boundary.
+                Err(_) => return,
+            };
             if progress.is_pending() {
-                let next = iteration + 1;
-                if next < total_iterations {
-                    park_repeat_for_after_current_iteration(
-                        state,
-                        crate::types::game_state::PendingRepeatIteration {
-                            ability: ability.clone(),
-                            tracked_members: tracked_members.clone(),
-                            iterated_counter_kinds: iterated_counter_kinds.clone(),
-                            next_iteration: next,
-                            total_iterations,
-                            copy_order_fixed,
-                        },
-                        stack_depth_before_iteration,
-                    );
-                }
                 match progress {
                     ResolutionProgress::Queued => {
                         drain_pending_continuation(state, events);
@@ -3496,7 +3964,7 @@ pub(crate) fn resolve_effect_pay_cost_rider(
         rider.mirror_targets_from(ability);
     }
     apply_parent_chain_context(&mut rider, ability, None, state);
-    resolve_ability_chain(state, &rider, events, 1)
+    resolve_resume_owned_ability_chain(state, &rider, events, 1)
 }
 
 pub(crate) fn prepend_remaining_pay_cost_continuation(
@@ -4158,6 +4626,7 @@ fn build_reflexive_pending_trigger(
         "build_reflexive_pending_trigger requires a WhenYouDo or QuantityCheck gate"
     );
     consume_reflexive_creation_gate(&mut ability);
+    ability.clear_return_result_process_recursive();
 
     let source_id = parent.map_or(ability.source_id, |parent| parent.source_id);
     let controller = parent.map_or(ability.controller, |parent| parent.controller);
@@ -4352,7 +4821,12 @@ fn try_materialize_reflexive_trigger_inner(
         .as_ref()
         .and_then(AbilityCondition::counter_removal_event)
     {
-        let count = counter_reflexive_occurrences(state, reflexive, result, counters)?;
+        let mut receipt_view = reflexive.clone();
+        receipt_view.return_result_process = match parent {
+            Some(parent) => parent.return_result_process,
+            None => reflexive.return_result_process,
+        };
+        let count = counter_reflexive_occurrences(state, &receipt_view, result, counters)?;
         // CR 603.2c + CR 603.12a: singular counter events earn independent
         // children. Queue the whole set before ordinary announcement can prompt.
         for _ in 0..count {
@@ -5367,7 +5841,7 @@ fn resolve_optional_effect_decision_step(
                     .as_deref()
                     .is_none_or(|branch| !branch_declares_return_result(branch, result_id))
                 {
-                    publish_empty_return_result_for_active(state, result_id, &ability.effect)?;
+                    publish_empty_return_result_for_active(state, result_id, ability)?;
                 }
             }
             if let Some(branch) = decline_branch {
@@ -7015,6 +7489,7 @@ fn instruction_outlives_declined_gate(
     parent_target_is_declared: bool,
 ) -> bool {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         // The printed instruction, audited by the caller (`audit`), and how
         // long it lasts, audited below.
         effect: _,
@@ -7938,7 +8413,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::SacrificedThisTurn { filter, .. }
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregate { filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. } => filter_pred(filter),
         // Same, under a field named for what it selects rather than `filter`.
         QuantityRef::CounterAddedThisTurn { target, .. } => filter_pred(target),
@@ -9783,6 +10258,7 @@ fn resolve_effect_step(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<EffectStep, EffectError> {
+    validate_addressed_quantity_reads(state, ability)?;
     match &ability.effect {
         Effect::RollDie { .. } => Ok(EffectStep {
             progress: roll_die::resolve_step(state, ability, events)?,
@@ -12673,7 +13149,11 @@ pub(super) fn complete_reciprocal_consume_selection(
         })?
         .extend(selected);
     if let Some(tail) = frame.pending.chain.sub_ability.take() {
-        resolve_ability_chain(state, &tail, events, 1)?;
+        with_inherited_return_result_occurrence(
+            state,
+            frame.pending.return_result_occurrence,
+            |state| resolve_resume_owned_ability_chain(state, &tail, events, 1),
+        )?;
     } else {
         state.waiting_for = WaitingFor::Priority {
             player: frame.pending.chain.controller,
@@ -12702,7 +13182,11 @@ pub(super) fn complete_reciprocal_consume_no_candidates(
         subject: None,
     });
     if let Some(tail) = tail {
-        resolve_ability_chain(state, &tail, events, 1)?;
+        with_inherited_return_result_occurrence(
+            state,
+            frame.pending.return_result_occurrence,
+            |state| resolve_resume_owned_ability_chain(state, &tail, events, 1),
+        )?;
     } else {
         state.waiting_for = WaitingFor::Priority {
             player: frame.pending.chain.controller,
@@ -12775,6 +13259,7 @@ fn drive_empty_reciprocal_producer(
         _ => {
             prepend_to_pending_continuation(state, consumer.clone());
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                return_result_occurrence: retained_return_result_occurrence(state, consumer)?,
                 player: ability.controller,
                 candidates: opponents,
                 ability: Box::new(consumer.clone()),
@@ -14134,27 +14619,28 @@ fn drive_repeat_for_outermost(
         let mut iter_ability = effective.clone();
         iter_ability.repeat_for = None;
         let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
-        let progress = with_iteration_return_result_occurrence(state, &iter_ability, |state| {
-            resolve_chain_body(state, &iter_ability, events, depth)
-        })?;
+        let progress =
+            with_iteration_return_result_occurrence(state, &iter_ability, |state, executable| {
+                let progress = resolve_chain_body(state, executable, events, depth)?;
+                let next_iteration = iteration + 1;
+                if progress.is_pending() && next_iteration < base_iterations {
+                    park_repeat_for_after_current_iteration(
+                        state,
+                        crate::types::game_state::PendingRepeatIteration {
+                            return_result_occurrence: state.active_return_result_occurrence,
+                            ability: Box::new(executable.clone()),
+                            tracked_members: Vec::new(),
+                            iterated_counter_kinds: Vec::new(),
+                            next_iteration,
+                            total_iterations: base_iterations,
+                            copy_order_fixed: None,
+                        },
+                        stack_depth_before_iteration,
+                    );
+                }
+                Ok(progress)
+            })?;
         if progress.is_pending() {
-            let next_iteration = iteration + 1;
-            if next_iteration < base_iterations {
-                let mut resume = effective.clone();
-                resume.repeat_for = None;
-                park_repeat_for_after_current_iteration(
-                    state,
-                    crate::types::game_state::PendingRepeatIteration {
-                        ability: Box::new(resume),
-                        tracked_members: Vec::new(),
-                        iterated_counter_kinds: Vec::new(),
-                        next_iteration,
-                        total_iterations: base_iterations,
-                        copy_order_fixed: None,
-                    },
-                    stack_depth_before_iteration,
-                );
-            }
             return Ok(progress);
         }
         iteration += 1;
@@ -15853,6 +16339,8 @@ fn set_player_scope_sacrifice_waiting_for(
     source_id: ObjectId,
 ) {
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: prompt.player,
         cards: prompt.cards,
         count: prompt.count,
@@ -15947,6 +16435,9 @@ fn perform_player_scope_sacrifices(
                     completion.spans_replacement_pause = true;
                     state.pending_player_scope_sacrifice_choice =
                         Some(PendingPlayerScopeSacrificeChoice {
+                            return_result_occurrence: retained_return_result_occurrence(
+                                state, ability,
+                            )?,
                             ability: Box::new(ability.clone()),
                             remaining_players: vec![],
                             selections,
@@ -16294,6 +16785,9 @@ fn start_player_scope_sacrifice_choices(
                 }
                 state.pending_player_scope_sacrifice_choice =
                     Some(PendingPlayerScopeSacrificeChoice {
+                        return_result_occurrence: retained_return_result_occurrence(
+                            state, &template,
+                        )?,
                         ability: Box::new(template.clone()),
                         remaining_players: matching_players[i + 1..].to_vec(),
                         selections,
@@ -16319,6 +16813,24 @@ fn start_player_scope_sacrifice_choices(
 }
 
 pub(crate) fn advance_pending_player_scope_sacrifice_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
+    let occurrence = state
+        .pending_player_scope_sacrifice_choice
+        .as_ref()
+        .and_then(|pending| pending.return_result_occurrence);
+    with_inherited_return_result_occurrence(state, occurrence, |state| {
+        if let Some(pending) = &state.pending_player_scope_sacrifice_choice {
+            validate_addressed_quantity_reads(state, &pending.ability)?;
+        }
+        advance_player_scope_sacrifice_in_occurrence(state, player, chosen, events)
+    })
+}
+
+fn advance_player_scope_sacrifice_in_occurrence(
     state: &mut GameState,
     player: PlayerId,
     chosen: &[ObjectId],
@@ -16377,6 +16889,22 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
+    let occurrence = state
+        .pending_player_scope_sacrifice_choice
+        .as_ref()
+        .and_then(|pending| pending.return_result_occurrence);
+    with_inherited_return_result_occurrence(state, occurrence, |state| {
+        if let Some(pending) = &state.pending_player_scope_sacrifice_choice {
+            validate_addressed_quantity_reads(state, &pending.ability)?;
+        }
+        drain_player_scope_sacrifice_in_occurrence(state, events)
+    })
+}
+
+fn drain_player_scope_sacrifice_in_occurrence(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
     // CR 101.4: After a CR 616.1 replacement choice resumes one selected
     // sacrifice, continue the remaining already-announced simultaneous action.
     let Some(pending) = state.pending_player_scope_sacrifice_choice.take() else {
@@ -16426,6 +16954,27 @@ pub(crate) enum PendingDiscardBatchOutcome {
 /// Composability: an arbitrary number of sequential re-pauses compose, because
 /// each resume re-enters this same function through the same hook.
 pub(crate) fn drain_pending_discard_batch(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<PendingDiscardBatchOutcome, EffectError> {
+    let occurrence = state
+        .pending_discard_batch
+        .as_ref()
+        .and_then(|batch| batch.fan_out.as_ref())
+        .and_then(|pending| pending.return_result_occurrence);
+    with_inherited_return_result_occurrence(state, occurrence, |state| {
+        if let Some(pending) = state
+            .pending_discard_batch
+            .as_ref()
+            .and_then(|batch| batch.fan_out.as_ref())
+        {
+            validate_addressed_quantity_reads(state, &pending.scoped_template)?;
+        }
+        drain_discard_batch_in_occurrence(state, events)
+    })
+}
+
+fn drain_discard_batch_in_occurrence(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<PendingDiscardBatchOutcome, EffectError> {
@@ -16572,7 +17121,11 @@ pub(crate) fn drain_pending_discard_batch(
             scoped.set_original_controller_recursive(fan_out.original_controller);
             scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
-            resolve_ability_chain(state, &scoped, events, 1)?;
+            with_inherited_return_result_occurrence(
+                state,
+                fan_out.return_result_occurrence,
+                |state| resolve_selected_ability_chain(state, &scoped, events, 1),
+            )?;
             if state.waiting_for == initial_waiting_for {
                 continue;
             }
@@ -16855,7 +17408,60 @@ pub fn resolve_ability_chain(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
-    resolve_ability_chain_step(state, ability, events, depth).map(|_| ())
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable| {
+            resolve_ability_chain_step(state, executable, events, depth).map(|_| ())
+        },
+    )
+}
+
+pub(crate) fn resolve_selected_ability_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::SelectedBody,
+        |state, executable| {
+            resolve_ability_chain_step(state, executable, events, depth).map(|_| ())
+        },
+    )
+}
+
+pub(crate) fn resolve_selected_ability_chain_step(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<ResolutionProgress, EffectError> {
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::SelectedBody,
+        |state, executable| resolve_ability_chain_step(state, executable, events, depth),
+    )
+}
+
+pub(crate) fn resolve_resume_owned_ability_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::ResumeOwned,
+        |state, executable| {
+            resolve_ability_chain_step(state, executable, events, depth).map(|_| ())
+        },
+    )
 }
 
 pub(crate) fn resolve_ability_chain_step(
@@ -16864,6 +17470,10 @@ pub(crate) fn resolve_ability_chain_step(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<ResolutionProgress, EffectError> {
+    crate::types::ability::classify_instruction_result_invocation(
+        ability,
+        crate::types::ability::InstructionResultEntry::ResumeOwned,
+    )?;
     // CR 608.2c: A forwarded result belongs to one resolution chain. A root
     // ability can be resumed from serialized state, so discard any stale value
     // before it begins a new resolution; nested producers replace the context
@@ -16935,12 +17545,6 @@ pub(crate) fn resolve_ability_chain_step(
     // CR 608.2c: Each top-level execution owns a separate result frame. A
     // replacement post-effect can enter another depth-0 chain synchronously;
     // restore the parent's selector after that nested root returns.
-    let previous_return_occurrence =
-        if depth == 0 && crate::types::game_state::has_return_result_metadata(ability) {
-            Some(begin_return_result_occurrence(state)?)
-        } else {
-            None
-        };
     let result = (|| {
         // CR 608.2c: Bump the per-ability per-turn resolution counter at the start of
         // top-level resolution so that the ordinary resolution-time
@@ -16972,30 +17576,29 @@ pub(crate) fn resolve_ability_chain_step(
             None => resolve_chain_body(state, ability, events, depth),
             Some(RepeatContinuation::ControllerChoice) => {
                 let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
-                let progress = with_iteration_return_result_occurrence(state, ability, |state| {
-                    resolve_chain_body(state, ability, events, depth)
-                })?;
-                if progress.is_pending() {
-                    // Inner pause: stash so the drain re-sets the repeat prompt
-                    // after the iteration's player choice resolves.
-                    //
-                    // No progress witness: this mode re-prompts the controller
-                    // every iteration, so it cannot loop unattended.
-                    park_repeat_until_after_inner_pause(
-                        state,
-                        Box::new(ability.clone()),
-                        None,
-                        None,
-                        stack_depth_before_iteration,
-                    );
-                } else {
-                    // CR 107.1c: after the iteration fully resolved, prompt the
-                    // controller to repeat the process or stop.
-                    state.waiting_for = WaitingFor::RepeatDecision {
-                        player: ability.controller,
-                        ability: Box::new(ability.clone()),
-                    };
-                }
+                let progress = with_iteration_return_result_occurrence(
+                    state,
+                    ability,
+                    |state, executable| {
+                        let progress = resolve_chain_body(state, executable, events, depth)?;
+                        if progress.is_pending() {
+                            park_repeat_until_after_inner_pause(
+                                state,
+                                Box::new(executable.clone()),
+                                None,
+                                None,
+                                stack_depth_before_iteration,
+                            );
+                        } else {
+                            state.waiting_for = WaitingFor::RepeatDecision {
+                                return_result_occurrence: state.active_return_result_occurrence,
+                                player: executable.controller,
+                                ability: Box::new(executable.clone()),
+                            };
+                        }
+                        Ok(progress)
+                    },
+                )?;
                 Ok(match progress {
                     ResolutionProgress::Complete => ResolutionProgress::Waiting,
                     ResolutionProgress::Queued | ResolutionProgress::Waiting => progress,
@@ -17022,46 +17625,55 @@ pub(crate) fn resolve_ability_chain_step(
                     .filter(|record| record.recorded_turn_number == state.turn_number)
                     .count();
                 let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
-                let progress = with_iteration_return_result_occurrence(state, ability, |state| {
-                    resolve_chain_body(state, ability, events, depth)
-                })?;
-                if progress.is_pending() {
-                    park_repeat_until_after_inner_pause(
-                        state,
-                        Box::new(ability.clone()),
-                        Some(progress_baseline),
-                        Some(RepeatUntilIterationWitness {
-                            choice: match progress {
-                                ResolutionProgress::Waiting => {
-                                    RepeatIterationChoice::OptionalOffered
-                                }
-                                ResolutionProgress::Queued => {
-                                    RepeatIterationChoice::for_unpaused_iteration(
-                                        ability,
-                                        &events[iteration_events_start..],
-                                    )
-                                }
-                                ResolutionProgress::Complete => {
-                                    unreachable!("only pending iterations are parked")
-                                }
-                            },
-                            zone_changes_before,
-                        }),
-                        stack_depth_before_iteration,
-                    );
-                    return Ok(progress);
-                }
-                match repeat_until_verdict(
+                let (progress, verdict) = with_iteration_return_result_occurrence(
                     state,
                     ability,
-                    stop_on_put_to_hand,
-                    stop_on_duplicate_exiled_names,
-                    Some(&progress_baseline),
-                    RepeatIterationChoice::for_unpaused_iteration(
-                        ability,
-                        &events[iteration_events_start..],
-                    ),
-                ) {
+                    |state, executable| {
+                        let progress = resolve_chain_body(state, executable, events, depth)?;
+                        if progress.is_pending() {
+                            park_repeat_until_after_inner_pause(
+                                state,
+                                Box::new(executable.clone()),
+                                Some(progress_baseline),
+                                Some(RepeatUntilIterationWitness {
+                                    choice: match progress {
+                                        ResolutionProgress::Waiting => {
+                                            RepeatIterationChoice::OptionalOffered
+                                        }
+                                        ResolutionProgress::Queued => {
+                                            RepeatIterationChoice::for_unpaused_iteration(
+                                                executable,
+                                                &events[iteration_events_start..],
+                                            )
+                                        }
+                                        ResolutionProgress::Complete => {
+                                            unreachable!("only pending iterations are parked")
+                                        }
+                                    },
+                                    zone_changes_before,
+                                }),
+                                stack_depth_before_iteration,
+                            );
+                            return Ok((progress, None));
+                        }
+                        let verdict = repeat_until_verdict(
+                            state,
+                            executable,
+                            stop_on_put_to_hand,
+                            stop_on_duplicate_exiled_names,
+                            Some(&progress_baseline),
+                            RepeatIterationChoice::for_unpaused_iteration(
+                                executable,
+                                &events[iteration_events_start..],
+                            ),
+                        );
+                        Ok((progress, Some(verdict)))
+                    },
+                )?;
+                if progress.is_pending() {
+                    return Ok(progress);
+                }
+                match verdict.expect("completed repeat iteration has a verdict") {
                     RepeatUntilVerdict::Repeat => {}
                     RepeatUntilVerdict::Stop => return Ok(ResolutionProgress::Complete),
                     RepeatUntilVerdict::MandatoryLoopDraw => {
@@ -17100,41 +17712,46 @@ pub(crate) fn resolve_ability_chain_step(
                     state.resolution_coin_flip = None;
                     let stack_depth_before_iteration =
                         state.resolution_stack.capture_child_boundary();
-                    let progress =
-                        with_iteration_return_result_occurrence(state, ability, |state| {
-                            resolve_chain_body(state, ability, events, depth)
-                        })?;
+                    let (progress, repeat) = with_iteration_return_result_occurrence(
+                        state,
+                        ability,
+                        |state, executable| {
+                            let progress = resolve_chain_body(state, executable, events, depth)?;
+                            if progress.is_pending() {
+                                let mut paused = executable.clone();
+                                paused.repeat_until = Some(RepeatContinuation::WhileCondition {
+                                    condition: condition.clone(),
+                                    max_iterations: remaining,
+                                });
+                                park_repeat_until_after_inner_pause(
+                                    state,
+                                    Box::new(paused),
+                                    None,
+                                    None,
+                                    stack_depth_before_iteration,
+                                );
+                                Ok((progress, false))
+                            } else {
+                                let repeat = should_repeat_while_condition(
+                                    state,
+                                    executable,
+                                    &condition,
+                                    &mut remaining,
+                                );
+                                Ok((progress, repeat))
+                            }
+                        },
+                    )?;
                     if progress.is_pending() {
-                        // Inner pause: stash the loop ability with its remaining cap
-                        // so the drain re-evaluates the condition after the choice.
-                        let mut paused = ability.clone();
-                        paused.repeat_until = Some(RepeatContinuation::WhileCondition {
-                            condition: condition.clone(),
-                            max_iterations: remaining,
-                        });
-                        // No progress witness: this mode is bounded by its own
-                        // `max_iterations`, threaded above via
-                        // `should_repeat_while_condition`.
-                        park_repeat_until_after_inner_pause(
-                            state,
-                            Box::new(paused),
-                            None,
-                            None,
-                            stack_depth_before_iteration,
-                        );
                         return Ok(progress);
                     }
-                    if !should_repeat_while_condition(state, ability, &condition, &mut remaining) {
+                    if !repeat {
                         return Ok(ResolutionProgress::Complete);
                     }
                 }
             }
         }
     })();
-    if let Some(previous) = previous_return_occurrence {
-        state.active_return_result_occurrence = previous;
-        retire_unreferenced_return_result_frames(state);
-    }
     if matches!(result, Ok(ResolutionProgress::Waiting)) {
         state.resolution_stack.note_repeat_until_descendant_choice();
     }
@@ -17510,6 +18127,7 @@ fn resolve_chain_body(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<ResolutionProgress, EffectError> {
+    validate_addressed_quantity_reads(state, ability)?;
     let mut progress = ResolutionProgress::Complete;
     let mut tail_ownership = TailOwnership::Caller;
     if is_named_revealed_reader(ability) && ability.player_scope.is_some() {
@@ -18215,6 +18833,9 @@ fn resolve_chain_body(
                         batch.preceding_events = events[scoped_events_before..].to_vec();
                         batch.fan_out =
                             Some(Box::new(crate::types::game_state::PendingDiscardFanOut {
+                                return_result_occurrence: retained_return_result_occurrence(
+                                    state, ability,
+                                )?,
                                 scoped_template: Box::new(scoped_template.clone()),
                                 outer: Box::new(ability.clone()),
                                 original_controller: controller,
@@ -18420,7 +19041,7 @@ fn resolve_chain_body(
                     .as_deref()
                     .is_none_or(|other| !branch_declares_return_result(other, result_id))
                 {
-                    publish_empty_return_result_for_active(state, result_id, &ability.effect)?;
+                    publish_empty_return_result_for_active(state, result_id, ability)?;
                 }
             }
             if let Some(ref else_branch) = ability.else_ability {
@@ -18930,6 +19551,7 @@ fn resolve_chain_body(
                 // single-cost branch in `handle_unless_payment` unchanged.
                 state.waiting_for = match resolved_cost {
                     AbilityCost::OneOf { costs } => WaitingFor::UnlessPaymentChooseCost {
+                        return_result_occurrence: state.active_return_result_occurrence,
                         player: payer,
                         costs,
                         pending_effect: Box::new(pending),
@@ -18962,6 +19584,7 @@ fn resolve_chain_body(
                             .collect();
                         let first = queue.remove(0);
                         WaitingFor::UnlessPaymentChooseCost {
+                            return_result_occurrence: state.active_return_result_occurrence,
                             player: payer,
                             costs: first,
                             pending_effect: Box::new(pending),
@@ -18972,6 +19595,7 @@ fn resolve_chain_body(
                         }
                     }
                     cost => WaitingFor::UnlessPayment {
+                        return_result_occurrence: state.active_return_result_occurrence,
                         player: payer,
                         cost,
                         pending_effect: Box::new(pending),
@@ -19414,6 +20038,7 @@ fn resolve_chain_body(
                     park_repeat_for_after_current_iteration(
                         state,
                         crate::types::game_state::PendingRepeatIteration {
+                            return_result_occurrence: state.active_return_result_occurrence,
                             ability: Box::new(resume_ability),
                             tracked_members: iter_tracked_members.clone(),
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
@@ -19472,6 +20097,40 @@ fn resolve_chain_body(
                         effective
                     };
                 let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
+                let mut iteration_parked = false;
+                let park_remaining =
+                    |state: &mut GameState,
+                     executable: &ResolvedAbility,
+                     restore_creation_tail: bool| {
+                        let next_iteration = iteration + 1;
+                        if next_iteration >= iterations {
+                            return false;
+                        }
+                        let mut resume = executable.clone();
+                        resume.repeat_for = None;
+                        resume.copy_count_status =
+                            crate::types::ability::CopyCountStatus::Finalized;
+                        if restore_creation_tail {
+                            // The creation owner holds only this iteration's tail;
+                            // later iterations retain the original same-body tail.
+                            resume.sub_ability = effective.sub_ability.clone();
+                            resume.bind_return_result_process(executable.return_result_process);
+                        }
+                        park_repeat_for_after_current_iteration(
+                            state,
+                            crate::types::game_state::PendingRepeatIteration {
+                                return_result_occurrence: state.active_return_result_occurrence,
+                                ability: Box::new(resume),
+                                tracked_members: iter_tracked_members.clone(),
+                                iterated_counter_kinds: iterated_counter_kinds.clone(),
+                                next_iteration,
+                                total_iterations: iterations,
+                                copy_order_fixed,
+                            },
+                            stack_depth_before_iteration,
+                        );
+                        true
+                    };
                 // CR 608.2d: A kind-driven or member-driven iteration whose action
                 // is optional fires its per-iteration "you may" gate through the
                 // full chain. All other iterations resolve the effect directly —
@@ -19486,13 +20145,17 @@ fn resolve_chain_body(
                     progress = with_iteration_return_result_occurrence(
                         state,
                         &full_chain_iteration,
-                        |state| {
-                            resolve_ability_chain_step(
+                        |state, executable| {
+                            let progress = resolve_ability_chain_step(
                                 state,
-                                &full_chain_iteration,
+                                executable,
                                 events,
                                 depth.max(1),
-                            )
+                            )?;
+                            if progress.is_pending() {
+                                iteration_parked = park_remaining(state, executable, false);
+                            }
+                            Ok(progress)
                         },
                     )?;
                 } else if (kind_driven || member_driven) && iter_effective.optional {
@@ -19500,10 +20163,22 @@ fn resolve_chain_body(
                     // (chain-local state clearing, resolution counter) does not
                     // re-run mid-loop — this iteration continues the current
                     // resolution, mirroring the drain-path resume at depth 1.
-                    progress =
-                        with_iteration_return_result_occurrence(state, iter_effective, |state| {
-                            resolve_ability_chain_step(state, iter_effective, events, depth.max(1))
-                        })?;
+                    progress = with_iteration_return_result_occurrence(
+                        state,
+                        iter_effective,
+                        |state, executable| {
+                            let progress = resolve_ability_chain_step(
+                                state,
+                                executable,
+                                events,
+                                depth.max(1),
+                            )?;
+                            if progress.is_pending() {
+                                iteration_parked = park_remaining(state, executable, false);
+                            }
+                            Ok(progress)
+                        },
+                    )?;
                 } else {
                     // The generic effect driver uses this loop for the normal
                     // one-time case as well. Only an actual `repeat_for` body
@@ -19554,9 +20229,18 @@ fn resolve_chain_body(
                             iter_effective
                         };
                     let resolved = if ability.repeat_for.is_some() {
-                        with_iteration_return_result_occurrence(state, iter_effective, |state| {
-                            resolve_effect_step(state, iter_effective, events)
-                        })
+                        with_iteration_return_result_occurrence(
+                            state,
+                            iter_effective,
+                            |state, executable| {
+                                let step = resolve_effect_step(state, executable, events)?;
+                                if step.progress.is_pending() {
+                                    iteration_parked =
+                                        park_remaining(state, executable, creation_tail_owned);
+                                }
+                                Ok(step)
+                            },
+                        )
                     } else {
                         resolve_effect_step(state, iter_effective, events)
                     };
@@ -19600,56 +20284,9 @@ fn resolve_chain_body(
                         }
                     }
                 }
-                // CR 608.2c + CR 109.5: When the inner effect enters an
-                // interactive WaitingFor (e.g. SearchChoice), stash the
-                // remaining iterations so `drain_pending_continuation` can
-                // resume the loop after the player choice (and its chained
-                // sub-ability) complete. Without this, only the first
-                // iteration would ever fire — the loop would break and the
-                // remaining iterations would be silently dropped.
                 if progress.is_pending() {
-                    let next_iteration = iteration + 1;
-                    if next_iteration < iterations {
-                        // CR 608.2c + CR 109.5: Each resumed iteration must run
-                        // through the FULL chain (parent effect + sub_ability)
-                        // exactly the way iteration 0 just did. The drain path
-                        // re-enters via `resolve_ability_chain`, which goes
-                        // through the line-1461 sub_ability wiring and the
-                        // line-1660 SearchChoice continuation stash. Without
-                        // preserving `sub_ability` here, opponents picked
-                        // during iterations 1+ would never have their chosen
-                        // card placed onto the battlefield (Winds of Abandon).
-                        //
-                        // Clear `repeat_for` on the resumed copy so
-                        // `resolve_ability_chain` treats each resumed call as
-                        // a single iteration rather than re-entering this
-                        // outer iteration loop (which would re-iterate from
-                        // zero against `total_iterations`). The drain driver
-                        // owns iteration accounting via `next_iteration`.
-                        let mut resume_ability = effective.clone();
-                        resume_ability.repeat_for = None;
-                        // CR 614.5: the copy-count replacement bonus is already
-                        // folded into `total_iterations`; mark the resume so the
-                        // CopySpell count hook does not re-add it per resumed copy
-                        // (a replacement effect gets only one opportunity to affect
-                        // an event, so it must not re-fire on each resumed copy).
-                        resume_ability.copy_count_status =
-                            crate::types::ability::CopyCountStatus::Finalized;
-                        park_repeat_for_after_current_iteration(
-                            state,
-                            crate::types::game_state::PendingRepeatIteration {
-                                ability: Box::new(resume_ability),
-                                tracked_members: iter_tracked_members.clone(),
-                                // CR 122.1 + CR 608.2c: carry the per-iteration
-                                // counter kinds so each resumed iteration rebinds
-                                // its dynamic branch (empty for non-kind loops).
-                                iterated_counter_kinds: iterated_counter_kinds.clone(),
-                                next_iteration,
-                                total_iterations: iterations,
-                                copy_order_fixed,
-                            },
-                            stack_depth_before_iteration,
-                        );
+                    if !iteration_parked {
+                        park_remaining(state, iter_effective, false);
                     }
                     break;
                 }
@@ -21036,7 +21673,7 @@ fn resolve_chain_body(
                         .as_deref()
                         .is_none_or(|other| !branch_declares_return_result(other, result_id))
                     {
-                        publish_empty_return_result_for_active(state, result_id, &sub.effect)?;
+                        publish_empty_return_result_for_active(state, result_id, sub)?;
                     }
                 }
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
@@ -21127,7 +21764,7 @@ fn resolve_chain_body(
                                     publish_empty_return_result_for_active(
                                         state,
                                         result_id,
-                                        &sibling_resolved.effect,
+                                        &sibling_resolved,
                                     )?;
                                 }
                                 current = sibling.sub_ability.as_ref();
@@ -24468,7 +25105,7 @@ mod tests {
                         from: None,
                         to: None,
                     },
-                    QuantityRef::ZoneChangeAggregateThisTurn {
+                    QuantityRef::ZoneChangeAggregate {
                         filter: filter.clone(),
                         from: None,
                         to: None,
@@ -32773,6 +33410,8 @@ mod tests {
             .trigger_definitions
             .push(trigger);
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(1),
             cards: vec![victim_id],
             count: 1,
@@ -37455,6 +38094,7 @@ mod tests {
         let mut scoped = template.clone();
         scoped.player_scope = None;
         Box::new(crate::types::game_state::PendingDiscardFanOut {
+            return_result_occurrence: None,
             scoped_template: Box::new(scoped),
             outer: Box::new(template),
             original_controller: PlayerId(0),
@@ -40476,6 +41116,7 @@ mod tests {
             player: PlayerId(0),
         };
         state.push_repeat_until(crate::types::game_state::PendingRepeatUntil {
+            return_result_occurrence: None,
             ability: Box::new(ability),
             stop_progress: None,
             iteration_progress: None,
@@ -41025,6 +41666,8 @@ mod tests {
             .tracked_object_sets
             .insert(set_id, vec![first, second]);
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![first, second],
             count: 1,
@@ -41071,6 +41714,8 @@ mod tests {
         let _outcome = crate::game::engine_resolution_choices::handle_resolution_choice(
             &mut state,
             WaitingFor::EffectZoneChoice {
+                return_result_occurrence,
+                return_result_process: None,
                 player: PlayerId(0),
                 cards: vec![first, second],
                 count: 1,
@@ -41575,6 +42220,7 @@ mod tests {
 
         // Stage a resume of 3 iterations starting at iteration 1.
         state.push_repeat_for(crate::types::game_state::PendingRepeatIteration {
+            return_result_occurrence: None,
             ability: Box::new(iter_ability),
             tracked_members: vec![],
             iterated_counter_kinds: vec![],
@@ -53926,6 +54572,7 @@ mod resolution_progress_contract_tests {
         assert_eq!(probe.players[0].life, 21);
 
         state.push_repeat_for(crate::types::game_state::PendingRepeatIteration {
+            return_result_occurrence: None,
             ability: Box::new(iteration),
             tracked_members: vec![],
             iterated_counter_kinds: vec![],
@@ -54114,6 +54761,7 @@ mod u13_counter_reader_owner_tests {
             .return_result_frames
             .entry(occurrence)
             .or_default()
+            .results
             .insert(id, InstructionResult::CounterRemovals(result.clone()));
         assert_eq!(
             counter_reflexive_occurrences_for_occurrence(
@@ -54158,6 +54806,7 @@ mod u13_counter_reader_owner_tests {
                 .return_result_frames
                 .get_mut(&occurrence)
                 .unwrap()
+                .results
                 .insert(id, InstructionResult::CounterRemovals(changed));
             assert!(counter_reflexive_occurrences_for_occurrence(
                 &state,
@@ -54172,6 +54821,7 @@ mod u13_counter_reader_owner_tests {
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
+            .results
             .insert(id, InstructionResult::ZoneChanges(vec![]));
         assert!(counter_reflexive_occurrences_for_occurrence(
             &state,
@@ -54187,6 +54837,7 @@ mod u13_counter_reader_owner_tests {
             .return_result_frames
             .get_mut(&occurrence)
             .unwrap()
+            .results
             .insert(id, InstructionResult::CounterRemovals(empty));
         assert_eq!(
             counter_reflexive_occurrences_for_occurrence(
@@ -54198,6 +54849,463 @@ mod u13_counter_reader_owner_tests {
             )
             .unwrap(),
             0
+        );
+    }
+}
+
+#[cfg(test)]
+mod departure_process_entry_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{
+        AggregateFunction, InstructionResultEntry, ObjectProperty, ReturnResultId,
+        ZoneChangeRecordSource,
+    };
+    use crate::types::game_state::{ReturnResultFrame, ReturnResultProcessId};
+
+    fn addressed(result: u32) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: ZoneChangeRecordSource::InstructionResult {
+                    result: ReturnResultId(result),
+                },
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::Any,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        }
+    }
+
+    fn producer(result: u32) -> ResolvedAbility {
+        let effect: Effect = serde_json::from_value(serde_json::json!({ "type": "ChangeZoneAll", "origin": "Battlefield", "destination": "Exile" })).unwrap();
+        let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(100), P0);
+        ability.declares_return_result = Some(ReturnResultId(result));
+        ability
+    }
+
+    #[test]
+    fn departure_dual_allocator_overflow_is_atomic_and_retired_processes_are_never_reused() {
+        for (next_o, next_p) in [
+            (0, 1),
+            (1, 0),
+            (u64::MAX, 1),
+            (1, u64::MAX),
+            (u64::MAX, u64::MAX),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            state.next_return_result_occurrence_id = next_o;
+            state.next_return_result_process_id = next_p;
+            let before = serde_json::to_value(&state).unwrap();
+            assert!(begin_return_result_occurrence(&mut state).is_err());
+            assert_eq!(
+                serde_json::to_value(&state).unwrap(),
+                before,
+                "neither allocator nor frame may change when either domain is exhausted"
+            );
+        }
+        let mut state = GameState::new_two_player(42);
+        state.next_return_result_occurrence_id = 11;
+        state.next_return_result_process_id = 37;
+        let (previous, first) = begin_return_result_occurrence(&mut state).unwrap();
+        assert_eq!(previous, None);
+        assert_eq!(first, ReturnResultProcessId(37));
+        let first_o = state.active_return_result_occurrence.unwrap();
+        assert_eq!(first_o, ReturnResultOccurrenceId(11));
+        assert_eq!(state.return_result_frames[&first_o].process, Some(first));
+        state.active_return_result_occurrence = previous;
+        retire_unreferenced_return_result_frames(&mut state);
+        assert!(state.return_result_frames.is_empty());
+        let (_, second) = begin_return_result_occurrence(&mut state).unwrap();
+        assert_eq!(second, ReturnResultProcessId(38));
+        assert_eq!(
+            state.active_return_result_occurrence,
+            Some(ReturnResultOccurrenceId(12))
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn departure_publication_is_once_only_even_for_a_completed_empty_result_and_rejects_foreign_authority_before_mutation(
+    ) {
+        let mut state = GameState::new_two_player(42);
+        let root = producer(7);
+        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, body| {
+            let occurrence = state.active_return_result_occurrence.unwrap();
+            let process = body.return_result_process.unwrap();
+            publish_return_result(state, occurrence, ReturnResultId(7), Some(process), vec![])?;
+            assert!(matches!(state.return_result_frames[&occurrence].results.get(&ReturnResultId(7)), Some(crate::types::game_state::InstructionResult::ZoneChanges(records)) if records.is_empty()));
+            let before = serde_json::to_value(&*state).unwrap();
+            let duplicate = publish_return_result(state, occurrence, ReturnResultId(7), Some(process), vec![]).unwrap_err();
+            assert!(format!("{duplicate:?}").contains("duplicate return result"));
+            assert_eq!(serde_json::to_value(&*state).unwrap(), before);
+            let foreign = publish_return_result(state, occurrence, ReturnResultId(11), Some(ReturnResultProcessId(process.0 + 1)), vec![]).unwrap_err();
+            assert!(format!("{foreign:?}").contains("process owner mismatch"));
+            assert_eq!(serde_json::to_value(&*state).unwrap(), before);
+            Ok(())
+        }).unwrap();
+        assert!(state.return_result_frames.is_empty());
+        assert_eq!(state.active_return_result_occurrence, None);
+    }
+
+    #[test]
+    fn departure_complete_root_mixed_import_refuses_before_any_producer_effect_reset_or_allocation()
+    {
+        let mut scenario = GameScenario::new();
+        let victim = scenario
+            .add_creature(P0, "Supplemental canonical mixed-root victim", 5, 5)
+            .id();
+        let mut base = scenario.build().state().clone();
+        base.next_return_result_occurrence_id = 12;
+        base.next_return_result_process_id = 38;
+        base.active_return_result_occurrence = Some(ReturnResultOccurrenceId(11));
+        base.return_result_frames.insert(
+            ReturnResultOccurrenceId(11),
+            ReturnResultFrame {
+                process: Some(ReturnResultProcessId(37)),
+                results: [(
+                    ReturnResultId(9),
+                    crate::types::game_state::InstructionResult::ZoneChanges(vec![]),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let mut root = producer(7);
+        let mut second = producer(8);
+        second.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Sum {
+                    exprs: vec![addressed(7), addressed(9)],
+                },
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )));
+        root.sub_ability = Some(Box::new(second));
+        root.bind_return_result_process(Some(ReturnResultProcessId(37)));
+        for entry in [
+            InstructionResultEntry::Independent,
+            InstructionResultEntry::SelectedBody,
+            InstructionResultEntry::ResumeOwned,
+        ] {
+            let mut state = base.clone();
+            let before = serde_json::to_value(&state).unwrap();
+            let mut entered = false;
+            let result = with_instruction_result_entry(&mut state, &root, entry, |_, _| {
+                entered = true;
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert!(
+                !entered,
+                "the whole root must be classified before entering its first producer"
+            );
+            assert_eq!(state.objects[&victim].zone, Zone::Battlefield);
+            assert_eq!(state.players[0].life, 20);
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn departure_entry_binds_the_executed_clone_and_restores_an_unrelated_outer_owner() {
+        let mut state = GameState::new_two_player(42);
+        let (_, outer_p) = begin_return_result_occurrence(&mut state).unwrap();
+        let outer_o = state.active_return_result_occurrence;
+        let root = producer(7);
+        let before_p = state.next_return_result_process_id;
+        with_instruction_result_entry(
+            &mut state,
+            &root,
+            InstructionResultEntry::SelectedBody,
+            |state, executable| {
+                assert_eq!(root.return_result_process, None);
+                let inner_p = executable.return_result_process.unwrap();
+                assert_ne!(inner_p, outer_p);
+                assert_eq!(inner_p.0, before_p);
+                let inner_o = state.active_return_result_occurrence.unwrap();
+                assert_ne!(Some(inner_o), outer_o);
+                assert_eq!(state.return_result_frames[&inner_o].process, Some(inner_p));
+                publish_return_result(state, inner_o, ReturnResultId(7), Some(inner_p), vec![])?;
+                assert!(state.return_result_frames[&inner_o]
+                    .results
+                    .contains_key(&ReturnResultId(7)));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(state.active_return_result_occurrence, outer_o);
+        assert_eq!(state.return_result_frames.len(), 1);
+        assert_eq!(
+            state.return_result_frames[&outer_o.unwrap()].process,
+            Some(outer_p)
+        );
+        assert_eq!(root.return_result_process, None);
+    }
+
+    #[test]
+    fn departure_independent_reflexive_import_refuses_but_a_complete_local_body_gets_its_own_process(
+    ) {
+        let mut imported = ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: addressed(7),
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        );
+        imported.condition = Some(AbilityCondition::WhenYouDo);
+        let mut forbidden = producer(7);
+        forbidden.sub_ability = Some(Box::new(imported));
+        let mut state = GameState::new_two_player(42);
+        let before = serde_json::to_value(&state).unwrap();
+        let mut entered = false;
+        assert!(with_instruction_result_entry(
+            &mut state,
+            &forbidden,
+            InstructionResultEntry::Independent,
+            |_, _| {
+                entered = true;
+                Ok(())
+            }
+        )
+        .is_err());
+        assert!(!entered);
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            before,
+            "an independent body's partial import cannot leak an outer producer or allocation"
+        );
+        let mut local = producer(7);
+        local.condition = Some(AbilityCondition::WhenYouDo);
+        local.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: addressed(7),
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )));
+        let mut root = producer(7);
+        root.sub_ability = Some(Box::new(local));
+        with_instruction_result_entry(
+            &mut state,
+            &root,
+            InstructionResultEntry::Independent,
+            |state, actual_root| {
+                let outer_o = state.active_return_result_occurrence;
+                let outer_p = actual_root.return_result_process.unwrap();
+                let registered = actual_root.sub_ability.as_ref().unwrap();
+                assert_eq!(registered.return_result_process, None);
+                assert_eq!(
+                    registered
+                        .sub_ability
+                        .as_ref()
+                        .unwrap()
+                        .return_result_process,
+                    None
+                );
+                with_instruction_result_entry(
+                    state,
+                    registered,
+                    InstructionResultEntry::Independent,
+                    |state, actual_child| {
+                        let inner_o = state.active_return_result_occurrence.unwrap();
+                        let inner_p = actual_child.return_result_process.unwrap();
+                        assert_ne!(Some(inner_o), outer_o);
+                        assert_ne!(inner_p, outer_p);
+                        assert_eq!(
+                            actual_child
+                                .sub_ability
+                                .as_ref()
+                                .unwrap()
+                                .return_result_process,
+                            Some(inner_p)
+                        );
+                        publish_return_result(
+                            state,
+                            inner_o,
+                            ReturnResultId(7),
+                            Some(inner_p),
+                            vec![],
+                        )?;
+                        Ok(())
+                    },
+                )?;
+                assert_eq!(state.active_return_result_occurrence, outer_o);
+                assert_eq!(state.return_result_frames.len(), 1);
+                assert_eq!(registered.return_result_process, None);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(state.return_result_frames.is_empty());
+        assert_eq!(state.active_return_result_occurrence, None);
+        assert_eq!(state.next_return_result_occurrence_id, 3);
+        assert_eq!(state.next_return_result_process_id, 3);
+    }
+}
+
+#[cfg(test)]
+mod departure_existing_receipt_process_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::ReturnResultId;
+    use crate::types::counter::CounterMatch;
+    use crate::types::game_state::InstructionResult;
+
+    #[test]
+    fn departure_process_binding_preserves_actual_counter_receipts_and_clears_the_independent_child(
+    ) {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P0, "Supplemental canonical receipt source", 2, 4)
+            .id();
+        let charge = CounterType::Generic("charge".into());
+        scenario.with_counter(source, charge.clone(), 3);
+        let mut state = scenario.build().state().clone();
+        let (_, process) = begin_return_result_occurrence(&mut state).unwrap();
+        let occurrence = state.active_return_result_occurrence.unwrap();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let mut parent = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(charge.clone()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        parent.declares_return_result = Some(ReturnResultId(2));
+        parent.bind_return_result_process(Some(process));
+        let binding = begin_counter_removal_result(
+            &mut state,
+            &parent,
+            Some(pin),
+            CounterMatch::OfType(charge.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(binding.process, Some(process));
+        assert!(counter_removal_binding_is_valid(&state, &binding));
+        let mut events = vec![];
+        assert_eq!(
+            counters::apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&binding),
+                &mut events
+            ),
+            1
+        );
+        let InstructionResult::CounterRemovals(receipt) =
+            &state.return_result_frames[&occurrence].results[&ReturnResultId(2)]
+        else {
+            unreachable!()
+        };
+        assert_eq!(receipt.counter_removals.len(), 1);
+        assert_eq!(receipt.counter_removals[0].count, 1);
+        assert_eq!(
+            counter_reflexive_occurrences(
+                &state,
+                &parent,
+                ReturnResultId(2),
+                &CounterMatch::OfType(charge.clone())
+            )
+            .unwrap(),
+            1
+        );
+        let reflexive = ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            source,
+            P0,
+        )
+        .condition(AbilityCondition::when_you_do_with_guard(
+            AbilityCondition::CounterRemovedThisWay {
+                result: ReturnResultId(2),
+                counters: CounterMatch::OfType(charge.clone()),
+            },
+        ));
+        assert_eq!(reflexive.return_result_process, None);
+        assert_eq!(
+            try_materialize_reflexive_trigger_step(
+                &mut state,
+                &reflexive,
+                Some(&parent),
+                None,
+                &mut events,
+                1
+            )
+            .unwrap(),
+            Some(ResolutionProgress::Complete)
+        );
+        assert_eq!(state.deferred_triggers.len(), 1);
+        assert_eq!(state.deferred_triggers[0].ability.return_result_process, None, "the creating receipt view authenticates actual parent P, while its new stack child owns no old process");
+        let mut foreign_parent = parent.clone();
+        foreign_parent.return_result_process = Some(
+            crate::types::game_state::ReturnResultProcessId(process.0 + 1),
+        );
+        let before = serde_json::to_value(&state).unwrap();
+        let error = try_materialize_reflexive_trigger_step(
+            &mut state,
+            &reflexive,
+            Some(&foreign_parent),
+            None,
+            &mut events,
+            1,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("instruction-result process owner mismatch"));
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+        let mut wrong_binding = binding.clone();
+        wrong_binding.process = foreign_parent.return_result_process;
+        assert!(!counter_removal_binding_is_valid(&state, &wrong_binding));
+        assert_eq!(
+            counters::apply_counter_removal_with_result(
+                &mut state,
+                source,
+                charge.clone(),
+                1,
+                Some(&wrong_binding),
+                &mut events
+            ),
+            0
+        );
+        assert_eq!(state.objects[&source].counters[&charge], 2);
+        let mut legacy = state.clone();
+        legacy
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .process = None;
+        let mut legacy_binding = binding;
+        legacy_binding.process = None;
+        let mut legacy_parent = parent;
+        legacy_parent.return_result_process = None;
+        assert!(counter_removal_binding_is_valid(&legacy, &legacy_binding));
+        assert_eq!(
+            counter_reflexive_occurrences(
+                &legacy,
+                &legacy_parent,
+                ReturnResultId(2),
+                &CounterMatch::OfType(charge)
+            )
+            .unwrap(),
+            1
         );
     }
 }

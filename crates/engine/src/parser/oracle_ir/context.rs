@@ -631,6 +631,9 @@ pub(crate) struct ParseContext {
     /// from the chain-local clause accumulator; defaults `false` via
     /// `derive(Default)` so standalone clause parsing is unaffected.
     pub chain_has_prior_exile_producer: bool,
+    /// CR 608.2c: the selected earlier same-body departure producer; never a guessed id.
+    pub chain_zone_result: Option<(super::effect_chain::ClauseId, Zone, Zone)>,
+
     /// CR 608.2c: The current effect-chain chunk's MOST-RECENT prior object
     /// referent is a just-created token (Token/CopyTokenOf/Populate), so a bare
     /// "it" anaphor in this chunk binds to that token (`TargetFilter::LastCreated`)
@@ -961,16 +964,16 @@ impl ParseContext {
         self.diagnostics.push(d);
     }
 
-    /// CR 608.2c: a context carrying only the caller's player
-    /// antecedents — the fields `player_antecedents` reads for "that player" /
-    /// "they" — for a sub-parse that must bind an anaphoric controller phrase the
-    /// way its caller would, without re-reading object anaphors (`subject`,
-    /// `object_pronoun_ref`, …) or inheriting any other caller state.
+    /// CR 608.2c: carry the caller's player antecedents and same-body zone-result
+    /// authority into a quantity sub-parse. Object anaphors (`subject`,
+    /// `object_pronoun_ref`, …) remain isolated. Independent bodies use
+    /// `clone_for_independent_body` and cannot import this result authority.
     pub(crate) fn clone_player_antecedents(&self) -> Self {
         Self {
             relative_player_scope: self.relative_player_scope.clone(),
             declared_player_scope: self.declared_player_scope.clone(),
             prior_player_declaration: self.prior_player_declaration,
+            chain_zone_result: self.chain_zone_result,
             ..Self::default()
         }
     }
@@ -1010,6 +1013,7 @@ impl ParseContext {
             // `ZoneChangeObjectMatchesFilter` on authority it does not own. The
             // context is independent for the same reason it is throwaway.
             trigger_zone_change: TriggerZoneChangeProvenance::none(),
+            chain_zone_result: None,
             ..self.clone()
         }
     }
@@ -1026,6 +1030,7 @@ impl ParseContext {
     pub fn clone_for_independent_body(&self) -> Self {
         Self {
             trigger_zone_change: TriggerZoneChangeProvenance::none(),
+            chain_zone_result: None,
             ..self.clone()
         }
     }

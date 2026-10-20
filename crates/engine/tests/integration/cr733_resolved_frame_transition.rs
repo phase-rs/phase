@@ -41,6 +41,8 @@ fn multi_draw_frame() -> ResolutionFrame {
 
 fn coin_flip_frame() -> ResolutionFrame {
     ResolutionFrame::CoinFlip(PendingCoinFlip {
+        return_result_occurrence: None,
+        expected_return_result_process: None,
         source_id: ObjectId(91),
         controller: PlayerId(0),
         flipper: PlayerId(0),

@@ -1604,6 +1604,8 @@ fn apply_search_partition(
 /// (`ChooseOption`) and object (`SubmitVoteCandidate`) submission arms without
 /// duplicating the advance/resolve logic across them.
 struct VoteRoundState {
+    return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     player: crate::types::player::PlayerId,
     remaining_votes: u32,
     options: Vec<String>,
@@ -1646,6 +1648,8 @@ fn append_vote_ballot_and_advance(
     round: VoteRoundState,
 ) -> ResolutionChoiceOutcome {
     let VoteRoundState {
+        return_result_occurrence,
+        expected_return_result_process,
         player,
         remaining_votes,
         options,
@@ -1684,6 +1688,8 @@ fn append_vote_ballot_and_advance(
     if remaining_votes > 1 {
         // CR 701.38d: Same player still has votes to cast.
         state.waiting_for = WaitingFor::VoteChoice {
+            return_result_occurrence,
+            expected_return_result_process,
             player,
             remaining_votes: remaining_votes - 1,
             options,
@@ -1705,6 +1711,8 @@ fn append_vote_ballot_and_advance(
     } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
         // CR 101.4: Advance to the next voter in turn order.
         state.waiting_for = WaitingFor::VoteChoice {
+            return_result_occurrence,
+            expected_return_result_process,
             player: *next_player,
             remaining_votes: *next_votes,
             options,
@@ -1748,6 +1756,7 @@ fn append_vote_ballot_and_advance(
             &candidate_object_ids,
             outcome_template.as_deref(),
             &chain_root_targets,
+            expected_return_result_process,
             events,
         );
         ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, controller, events))
@@ -1901,6 +1910,128 @@ pub(crate) fn boundary_declines(
 }
 
 pub(super) fn handle_resolution_choice(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    action: GameAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionChoiceOutcome, EngineError> {
+    effects::validate_definition_waiting_for_result_owner(state, &waiting_for)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    if let WaitingFor::EffectZoneChoice {
+        return_result_occurrence,
+        return_result_process,
+        conditional_enter_with_counters,
+        enters_modified_if,
+        effect_kind,
+        source_id,
+        ..
+    } = &waiting_for
+    {
+        crate::types::game_state::validate_zone_entry_result_owner(
+            state,
+            *return_result_occurrence,
+            *return_result_process,
+            conditional_enter_with_counters,
+            enters_modified_if.as_ref(),
+        )
+        .map_err(EngineError::InvalidAction)?;
+        if let Some(pending) = state.active_ability_continuation() {
+            if let Some((occurrence, result)) = pending.pending_return_result_producer {
+                if !matches!(effect_kind, EffectKind::BounceAll)
+                    || pending.chain.source_id != *source_id
+                    || pending.return_result_occurrence != Some(occurrence)
+                    || !crate::types::game_state::reads_return_result_id(&pending.chain, result)
+                {
+                    return Err(EngineError::InvalidAction(
+                        "Return-result producer does not own this zone choice".into(),
+                    ));
+                }
+                crate::types::game_state::checked_return_result_frame(
+                    state,
+                    Some(occurrence),
+                    pending.chain.return_result_process,
+                    false,
+                )
+                .map_err(EngineError::InvalidAction)?;
+                if return_result_process.is_some()
+                    && (pending.chain.return_result_process != *return_result_process
+                        || Some(occurrence) != *return_result_occurrence)
+                {
+                    return Err(EngineError::InvalidAction(
+                        "zone reader and publisher process owner mismatch".into(),
+                    ));
+                }
+            }
+        }
+    }
+    let occurrence = match &waiting_for {
+        WaitingFor::RepeatDecision {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::EffectZoneChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::ClashChooseOpponent {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::ChooseFromZoneOpponentChooser {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::VoteChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesChoice {
+            return_result_occurrence,
+            ..
+        } => Some(*return_result_occurrence),
+        _ => state
+            .active_per_category_zone_choice()
+            .map(|pending| pending.return_result_occurrence),
+    };
+    let Some(occurrence) = occurrence else {
+        return handle_resolution_choice_in_occurrence(state, waiting_for, action, events);
+    };
+    effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        if let Some(pending) = state.active_per_category_zone_choice() {
+            effects::validate_addressed_quantity_reads(state, &pending.ability)
+                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+        }
+        if let WaitingFor::EffectZoneChoice {
+            source_id,
+            return_result_process,
+            conditional_enter_with_counters,
+            enters_modified_if,
+            ..
+        } = &waiting_for
+        {
+            effects::change_zone::pending_zone_entry_evaluation_ability(
+                state,
+                *source_id,
+                state.active_return_result_occurrence,
+                *return_result_process,
+                conditional_enter_with_counters,
+                enters_modified_if.as_ref(),
+            )
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        }
+        handle_resolution_choice_in_occurrence(state, waiting_for, action, events)
+    })
+}
+
+fn handle_resolution_choice_in_occurrence(
     state: &mut GameState,
     waiting_for: WaitingFor,
     action: GameAction,
@@ -2172,6 +2303,10 @@ pub(super) fn handle_resolution_choice(
                 }
             }
             let kept: Vec<bool> = keep_indices.iter().map(|&index| results[index]).collect();
+            if let Some(pending) = state.active_coin_flip_frame() {
+                effects::flip_coin::validate_pending_coin_flip(state, pending)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            }
             let pending = state
                 .take_active_coin_flip_frame()
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?
@@ -2227,6 +2362,10 @@ pub(super) fn handle_resolution_choice(
                 "ignorable_indices must index into results",
             );
 
+            if let Some(pending) = state.resolution_stack.active_die_roll() {
+                effects::roll_die::validate_pending_die_result_owner(state, pending)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            }
             let pending = state
                 .take_active_die_roll_frame()
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?
@@ -2763,7 +2902,11 @@ pub(super) fn handle_resolution_choice(
         // times" — after one iteration resolved, the controller decides
         // whether to run the process again.
         (
-            WaitingFor::RepeatDecision { player, ability },
+            WaitingFor::RepeatDecision {
+                return_result_occurrence,
+                player,
+                ability,
+            },
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
@@ -3874,6 +4017,7 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::ClashChooseOpponent {
+                return_result_occurrence,
                 player,
                 candidates,
                 ability,
@@ -3901,6 +4045,7 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::ChooseFromZoneOpponentChooser {
+                return_result_occurrence,
                 player,
                 candidates,
                 ability,
@@ -3951,6 +4096,24 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             if matches!(purpose, ZoneOpponentChooserPurpose::BindReciprocalConsume) {
+                let retained = state.active_ability_continuation().ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "reciprocal consumer has no active continuation".into(),
+                    )
+                })?;
+                if retained.return_result_occurrence != return_result_occurrence
+                    || retained.chain.return_result_process != ability.return_result_process
+                {
+                    return Err(EngineError::InvalidAction(
+                        "reciprocal consumer instruction-result owner mismatch".into(),
+                    ));
+                }
+                effects::validate_selected_instruction_result_owner(
+                    state,
+                    &retained.chain,
+                    return_result_occurrence,
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 effects::bind_reciprocal_consumer_from_picker(state, opponent)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                 let consumer = state
@@ -4031,6 +4194,8 @@ pub(super) fn handle_resolution_choice(
         // `vote::resolve_tally` and drain the post-vote continuation.
         (
             WaitingFor::VoteChoice {
+                return_result_occurrence,
+                expected_return_result_process,
                 player,
                 remaining_votes,
                 options,
@@ -4075,6 +4240,8 @@ pub(super) fn handle_resolution_choice(
                 events,
                 idx as u32,
                 VoteRoundState {
+                    return_result_occurrence,
+                    expected_return_result_process,
                     player,
                     remaining_votes,
                     options,
@@ -4100,6 +4267,8 @@ pub(super) fn handle_resolution_choice(
         // (empty `candidate_objects`) reject this path.
         (
             WaitingFor::VoteChoice {
+                return_result_occurrence,
+                expected_return_result_process,
                 player,
                 remaining_votes,
                 options,
@@ -4131,6 +4300,8 @@ pub(super) fn handle_resolution_choice(
                 events,
                 candidate_index,
                 VoteRoundState {
+                    return_result_occurrence,
+                    expected_return_result_process,
                     player,
                     remaining_votes,
                     options,
@@ -4154,6 +4325,8 @@ pub(super) fn handle_resolution_choice(
         // partition. Validate the choice and transition to SeparatePilesPartition.
         (
             WaitingFor::SeparatePilesChooseOpponent {
+                return_result_occurrence,
+                expected_return_result_process,
                 player: _,
                 candidates,
                 eligible,
@@ -4171,6 +4344,8 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
             state.waiting_for = WaitingFor::SeparatePilesPartition {
+                return_result_occurrence,
+                expected_return_result_process,
                 player: opponent,
                 eligible,
                 remaining_subjects: crate::im::Vector::new(),
@@ -4192,6 +4367,8 @@ pub(super) fn handle_resolution_choice(
         // phase.
         (
             WaitingFor::SeparatePilesPartition {
+                return_result_occurrence,
+                expected_return_result_process,
                 player,
                 eligible,
                 mut remaining_subjects,
@@ -4235,6 +4412,8 @@ pub(super) fn handle_resolution_choice(
             });
             if let Some((next_pid, next_pool)) = remaining_subjects.pop_front() {
                 state.waiting_for = WaitingFor::SeparatePilesPartition {
+                    return_result_occurrence,
+                    expected_return_result_process,
                     player: next_pid,
                     eligible: next_pool,
                     remaining_subjects,
@@ -4250,6 +4429,8 @@ pub(super) fn handle_resolution_choice(
                 // All subjects partitioned. Transition to chooser phase.
                 let (current, pending) = pop_first_pile_result(completed);
                 state.waiting_for = WaitingFor::SeparatePilesChoice {
+                    return_result_occurrence,
+                    expected_return_result_process,
                     player: chooser,
                     pending,
                     current,
@@ -4269,6 +4450,8 @@ pub(super) fn handle_resolution_choice(
         // chosen pile, scoped per subject as controller.
         (
             WaitingFor::SeparatePilesChoice {
+                return_result_occurrence,
+                expected_return_result_process,
                 player,
                 mut pending,
                 current,
@@ -4289,6 +4472,7 @@ pub(super) fn handle_resolution_choice(
                 source_id,
                 &chosen_pile_effect,
                 &[(current.clone(), pile)],
+                expected_return_result_process,
                 events,
             )
             .map_err(|e| EngineError::InvalidAction(format!("pile sub-effect: {e:?}")))?;
@@ -4299,6 +4483,7 @@ pub(super) fn handle_resolution_choice(
                     source_id,
                     unchosen_def,
                     &[(current, pile)],
+                    expected_return_result_process,
                     events,
                 )
                 .map_err(|e| {
@@ -4307,6 +4492,8 @@ pub(super) fn handle_resolution_choice(
             }
             if let Some(next) = pending.pop_front() {
                 state.waiting_for = WaitingFor::SeparatePilesChoice {
+                    return_result_occurrence,
+                    expected_return_result_process,
                     player,
                     pending,
                     current: next,
@@ -5688,6 +5875,8 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::ChooseOneOfBranch {
+                return_result_occurrence,
+                expected_return_result_process,
                 player,
                 controller,
                 source_id,
@@ -5702,10 +5891,11 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseBranch { index },
         ) => {
-            set_priority(state, player);
             effects::choose_one_of::resolve_branch(
                 state,
                 effects::choose_one_of::BranchSelection {
+                    return_result_occurrence,
+                    expected_return_result_process,
                     player,
                     controller,
                     source_id,
@@ -6095,6 +6285,8 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::EffectZoneChoice {
+                return_result_occurrence,
+                return_result_process,
                 player,
                 cards,
                 count,
@@ -6488,6 +6680,16 @@ pub(super) fn handle_resolution_choice(
             let pending_return_result_producer = state
                 .active_ability_continuation()
                 .and_then(|pending| pending.pending_return_result_producer);
+            let producer_process = state
+                .active_ability_continuation()
+                .and_then(|pending| pending.chain.return_result_process);
+            let return_result_process = if pending_return_result_producer.is_some() {
+                // Reader authentication used the prompt's independent P above;
+                // a no-read named producer carries its own bound publisher P.
+                producer_process
+            } else {
+                return_result_process
+            };
             if let Some((occurrence_id, result_id)) = pending_return_result_producer {
                 let current = state.active_ability_continuation().is_some_and(|pending| {
                     matches!(effect_kind, EffectKind::BounceAll)
@@ -6514,8 +6716,14 @@ pub(super) fn handle_resolution_choice(
 
             if chosen.is_empty() {
                 if let Some((occurrence_id, result_id)) = pending_return_result_producer {
-                    effects::publish_return_result(state, occurrence_id, result_id, Vec::new())
-                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    effects::publish_return_result(
+                        state,
+                        occurrence_id,
+                        result_id,
+                        producer_process,
+                        Vec::new(),
+                    )
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                     state
                         .active_ability_continuation_frame_mut()
                         .expect("validated return-result continuation remains active")
@@ -6724,11 +6932,25 @@ pub(super) fn handle_resolution_choice(
                             effects::change_zone::enter_with_counters_for_pending_object(
                                 state,
                                 source_id,
+                                return_result_process,
                                 *card_id,
                                 &enter_with_counters,
                                 &conditional_enter_with_counters,
-                            );
+                                enters_modified_if.as_ref(),
+                            )
+                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                        let evaluation_view =
+                            effects::change_zone::pending_zone_entry_evaluation_ability(
+                                state,
+                                source_id,
+                                state.active_return_result_occurrence,
+                                return_result_process,
+                                &conditional_enter_with_counters,
+                                enters_modified_if.as_ref(),
+                            )
+                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
+                            return_result_process,
                             source_id,
                             controller: player,
                             origin: Some(origin),
@@ -6772,7 +6994,7 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, *card_id, events,
+                            state, &ctx, evaluation_view.as_ref(), *card_id, events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -6808,6 +7030,8 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        return_result_occurrence: state.active_return_result_occurrence,
+                                        return_result_process: return_result_process,
                                         pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -6886,6 +7110,8 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        return_result_occurrence: state.active_return_result_occurrence,
+                                        return_result_process: return_result_process,
                                         pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: Some(
@@ -6964,6 +7190,7 @@ pub(super) fn handle_resolution_choice(
                             state,
                             occurrence_id,
                             result_id,
+                            producer_process,
                             crate::types::game_state::settled_logical_zone_change_records(
                                 &logical_zone_change_group,
                             ),
@@ -7245,6 +7472,7 @@ pub(super) fn handle_resolution_choice(
                         )
                     })?;
                     let ctx = effects::change_zone::ChangeZoneIterationCtx {
+                        return_result_process: None,
                         source_id,
                         controller: player,
                         origin: Some(zone),
@@ -7288,7 +7516,7 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, *card_id, events,
+                            state, &ctx, None, *card_id, events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -7310,6 +7538,8 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        return_result_occurrence: state.active_return_result_occurrence,
+                                        return_result_process: None,
                                         pending_return_result_producer: None,
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -7361,6 +7591,8 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        return_result_occurrence: state.active_return_result_occurrence,
+                                        return_result_process: None,
                                         pending_return_result_producer: None,
                                         logical_zone_change_group,
                                         paused_current: Some(
@@ -9493,11 +9725,18 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::RecordInstructionZoneResult {
             occurrence_id,
             result_id,
+            return_result_process,
             settled_records,
         } => {
             let records = settled_records.expect("zone result completion must be settled");
-            effects::publish_return_result(state, occurrence_id, result_id, records)
-                .expect("zone result completion publishes once into a live occurrence");
+            effects::publish_return_result(
+                state,
+                occurrence_id,
+                result_id,
+                return_result_process,
+                records,
+            )
+            .expect("zone result completion publishes once into a live occurrence");
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
@@ -9736,6 +9975,7 @@ pub(crate) fn run_batch_completion(
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::ForEachCategoryExileComplete {
+            return_result_occurrence,
             ability,
             pool,
             remaining_member_filters,
@@ -9743,12 +9983,13 @@ pub(crate) fn run_batch_completion(
         } => {
             effects::choose_from_zone::complete_per_category_exile(
                 state,
+                return_result_occurrence,
                 ability,
                 pool,
                 remaining_member_filters,
                 chosen,
                 events,
-            );
+            ).expect("category batch completion was authenticated before the public replacement response");
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DrawnThisTurnTopdeckComplete {
@@ -10241,6 +10482,7 @@ pub(crate) fn run_batch_completion(
                 crate::game::zone_pipeline::BatchMoveResult::Done
             }
             crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                return_result_occurrence,
                 player,
                 source_id,
                 search_keys,
@@ -10276,6 +10518,7 @@ pub(crate) fn run_batch_completion(
                 }
                 effects::scoped_library_search::finish_delivery_tail(
                     state,
+                    return_result_occurrence,
                     player,
                     source_id,
                     after_scope,
@@ -14067,6 +14310,8 @@ mod tests {
         ));
 
         let waiting = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![eligible],
             count: 1,
@@ -14178,6 +14423,8 @@ mod tests {
                 rider.set_optional_effect_performed_recursive(!pick);
                 state.park_ability_continuation(PendingContinuation::new(Box::new(rider), &state));
                 let waiting = WaitingFor::EffectZoneChoice {
+                    return_result_occurrence: None,
+                    return_result_process: None,
                     player: PlayerId(0),
                     cards: vec![eligible],
                     count: 1,

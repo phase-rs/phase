@@ -4216,6 +4216,7 @@ mod tests {
             ),
             (
                 WaitingFor::UnlessPayment {
+                    return_result_occurrence: None,
                     player: PlayerId(0),
                     cost: AbilityCost::Mana {
                         cost: ManaCost::generic(1),
@@ -6230,6 +6231,7 @@ mod tests {
 
         // Mana-Leak-shaped prompt: P0 must pay {1} or the effect happens.
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: PlayerId(0),
             cost: AbilityCost::Mana {
                 cost: ManaCost::generic(1),

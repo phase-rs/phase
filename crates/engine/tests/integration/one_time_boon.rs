@@ -1184,6 +1184,7 @@ fn dunbarrow_batch_host_prompt_projects_without_leak() {
     let raw = runner.state().clone();
     let (player, source_id, legal_targets, pending_ability) = match &raw.waiting_for {
         WaitingFor::ChooseTokenHost {
+            return_result_occurrence,
             player,
             source_id,
             legal_targets,
@@ -1209,6 +1210,7 @@ fn dunbarrow_batch_host_prompt_projects_without_leak() {
     ] {
         match &view.waiting_for {
             WaitingFor::ChooseTokenHost {
+                return_result_occurrence,
                 player: view_player,
                 source_id: view_source,
                 legal_targets: view_targets,

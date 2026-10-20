@@ -2,7 +2,7 @@ use crate::types::game_state::RandomDraw;
 use rand::Rng;
 use std::collections::HashSet;
 
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
@@ -16,7 +16,7 @@ use crate::types::resolution::{
     DieRollContinuation, PendingDieRoll, PendingDieRollInstruction, ResolutionFrame,
 };
 
-use super::{resolve_ability_chain_step, ResolutionProgress};
+use super::{resolve_selected_ability_chain_step, ResolutionProgress};
 use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root;
 
 /// CR 706.2: Draw one natural result from the game's seeded RNG — "the number
@@ -48,6 +48,79 @@ pub(crate) fn roll_natural(state: &mut GameState, sides: u8) -> u8 {
     state.rng.draw(RandomDraw::Outcome).random_range(1..=sides)
 }
 
+fn validate_die_result_owner(
+    state: &GameState,
+    occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+    source: ObjectId,
+    controller: PlayerId,
+    results: &[crate::types::ability::DieResultBranch],
+    modifier: Option<&DieRollModifier>,
+) -> Result<(), EffectError> {
+    let mut addressed = Vec::new();
+    if let Some(modifier) = modifier {
+        modifier.for_each_quantity_expr(&mut |expression| {
+            expression.for_each_ref(&mut |reference| {
+                if let Some(result) = reference.instruction_result_id() {
+                    addressed.push(result);
+                }
+            })
+        });
+    }
+    if !addressed.is_empty() {
+        let frame = crate::types::game_state::checked_return_result_frame(
+            state, occurrence, expected, true,
+        )
+        .map_err(EffectError::InvalidParam)?;
+        for result in addressed {
+            if !matches!(frame.results.get(&result), Some(crate::types::game_state::InstructionResult::ZoneChanges(records))
+                if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+            {
+                return Err(EffectError::InvalidParam(
+                    "unavailable addressed die modifier".into(),
+                ));
+            }
+        }
+    }
+    for branch in results {
+        let mut body =
+            crate::game::ability_utils::build_resolved_from_def(&branch.effect, source, controller);
+        body.bind_return_result_process(expected);
+        super::validate_selected_instruction_result_owner(state, &body, occurrence)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_die_instruction_result_owner(
+    state: &GameState,
+    pending: &PendingDieRollInstruction,
+) -> Result<(), EffectError> {
+    validate_die_result_owner(
+        state,
+        pending.return_result_occurrence,
+        pending.expected_return_result_process,
+        pending.source_id,
+        pending.controller,
+        &pending.results_table,
+        pending.modifier.as_ref(),
+    )
+}
+
+pub(crate) fn validate_pending_die_result_owner(
+    state: &GameState,
+    pending: &PendingDieRoll,
+) -> Result<(), EffectError> {
+    validate_die_result_owner(
+        state,
+        pending.return_result_occurrence,
+        pending.expected_return_result_process,
+        pending.source_id,
+        pending.controller,
+        &pending.results_table,
+        pending.modifier.as_ref(),
+    )
+}
+
 /// CR 706.2: Apply a die roll's (optional) modifier to a natural result.
 ///
 /// The result is clamped to a u8-representable non-negative integer so a large
@@ -57,8 +130,7 @@ fn apply_modifier(
     state: &mut GameState,
     natural: u8,
     modifier: Option<&DieRollModifier>,
-    controller: PlayerId,
-    source_id: ObjectId,
+    ability: &ResolvedAbility,
 ) -> u8 {
     let Some(m) = modifier else {
         return natural;
@@ -69,9 +141,9 @@ fn apply_modifier(
     let combined =
         match m {
             DieRollModifier::Add { value } => (natural as i32)
-                .saturating_add(resolve_quantity(state, value, controller, source_id)),
+                .saturating_add(resolve_quantity_with_targets(state, value, ability)),
             DieRollModifier::Subtract { value } => (natural as i32)
-                .saturating_sub(resolve_quantity(state, value, controller, source_id)),
+                .saturating_sub(resolve_quantity_with_targets(state, value, ability)),
         };
     combined.clamp(0, u8::MAX as i32) as u8
 }
@@ -204,7 +276,19 @@ pub(crate) fn resolve_step(
     // independently with the same sides/modifier/results table.
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
+    let expected_return_result_process = ability.return_result_process;
+    validate_die_result_owner(
+        state,
+        state.active_return_result_occurrence,
+        expected_return_result_process,
+        ability.source_id,
+        ability.controller,
+        results,
+        modifier,
+    )?;
     let instruction = PendingDieRollInstruction {
+        return_result_occurrence: state.active_return_result_occurrence,
+        expected_return_result_process,
         source_id: ability.source_id,
         controller: ability.controller,
         // CR 706.6: the roller is the player instructed to ignore, and so the
@@ -256,6 +340,21 @@ pub(crate) fn resolve_step(
 /// Returns typed progress for a suspended proposal, ignore choice or results
 /// branch, and `ResolutionProgress::Complete` after the instruction settles.
 fn execute_roll(
+    state: &mut GameState,
+    instruction: PendingDieRollInstruction,
+    sides: u8,
+    proposal: RollProposal,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionProgress, EffectError> {
+    validate_die_instruction_result_owner(state, &instruction)?;
+    super::with_inherited_return_result_occurrence(
+        state,
+        instruction.return_result_occurrence,
+        |state| execute_roll_in_occurrence(state, instruction, sides, proposal, events),
+    )
+}
+
+fn execute_roll_in_occurrence(
     state: &mut GameState,
     instruction: PendingDieRollInstruction,
     sides: u8,
@@ -315,6 +414,8 @@ fn execute_roll(
     let outcome = DieRollIgnoreRule::ignore_outcome_for_rules(&ignore_rules, &naturals);
 
     let PendingDieRollInstruction {
+        return_result_occurrence,
+        expected_return_result_process,
         source_id,
         controller,
         roller,
@@ -331,6 +432,8 @@ fn execute_roll(
     } = instruction;
 
     let pending = PendingDieRoll {
+        return_result_occurrence: return_result_occurrence,
+        expected_return_result_process,
         source_id,
         controller,
         roller,
@@ -397,6 +500,9 @@ pub(crate) fn resume_roll_dice_after_replacement(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionProgress, EffectError> {
+    if let Some(instruction) = state.pending_die_roll_instruction.as_deref() {
+        validate_die_instruction_result_owner(state, instruction)?;
+    }
     let Some(instruction) = state.pending_die_roll_instruction.take() else {
         // No parked instruction: nothing proposed this roll through a path that
         // owns a continuation. Both production origins (`Effect::RollDie` and
@@ -556,7 +662,42 @@ pub(crate) fn resume_after_ignore(
     ignore_indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionProgress, EffectError> {
+    validate_pending_die_result_owner(state, &pending)?;
+    super::with_inherited_return_result_occurrence(
+        state,
+        pending.return_result_occurrence,
+        |state| {
+            let mut available = true;
+            if let Some(modifier) = &pending.modifier {
+                modifier.for_each_quantity_expr(&mut |expression| {
+                    expression.for_each_ref(&mut |reference| {
+                        available &= super::addressed_quantity_ref_is_available(
+                            state,
+                            reference,
+                            pending.expected_return_result_process,
+                        )
+                    })
+                });
+            }
+            if !available {
+                return Err(EffectError::InvalidParam(
+                    "unavailable addressed die modifier".into(),
+                ));
+            }
+            resume_after_ignore_in_occurrence(state, pending, ignore_indices, events)
+        },
+    )
+}
+
+fn resume_after_ignore_in_occurrence(
+    state: &mut GameState,
+    pending: PendingDieRoll,
+    ignore_indices: Vec<usize>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionProgress, EffectError> {
     let PendingDieRoll {
+        return_result_occurrence,
+        expected_return_result_process,
         source_id,
         controller,
         roller,
@@ -586,6 +727,19 @@ pub(crate) fn resume_after_ignore(
         state.waiting_for = WaitingFor::Priority { player: controller };
     }
 
+    let mut modifier_view = ResolvedAbility::new(
+        Effect::RollDie {
+            count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
+            sides,
+            results: Vec::new(),
+            modifier: None,
+        },
+        targets.clone(),
+        source_id,
+        controller,
+    );
+    modifier_view.context.chain_root_targets = chain_root_targets.clone();
+    modifier_view.bind_return_result_process(expected_return_result_process);
     let mut total_actual = running_total;
     let mut rolled_any = already_rolled_any;
 
@@ -613,7 +767,7 @@ pub(crate) fn resume_after_ignore(
         }
 
         // CR 706.2: apply the modifier to produce this die's actual result.
-        let actual = apply_modifier(state, natural, modifier.as_ref(), controller, source_id);
+        let actual = apply_modifier(state, natural, modifier.as_ref(), &modifier_view);
 
         // CR 706.2 + CR 706.6: emit the authoritative die-roll event ONCE, with
         // the post-modifier value already resolved, and only for a surviving
@@ -652,11 +806,12 @@ pub(crate) fn resume_after_ignore(
                 targets.clone(),
                 chain_root_targets.clone(),
             );
+            sub.bind_return_result_process(expected_return_result_process);
             // CR 706.3b + CR 400.7: the row is part of the ability that rolled, so
             // it acts for the object that ability captured.
             inherit_activation_incarnation(state, &mut sub);
             let child_boundary = state.resolution_stack.capture_child_boundary();
-            let progress = resolve_ability_chain_step(state, &sub, events, 0)?;
+            let progress = resolve_selected_ability_chain_step(state, &sub, events, 0)?;
 
             // CR 608.2c + CR 706.3a: a branch may itself have paused for a
             // player choice. The instruction is NOT finished — every die after
@@ -673,6 +828,8 @@ pub(crate) fn resume_after_ignore(
                 ResolutionProgress::Queued | ResolutionProgress::Waiting
             ) {
                 let resumed = PendingDieRoll {
+                    return_result_occurrence: state.active_return_result_occurrence,
+                    expected_return_result_process,
                     source_id,
                     controller,
                     roller,
@@ -1572,6 +1729,8 @@ mod tests {
     fn ignored_rolls_emit_display_mirror_alongside_survivors() {
         let mut state = GameState::new_two_player(42);
         let pending = PendingDieRoll {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
             roller: PlayerId(0),

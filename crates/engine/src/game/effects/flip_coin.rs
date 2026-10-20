@@ -15,8 +15,6 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
 
-use super::resolve_ability_chain;
-
 /// CR 705.1 + CR 614.1a: Outcome of routing a single logical coin flip through
 /// the replacement pipeline.
 enum CoinFlipOutcome {
@@ -31,6 +29,61 @@ enum CoinFlipOutcome {
     /// CR 614.6: a replacement prevented the flip entirely (the event never
     /// happens). No `CoinFlipped` pushed; the caller skips this flip's branch.
     Prevented,
+}
+
+fn retained_flip_occurrence(
+    state: &GameState,
+    win_effect: Option<&AbilityDefinition>,
+    lose_effect: Option<&AbilityDefinition>,
+    source_id: ObjectId,
+    controller: PlayerId,
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
+    occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+) -> Result<Option<crate::types::game_state::ReturnResultOccurrenceId>, EffectError> {
+    use crate::types::ability::{
+        classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
+    };
+    let retained = ResolvedAbility::new(
+        Effect::FlipCoin {
+            win_effect: win_effect.cloned().map(Box::new),
+            lose_effect: lose_effect.cloned().map(Box::new),
+            flipper: crate::types::ability::TargetFilter::Controller,
+        },
+        Vec::new(),
+        source_id,
+        controller,
+    );
+    match classify_instruction_result_invocation(&retained, InstructionResultEntry::SelectedBody)? {
+        InstructionResultProcess::Imported { results } => {
+            let mut addressed = Vec::new();
+            retained.for_each_own_quantity_ref(&mut |reference| {
+                if let Some(result) = reference
+                    .instruction_result_id()
+                    .filter(|result| results.contains(result))
+                {
+                    addressed.push(result);
+                }
+            });
+            let frame = crate::types::game_state::checked_return_result_frame(
+                state,
+                occurrence,
+                expected_return_result_process,
+                !addressed.is_empty(),
+            )
+            .map_err(EffectError::InvalidParam)?;
+            for result in addressed {
+                if !matches!(frame.results.get(&result), Some(crate::types::game_state::InstructionResult::ZoneChanges(records))
+                    if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+                {
+                    return Err(EffectError::InvalidParam(
+                        "unavailable retained coin result".into(),
+                    ));
+                }
+            }
+            Ok(occurrence)
+        }
+        InstructionResultProcess::Unused | InstructionResultProcess::Local { .. } => Ok(None),
+    }
 }
 
 /// CR 705.1 + CR 614.1a: Route one logical coin flip through the CR 614
@@ -113,20 +166,23 @@ fn run_flip_branch(
     controller: PlayerId,
     targets: &[TargetRef],
     chain_root_targets: &[TargetRef],
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     if let Some(def) = branch {
         // CR 608.2h: propagate so a counter-gated "that many" nested in the
         // branch still resolves against the live chain-root target (see
         // `build_resolved_from_def_with_chain_root`'s doc).
-        let sub = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-            def,
-            source_id,
-            controller,
-            targets.to_vec(),
-            chain_root_targets.to_vec(),
-        );
-        resolve_ability_chain(state, &sub, events, 0)?;
+        let mut sub =
+            crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                def,
+                source_id,
+                controller,
+                targets.to_vec(),
+                chain_root_targets.to_vec(),
+            );
+        sub.bind_return_result_process(expected_return_result_process);
+        super::resolve_selected_ability_chain(state, &sub, events, 0)?;
     }
     Ok(())
 }
@@ -178,7 +234,18 @@ pub fn resolve(
             // `resume_after_keep` can run the kept flip's branch. `EffectResolved`
             // is deferred until the keep choice resolves. CR 705.2: the kept flip's
             // `CoinFlipped` is recorded for the `flipper`, not the controller.
+            let saved_occurrence = retained_flip_occurrence(
+                state,
+                win_effect,
+                lose_effect,
+                ability.source_id,
+                ability.controller,
+                ability.return_result_process,
+                state.active_return_result_occurrence,
+            )?;
             state.push_coin_flip_frame(PendingCoinFlip {
+                expected_return_result_process: saved_occurrence.and(ability.return_result_process),
+                return_result_occurrence: saved_occurrence,
                 source_id: ability.source_id,
                 controller: ability.controller,
                 flipper,
@@ -206,6 +273,7 @@ pub fn resolve(
         ability.controller,
         &ability.targets,
         &ability.context.chain_root_targets,
+        ability.return_result_process,
         events,
     )?;
 
@@ -272,7 +340,19 @@ pub fn resolve_flip_coins(
             CoinFlipOutcome::Suspended => {
                 // CR 614.1a: doubled flip — stash loop position and resume after
                 // the keep choice. `remaining` excludes the paused flip itself.
+                let saved_occurrence = retained_flip_occurrence(
+                    state,
+                    win_effect,
+                    lose_effect,
+                    ability.source_id,
+                    ability.controller,
+                    ability.return_result_process,
+                    state.active_return_result_occurrence,
+                )?;
                 state.push_coin_flip_frame(PendingCoinFlip {
+                    expected_return_result_process: saved_occurrence
+                        .and(ability.return_result_process),
+                    return_result_occurrence: saved_occurrence,
                     source_id: ability.source_id,
                     controller: ability.controller,
                     flipper,
@@ -295,6 +375,7 @@ pub fn resolve_flip_coins(
             ability.controller,
             &ability.targets,
             &ability.context.chain_root_targets,
+            ability.return_result_process,
             events,
         )?;
         // CR 608.2c: stop only for an interactive resolution choice. A token
@@ -339,6 +420,7 @@ pub fn resolve_until_lose(
         ability.source_id,
         0,
         &ability.context.chain_root_targets,
+        ability.return_result_process,
         events,
     )? {
         Some(count) => count,
@@ -355,6 +437,7 @@ pub fn resolve_until_lose(
         ability.source_id,
         ability.controller,
         &ability.context.chain_root_targets,
+        ability.return_result_process,
         events,
     )
 }
@@ -372,6 +455,7 @@ fn flip_until_lose_loop(
     source_id: ObjectId,
     wins_so_far: u32,
     chain_root_targets: &[TargetRef],
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<u32>, EffectError> {
     // Safety cap prevents infinite loops with pathological RNG seeds.
@@ -384,7 +468,19 @@ fn flip_until_lose_loop(
             // CR 614.6: a prevented flip is neither a win nor the losing flip.
             CoinFlipOutcome::Prevented => continue,
             CoinFlipOutcome::Suspended => {
+                let saved_occurrence = retained_flip_occurrence(
+                    state,
+                    Some(win_effect),
+                    None,
+                    source_id,
+                    controller,
+                    expected_return_result_process,
+                    state.active_return_result_occurrence,
+                )?;
                 state.push_coin_flip_frame(PendingCoinFlip {
+                    expected_return_result_process: saved_occurrence
+                        .and(expected_return_result_process),
+                    return_result_occurrence: saved_occurrence,
                     source_id,
                     controller,
                     // CR 705: "flip a coin until you lose" is always the controller.
@@ -415,6 +511,7 @@ fn finish_until_lose(
     source_id: ObjectId,
     controller: PlayerId,
     chain_root_targets: &[TargetRef],
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     for _ in 0..win_count {
@@ -425,6 +522,7 @@ fn finish_until_lose(
             controller,
             targets,
             chain_root_targets,
+            expected_return_result_process,
             events,
         )?;
         // CR 608.2c: stop only if the win effect suspended for an INTERACTIVE
@@ -469,13 +567,53 @@ fn finish_until_lose(
 /// `Priority { controller }` so any new resolution-choice `WaitingFor` is an
 /// unambiguous re-suspension (`super::waits_for_resolution_choice`), even when a
 /// re-suspended flip's results coincide with the one just resolved.
+pub(crate) fn validate_pending_coin_flip(
+    state: &GameState,
+    pending: &PendingCoinFlip,
+) -> Result<(), EffectError> {
+    retained_flip_occurrence(
+        state,
+        pending.win_effect.as_deref(),
+        pending.lose_effect.as_deref(),
+        pending.source_id,
+        pending.controller,
+        pending.expected_return_result_process,
+        pending.return_result_occurrence,
+    )
+    .map(|_| ())
+}
+
 pub fn resume_after_keep(
     state: &mut GameState,
     pending: PendingCoinFlip,
     kept: Vec<bool>,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EffectError> {
+    validate_pending_coin_flip(state, &pending)?;
+    let occurrence = pending.return_result_occurrence;
+    super::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        retained_flip_occurrence(
+            state,
+            pending.win_effect.as_deref(),
+            pending.lose_effect.as_deref(),
+            pending.source_id,
+            pending.controller,
+            pending.expected_return_result_process,
+            pending.return_result_occurrence,
+        )?;
+        resume_after_keep_in_occurrence(state, pending, kept, events)
+    })
+}
+
+fn resume_after_keep_in_occurrence(
+    state: &mut GameState,
+    pending: PendingCoinFlip,
+    kept: Vec<bool>,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EffectError> {
     let PendingCoinFlip {
+        return_result_occurrence,
+        expected_return_result_process,
         source_id,
         controller,
         flipper,
@@ -526,6 +664,7 @@ pub fn resume_after_keep(
                 controller,
                 &targets,
                 &chain_root_targets,
+                expected_return_result_process,
                 events,
             )?;
             if suspended(state) {
@@ -552,6 +691,7 @@ pub fn resume_after_keep(
                 controller,
                 &targets,
                 &chain_root_targets,
+                expected_return_result_process,
                 events,
             )?;
             if suspended(state) {
@@ -574,6 +714,7 @@ pub fn resume_after_keep(
                             controller,
                             &targets,
                             &chain_root_targets,
+                            expected_return_result_process,
                             events,
                         )?;
                         if suspended(state) {
@@ -583,6 +724,8 @@ pub fn resume_after_keep(
                     CoinFlipOutcome::Prevented => continue,
                     CoinFlipOutcome::Suspended => {
                         state.push_coin_flip_frame(PendingCoinFlip {
+                            return_result_occurrence,
+                            expected_return_result_process,
                             source_id,
                             controller,
                             flipper,
@@ -620,6 +763,7 @@ pub fn resume_after_keep(
                     source_id,
                     seed,
                     &chain_root_targets,
+                    expected_return_result_process,
                     events,
                 )? {
                     Some(win_count) => {
@@ -631,6 +775,7 @@ pub fn resume_after_keep(
                             source_id,
                             controller,
                             &chain_root_targets,
+                            expected_return_result_process,
                             events,
                         )?;
                         if suspended(state) {
@@ -652,6 +797,7 @@ pub fn resume_after_keep(
                     source_id,
                     controller,
                     &chain_root_targets,
+                    expected_return_result_process,
                     events,
                 )?;
                 if suspended(state) {

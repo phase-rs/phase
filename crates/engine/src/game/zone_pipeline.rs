@@ -7608,6 +7608,7 @@ mod sought_completion_order_tests {
                 .expect("parked batch");
             let Some(BatchCompletion::RecordInstructionZoneResult {
                 occurrence_id,
+                return_result_process,
                 result_id,
                 settled_records,
             }) = &batch.completion
@@ -7615,7 +7616,13 @@ mod sought_completion_order_tests {
                 panic!("missing named completion")
             };
             assert!(settled_records.is_none());
-            assert!(!runner.state().return_result_frames[occurrence_id].contains_key(result_id));
+            assert_eq!(
+                runner.state().return_result_frames[occurrence_id].process,
+                *return_result_process
+            );
+            assert!(!runner.state().return_result_frames[occurrence_id]
+                .results
+                .contains_key(result_id));
             assert_eq!(
                 batch.remaining.len(),
                 1 - pause,
@@ -7669,7 +7676,7 @@ mod sought_completion_order_tests {
             .state()
             .return_result_frames
             .values()
-            .flat_map(|frame| frame.values())
+            .flat_map(|frame| frame.results.values())
             .filter_map(|result| result.zone_changes())
             .find(|records| !records.is_empty())
             .unwrap()[0]

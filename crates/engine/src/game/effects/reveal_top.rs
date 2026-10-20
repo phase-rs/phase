@@ -133,7 +133,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                state.return_result_frames[&occurrence][&result_id].revealed_cards(),
+                state.return_result_frames[&occurrence].results[&result_id].revealed_cards(),
                 Some([].as_slice())
             );
             assert!(state.last_revealed_ids.is_empty());

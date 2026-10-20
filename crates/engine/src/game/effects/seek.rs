@@ -66,7 +66,13 @@ pub fn resolve(
         // Digital Seek: a completed empty instruction is a fresh exact result,
         // never permission to recover another producer's cards.
         if let Some((occurrence_id, result_id)) = result_key {
-            super::publish_return_result(state, occurrence_id, result_id, Vec::new())?;
+            super::publish_return_result(
+                state,
+                occurrence_id,
+                result_id,
+                ability.return_result_process,
+                Vec::new(),
+            )?;
         }
         // "Fail to find" — resolve immediately
         events.push(GameEvent::EffectResolved {
@@ -118,6 +124,7 @@ pub fn resolve(
         crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
             occurrence_id,
             result_id,
+            return_result_process: ability.return_result_process,
             settled_records: None,
         }
     });
@@ -218,7 +225,7 @@ pub(crate) mod tests {
             .state()
             .return_result_frames
             .values()
-            .any(|frame| frame.values().any(|records| records
+            .any(|frame| frame.results.values().any(|records| records
                 .zone_changes()
                 .is_some_and(|records| !records.is_empty()))));
         (runner, cards, source)

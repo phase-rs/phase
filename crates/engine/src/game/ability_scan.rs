@@ -237,6 +237,7 @@ pub(crate) enum FilterReadContext {
 /// `target_constraints`).
 fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         // ---- read-bearing: scanned into `acc` below ----
         effect,
         sub_ability,
@@ -2935,7 +2936,8 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        QuantityRef::ZoneChangeAggregateThisTurn {
+        QuantityRef::ZoneChangeAggregate {
+            source,
             filter,
             from: _,
             to: _,
@@ -2945,7 +2947,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             let mut acc = Axes {
                 event: false,
                 sibling: false,
-                projected: true,
+                projected: matches!(
+                    source,
+                    crate::types::ability::ZoneChangeRecordSource::ThisTurn
+                ),
                 history: HistoryReads::NONE,
             };
             acc = acc.or(scan_target_filter(
@@ -11775,5 +11780,68 @@ mod u13_counter_condition_scan_tests {
             .counter_removal_event()
             .is_some());
         assert!(reader.declares_return_result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod departure_source_axis_tests {
+    use super::*;
+    use crate::types::ability::{
+        AggregateFunction, ObjectProperty, ReturnResultId, ZoneChangeRecordSource,
+    };
+
+    fn read(source: ZoneChangeRecordSource, filter: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate {
+                        source,
+                        from: Some(crate::types::zones::Zone::Battlefield),
+                        to: Some(crate::types::zones::Zone::Exile),
+                        filter,
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                    },
+                },
+            },
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        )
+    }
+
+    #[test]
+    fn departure_frozen_source_keeps_only_its_actual_nested_operand_read_axes() {
+        let source = ZoneChangeRecordSource::InstructionResult {
+            result: ReturnResultId(7),
+        };
+        let pure = read(source, TargetFilter::Typed(TypedFilter::creature()));
+        assert!(!ability_reads_projected_resource(&pure));
+        assert!(!ability_reads_sibling_mutable(&pure));
+        assert!(!ability_uses_event_context(&pure));
+        let journal = read(
+            ZoneChangeRecordSource::ThisTurn,
+            TargetFilter::Typed(TypedFilter::creature()),
+        );
+        assert!(ability_reads_projected_resource(&journal));
+        let event = read(source, TargetFilter::EventTarget);
+        assert!(ability_uses_event_context(&event));
+        let mut predicate = TypedFilter::creature();
+        predicate.properties.push(FilterProp::Cmc {
+            comparator: crate::types::ability::Comparator::LT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        });
+        let source_read = read(source, TargetFilter::Typed(predicate));
+        assert!(
+            ability_reads_sibling_mutable(&source_read),
+            "the frozen population does not erase a live source operand in its predicate"
+        );
+        assert!(!ability_uses_event_context(&source_read));
+        assert!(!ability_reads_projected_resource(&source_read));
     }
 }

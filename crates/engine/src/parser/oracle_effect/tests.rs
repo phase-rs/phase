@@ -3431,7 +3431,7 @@ use crate::types::player::PlayerCounterKind;
 /// "Destroy all Dalek creatures and each of your opponents loses life equal
 /// to the total power of Daleks that died this turn" must split into
 /// `DestroyAll{Dalek}` + a `LoseLife` sub_ability whose amount is the
-/// `ZoneChangeAggregateThisTurn` death-power aggregate — NOT collapse to an
+/// `ZoneChangeAggregate` death-power aggregate — NOT collapse to an
 /// empty-filter mass DestroyAll, and NOT drop the `, or …` alternative. The
 /// `LoseLife.target` must carry the "each of your opponents" player scope
 /// (CR 119.3); dropping it would redirect the loss to Genesis's controller.
@@ -3464,12 +3464,12 @@ fn genesis_villainous_branch_splits_destroy_and_lose_life() {
         panic!("expected LoseLife sub_ability, got {:?}", sub.effect);
     };
     let QuantityExpr::Ref {
-        qty: QuantityRef::ZoneChangeAggregateThisTurn {
+        qty: QuantityRef::ZoneChangeAggregate {
             function, property, ..
         },
     } = amount
     else {
-        panic!("expected ZoneChangeAggregateThisTurn amount, got {amount:?}");
+        panic!("expected ZoneChangeAggregate amount, got {amount:?}");
     };
     assert_eq!(*function, AggregateFunction::Sum);
     assert_eq!(*property, ObjectProperty::Power);

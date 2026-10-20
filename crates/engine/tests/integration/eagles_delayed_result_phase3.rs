@@ -276,7 +276,7 @@ fn selected_return_result_survives_redirect_pause_and_rejects_corrupt_carriers()
     corruptions.push((duplicate, "duplicate parked publishers"));
 
     let mut prepublished = saved.clone();
-    prepublished["return_result_frames"][occurrence.to_string()]
+    prepublished["return_result_frames"][occurrence.to_string()]["results"]
         .as_object_mut()
         .expect("return-result frame")
         .insert(result.to_string(), serde_json::json!([]));
@@ -664,15 +664,17 @@ fn selected_second_return_uses_its_own_result_key_after_an_earlier_producer() {
     assert_ne!(key[1], serde_json::json!(100));
     let occurrence = key[0].as_u64().expect("shared occurrence");
     assert_eq!(
-        saved["return_result_frames"][occurrence.to_string()]["100"]
+        saved["return_result_frames"][occurrence.to_string()]["results"]["100"]
             .as_array()
             .expect("first producer already settled")
             .len(),
         1
     );
-    assert!(saved["return_result_frames"][occurrence.to_string()]
-        .get(second_result.0.to_string())
-        .is_none());
+    assert!(
+        saved["return_result_frames"][occurrence.to_string()]["results"]
+            .get(second_result.0.to_string())
+            .is_none()
+    );
 
     runner
         .act(GameAction::SelectCards {
@@ -1748,6 +1750,7 @@ fn paused_return_result_restore_rejects_corrupt_authority_before_resume() {
         .return_result_frames
         .get_mut(&occurrence_id)
         .unwrap()
+        .results
         .insert(
             ReturnResultId(u32::MAX),
             engine::types::game_state::InstructionResult::ZoneChanges(vec![secret_record]),
@@ -1895,7 +1898,7 @@ fn paused_return_result_restore_rejects_corrupt_authority_before_resume() {
     corruptions.push((premature, "prematurely settled"));
 
     let mut duplicate_publication = saved.clone();
-    duplicate_publication["return_result_frames"][occurrence.to_string()]
+    duplicate_publication["return_result_frames"][occurrence.to_string()]["results"]
         .as_object_mut()
         .expect("result frame")
         .insert(result.to_string(), serde_json::json!([]));

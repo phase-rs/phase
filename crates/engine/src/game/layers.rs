@@ -4068,7 +4068,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::VoteCount { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregate { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. } => false,
     }
 }
@@ -4261,7 +4261,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::SacrificedThisTurn { filter, .. }
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregate { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. } => {
             target_filter_reads_life_total(filter)

@@ -58,6 +58,7 @@ pub(crate) fn resolve(
     // against `candidates`) is fed back through `perform_clash`.
     if candidates.len() >= 2 {
         state.waiting_for = WaitingFor::ClashChooseOpponent {
+            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
             player: controller,
             candidates,
             ability: Box::new(ability.clone()),

@@ -514,7 +514,7 @@ fn revealed_result_pause_private_views_and_legacy_zone_readers() {
         let result = private
             .return_result_frames
             .values_mut()
-            .flat_map(|frame| frame.values_mut())
+            .flat_map(|frame| frame.results.values_mut())
             .find_map(|result| match result {
                 engine::types::game_state::InstructionResult::RevealedCards(result) => Some(result),
                 _ => None,
@@ -631,7 +631,7 @@ fn revealed_exact_producers_and_latched_queue_ignore_later_mirrors() {
         .state_mut()
         .return_result_frames
         .values_mut()
-        .flat_map(|frame| frame.values_mut())
+        .flat_map(|frame| frame.results.values_mut())
     {
         *result = engine::types::game_state::InstructionResult::ZoneChanges(Vec::new());
     }

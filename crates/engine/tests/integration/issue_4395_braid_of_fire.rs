@@ -93,6 +93,7 @@ fn fixed_mana_effect_cost_pays_into_the_unless_payers_mana_pool() {
         P0,
     );
     runner.state_mut().waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: P0,
         cost: AbilityCost::EffectCost {
             effect: Box::new(Effect::Mana {

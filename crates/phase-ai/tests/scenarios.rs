@@ -47,6 +47,7 @@ fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
         player,
         choice: ManaChoicePrompt::AnyCombination { count, options },
         context: ManaChoiceContext::ResolvingEffect(resume),
+        ..
     } = &state.waiting_for
     else {
         panic!("capture must restore at Cosmic Crucible's resolving mana prompt");

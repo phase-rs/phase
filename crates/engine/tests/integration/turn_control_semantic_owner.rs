@@ -381,6 +381,7 @@ fn a_controlled_seats_land_tap_undoes_during_an_unless_payment() {
         P1,
     );
     runner.state_mut().waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: P1,
         cost: AbilityCost::Mana {
             cost: ManaCost::Cost {

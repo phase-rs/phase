@@ -6625,6 +6625,8 @@ mod tests {
     /// `pile_a` vector the candidate set offers.
     fn partition_candidates(state: &mut GameState, eligible: &[ObjectId]) -> Vec<Vec<ObjectId>> {
         state.waiting_for = WaitingFor::SeparatePilesPartition {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: PlayerId(0),
             eligible: eligible.iter().copied().collect(),
             remaining_subjects: im::Vector::new(),
@@ -8138,6 +8140,8 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards,
             count: 20,
@@ -9334,6 +9338,7 @@ mod tests {
         // scoped flag differs, so a green here cannot come from anything else.
         let (mut scoped, ids) = single_card_search_state();
         scoped.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },

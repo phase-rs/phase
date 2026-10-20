@@ -1167,6 +1167,13 @@ pub(crate) fn parse_extreme_chosen_number_ref(input: &str) -> OracleResult<'_, Q
 }
 
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    if is_historical_zone_aggregate(input) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
     alt((
         alt((
             parse_repeated_object_population,
@@ -1902,6 +1909,71 @@ pub(crate) fn parse_bare_card_set_anaphor(input: &str) -> OracleResult<'_, ()> {
         )),
         _ => Ok((rest, ())),
     }
+}
+
+/// Parser-only historical descriptor; source identity belongs to the sealed chain builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistoricalZoneAggregate {
+    pub filter: TargetFilter,
+    pub controller: super::target::ControllerPhrase,
+    pub from: Zone,
+    pub to: Zone,
+    pub function: AggregateFunction,
+    pub property: ObjectProperty,
+}
+
+/// CR 608.2i: a qualified noun's past controller and completed action name departure facts.
+pub(crate) fn parse_historical_zone_aggregate(
+    input: &str,
+) -> OracleResult<'_, HistoricalZoneAggregate> {
+    let (population, (function, property)) = parse_object_property_aggregate_head(input)?;
+    let (noun, controller, rest) = scan_preceded(population, |i| {
+        verify(
+            parse_controller_phrase,
+            |phrase: &super::target::ControllerPhrase| phrase.tense == ControllerTense::Past,
+        )
+        .parse(i)
+    })
+    .ok_or_else(|| oracle_err(input))?;
+    let (rest, _) = tag(" that were ").parse(rest)?;
+    let (rest, to) = value(Zone::Exile, tag("exiled this way")).parse(rest)?;
+    let (remaining, filter) = parse_type_phrase_folding(noun.trim());
+    if !remaining.trim().is_empty() || matches!(filter, TargetFilter::Any | TargetFilter::None) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((
+        rest,
+        HistoricalZoneAggregate {
+            filter,
+            controller,
+            from: Zone::Battlefield,
+            to,
+            function,
+            property,
+        },
+    ))
+}
+
+/// A historical source cannot fall through to the current-object population grammar.
+pub(crate) fn is_historical_zone_aggregate(input: &str) -> bool {
+    let Ok((population, _)) = parse_object_property_aggregate_head(input) else {
+        return false;
+    };
+    scan_preceded(population, |i| {
+        verify(
+            parse_controller_phrase,
+            |phrase: &super::target::ControllerPhrase| phrase.tense == ControllerTense::Past,
+        )
+        .parse(i)
+    })
+    .is_some()
+        || scan_preceded(population, |i| {
+            tag::<_, _, OracleError<'_>>("exiled this way").parse(i)
+        })
+        .is_some()
 }
 
 fn parse_object_property_aggregate_head(

@@ -8214,6 +8214,7 @@ mod tests {
             context: engine::types::game_state::ManaChoiceContext::ResolvingEffect(Box::new(
                 dummy_ability(),
             )),
+            return_result_occurrence: None,
         };
 
         assert_eq!(

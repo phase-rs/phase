@@ -2005,7 +2005,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_target(filter)
             )
         }
-        QuantityRef::ZoneChangeAggregateThisTurn {
+        QuantityRef::ZoneChangeAggregate {
+            source,
             from,
             to,
             filter,
@@ -2013,7 +2014,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             property,
         } => {
             format!(
-                "{} ({property:?} {function:?}) zone changes this turn ({from:?}->{to:?})",
+                "{} ({property:?} {function:?}) zone changes from {source:?} ({from:?}->{to:?})",
                 fmt_target(filter)
             )
         }
@@ -10542,7 +10543,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         ),
         QuantityRef::LandsPlayedThisTurn { .. } => ("LandsPlayedThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
-        QuantityRef::ZoneChangeAggregateThisTurn { .. } => ("ZoneChangeAggregateThisTurn", Handled),
+        QuantityRef::ZoneChangeAggregate { .. } => ("ZoneChangeAggregate", Handled),
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
         // CR 500: per-player turn count. Resolver (game/quantity.rs, player.turns_taken)
         // has always worked; Control Win Condition's CDA now consumes it live. Not a
@@ -23398,5 +23399,60 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             assert!(details.iter().any(|(k, _)| k == key));
         }
         assert!(details.iter().any(|(_, value)| value.contains("charge")));
+    }
+}
+
+#[cfg(test)]
+mod departure_source_coverage_tests {
+    use super::*;
+    use crate::types::ability::{
+        AggregateFunction, ObjectProperty, ReturnResultId, ZoneChangeRecordSource,
+    };
+
+    #[test]
+    fn departure_source_formatter_and_feature_accounting_keep_both_population_axes() {
+        for source in [
+            ZoneChangeRecordSource::ThisTurn,
+            ZoneChangeRecordSource::InstructionResult {
+                result: ReturnResultId(7),
+            },
+        ] {
+            let quantity = QuantityRef::ZoneChangeAggregate {
+                source,
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            };
+            let (feature, support) = quantity_ref_feature(&quantity);
+            assert_eq!(feature, "ZoneChangeAggregate");
+            assert_eq!(support, FeatureSupport::Handled);
+            let text = fmt_quantity_ref(&quantity);
+            assert!(
+                text.contains("Power")
+                    && text.contains("Sum")
+                    && text.contains("Battlefield")
+                    && text.contains("Exile")
+            );
+            match source {
+                ZoneChangeRecordSource::ThisTurn => {
+                    assert!(text.contains("ThisTurn") && !text.contains("InstructionResult"))
+                }
+                ZoneChangeRecordSource::InstructionResult { .. } => {
+                    assert!(text.contains("InstructionResult") && text.contains('7'))
+                }
+            }
+            let mut features = HashMap::new();
+            extract_quantity_features(
+                &QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref { qty: quantity }),
+                    offset: 1,
+                },
+                &mut features,
+            );
+            assert_eq!(features.len(), 1);
+            assert_eq!(features.values().next(), Some(&FeatureSupport::Handled));
+        }
     }
 }

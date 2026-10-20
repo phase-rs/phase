@@ -3485,6 +3485,7 @@ mod tests {
         add_library_creature(&mut state, 87, PlayerId(0), "Target");
         let ability = make_search_ability(TargetFilter::Any, 1);
         state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(ability.clone()),
             phase: ScopedLibrarySearchPhase::CollectAcceptance {
                 remaining_players: Vec::new(),

@@ -198,6 +198,8 @@ pub fn roll_to_visit_attractions(
     // the turn-based roll-to-visit and must be finished by
     // `complete_roll_to_visit`, not by the resolution path.
     state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+        return_result_occurrence: None,
+        expected_return_result_process: None,
         // CR 703.4g: the turn-based action has no source object and no
         // resolution context — only the roller matters downstream.
         source_id: ObjectId(0),

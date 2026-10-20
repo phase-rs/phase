@@ -447,6 +447,7 @@ pub(crate) fn apply_instead_swap(
     {
         overridden.mirror_targets_from(sub);
     }
+    overridden.bind_return_result_process(parent.return_result_process);
     overridden
 }
 
@@ -7579,7 +7580,7 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<QuantitySlotDeriva
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
         | QuantityRef::SacrificedThisTurn { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregate { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => population_target_slot_filter(filter),

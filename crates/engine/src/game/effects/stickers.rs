@@ -234,6 +234,8 @@ fn resolve_put_sticker(
     super::choose_one_of::prompt_next(
         state,
         super::choose_one_of::PromptRequest {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             controller: ability.controller,
             source_id: ability.source_id,
             branches,
@@ -304,6 +306,8 @@ fn prompt_count_choice(
     super::choose_one_of::prompt_next(
         state,
         super::choose_one_of::PromptRequest {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             controller: ability.controller,
             source_id: ability.source_id,
             branches,

@@ -37,6 +37,7 @@ fn exact_thirteen_targets_state() -> (GameState, Vec<ObjectId>) {
         P0,
     );
     state.waiting_for = WaitingFor::MultiTargetSelection {
+        return_result_occurrence: None,
         player: P0,
         legal_targets: targets.clone(),
         min_targets: 13,

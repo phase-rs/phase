@@ -431,6 +431,8 @@ fn open_private_zone_cast_selection(
     // live, so the resume's finalize-time re-evaluation is correct.
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: ability.controller,
         cards: eligible,
         count: 1,

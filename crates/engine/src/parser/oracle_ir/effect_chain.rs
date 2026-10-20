@@ -1184,6 +1184,92 @@ impl ClauseIr {
         .then_some((amount, mode))
     }
 
+    pub(crate) fn for_each_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        self.parsed.effect.for_each_quantity_ref(f);
+        self.disposition.for_each_quantity_ref(f);
+        for condition in [&self.condition, &self.parsed.condition]
+            .into_iter()
+            .flatten()
+        {
+            condition.for_each_nested_quantity_ref(f);
+        }
+        if let Some(repeat) = &self.repeat_for {
+            repeat.for_each_ref(f);
+        }
+        if let Some(sub) = &self.parsed.sub_ability {
+            sub.for_each_own_quantity_ref(f);
+        }
+        for payment in [&self.unless_pay, &self.parsed.unless_pay]
+            .into_iter()
+            .flatten()
+        {
+            payment
+                .cost
+                .for_each_quantity_expr(&mut |expr| expr.for_each_ref(f));
+            payment.cost.for_each_predicate_quantity_ref(f);
+        }
+    }
+
+    fn for_each_quantity_ref_mut(&mut self, f: &mut dyn FnMut(&mut QuantityRef)) {
+        self.parsed.effect.for_each_quantity_ref_mut(f);
+        self.disposition.for_each_quantity_ref_mut(f);
+        for condition in [&mut self.condition, &mut self.parsed.condition]
+            .into_iter()
+            .flatten()
+        {
+            condition.for_each_nested_quantity_ref_mut(f);
+        }
+        if let Some(repeat) = &mut self.repeat_for {
+            repeat.each_ref_mut(f);
+        }
+        if let Some(sub) = &mut self.parsed.sub_ability {
+            sub.for_each_own_quantity_ref_mut(f);
+        }
+        for payment in [&mut self.unless_pay, &mut self.parsed.unless_pay]
+            .into_iter()
+            .flatten()
+        {
+            payment
+                .cost
+                .for_each_quantity_expr_mut(&mut |expr| expr.each_ref_mut(f));
+            payment.cost.for_each_predicate_quantity_ref_mut(f);
+        }
+    }
+
+    /// CR 608.2c: only the complete supported mass-exile producer supplies this result class.
+    pub(crate) fn zone_result_producer(&self) -> Option<(Zone, Zone)> {
+        if !self.sought_result_shell_is_empty()
+            || self.repeat_for.is_some()
+            || self.where_x_expression.is_some()
+            || self.reads_return_result.is_some()
+        {
+            return None;
+        }
+        match &self.parsed.effect {
+            Effect::ChangeZoneAll {
+                origin: None | Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                ..
+            } => {
+                let proof = crate::parser::oracle_effect::parse_effect_clause(
+                    self.source.fragment()?,
+                    &mut Default::default(),
+                );
+                (proof.effect == self.parsed.effect
+                    && proof.sub_ability.is_none()
+                    && proof.condition.is_none()
+                    && !proof.optional
+                    && proof.unless_pay.is_none())
+                .then_some((Zone::Battlefield, Zone::Exile))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_transparent_zone_result_corridor(&self) -> bool {
+        self.is_transparent_sought_corridor()
+    }
+
     /// Empty structural shell shared by the producer, corridor and reader proof.
     pub(crate) fn sought_result_shell_is_empty(&self) -> bool {
         matches!(
@@ -1314,6 +1400,85 @@ impl ClauseIr {
     }
 }
 
+// Continuations remain part of their source clause until assembly. In particular,
+// an absorbed token counter clause must participate in address binding and reminting.
+macro_rules! define_disposition_quantity_walk {
+    ([$($mut_:tt)?]; $walk:ident; $refs:ident; $nested:ident; $owned:ident; $exprs:ident; $predicates:ident) => {
+        impl ClauseDisposition {
+            fn $walk(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+                match self {
+                    Self::Emit { followup, intrinsic } => {
+                        for continuation in [followup, intrinsic].into_iter().flatten() { continuation.$walk(f); }
+                    }
+                    Self::Continue { continuation } | Self::FoldSearchIntoElse { intrinsic: continuation } => {
+                        if let Some(continuation) = continuation { continuation.$walk(f); }
+                    }
+                    Self::Absorb { rider, .. } | Self::BranchOtherwise { else_def: rider, .. }
+                    | Self::ReplaceMeaning { kind: ReplaceMeaningKind::DigAlt(rider) | ReplaceMeaningKind::Instead(rider) } => rider.$owned(f),
+                    Self::ModifyPrior { modifier: PriorModifier::AltCost(cost) } => {
+                        cost.$exprs(&mut |expr| expr.$refs(f));
+                        cost.$predicates(f);
+                    }
+                    Self::DrawnThisTurnFollowup { life_payment } => life_payment.$refs(f),
+                    Self::ReplicatePerKeyword { .. }
+                    | Self::ModifyPrior { modifier: PriorModifier::ManaRetention(_) | PriorModifier::ManaSpendPermission(_) | PriorModifier::EntersTappedAttacking }
+                    | Self::ReplaceMeaning { kind: ReplaceMeaningKind::KeywordOverride } => {}
+                }
+            }
+        }
+        impl ContinuationAst {
+            fn $walk(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+                use super::ast::PutCount;
+                use crate::types::ability::PtValue;
+                match self {
+                    Self::TokenEntersWithCounters { count, .. } => count.$refs(f),
+                    Self::TokenSourcePowerToughness { power, toughness } => {
+                        for value in [power, toughness] { if let PtValue::Quantity(expr) = value { expr.$refs(f); } }
+                    }
+                    Self::ExileLookedAtCard { player, count, .. } => { player.$nested(f); count.$refs(f); }
+                    Self::ExileOneOfThemFaceDown { enter_with_counters } => {
+                        for (_, count) in enter_with_counters { count.$refs(f); }
+                    }
+                    Self::DigFromAmong { quantity, filter, rest_split_top_count, .. } => {
+                        match quantity { PutCount::Up(expr) | PutCount::Exactly(expr) => expr.$refs(f), PutCount::All | PutCount::AnyNumber => {} }
+                        filter.$nested(f);
+                        if let Some(count) = rest_split_top_count { count.$refs(f); }
+                    }
+                    Self::SearchDestination { attach_host: filter, .. }
+                    | Self::RevealHandFilter { card_filter: filter, .. }
+                    | Self::EntersTappedAttacking { moved_filter: filter }
+                    | Self::ChooseAndSacrificeRestFilter { sacrifice_filter: filter } => {
+                        if let Some(filter) = filter { filter.$nested(f); }
+                    }
+                    Self::CounterSourceStatic { source_filter, .. } => {
+                        if let Some(filter) = source_filter { filter.$nested(f); }
+                    }
+                    Self::RevealUntilConditionalKept { filter, .. } => filter.$nested(f),
+                    Self::PutChosenCardsAtLibraryPosition { position } => {
+                        use crate::types::ability::LibraryPosition;
+                        match position { LibraryPosition::BeneathTop { depth } => depth.$refs(f), LibraryPosition::RandomWithinTop { n } => n.$refs(f), LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => {} }
+                    }
+                    Self::ManaRestriction { .. } | Self::ManaGrant { .. }
+                    | Self::CounterSourceRiderUnreadable { .. } | Self::CounterSourceRiderDestroy
+                    | Self::CounterSpellZoneRedirect { .. } | Self::CopyMayRetarget { .. }
+                    | Self::SuspectLastCreated | Self::GoadLastCreated { .. }
+                    | Self::SelfCostKeywordCostClarification | Self::CantRegenerate { .. }
+                    | Self::EndEffectCost { .. } | Self::ExcessDamageToController { .. }
+                    | Self::ChooseFromExile { .. } | Self::SearchResultClauseHandled
+                    | Self::ExileSearchResultFaceDown | Self::SearchRevealResult
+                    | Self::PutChoiceRemainderOnBottom | Self::ChoicePartitionDestinations { .. }
+                    | Self::ExileSearchRemainder | Self::BecomesPlotted | Self::BecomesForetold
+                    | Self::PutRest { .. } | Self::FaceDownProfileSpec { .. }
+                    | Self::GrantExtraTurnAfterControlledTurn | Self::RevealUntilKept { .. }
+                    | Self::RevealUntilAllToZone { .. } => {}
+                }
+            }
+        }
+    };
+}
+define_disposition_quantity_walk!([]; for_each_quantity_ref; for_each_ref; for_each_nested_quantity_ref; for_each_own_quantity_ref; for_each_quantity_expr; for_each_predicate_quantity_ref);
+define_disposition_quantity_walk!([mut]; for_each_quantity_ref_mut; each_ref_mut; for_each_nested_quantity_ref_mut; for_each_own_quantity_ref_mut; for_each_quantity_expr_mut; for_each_predicate_quantity_ref_mut);
+
 impl ClauseDisposition {
     /// The self-patch continuation parsed from a clause's own text (formerly the
     /// `intrinsic_continuation` field): applied to this clause's own lowered def
@@ -1351,6 +1516,28 @@ impl ClauseDisposition {
             | ClauseDisposition::DrawnThisTurnFollowup { .. } => None,
         }
     }
+}
+
+/// Validate a stored address against its immutable source chain; never select a
+/// replacement producer during assembly or relocation.
+pub(crate) fn zone_result_reads_are_valid(clauses: &[ClauseIr], reader: &ClauseIr) -> bool {
+    let reader_index = clauses
+        .iter()
+        .position(|clause| std::ptr::eq(clause, reader));
+    let mut valid = true;
+    reader.for_each_quantity_ref(&mut |reference| {
+        if let QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result }, from, to, ..
+        } = reference {
+            let owners: Vec<_> = clauses.iter().enumerate().filter(|(_, producer)| producer.id.0 == result.0).collect();
+            valid &= matches!((owners.as_slice(), reader_index), ([(index, producer)], Some(reader_index))
+                if *index < reader_index
+                    && producer.declares_instruction_result == Some(producer.id)
+                    && producer.zone_result_producer().is_some_and(|(origin, destination)| *from == Some(origin) && *to == Some(destination))
+                    && clauses[*index+1..reader_index].iter().all(|clause| clause.zone_result_producer().is_some() || clause.is_transparent_zone_result_corridor()));
+        }
+    });
+    valid
 }
 
 /// Item-scoped builder that is the single authority for `ClauseIr` construction.
@@ -1517,6 +1704,66 @@ impl ClauseIrBuilder {
         self.pending_leading_duration = duration;
     }
 
+    /// CR 608.2c: selection occurs in sealed, earlier clause space, before lowering.
+    pub(crate) fn zone_result_antecedent(&self) -> Option<(ClauseId, Zone, Zone)> {
+        if self.repeats_a_process() {
+            return None;
+        }
+        let mut candidates = Vec::new();
+        for clause in self.clauses.iter().rev() {
+            if let Some((from, to)) = clause.zone_result_producer() {
+                candidates.push((clause.id, from, to));
+            } else if !clause.is_transparent_zone_result_corridor() {
+                break;
+            }
+        }
+        match candidates.as_slice() {
+            [selected] => Some(*selected),
+            _ => None,
+        }
+    }
+
+    fn bind_zone_result_quantities(&mut self) {
+        let Some(reader) = self.clauses.last() else {
+            return;
+        };
+        let mut selected = Vec::new();
+        reader.for_each_quantity_ref(&mut |reference| {
+            if let QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result },
+                from,
+                to,
+                ..
+            } = reference
+            {
+                selected.push((ClauseId(result.0), *from, *to));
+            }
+        });
+        if selected.is_empty() {
+            return;
+        }
+        let index = self.clauses.len() - 1;
+        let valid = selected.iter().all(|(owner, from, to)| {
+            let producers: Vec<_> = self.clauses.iter().enumerate().filter(|(_, clause)| clause.id == *owner).collect();
+            matches!(producers.as_slice(), [(producer_index, producer)] if *producer_index < index
+                && producer.zone_result_producer().is_some_and(|(origin, destination)| *from == Some(origin) && *to == Some(destination))
+                && self.clauses[*producer_index+1..index].iter().all(|clause|
+                    clause.zone_result_producer().is_some() || clause.is_transparent_zone_result_corridor()))
+        });
+        if !valid {
+            self.clauses[index].replace_with_gap("departure_result_antecedent");
+            return;
+        }
+        for (owner, _, _) in selected {
+            let producer = self
+                .clauses
+                .iter_mut()
+                .find(|clause| clause.id == owner)
+                .expect("validated selected producer");
+            producer.declares_instruction_result = Some(owner);
+        }
+    }
+
     /// Read the already-built clauses for mid-chain lookback (prior-referent
     /// checks, condition/opponent-may scans). Returns already-constructed
     /// clauses — it constructs nothing, so the single-construction gate holds.
@@ -1553,7 +1800,50 @@ impl ClauseIrBuilder {
             .filter(|clause| clause.declares_instruction_result == Some(clause.id))
             .map(|clause| clause.id)
             .collect();
+        let zone_producers: Vec<_> = clauses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clause)| {
+                clause
+                    .zone_result_producer()
+                    .map(|zones| (index, clause.id, zones))
+            })
+            .collect();
         for (offset, clause) in clauses.iter_mut().enumerate() {
+            let mut valid_zone_reads = true;
+            clause.for_each_quantity_ref_mut(&mut |reference| {
+                if let QuantityRef::ZoneChangeAggregate {
+                    source:
+                        crate::types::ability::ZoneChangeRecordSource::InstructionResult { result },
+                    from,
+                    to,
+                    ..
+                } = reference
+                {
+                    let producers: Vec<_> = zone_producers
+                        .iter()
+                        .filter(|(_, id, _)| id.0 == result.0)
+                        .collect();
+                    if let [(producer_index, owner, (origin, destination))] = producers.as_slice() {
+                        if *producer_index < offset
+                            && *from == Some(*origin)
+                            && *to == Some(*destination)
+                            && relocation.iter().filter(|(old, _)| old == owner).count() == 1
+                        {
+                            *result = crate::types::ability::ReturnResultId(
+                                relocation[*producer_index].1 .0,
+                            );
+                        } else {
+                            valid_zone_reads = false;
+                        }
+                    } else {
+                        valid_zone_reads = false;
+                    }
+                }
+            });
+            if !valid_zone_reads {
+                clause.replace_with_gap("departure_result_relocation");
+            }
             if clause.condition.as_mut().is_some_and(|condition| {
                 !relocate_counter_condition(condition, &relocation, &counter_producers, offset)
             }) {
@@ -2204,6 +2494,243 @@ impl ClauseDraft<'_> {
         });
         self.builder.bind_sought_cost_reader();
         self.builder.bind_all_revealed_reader();
+        self.builder.bind_zone_result_quantities();
+    }
+}
+
+#[cfg(test)]
+mod departure_result_tests {
+    use super::*;
+    use crate::parser::oracle_effect::{assembly::assemble_effect_chain, parse_effect_chain_ir};
+    use crate::types::ability::{ReturnResultId, ZoneChangeRecordSource};
+
+    const PRINTED: &str = "Exile all creatures. Each player creates a 0/0 green and blue Fractal creature token and puts a number of +1/+1 counters on it equal to the total power of creatures they controlled that were exiled this way.";
+
+    fn addressed_ids(definition: &AbilityDefinition) -> Vec<ReturnResultId> {
+        let mut ids = Vec::new();
+        definition.for_each_own_quantity_ref(&mut |reference| {
+            if let QuantityRef::ZoneChangeAggregate {
+                source: ZoneChangeRecordSource::InstructionResult { result },
+                ..
+            } = reference
+            {
+                ids.push(*result);
+            }
+        });
+        ids
+    }
+
+    #[test]
+    fn oversimplify_complete_source_binds_departure_quantity() {
+        let text = format!("You gain 7 life. {PRINTED}");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut Default::default());
+        let producer = ir
+            .clauses
+            .iter()
+            .find(|clause| clause.zone_result_producer().is_some())
+            .expect("full source producer");
+        assert_ne!(producer.id, ClauseId(0), "real clause offset is retained");
+        assert_eq!(producer.declares_instruction_result, Some(producer.id));
+        let output = assemble_effect_chain(&ir);
+        assert_eq!(addressed_ids(&output), vec![ReturnResultId(producer.id.0)]);
+        let token = std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+            .find(|node| matches!(*node.effect, Effect::Token { .. }))
+            .expect("absorbed full token instruction");
+        let Effect::Token {
+            enter_with_counters,
+            ..
+        } = token.effect.as_ref()
+        else {
+            unreachable!()
+        };
+        assert_eq!(enter_with_counters.len(), 1);
+        assert_eq!(
+            enter_with_counters[0].1.instruction_result_ids(),
+            vec![ReturnResultId(producer.id.0)]
+        );
+        assert!(
+            !std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())
+                .any(|node| matches!(*node.effect, Effect::Unimplemented { .. }))
+        );
+    }
+
+    #[test]
+    fn departure_quantity_assembly_honors_stored_earlier_producer() {
+        let mut ir = parse_effect_chain_ir(PRINTED, AbilityKind::Spell, &mut Default::default());
+        assert_eq!(
+            addressed_ids(&assemble_effect_chain(&ir)),
+            vec![ReturnResultId(ir.clauses[0].id.0)]
+        );
+        let original = ir.clauses[0].id;
+        let mut later = ir.clauses[0].clone();
+        later.id = ClauseId(9);
+        later.declares_instruction_result = None;
+        ir.clauses.last_mut().unwrap().id = ClauseId(10);
+        ir.clauses.insert(1, later);
+        let output = assemble_effect_chain(&ir);
+        assert_eq!(
+            output.declares_return_result,
+            Some(ReturnResultId(original.0))
+        );
+        assert_eq!(addressed_ids(&output), vec![ReturnResultId(original.0)]);
+        assert_ne!(
+            addressed_ids(&output),
+            vec![ReturnResultId(9)],
+            "assembly cannot reselect the later compatible producer"
+        );
+    }
+
+    #[test]
+    fn departure_quantity_relocation_is_transactional() {
+        let ir = parse_effect_chain_ir(PRINTED, AbilityKind::Spell, &mut Default::default());
+        let prefix = parse_effect_chain_ir(
+            "You gain 7 life.",
+            AbilityKind::Spell,
+            &mut Default::default(),
+        );
+        let mut builder = ClauseIrBuilder::new(PRINTED);
+        builder.absorb_clauses(prefix.clauses);
+        builder.absorb_clauses(ir.clauses.clone());
+        let relocated = builder.finish();
+        assert_eq!(
+            relocated[1].declares_instruction_result,
+            Some(relocated[1].id)
+        );
+        let mut ids = Vec::new();
+        relocated
+            .last()
+            .unwrap()
+            .for_each_quantity_ref(&mut |reference| {
+                if let QuantityRef::ZoneChangeAggregate {
+                    source: ZoneChangeRecordSource::InstructionResult { result },
+                    ..
+                } = reference
+                {
+                    ids.push(*result);
+                }
+            });
+        assert_eq!(ids, vec![ReturnResultId(relocated[1].id.0)]);
+        assert_ne!(relocated[1].id, ir.clauses[0].id);
+        for fault in 0..5 {
+            let mut malformed = ir.clauses.clone();
+            match fault {
+                0 => malformed[0].id = ClauseId(999),
+                1 => malformed.push(malformed[0].clone()),
+                2 => malformed.swap(0, 1),
+                3 => {
+                    if let Effect::ChangeZoneAll { destination, .. } =
+                        &mut malformed[0].parsed.effect
+                    {
+                        *destination = Zone::Hand;
+                    }
+                }
+                4 => malformed[0].is_optional = true,
+                _ => unreachable!(),
+            }
+            let mut builder = ClauseIrBuilder::new(PRINTED);
+            builder.absorb_clauses(malformed);
+            let relocated = builder.finish();
+            let mut executable_addresses = Vec::new();
+            for clause in &relocated {
+                clause.for_each_quantity_ref(&mut |reference| {
+                    if let QuantityRef::ZoneChangeAggregate {
+                        source: ZoneChangeRecordSource::InstructionResult { result },
+                        ..
+                    } = reference
+                    {
+                        executable_addresses.push(*result);
+                    }
+                });
+            }
+            assert!(
+                executable_addresses.is_empty(),
+                "fault {fault} cannot leave a partly remapped owned reader"
+            );
+            assert!(relocated
+                .iter()
+                .any(|clause| matches!(clause.parsed.effect, Effect::Unimplemented { .. })));
+        }
+    }
+
+    #[test]
+    fn departure_complete_ir_mixed_selected_body_refuses_transactionally_and_import_only_twin_assembles(
+    ) {
+        use crate::types::ability::{
+            AggregateFunction, ChooseOneOfKind, ObjectProperty, PlayerFilter, QuantityExpr,
+            QuantityRef, TargetFilter,
+        };
+        let base = parse_effect_chain_ir(PRINTED, AbilityKind::Spell, &mut Default::default());
+        let producer = base
+            .clauses
+            .iter()
+            .find(|clause| clause.zone_result_producer().is_some())
+            .unwrap();
+        let original = ReturnResultId(producer.id.0);
+        let reference = |result| QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: ZoneChangeRecordSource::InstructionResult { result },
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::Any,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        for local in [false, true] {
+            let reader = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: if local {
+                        QuantityExpr::Sum {
+                            exprs: vec![reference(original), reference(ReturnResultId(211))],
+                        }
+                    } else {
+                        reference(original)
+                    },
+                },
+            );
+            let branch = if local {
+                let mut child =
+                    AbilityDefinition::new(AbilityKind::Spell, producer.parsed.effect.clone());
+                child.declares_return_result = Some(ReturnResultId(211));
+                child.sub_ability = Some(Box::new(reader));
+                child
+            } else {
+                reader
+            };
+            let mut ir = base.clone();
+            ir.clauses.last_mut().unwrap().parsed.effect = Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![branch],
+                kind: ChooseOneOfKind::Ordinary,
+            };
+            let output = assemble_effect_chain(&ir);
+            if local {
+                assert!(matches!(output.effect.as_ref(), Effect::Unimplemented { .. }), "a complete selected child cannot mix its local result with the enclosing instruction's import");
+                assert!(addressed_ids(&output).is_empty());
+                assert_eq!(output.declares_return_result, None);
+                let wire = serde_json::to_value(&output).unwrap();
+                assert!(
+                    // allow-noncombinator: test assertion inspects serialized identities, not Oracle parsing.
+                    !wire.to_string().contains("InstructionResult"),
+                    "transactional refusal removes every executable nested address"
+                );
+            } else {
+                assert!(!matches!(
+                    output.effect.as_ref(),
+                    Effect::Unimplemented { .. }
+                ));
+                assert_eq!(output.declares_return_result, Some(original));
+                assert!(
+                    crate::types::ability::validate_instruction_result_definition(&output).is_ok()
+                );
+                assert!(
+                    addressed_ids(&output).contains(&original),
+                    "the functioning read-only selected twin preserves its stored earlier address"
+                );
+            }
+        }
     }
 }
 

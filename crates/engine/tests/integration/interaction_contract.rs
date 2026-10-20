@@ -1514,6 +1514,7 @@ fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_cod
     scenario.add_creature_to_exile(P0, "Zone Opponent Chooser Card", 1, 1);
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+        return_result_occurrence: None,
         player: P0,
         candidates: vec![P1, PlayerId(2)],
         ability: Box::new(ResolvedAbility::new(
@@ -2323,6 +2324,7 @@ fn sequential_ward_projection_submits_one_object_and_rotates_before_reprompt() {
     let second = scenario.add_creature(P0, "Ward Contract Second", 1, 1).id();
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![first, second],
         pending_effect: gain_life_effect(source),
@@ -2393,6 +2395,7 @@ fn aggregate_ward_projects_and_submits_a_multi_object_power_witness() {
         .id();
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![first, second],
         pending_effect: gain_life_effect(source),
@@ -2436,6 +2439,7 @@ fn aggregate_ward_threshold_zero_still_rejects_an_empty_selection() {
     let zero = scenario.add_creature(P0, "Ward Zero Permanent", 0, 1).id();
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![zero],
         pending_effect: gain_life_effect(source),
@@ -2477,6 +2481,7 @@ fn aggregate_ward_counts_negative_power_and_keeps_a_valid_positive_sibling() {
         .id();
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![positive, negative],
         pending_effect: gain_life_effect(source),
@@ -2541,6 +2546,7 @@ fn aggregate_ward_does_not_publish_a_witness_larger_than_the_contract_cap() {
         .expect("the interaction list cap fits in an aggregate power threshold");
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents,
         pending_effect: gain_life_effect(source),
@@ -2640,6 +2646,7 @@ fn sequential_unless_bounce_projection_submits_one_object_before_reprompt() {
         .id();
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::UnlessBounceChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![first, second],
         pending_effect: gain_life_effect(source),

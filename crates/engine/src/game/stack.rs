@@ -4607,6 +4607,7 @@ fn self_counter_run_key<'a>(
 
 fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         effect,
         targets,
         declares_chosen_group,
@@ -4857,6 +4858,7 @@ fn fixed_controller_gain_life_run_key<'a>(
 
 fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         effect,
         targets,
         declares_chosen_group,
@@ -5087,6 +5089,7 @@ fn fixed_opponent_effect_run_key<'a>(
 
 fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         effect,
         targets,
         declares_chosen_group,
@@ -5426,6 +5429,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     b: &ResolvedAbility,
 ) -> bool {
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance; no additional read, choice or text
         effect: a_effect,
         targets: a_targets,
         declares_chosen_group: a_declares_chosen_group,
@@ -5513,6 +5517,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_local_target_slots: a_illegal_local_target_slots,
     } = a;
     let ResolvedAbility {
+        return_result_process: _, // invocation provenance is ignored in inert-trigger comparison
         effect: b_effect,
         targets: b_targets,
         declares_chosen_group: b_declares_chosen_group,

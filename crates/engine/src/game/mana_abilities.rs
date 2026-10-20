@@ -1141,8 +1141,11 @@ pub(crate) fn mana_choice_prompt(
             let produces_mana = count_ability
                 .map(|ability| {
                     let adds_mana = |produced: &ManaProduction| {
-                        !super::effects::mana::resolve_mana_types_for_ability(
-                            produced, state, ability,
+                        !super::effects::mana::resolve_mana_types_with_contexts(
+                            produced,
+                            state,
+                            color_ability,
+                            ability,
                         )
                         .is_empty()
                     };
@@ -1163,9 +1166,13 @@ pub(crate) fn mana_choice_prompt(
         }
         ManaProduction::AnyCombination { color_options, .. } if color_options.len() > 1 => {
             let ability = count_ability?;
-            let count =
-                super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
-                    .len();
+            let count = super::effects::mana::resolve_mana_types_with_contexts(
+                produced,
+                state,
+                color_ability,
+                ability,
+            )
+            .len();
             if count > 0 {
                 Some(ManaChoicePrompt::AnyCombination {
                     count,
@@ -1199,8 +1206,13 @@ pub(crate) fn mana_choice_prompt(
             // produces no mana, so it needs no color choice.
             let produces_mana = count_ability
                 .map(|ability| {
-                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
-                        .is_empty()
+                    !super::effects::mana::resolve_mana_types_with_contexts(
+                        produced,
+                        state,
+                        color_ability,
+                        ability,
+                    )
+                    .is_empty()
                 })
                 .unwrap_or(true);
             if options.len() > 1 && produces_mana {
@@ -1228,8 +1240,11 @@ pub(crate) fn mana_choice_prompt(
                 // its prompt because that choice can determine its count.
                 let produces_mana = count_ability
                     .map(|ability| {
-                        !super::effects::mana::resolve_mana_types_for_ability(
-                            produced, state, ability,
+                        !super::effects::mana::resolve_mana_types_with_contexts(
+                            produced,
+                            state,
+                            color_ability,
+                            ability,
                         )
                         .is_empty()
                     })
@@ -1273,19 +1288,27 @@ pub(crate) fn mana_choice_prompt(
         // `Colorless`. With 0 or 1 options the resolver handles it without a
         // prompt (CR 106.5: empty union → no mana; single option auto-picks).
         ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
-            let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
+            let owner = color_ability
+                .map(|ability| ability.controller)
+                .or_else(|| state.objects.get(&source_id).map(|obj| obj.controller))?;
             let options = super::mana_sources::produceable_mana_types_by_filter(
                 state,
                 land_filter,
                 owner,
                 source_id,
+                color_ability,
             );
             // CR 106.5: An ability that would produce mana of an undefined type
             // produces no mana, so it needs no color choice.
             let produces_mana = count_ability
                 .map(|ability| {
-                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
-                        .is_empty()
+                    !super::effects::mana::resolve_mana_types_with_contexts(
+                        produced,
+                        state,
+                        color_ability,
+                        ability,
+                    )
+                    .is_empty()
                 })
                 .unwrap_or(true);
             if options.len() > 1 && produces_mana {
@@ -1305,8 +1328,13 @@ pub(crate) fn mana_choice_prompt(
             // produces no mana, so it needs no color choice.
             let produces_mana = count_ability
                 .map(|ability| {
-                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
-                        .is_empty()
+                    !super::effects::mana::resolve_mana_types_with_contexts(
+                        produced,
+                        state,
+                        color_ability,
+                        ability,
+                    )
+                    .is_empty()
                 })
                 .unwrap_or(true);
             if identity.len() > 1 && produces_mana {
@@ -1329,8 +1357,13 @@ pub(crate) fn mana_choice_prompt(
             // produces no mana, so it needs no color choice.
             let produces_mana = count_ability
                 .map(|ability| {
-                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
-                        .is_empty()
+                    !super::effects::mana::resolve_mana_types_with_contexts(
+                        produced,
+                        state,
+                        color_ability,
+                        ability,
+                    )
+                    .is_empty()
                 })
                 .unwrap_or(true);
             if options.len() > 1 && produces_mana {
@@ -1354,9 +1387,13 @@ pub(crate) fn mana_choice_prompt(
                 return None;
             }
             let ability = count_ability?;
-            let count =
-                super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
-                    .len();
+            let count = super::effects::mana::resolve_mana_types_with_contexts(
+                produced,
+                state,
+                color_ability,
+                ability,
+            )
+            .len();
             if count > 0 {
                 Some(ManaChoicePrompt::AnyCombination { count, options })
             } else {
@@ -3415,6 +3452,7 @@ fn finish_mana_ability_cost_payment(
                 player: choice_player,
                 choice: choice.clone(),
                 context: context.clone(),
+                return_result_occurrence: None,
             };
             if settles_completed_frame {
                 // CR 603.2 + CR 603.3b + CR 605.3b + CR 605.4a: A mana-color
@@ -3720,6 +3758,7 @@ pub(crate) fn resume_settled_mana_frame(
                 player,
                 choice,
                 context,
+                return_result_occurrence: None,
             };
             Ok(Some(
                 super::triggers::preserve_order_triggers_resume(state, resume.clone())
@@ -3756,6 +3795,53 @@ pub(crate) fn resume_mana_ability_root(
     resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let occurrence = match &resume {
+        ManaAbilityResume::UnlessPayment {
+            return_result_occurrence,
+            ..
+        }
+        | ManaAbilityResume::EffectPayCost {
+            return_result_occurrence,
+            ..
+        } => *return_result_occurrence,
+        _ => None,
+    };
+    // The root may already have been removed from its cursor. Authenticate its
+    // actual executable and typed cost before restoring lookup authority.
+    if let ManaAbilityResume::UnlessPayment {
+        pending_effect: body,
+        ..
+    }
+    | ManaAbilityResume::EffectPayCost { ability: body, .. } = &resume
+    {
+        super::effects::validate_selected_instruction_result_owner(state, body, occurrence)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    }
+    super::effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        if let ManaAbilityResume::UnlessPayment {
+            pending_effect: body,
+            cost,
+            ..
+        }
+        | ManaAbilityResume::EffectPayCost {
+            ability: body,
+            cost,
+            ..
+        } = &resume
+        {
+            super::quantity::validate_addressed_cost_reads(state, cost, body)
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        }
+        resume_mana_ability_root_in_occurrence(state, mana_source_controller, resume, events)
+    })
+}
+
+fn resume_mana_ability_root_in_occurrence(
+    state: &mut GameState,
+    mana_source_controller: PlayerId,
+    resume: ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     // CR 601.2g + CR 605.3b: the single authority for the row policy of a
     // resumed automatic payment. A synchronous auto-tap never reaches this
     // root (its direct resolver resumes to `Priority`; the payment root is
@@ -3784,6 +3870,7 @@ fn resume_mana_ability_root_payment(
 ) -> Result<WaitingFor, EngineError> {
     match resume {
         ManaAbilityResume::EffectPayCost {
+            return_result_occurrence: _,
             payer,
             return_to,
             ability,
@@ -3900,6 +3987,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
             },
         )),
         ManaAbilityResume::UnlessPayment {
+            return_result_occurrence: _,
             outer_player,
             cost,
             pending_effect,
@@ -3934,6 +4022,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
             }
         }
         ManaAbilityResume::EffectPayCost {
+            return_result_occurrence: _,
             payer,
             return_to,
             ability,
@@ -5655,6 +5744,7 @@ pub(crate) fn resume_waiting_for(
             pending_mana_ability,
         },
         ManaAbilityResume::UnlessPayment {
+            return_result_occurrence: return_result_occurrence,
             outer_player,
             cost,
             pending_effect,
@@ -5662,6 +5752,7 @@ pub(crate) fn resume_waiting_for(
             effect_description,
             remaining,
         } => WaitingFor::UnlessPayment {
+            return_result_occurrence: return_result_occurrence,
             player: outer_player.unwrap_or(mana_source_controller),
             cost: *cost,
             pending_effect,
@@ -7923,6 +8014,7 @@ mod tests {
             player,
             choice: ManaChoicePrompt::SingleColor { options },
             context,
+            ..
         } = waiting
         else {
             panic!("expected ChooseManaColor, got {waiting:?}");
@@ -10616,6 +10708,7 @@ mod tests {
                 player,
                 choice: ManaChoicePrompt::SingleColor { options },
                 context,
+                ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(options.len(), 5);
@@ -10748,6 +10841,7 @@ mod tests {
                 player,
                 choice: ManaChoicePrompt::SingleColor { options },
                 context,
+                ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(options.len(), 5);

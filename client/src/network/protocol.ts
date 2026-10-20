@@ -725,7 +725,8 @@ export type P2PInteractionPreviewAnswer =
 // 139: full-game 157 requires specified-kind/exact-recipient counter adjustment.
 // 140: full-game 158 carries exact removal/source authority (resolution wire 9).
 // 141: full-game 159 carries source-bound chosen parity.
-export const WIRE_PROTOCOL_VERSION = 141 as const;
+// 142: full-game 160 carries addressed departure aggregates and retained owners.
+export const WIRE_PROTOCOL_VERSION = 142 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

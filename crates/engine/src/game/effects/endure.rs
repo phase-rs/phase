@@ -125,6 +125,8 @@ pub fn resolve(
     choose_one_of::prompt_next(
         state,
         choose_one_of::PromptRequest {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             controller: enduring_controller,
             source_id: enduring_id,
             branches,

@@ -9434,8 +9434,8 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 power,
                 toughness,
             })
-            .or_else(|| try_parse_token_enters_with_counters(&lower))
-            .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
+            .or_else(|| try_parse_token_enters_with_counters_with_context(&lower, ctx))
+            .or_else(|| try_parse_put_counters_on_token_followup_with_context(&lower, ctx)),
         _ => None,
     }
 }
@@ -9695,7 +9695,78 @@ fn parse_source_possessive(input: &str) -> Result<(&str, ()), nom::Err<OracleErr
 
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
 /// Returns `TokenEntersWithCounters` continuation on success.
+#[cfg(test)]
+mod departure_counter_context_tests {
+    use super::*;
+    use crate::parser::oracle_ir::effect_chain::ClauseId;
+    use crate::types::ability::ReturnResultId;
+
+    #[test]
+    fn token_counter_followups_keep_chain_zone_result_context() {
+        let mut ctx = ParseContext::default();
+        ctx.chain_zone_result = Some((ClauseId(7), Zone::Battlefield, Zone::Exile));
+        let historical = "the total power of creatures you controlled that were exiled this way";
+        for text in [
+            format!("the token enters with x +1/+1 counters on it, where x is {historical}"),
+            format!("it enters with a number of +1/+1 counters on it equal to {historical}"),
+            format!("put x +1/+1 counters on it, where x is {historical}"),
+            format!("puts a number of +1/+1 counters on it equal to {historical}"),
+        ] {
+            let parsed = try_parse_token_enters_with_counters_with_context(&text, &mut ctx)
+                .or_else(|| try_parse_put_counters_on_token_followup_with_context(&text, &mut ctx))
+                .expect("same-body absorption retains producer authority");
+            let ContinuationAst::TokenEntersWithCounters { count, .. } = parsed else {
+                panic!("counter continuation")
+            };
+            assert_eq!(count.instruction_result_ids(), vec![ReturnResultId(7)]);
+            assert!(try_parse_token_enters_with_counters(&text).is_none());
+            assert!(try_parse_put_counters_on_token_followup(&text).is_none());
+        }
+        for text in [
+            "put three +1/+1 counters on it",
+            "puts a +1/+1 counter on it",
+            "put x +1/+1 counters on it",
+        ] {
+            assert!(
+                try_parse_put_counters_on_token_followup(text).is_some(),
+                "{text}"
+            );
+        }
+        assert!(try_parse_put_counters_on_token_followup(
+            "put a +1/+1 counter on it and attach it to target creature"
+        )
+        .is_none());
+        let before = ctx.chain_zone_result;
+        assert!(try_parse_put_counters_on_token_followup_with_context(
+            &format!("put a number of +1/+1 counters on it equal to {historical} and draw a card"),
+            &mut ctx
+        )
+        .is_none());
+        assert_eq!(
+            ctx.chain_zone_result, before,
+            "failed speculative parse is transactional"
+        );
+    }
+}
+
 fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
+    try_parse_token_enters_with_counters_with_context(lower, &mut ParseContext::default())
+}
+
+fn try_parse_token_enters_with_counters_with_context(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
+    let mut tentative = ctx.clone();
+    let parsed = parse_token_enters_with_counters_in_context(lower, &mut tentative)?;
+    *ctx = tentative;
+    Some(parsed)
+}
+
+fn parse_token_enters_with_counters_in_context(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
     // Match subject prefix: "the token enters with " / "it enters with "
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("the token enters with "),
@@ -9746,18 +9817,19 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
         tag::<_, _, OracleError<'_>>(", where x is ").parse(rest.trim_start_matches(['.', ' ']))
     {
         let qty_text = rest_where.trim().trim_end_matches('.');
-        parse_cda_quantity(qty_text)
-            .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+        Some(crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)?)
     } else if let Ok((rest_equal, _)) =
         tag::<_, _, OracleError<'_>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
     {
         let qty_text = rest_equal.trim().trim_end_matches('.');
-        parse_cda_quantity(qty_text)
-            .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+        Some(crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)?)
     } else {
         None
     };
 
+    if quantity.is_none() && !token_counter_followup_tail_is_clean(rest) {
+        return None;
+    }
     let count = if let Some(qty) = quantity {
         qty
     } else if let Some(n) = count_prefix {
@@ -9810,6 +9882,23 @@ fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
 }
 
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
+    try_parse_put_counters_on_token_followup_with_context(lower, &mut ParseContext::default())
+}
+
+fn try_parse_put_counters_on_token_followup_with_context(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
+    let mut tentative = ctx.clone();
+    let parsed = parse_put_counters_on_token_followup_in_context(lower, &mut tentative)?;
+    *ctx = tentative;
+    Some(parsed)
+}
+
+fn parse_put_counters_on_token_followup_in_context(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
     // then the verb. Both `put ` (imperative) and `puts ` (third-person,
     // "Each player … puts a number of counters on it …") feed the same
@@ -9829,7 +9918,10 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // mod.rs`. The body consumes the full clause (including trailing period),
     // so on success we're done — emit the continuation directly.
     if let Ok((remainder, (counter_type, count))) =
-        super::parse_dynamic_counter_suffix_body(rest.trim_end_matches('.').trim_end())
+        super::lower::parse_dynamic_counter_suffix_body_with_context(
+            rest.trim_end_matches('.').trim_end(),
+            ctx,
+        )
     {
         if !token_counter_followup_tail_is_clean(remainder) {
             return None;
@@ -9887,8 +9979,7 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
             // allow-noncombinator: trailing-period cleanup on a pre-tokenized
             // suffix; not parsing dispatch.
             let qty_text = rest_where.trim().trim_end_matches('.');
-            parse_cda_quantity(qty_text)
-                .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+            Some(crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)?)
         } else if let Ok((rest_equal, _)) =
             tag::<_, _, OracleError<'_>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
         {
@@ -9896,8 +9987,7 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
             // counter count in the imperative followup form (Primo, the Unbounded).
             // allow-noncombinator: trailing-period cleanup on a pre-tokenized suffix.
             let qty_text = rest_equal.trim().trim_end_matches('.');
-            parse_cda_quantity(qty_text)
-                .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+            Some(crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)?)
         } else {
             None
         };

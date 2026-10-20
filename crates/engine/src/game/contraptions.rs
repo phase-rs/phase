@@ -241,6 +241,8 @@ pub(crate) fn continue_assemble_batch(
     choose_one_of::prompt_next(
         state,
         choose_one_of::PromptRequest {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             controller: player,
             source_id,
             branches: assemble_sprocket_branches(object_id, remaining),
@@ -421,6 +423,8 @@ fn prompt_reassemble_sprocket_choice(
     choose_one_of::prompt_next(
         state,
         choose_one_of::PromptRequest {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             controller: ability.controller,
             source_id: ability.source_id,
             branches,

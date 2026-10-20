@@ -2827,6 +2827,103 @@ pub(crate) struct PendingPlayerScopeLinkedExile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReturnResultOccurrenceId(pub u64);
 
+/// Independently retained identity of one admitted executable invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ReturnResultProcessId(pub u64);
+
+/// Results and their producing invocation share the existing occurrence store.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ReturnResultFrameWire")]
+pub struct ReturnResultFrame {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ReturnResultProcessId>,
+    pub results: BTreeMap<ReturnResultId, InstructionResult>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReturnResultFrameWire {
+    Owned {
+        #[serde(default)]
+        process: Option<ReturnResultProcessId>,
+        results: BTreeMap<ReturnResultId, InstructionResult>,
+    },
+    Legacy(BTreeMap<ReturnResultId, InstructionResult>),
+}
+
+impl From<ReturnResultFrameWire> for ReturnResultFrame {
+    fn from(wire: ReturnResultFrameWire) -> Self {
+        match wire {
+            ReturnResultFrameWire::Owned { process, results } => Self { process, results },
+            ReturnResultFrameWire::Legacy(results) => Self {
+                process: None,
+                results,
+            },
+        }
+    }
+}
+
+impl ReturnResultFrame {
+    /// The expected identity comes from the executable, never this lookup.
+    pub(crate) fn has_process(&self, expected: Option<ReturnResultProcessId>) -> bool {
+        self.process == expected
+    }
+}
+
+/// Authenticate independently retained execution authority before looking at result data.
+pub(crate) fn checked_return_result_frame(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    expected: Option<ReturnResultProcessId>,
+    requires_owned_process: bool,
+) -> Result<&ReturnResultFrame, String> {
+    let occurrence = occurrence.ok_or("missing selected instruction-result occurrence")?;
+    let frame = state
+        .return_result_frames
+        .get(&occurrence)
+        .ok_or("missing selected instruction-result frame")?;
+    if !frame.has_process(expected) || (requires_owned_process && expected.is_none()) {
+        return Err("instruction-result process owner mismatch".into());
+    }
+    Ok(frame)
+}
+
+/// Current stripped entry work shares one dependency walk with capture and liveness.
+pub(crate) fn validate_zone_entry_result_owner(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    expected: Option<ReturnResultProcessId>,
+    conditional: &[(TargetFilter, CounterType, QuantityExpr)],
+    gate: Option<&TargetFilter>,
+) -> Result<bool, String> {
+    let mut reads = Vec::new();
+    crate::types::ability::for_each_zone_entry_quantity_ref(conditional, gate, &mut |reference| {
+        if let Some(result) = reference.instruction_result_id() {
+            reads.push(result);
+        }
+    });
+    if reads.is_empty() {
+        return Ok(false);
+    }
+    let frame = checked_return_result_frame(state, occurrence, expected, true)?;
+    for result in reads {
+        if !matches!(frame.results.get(&result), Some(InstructionResult::ZoneChanges(records))
+            if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+        {
+            return Err("unavailable addressed zone entry result".into());
+        }
+    }
+    Ok(true)
+}
+
+fn default_next_return_result_process_id() -> u64 {
+    1
+}
+
+fn is_default_next_return_result_process_id(value: &u64) -> bool {
+    *value == default_next_return_result_process_id()
+}
+
 fn default_next_return_result_occurrence_id() -> u64 {
     1
 }
@@ -2975,6 +3072,8 @@ impl PendingContinuation {
 /// itself pause and re-stash this struct (recursive drive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRepeatIteration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     pub ability: Box<crate::types::ability::ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_members: Vec<ObjectId>,
@@ -4293,6 +4392,10 @@ impl PendingZoneChangeDelivery {
 /// to the live `resolve` path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingChangeZoneIteration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_process: Option<ReturnResultProcessId>,
     pub logical_zone_change_group: LogicalZoneChangeGroup,
     /// Ownership transferred from a paused instruction-result producer when
     /// the selected zone move itself needs another player choice.
@@ -4932,6 +5035,8 @@ pub struct RepeatUntilIterationWitness {
 ///   tell a stalled repeat from a progressing one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRepeatUntil {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     pub ability: Box<crate::types::ability::ResolvedAbility>,
     /// CR 104.4b: the stop-predicate inputs as they stood BEFORE the paused
     /// iteration began. `None` means no baseline was recorded (a legacy
@@ -5015,6 +5120,10 @@ impl ParentTargetOccurrences {
 /// branch choice after the current chosen branch finishes resolving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingChooseOneOf {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_return_result_process: Option<ReturnResultProcessId>,
     pub controller: PlayerId,
     pub source_id: ObjectId,
     pub branches: Vec<AbilityDefinition>,
@@ -5059,6 +5168,8 @@ pub struct PendingChooseOneOf {
 /// Building block for Breach the Multiverse and Ultimate Magic: Meteor.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPerPlayerZoneChoice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     /// The `Effect::ChooseFromZone` ability whose per-player body repeats. Its
     /// `zone`/`filter`/`count`/`chooser` describe each player's prompt.
     pub ability: Box<ResolvedAbility>,
@@ -5158,6 +5269,8 @@ pub struct PendingMassLibraryOrderChoice {
 /// "each player sacrifices a creature."
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPlayerScopeSacrificeChoice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     /// The scoped sacrifice ability template. The current chooser is rebound
     /// onto a clone before each prompt is built.
     pub ability: Box<ResolvedAbility>,
@@ -5182,6 +5295,8 @@ pub struct PendingPlayerScopeSacrificeChoice {
 /// decision and may be replaced mid-payment.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingPlayerScopeUnlessPayment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     /// The unscoped token instruction to resolve exactly once at the terminal
     /// poll boundary. Its count is replaced with the number of decliners.
     pub pending_effect: Box<ResolvedAbility>,
@@ -5411,6 +5526,8 @@ pub enum PendingDiscardBatchCompletion {
 /// whole clause publish ONE per-player table.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingDiscardFanOut {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     /// The scoped template — `player_scope` already removed by
     /// `split_player_scope_chain`.
     pub scoped_template: Box<ResolvedAbility>,
@@ -5465,6 +5582,8 @@ pub struct PendingDiscardFanOut {
 /// player's local candidates and local-X quantity.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PendingScopedLibrarySearch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     /// Search + parent-target delivery template, with the outer player scope
     /// removed by the resolution driver.
     pub ability: Box<ResolvedAbility>,
@@ -5500,6 +5619,8 @@ pub enum ScopedLibrarySearchPhase {
 
 #[derive(Deserialize)]
 struct PendingScopedLibrarySearchWire {
+    #[serde(default)]
+    return_result_occurrence: Option<ReturnResultOccurrenceId>,
     ability: Box<ResolvedAbility>,
     phase: ScopedLibrarySearchPhase,
     #[serde(default)]
@@ -5694,6 +5815,7 @@ impl<'de> Deserialize<'de> for PendingScopedLibrarySearch {
         }
         Ok(Self {
             ability: wire.ability,
+            return_result_occurrence: wire.return_result_occurrence,
             phase: wire.phase,
             after_scope: wire.after_scope,
         })
@@ -6059,6 +6181,8 @@ pub enum PendingSearchFoundContinuation {
 /// exiled across all members.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPerCategoryZoneChoice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     /// The `Effect::ForEachCategoryExile` ability whose per-member body repeats.
     pub ability: Box<ResolvedAbility>,
     /// CR 608.2c: The full revealed/exiled pool snapshot, captured once at the
@@ -6077,6 +6201,10 @@ pub struct PendingPerCategoryZoneChoice {
 /// after each choice resolves until all voters are processed.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingVoteBallotIteration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_return_result_process: Option<ReturnResultProcessId>,
     /// The ability template to instantiate for each remaining voter.
     pub ability_template: Box<AbilityDefinition>,
     /// Voters whose ballots have not yet been processed (in APNAP order).
@@ -6443,6 +6571,8 @@ pub enum InstructionResult {
 pub struct CounterRemovalResultBinding {
     pub occurrence: ReturnResultOccurrenceId,
     pub result: ReturnResultId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ReturnResultProcessId>,
     #[serde(deserialize_with = "deserialize_counter_source")]
     pub source: ObjectIdentityBinding,
     #[serde(deserialize_with = "deserialize_counter_recipient")]
@@ -6883,6 +7013,8 @@ pub enum BatchCompletion {
     RecordInstructionZoneResult {
         occurrence_id: ReturnResultOccurrenceId,
         result_id: ReturnResultId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_process: Option<ReturnResultProcessId>,
         settled_records: Option<Vec<ZoneChangeRecord>>,
     },
     /// CR 303.4g + CR 614.1 + CR 616.1: A return-as-Aura host had no legal
@@ -7032,6 +7164,8 @@ pub enum BatchCompletion {
     /// CR 701.13a + CR 614.1 + CR 616.1: A per-category exile member has
     /// settled, so its tracked-set extension and next-member prompt can run.
     ForEachCategoryExileComplete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         ability: Box<ResolvedAbility>,
         pool: Vec<ObjectId>,
         remaining_member_filters: Vec<crate::types::ability::TargetFilter>,
@@ -7334,6 +7468,8 @@ pub enum LibrarySearchDeliveryResume {
         hidden_search_audiences: Vec<HiddenSearchAudience>,
     },
     Scoped {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         source_id: ObjectId,
         search_keys: Vec<PlayerId>,
@@ -8591,6 +8727,8 @@ pub enum PendingCostMoveResume {
     /// that must wait for a competing replacement choice before its unpaid
     /// suffix or terminal effect-resolution tail can proceed.
     WardSacrificePayment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         pending_effect: Box<ResolvedAbility>,
         resume: WardSacrificePaymentResume,
@@ -8626,6 +8764,8 @@ pub enum PendingCostMoveResume {
     /// awaits its replacement outcome. Its typed tail either surfaces the next
     /// return choice or records that the unless payment avoided the effect.
     UnlessBouncePayment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         moved: ObjectId,
         permanents: Vec<ObjectId>,
@@ -8669,6 +8809,8 @@ pub enum PendingCostMoveResume {
     /// `engine_payment_choices::resume_counter_addition_unless_payment`.
     #[serde(alias = "GetPlayerCountersUnlessPayment")]
     CounterAdditionUnlessPayment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
         cost: AbilityCost,
         pending_effect: Box<ResolvedAbility>,
@@ -8745,6 +8887,8 @@ impl PendingCostMoveResume {
 /// `GameState` — inside its stack budget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RandomDiscardUnlessPaymentResume {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     pub pending_effect: Box<ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
@@ -9547,6 +9691,8 @@ pub enum ManaAbilityResume {
         convoke_mode: Option<ConvokeMode>,
     },
     UnlessPayment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         /// The player who owns the outer unless-payment poll. It can differ
         /// from the controller of a helper mana source activated while paying.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9575,6 +9721,8 @@ pub enum ManaAbilityResume {
     /// authority after that source finishes; this is not an effect-chain
     /// continuation.
     EffectPayCost {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         payer: PlayerId,
         return_to: PlayerId,
         ability: Box<ResolvedAbility>,
@@ -12594,7 +12742,19 @@ pub(crate) fn normalize_resolution_cast_offer_allocator(
 /// A parked batch is necessarily unsettled; its completion is published only
 /// after the whole replacement-aware zone-change group has finished.
 pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
-    ability.declares_return_result.is_some()
+    let mut quantity_reader = false;
+    ability.for_each_own_quantity_ref(&mut |reference| {
+        quantity_reader |= matches!(
+            reference,
+            crate::types::ability::QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { .. },
+                ..
+            }
+        );
+    });
+
+    quantity_reader
+        || ability.declares_return_result.is_some()
         || ability.reads_return_result.is_some()
         || ability
             .condition
@@ -12611,10 +12771,18 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
 }
 
 pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: ReturnResultId) -> bool {
-    ability
-        .condition
-        .as_ref()
-        .is_some_and(|condition| condition.references_counter_result(Some(result_id)))
+    let mut quantity_reader = false;
+    ability.for_each_own_quantity_ref(&mut |reference| {
+        quantity_reader |= matches!(reference, crate::types::ability::QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result }, ..
+        } if *result == result_id);
+    });
+
+    quantity_reader
+        || ability
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.references_counter_result(Some(result_id)))
         || ability
             .reads_return_result
             .as_ref()
@@ -12629,16 +12797,450 @@ pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: Retur
             .is_some_and(|branch| reads_return_result_id(branch, result_id))
 }
 
+fn retained_result_waits(state: &GameState) -> Vec<&WaitingFor> {
+    let mut waits = vec![&state.waiting_for];
+    if let Some(wait) = state
+        .pending_trigger_order
+        .as_ref()
+        .and_then(|order| order.resume_after_ordering.as_deref())
+    {
+        waits.push(wait);
+    }
+    if let Some(transaction) = &state.payment_transaction {
+        waits.push(&transaction.base_waiting_for);
+    }
+    if let Some(PendingCostMoveResume::Cast { completion, .. }) = &state.pending_cost_move_resume {
+        match completion {
+            PendingCostMoveCompletion::FinalizeCast {
+                resolution_success_waiting_for,
+                ..
+            } => {
+                waits.extend(resolution_success_waiting_for.as_deref());
+            }
+            PendingCostMoveCompletion::FinalizeDelvedCast {
+                pre_payment_checks, ..
+            } => {
+                if let Some(checks) = pre_payment_checks {
+                    waits.extend(checks.early_waiting_for.as_ref());
+                    waits.extend(checks.resolution_success_waiting_for.as_ref());
+                }
+            }
+            PendingCostMoveCompletion::FinishPending
+            | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
+            | PendingCostMoveCompletion::PublishExileTrackedSet => {}
+        }
+    }
+    waits
+}
+
+// Follow existing typed payment custody only. Independent source definitions,
+// scalar-latched payment cursors and cast announcements are not imported readers.
+fn retained_payment_result_owners(
+    state: &GameState,
+) -> Vec<(
+    Option<ReturnResultOccurrenceId>,
+    &ResolvedAbility,
+    Option<&AbilityCost>,
+)> {
+    type Owner<'a> = (
+        Option<ReturnResultOccurrenceId>,
+        &'a ResolvedAbility,
+        Option<&'a AbilityCost>,
+    );
+    fn resume<'a>(value: &'a ManaAbilityResume, out: &mut Vec<Owner<'a>>) {
+        match value {
+            ManaAbilityResume::UnlessPayment {
+                return_result_occurrence,
+                pending_effect,
+                cost,
+                ..
+            } => out.push((*return_result_occurrence, pending_effect, Some(cost))),
+            ManaAbilityResume::EffectPayCost {
+                return_result_occurrence,
+                ability,
+                cost,
+                ..
+            } => out.push((*return_result_occurrence, ability, Some(cost))),
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } => pending(pending_mana_ability, out),
+            ManaAbilityResume::Priority
+            | ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
+            | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
+        }
+    }
+    fn pending<'a>(value: &'a PendingManaAbility, out: &mut Vec<Owner<'a>>) {
+        resume(&value.resume, out);
+        if let Some(value) = &value.cost_move_resume {
+            resume(value, out);
+        }
+    }
+    fn cursor<'a>(value: &'a ManaAbilityCostCursor, out: &mut Vec<Owner<'a>>) {
+        if let Some(parent) = &value.parent {
+            pending(&parent.pending, out);
+            cursor(&parent.cursor, out);
+        }
+    }
+    let mut out = vec![];
+    for waiting in retained_result_waits(state) {
+        if let Some(value) = waiting.continued_mana_ability() {
+            pending(value, &mut out);
+        }
+    }
+    if let Some(value) = &state.pending_cost_move_resume {
+        match value {
+            PendingCostMoveResume::WardSacrificePayment {
+                return_result_occurrence,
+                pending_effect,
+                ..
+            }
+            | PendingCostMoveResume::UnlessBouncePayment {
+                return_result_occurrence,
+                pending_effect,
+                ..
+            }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment {
+                return_result_occurrence,
+                pending_effect,
+                ..
+            } => out.push((*return_result_occurrence, pending_effect.as_ref(), None)),
+            PendingCostMoveResume::RandomDiscardUnlessPayment(value) => out.push((
+                value.return_result_occurrence,
+                value.pending_effect.as_ref(),
+                None,
+            )),
+            PendingCostMoveResume::ManaAbilityPayment {
+                pending: value,
+                cursor: payment,
+            } => {
+                pending(value, &mut out);
+                cursor(payment, &mut out);
+            }
+            PendingCostMoveResume::CollectEvidencePayment { resume: value, .. } => {
+                if let CollectEvidenceResume::ManaAbility {
+                    pending_mana_ability,
+                } = value.as_ref()
+                {
+                    pending(pending_mana_ability, &mut out);
+                }
+            }
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::SacrificeForCost { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. } => {}
+        }
+    }
+    if let Some(DeferredLifeCostResume::ManaRoot { resume: value, .. }) =
+        &state.pending_deferred_life_cost_resume
+    {
+        resume(value, &mut out);
+    }
+    if let Some(value) = &state.pending_triggered_mana_resume {
+        match &value.outer_resume {
+            ManaTriggerFixedPointResume::Root { resume: value, .. } => resume(value, &mut out),
+            ManaTriggerFixedPointResume::ColorChoice(value) => {
+                if let ManaChoiceContext::ManaAbility(value) = &value.context {
+                    pending(value, &mut out);
+                }
+            }
+            ManaTriggerFixedPointResume::Parent => {}
+        }
+    }
+    out
+}
+
+fn validate_retained_payment_result_owner(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    body: &ResolvedAbility,
+    cost: Option<&AbilityCost>,
+) -> Result<(), String> {
+    crate::game::effects::validate_selected_instruction_result_owner(state, body, occurrence)
+        .map_err(|error| error.to_string())?;
+    validate_retained_result_readers(state, body, occurrence, HashSet::new())?;
+    if let Some(cost) = cost {
+        let mut results = vec![];
+        let mut read = |reference: &super::ability::QuantityRef| {
+            if let Some(result) = reference.instruction_result_id() {
+                results.push(result);
+            }
+        };
+        cost.for_each_quantity_expr(&mut |expr| expr.for_each_ref(&mut read));
+        cost.for_each_predicate_quantity_ref(&mut read);
+        if !results.is_empty() {
+            let frame =
+                checked_return_result_frame(state, occurrence, body.return_result_process, true)?;
+            for result in results {
+                if !matches!(frame.results.get(&result), Some(InstructionResult::ZoneChanges(records)) if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+                {
+                    return Err(
+                        "unavailable instruction-result quantity in retained payment".into(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_retained_payment_result_owners(state: &GameState) -> Result<(), String> {
+    for (occurrence, body, cost) in retained_payment_result_owners(state) {
+        validate_retained_payment_result_owner(state, occurrence, body, cost)?;
+    }
+    Ok(())
+}
+
+fn retained_ability_result_owner_is_live(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    body: &ResolvedAbility,
+) -> bool {
+    occurrence.is_some()
+        && checked_return_result_frame(
+            state,
+            occurrence,
+            body.return_result_process,
+            body.has_addressed_zone_result_read(),
+        )
+        .is_ok()
+        && crate::game::effects::validate_selected_instruction_result_owner(state, body, occurrence)
+            .is_ok()
+}
+
 pub(crate) fn live_return_result_occurrences(
     state: &GameState,
 ) -> HashSet<ReturnResultOccurrenceId> {
     let mut live = HashSet::new();
     live.extend(state.active_return_result_occurrence);
+    for waiting in retained_result_waits(state) {
+        match waiting {
+            WaitingFor::RepeatDecision {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ChooseTokenHost {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::UnlessPayment {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::UnlessPaymentChooseCost {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::WardDiscardChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::WardSacrificeChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::UnlessBounceChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ExploreChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ClashChooseOpponent {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ChooseFromZoneOpponentChooser {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::MultiTargetSelection {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ChooseOneOfBranch {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::VoteChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::SeparatePilesChooseOpponent {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::SeparatePilesPartition {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::SeparatePilesChoice {
+                return_result_occurrence,
+                ..
+            } => {
+                if crate::game::effects::validate_definition_waiting_for_result_owner(
+                    state, waiting,
+                )
+                .is_ok()
+                {
+                    live.extend(*return_result_occurrence);
+                }
+            }
+            _ => {}
+        }
+        if let WaitingFor::ChooseManaColor {
+            return_result_occurrence,
+            context: ManaChoiceContext::ResolvingEffect(body),
+            choice,
+            ..
+        } = waiting
+        {
+            if checked_return_result_frame(
+                state,
+                *return_result_occurrence,
+                body.return_result_process,
+                false,
+            )
+            .is_ok()
+                && crate::game::effects::mana::validate_mana_choice_response(
+                    state,
+                    body,
+                    choice,
+                    *return_result_occurrence,
+                )
+                .is_ok()
+            {
+                live.extend(*return_result_occurrence);
+            }
+        }
+        if let WaitingFor::EffectZoneChoice {
+            return_result_occurrence,
+            return_result_process,
+            conditional_enter_with_counters,
+            enters_modified_if,
+            ..
+        } = waiting
+        {
+            if validate_zone_entry_result_owner(
+                state,
+                *return_result_occurrence,
+                *return_result_process,
+                conditional_enter_with_counters,
+                enters_modified_if.as_ref(),
+            ) == Ok(true)
+            {
+                live.extend(*return_result_occurrence);
+            }
+        }
+    }
+    match &state.waiting_for {
+        WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::VoteChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::SeparatePilesChoice {
+            return_result_occurrence,
+            ..
+        } => {
+            if crate::game::effects::validate_definition_waiting_for_result_owner(
+                state,
+                &state.waiting_for,
+            )
+            .is_ok()
+            {
+                live.extend(*return_result_occurrence);
+            }
+        }
+        _ => {}
+    }
+    if let Some(pending) = &state.pending_die_roll_instruction {
+        if crate::game::effects::roll_die::validate_die_instruction_result_owner(state, pending)
+            .is_ok()
+        {
+            live.extend(pending.return_result_occurrence);
+        }
+    }
+    if let Some(pending) = &state.pending_scoped_library_search {
+        if retained_ability_result_owner_is_live(
+            state,
+            pending.return_result_occurrence,
+            &pending.ability,
+        ) {
+            live.extend(pending.return_result_occurrence);
+        }
+    }
+    if let Some(pending) = &state.pending_player_scope_sacrifice_choice {
+        if retained_ability_result_owner_is_live(
+            state,
+            pending.return_result_occurrence,
+            &pending.ability,
+        ) {
+            live.extend(pending.return_result_occurrence);
+        }
+    }
+    if let Some(pending) = &state.pending_player_scope_unless_payment {
+        if retained_ability_result_owner_is_live(
+            state,
+            pending.return_result_occurrence,
+            &pending.pending_effect,
+        ) {
+            live.extend(pending.return_result_occurrence);
+        }
+    }
+    if let Some(fan_out) = state
+        .pending_discard_batch
+        .as_ref()
+        .and_then(|pending| pending.fan_out.as_ref())
+    {
+        if retained_ability_result_owner_is_live(
+            state,
+            fan_out.return_result_occurrence,
+            &fan_out.scoped_template,
+        ) && retained_ability_result_owner_is_live(
+            state,
+            fan_out.return_result_occurrence,
+            &fan_out.outer,
+        ) {
+            live.extend(fan_out.return_result_occurrence);
+        }
+    }
+    if let Some(LibrarySearchDeliveryResume::Scoped {
+        return_result_occurrence,
+        after_scope: Some(tail),
+        ..
+    }) = &state.pending_library_search_delivery
+    {
+        if retained_ability_result_owner_is_live(state, *return_result_occurrence, tail) {
+            live.extend(*return_result_occurrence);
+        }
+    }
     if let WaitingFor::ChooseOneOfBranch { context, .. } = &state.waiting_for {
         live.extend(
             context
                 .counter_removal_result
                 .as_ref()
+                .filter(|binding| {
+                    crate::game::effects::counter_removal_binding_is_valid(state, binding)
+                })
                 .map(|binding| binding.occurrence),
         );
     }
@@ -12650,35 +13252,128 @@ pub(crate) fn live_return_result_occurrences(
         .as_ref()
         .map(|pending| &pending.proposed)
     {
-        live.insert(binding.occurrence);
+        if crate::game::effects::counter_removal_binding_is_valid(state, binding) {
+            live.insert(binding.occurrence);
+        }
     }
     for frame in state.resolution_stack.iter() {
         match frame {
             ResolutionFrame::OptionalEffect(optional) => {
-                live.extend(optional.return_result_occurrence);
+                if retained_ability_result_owner_is_live(
+                    state,
+                    optional.return_result_occurrence,
+                    &optional.ability,
+                ) {
+                    live.extend(optional.return_result_occurrence);
+                }
             }
             ResolutionFrame::AbilityContinuation(frame) => {
-                live.extend(frame.pending.return_result_occurrence);
-                live.extend(
-                    frame
-                        .pending
-                        .pending_return_result_producer
-                        .map(|(id, _)| id),
-                );
+                if retained_ability_result_owner_is_live(
+                    state,
+                    frame.pending.return_result_occurrence,
+                    &frame.pending.chain,
+                ) {
+                    live.extend(frame.pending.return_result_occurrence);
+                }
+                if let Some((id, _)) = frame.pending.pending_return_result_producer {
+                    if frame.pending.return_result_occurrence == Some(id)
+                        && checked_return_result_frame(
+                            state,
+                            Some(id),
+                            frame.pending.chain.return_result_process,
+                            false,
+                        )
+                        .is_ok()
+                    {
+                        live.insert(id);
+                    }
+                }
             }
             ResolutionFrame::ChangeZone(frame) => {
-                live.extend(
-                    frame.pending.as_ref().and_then(|pending| {
-                        pending.pending_return_result_producer.map(|(id, _)| id)
-                    }),
-                );
+                if let Some(pending) = &frame.pending {
+                    if checked_return_result_frame(
+                        state,
+                        pending.return_result_occurrence,
+                        pending.return_result_process,
+                        false,
+                    )
+                    .is_ok()
+                        && crate::game::effects::change_zone::pending_zone_entry_evaluation_ability(
+                            state,
+                            pending.source_id,
+                            pending.return_result_occurrence,
+                            pending.return_result_process,
+                            &pending.conditional_enter_with_counters,
+                            pending.enters_modified_if.as_ref(),
+                        )
+                        .is_ok()
+                    {
+                        live.extend(pending.return_result_occurrence);
+                    }
+                    if let Some((id, _)) = pending.pending_return_result_producer {
+                        if pending.return_result_occurrence == Some(id)
+                            && checked_return_result_frame(
+                                state,
+                                Some(id),
+                                pending.return_result_process,
+                                false,
+                            )
+                            .is_ok()
+                        {
+                            live.insert(id);
+                        }
+                    }
+                }
             }
             ResolutionFrame::BatchDelivery(batch) => {
-                if let Some(BatchCompletion::RecordInstructionZoneResult {
-                    occurrence_id, ..
+                if let Some(BatchCompletion::ForEachCategoryExileComplete {
+                    return_result_occurrence,
+                    ability,
+                    remaining_member_filters,
+                    ..
                 }) = &batch.completion
                 {
-                    live.insert(*occurrence_id);
+                    if crate::game::effects::choose_from_zone::validate_per_category_result_owner(
+                        state,
+                        ability,
+                        remaining_member_filters,
+                        *return_result_occurrence,
+                    )
+                    .is_ok()
+                    {
+                        live.extend(*return_result_occurrence);
+                    }
+                }
+                if let Some(BatchCompletion::LibrarySearchDeliverySettled {
+                    resume:
+                        LibrarySearchDeliveryResume::Scoped {
+                            return_result_occurrence,
+                            after_scope: Some(tail),
+                            ..
+                        },
+                }) = &batch.completion
+                {
+                    if retained_ability_result_owner_is_live(state, *return_result_occurrence, tail)
+                    {
+                        live.extend(*return_result_occurrence);
+                    }
+                }
+                if let Some(BatchCompletion::RecordInstructionZoneResult {
+                    occurrence_id,
+                    return_result_process,
+                    ..
+                }) = &batch.completion
+                {
+                    if checked_return_result_frame(
+                        state,
+                        Some(*occurrence_id),
+                        *return_result_process,
+                        false,
+                    )
+                    .is_ok()
+                    {
+                        live.insert(*occurrence_id);
+                    }
                 }
             }
             ResolutionFrame::CounterRemovals(queue) => {
@@ -12686,31 +13381,96 @@ pub(crate) fn live_return_result_occurrences(
                     queue
                         .result_binding
                         .as_ref()
+                        .filter(|binding| {
+                            crate::game::effects::counter_removal_binding_is_valid(state, binding)
+                        })
                         .map(|binding| binding.occurrence),
                 );
             }
             ResolutionFrame::ChooseOneOf(pending) => {
+                if crate::game::effects::choose_one_of::validate_pending_result_owner(
+                    state, pending,
+                )
+                .is_ok()
+                {
+                    live.extend(pending.return_result_occurrence);
+                }
                 live.extend(
                     pending
                         .context
                         .counter_removal_result
                         .as_ref()
+                        .filter(|binding| {
+                            crate::game::effects::counter_removal_binding_is_valid(state, binding)
+                        })
                         .map(|binding| binding.occurrence),
                 );
             }
-            ResolutionFrame::RepeatFor(_)
-            | ResolutionFrame::RepeatUntil(_)
-            | ResolutionFrame::RepeatedOptionalPayment(_)
+            ResolutionFrame::RepeatFor(pending) => {
+                if retained_ability_result_owner_is_live(
+                    state,
+                    pending.return_result_occurrence,
+                    &pending.ability,
+                ) {
+                    live.extend(pending.return_result_occurrence);
+                }
+            }
+            ResolutionFrame::RepeatUntil(pending) => {
+                if retained_ability_result_owner_is_live(
+                    state,
+                    pending.return_result_occurrence,
+                    &pending.ability,
+                ) {
+                    live.extend(pending.return_result_occurrence);
+                }
+            }
+            ResolutionFrame::PerPlayerZoneChoice(pending) => {
+                if retained_ability_result_owner_is_live(
+                    state,
+                    pending.return_result_occurrence,
+                    &pending.ability,
+                ) {
+                    live.extend(pending.return_result_occurrence);
+                }
+            }
+            ResolutionFrame::PerCategoryZoneChoice(pending) => {
+                if crate::game::effects::choose_from_zone::validate_per_category_result_owner(
+                    state,
+                    &pending.ability,
+                    &pending.remaining_member_filters,
+                    pending.return_result_occurrence,
+                )
+                .is_ok()
+                {
+                    live.extend(pending.return_result_occurrence);
+                }
+            }
+            ResolutionFrame::DieRoll(pending) => {
+                if crate::game::effects::roll_die::validate_pending_die_result_owner(state, pending)
+                    .is_ok()
+                {
+                    live.extend(pending.return_result_occurrence);
+                }
+            }
+            ResolutionFrame::CoinFlip(pending) => {
+                if crate::game::effects::flip_coin::validate_pending_coin_flip(state, pending)
+                    .is_ok()
+                {
+                    live.extend(pending.return_result_occurrence);
+                }
+            }
+            ResolutionFrame::VoteBallot(pending) => {
+                if crate::game::effects::vote::validate_pending_result_owner(state, pending).is_ok()
+                {
+                    live.extend(pending.return_result_occurrence);
+                }
+            }
+            ResolutionFrame::RepeatedOptionalPayment(_)
             | ResolutionFrame::CounterMoves(_)
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
-            | ResolutionFrame::VoteBallot(_)
-            | ResolutionFrame::PerPlayerZoneChoice(_)
-            | ResolutionFrame::PerCategoryZoneChoice(_)
-            | ResolutionFrame::CoinFlip(_)
-            | ResolutionFrame::DieRoll(_)
             | ResolutionFrame::Proliferate(_)
             | ResolutionFrame::MultiDraw(_)
             | ResolutionFrame::Discard(_)
@@ -12727,12 +13487,377 @@ pub(crate) fn live_return_result_occurrences(
         ..
     }) = &state.pending_cost_move_resume
     {
-        live.extend(frame.return_result_occurrence);
+        if retained_ability_result_owner_is_live(
+            state,
+            frame.return_result_occurrence,
+            &frame.ability,
+        ) {
+            live.extend(frame.return_result_occurrence);
+        }
+    }
+    for (occurrence, body, cost) in retained_payment_result_owners(state) {
+        if validate_retained_payment_result_owner(state, occurrence, body, cost).is_ok() {
+            live.extend(occurrence);
+        }
     }
     live
 }
 
+fn validate_retained_result_readers(
+    state: &GameState,
+    root: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    mut future: HashSet<ReturnResultId>,
+) -> Result<(), String> {
+    if let Some(id) = root.declares_return_result {
+        future.insert(id);
+    }
+    if let Some((result, counters)) = root
+        .condition
+        .as_ref()
+        .and_then(super::ability::AbilityCondition::counter_removal_event)
+    {
+        if !future.contains(&result) {
+            crate::game::effects::counter_reflexive_occurrences_for_occurrence(
+                state, root, result, counters, occurrence,
+            )
+            .map_err(|error| format!("invalid counter event reader: {error:?}"))?;
+        }
+    }
+    if crate::game::effects::is_named_revealed_reader(root)
+        && root
+            .reads_return_result
+            .as_ref()
+            .is_some_and(|(id, _)| !future.contains(id))
+    {
+        crate::game::effects::named_revealed_members_for_occurrence(state, root, occurrence)
+            .map_err(|error| format!("invalid live reveal reader: {error:?}"))?;
+    }
+    let mut has_direct_addressed_read = false;
+    root.for_each_direct_quantity_ref(&mut |reference| {
+        has_direct_addressed_read |= reference.instruction_result_id().is_some();
+    });
+    if has_direct_addressed_read {
+        checked_return_result_frame(state, occurrence, root.return_result_process, true)?;
+    }
+    let mut invalid_quantity = None;
+    let mut check = |reference: &crate::types::ability::QuantityRef| {
+        if let crate::types::ability::QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result },
+            ..
+        } = reference
+        {
+            if root.declares_return_result == Some(*result) {
+                invalid_quantity = Some(*result);
+                return;
+            }
+            if !future.contains(result) {
+                let records = occurrence
+                    .and_then(|occurrence| state.return_result_frames.get(&occurrence))
+                    .and_then(|frame| frame.results.get(result));
+                if !matches!(records, Some(InstructionResult::ZoneChanges(records))
+                    if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
+                {
+                    invalid_quantity = Some(*result);
+                }
+            }
+        }
+    };
+    root.for_each_direct_quantity_ref(&mut check);
+    if let Some(result) = invalid_quantity {
+        return Err(format!("invalid addressed departure reader {result:?}"));
+    }
+    for child in [&root.sub_ability, &root.else_ability]
+        .into_iter()
+        .flatten()
+    {
+        if !child
+            .condition
+            .as_ref()
+            .is_some_and(super::ability::AbilityCondition::has_when_you_do_marker)
+        {
+            validate_retained_result_readers(state, child, occurrence, future.clone())?;
+        }
+    }
+    Ok(())
+}
+
+fn retained_continuation_future_results(
+    state: &GameState,
+    pending: &PendingContinuation,
+) -> HashSet<ReturnResultId> {
+    let mut future: HashSet<_> = pending
+        .pending_return_result_producer
+        .map(|(_, result)| result)
+        .into_iter()
+        .collect();
+    for frame in state.resolution_stack.iter() {
+        match frame {
+            ResolutionFrame::ChangeZone(frame) => {
+                if let Some(work) = frame.pending.as_ref() {
+                    if work.return_result_process == pending.chain.return_result_process {
+                        if let Some((occurrence, result)) = work.pending_return_result_producer {
+                            if Some(occurrence) == pending.return_result_occurrence {
+                                future.insert(result);
+                            }
+                        }
+                    }
+                }
+            }
+            ResolutionFrame::BatchDelivery(batch) => {
+                if let Some(BatchCompletion::RecordInstructionZoneResult {
+                    occurrence_id,
+                    result_id,
+                    return_result_process,
+                    ..
+                }) = batch.completion.as_ref()
+                {
+                    if Some(*occurrence_id) == pending.return_result_occurrence
+                        && *return_result_process == pending.chain.return_result_process
+                    {
+                        future.insert(*result_id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    future
+}
+
+pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<(), String> {
+    validate_retained_payment_result_owners(state)?;
+    if let Some(pending) = &state.pending_scoped_library_search {
+        crate::game::effects::validate_selected_instruction_result_owner(
+            state,
+            &pending.ability,
+            pending.return_result_occurrence,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(tail) = pending.after_scope.as_deref() {
+            crate::game::effects::validate_selected_instruction_result_owner(
+                state,
+                tail,
+                pending.return_result_occurrence,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+
+    let validate_search_tail = |resume: &LibrarySearchDeliveryResume| -> Result<(), String> {
+        if let LibrarySearchDeliveryResume::Scoped {
+            return_result_occurrence,
+            after_scope: Some(tail),
+            ..
+        } = resume
+        {
+            crate::game::effects::validate_selected_instruction_result_owner(
+                state,
+                tail,
+                *return_result_occurrence,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    };
+    if let Some(resume) = &state.pending_library_search_delivery {
+        validate_search_tail(resume)?;
+    }
+    for frame in state.resolution_stack.iter() {
+        if let ResolutionFrame::BatchDelivery(batch) = frame {
+            if let Some(BatchCompletion::LibrarySearchDeliverySettled { resume }) =
+                &batch.completion
+            {
+                validate_search_tail(resume)?;
+            }
+        }
+    }
+    for frame in state.resolution_stack.iter() {
+        if let ResolutionFrame::ChangeZone(frame) = frame {
+            if let Some(pending) = &frame.pending {
+                crate::game::effects::change_zone::pending_zone_entry_evaluation_ability(
+                    state,
+                    pending.source_id,
+                    pending.return_result_occurrence,
+                    pending.return_result_process,
+                    &pending.conditional_enter_with_counters,
+                    pending.enters_modified_if.as_ref(),
+                )
+                .map_err(|error| error.to_string())?;
+                if let Some((occurrence, _)) = pending.pending_return_result_producer {
+                    checked_return_result_frame(
+                        state,
+                        Some(occurrence),
+                        pending.return_result_process,
+                        false,
+                    )?;
+                }
+            }
+        }
+    }
+    for waiting in retained_result_waits(state) {
+        crate::game::effects::validate_definition_waiting_for_result_owner(state, waiting)
+            .map_err(|error| error.to_string())?;
+
+        if let WaitingFor::EffectZoneChoice {
+            return_result_occurrence,
+            return_result_process,
+            conditional_enter_with_counters,
+            enters_modified_if,
+            source_id,
+            ..
+        } = waiting
+        {
+            crate::game::effects::change_zone::pending_zone_entry_evaluation_ability(
+                state,
+                *source_id,
+                *return_result_occurrence,
+                *return_result_process,
+                conditional_enter_with_counters,
+                enters_modified_if.as_ref(),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    for frame in state.resolution_stack.iter() {
+        match frame {
+            ResolutionFrame::AbilityContinuation(frame) => {
+                if frame.pending.return_result_occurrence.is_some()
+                    && has_return_result_metadata(&frame.pending.chain)
+                {
+                    checked_return_result_frame(
+                        state,
+                        frame.pending.return_result_occurrence,
+                        frame.pending.chain.return_result_process,
+                        frame.pending.chain.has_addressed_zone_result_read(),
+                    )?;
+                }
+                validate_retained_result_readers(
+                    state,
+                    &frame.pending.chain,
+                    frame.pending.return_result_occurrence,
+                    retained_continuation_future_results(state, &frame.pending),
+                )?;
+                if let Some((occurrence, _)) = frame.pending.pending_return_result_producer {
+                    if frame.pending.return_result_occurrence != Some(occurrence) {
+                        return Err(
+                            "zone publisher occurrence disagrees with its retained owner".into(),
+                        );
+                    }
+                    checked_return_result_frame(
+                        state,
+                        Some(occurrence),
+                        frame.pending.chain.return_result_process,
+                        false,
+                    )?;
+                }
+            }
+            ResolutionFrame::PerPlayerZoneChoice(pending) => {
+                crate::game::effects::validate_selected_instruction_result_owner(
+                    state,
+                    &pending.ability,
+                    pending.return_result_occurrence,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            ResolutionFrame::PerCategoryZoneChoice(pending) => {
+                crate::game::effects::choose_from_zone::validate_per_category_result_owner(
+                    state,
+                    &pending.ability,
+                    &pending.remaining_member_filters,
+                    pending.return_result_occurrence,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            ResolutionFrame::BatchDelivery(batch) => {
+                if let Some(BatchCompletion::ForEachCategoryExileComplete {
+                    return_result_occurrence,
+                    ability,
+                    remaining_member_filters,
+                    ..
+                }) = &batch.completion
+                {
+                    crate::game::effects::choose_from_zone::validate_per_category_result_owner(
+                        state,
+                        ability,
+                        remaining_member_filters,
+                        *return_result_occurrence,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                if let Some(BatchCompletion::RecordInstructionZoneResult {
+                    occurrence_id,
+                    return_result_process,
+                    ..
+                }) = &batch.completion
+                {
+                    checked_return_result_frame(
+                        state,
+                        Some(*occurrence_id),
+                        *return_result_process,
+                        false,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
+    validate_retained_zone_result_owners(state)?;
+    for waiting in retained_result_waits(state) {
+        crate::game::effects::validate_definition_waiting_for_result_owner(state, waiting)
+            .map_err(|error| error.to_string())?;
+    }
+    for waiting in retained_result_waits(state) {
+        if let WaitingFor::ChooseManaColor {
+            context,
+            choice,
+            return_result_occurrence,
+            ..
+        } = waiting
+        {
+            match context {
+                ManaChoiceContext::ResolvingEffect(ability) => {
+                    crate::game::effects::mana::validate_mana_choice_response(
+                        state,
+                        ability,
+                        choice,
+                        *return_result_occurrence,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                ManaChoiceContext::ManaAbility(_) if return_result_occurrence.is_some() => {
+                    return Err("independent mana ability cannot import a resolving result".into());
+                }
+                ManaChoiceContext::ManaAbility(_) => {}
+            }
+        }
+    }
+    if let Some(resume) = &state.pending_triggered_mana_resume {
+        if let ManaTriggerFixedPointResume::ColorChoice(choice) = &resume.outer_resume {
+            if let ManaChoiceContext::ResolvingEffect(ability) = &choice.context {
+                crate::types::ability::classify_instruction_result_invocation(
+                    ability,
+                    crate::types::ability::InstructionResultEntry::Independent,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    if let Some(root) = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+    {
+        crate::types::ability::classify_instruction_result_invocation(
+            root,
+            crate::types::ability::InstructionResultEntry::Independent,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let counter_reader_waits_for = |source_id: ObjectId| {
         state
             .resolution_stack
@@ -12868,48 +13993,10 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             _ => {}
         }
     }
-    fn validate_reveal_readers(
-        state: &GameState,
-        root: &ResolvedAbility,
-        occurrence: Option<ReturnResultOccurrenceId>,
-        mut future: HashSet<ReturnResultId>,
-    ) -> Result<(), String> {
-        if let Some(id) = root.declares_return_result {
-            future.insert(id);
-        }
-        if let Some((result, counters)) = root
-            .condition
-            .as_ref()
-            .and_then(super::ability::AbilityCondition::counter_removal_event)
-        {
-            if !future.contains(&result) {
-                crate::game::effects::counter_reflexive_occurrences_for_occurrence(
-                    state, root, result, counters, occurrence,
-                )
-                .map_err(|error| format!("invalid counter event reader: {error:?}"))?;
-            }
-        }
-        if crate::game::effects::is_named_revealed_reader(root)
-            && root
-                .reads_return_result
-                .as_ref()
-                .is_some_and(|(id, _)| !future.contains(id))
-        {
-            crate::game::effects::named_revealed_members_for_occurrence(state, root, occurrence)
-                .map_err(|error| format!("invalid live reveal reader: {error:?}"))?;
-        }
-        if let Some(sub) = &root.sub_ability {
-            validate_reveal_readers(state, sub, occurrence, future.clone())?;
-        }
-        if let Some(other) = &root.else_ability {
-            validate_reveal_readers(state, other, occurrence, future)?;
-        }
-        Ok(())
-    }
     let revealed_authority = state
         .return_result_frames
         .values()
-        .flat_map(|frame| frame.values())
+        .flat_map(|frame| frame.results.values())
         .any(|result| result.revealed_cards().is_some());
     for frame in state.resolution_stack.iter() {
         if let ResolutionFrame::BatchDelivery(batch) = frame {
@@ -12939,6 +14026,20 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
     }
     if state.next_return_result_occurrence_id == 0 {
         return Err("return-result occurrence allocator is zero".to_string());
+    }
+    if state.next_return_result_process_id == 0 {
+        return Err("return-result process allocator is zero".into());
+    }
+    let mut processes = HashSet::new();
+    for frame in state.return_result_frames.values() {
+        if let Some(process) = frame.process {
+            if process.0 == 0 || process.0 >= state.next_return_result_process_id {
+                return Err("return-result process owner is outside the allocator".into());
+            }
+            if !processes.insert(process) {
+                return Err("duplicate return-result process owner".into());
+            }
+        }
     }
 
     let frame_exists = |id: ReturnResultOccurrenceId| {
@@ -12970,7 +14071,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         None if has_return_result_metadata(&frame.ability) => {
             Err("return-result optional effect has no occurrence stamp".to_string())
         }
-        _ => validate_reveal_readers(
+        _ => validate_retained_result_readers(
             state,
             &frame.ability,
             frame.return_result_occurrence,
@@ -12988,7 +14089,10 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                     occurrence_id
                 ));
             }
-            if state.return_result_frames[&occurrence_id].contains_key(&result_id) {
+            if state.return_result_frames[&occurrence_id]
+                .results
+                .contains_key(&result_id)
+            {
                 return Err(format!(
                     "return-result {:?} was already published before its parked {owner} settled",
                     result_id
@@ -13002,16 +14106,237 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             }
             Ok(())
         };
+    let validate_carrier = |occurrence: Option<ReturnResultOccurrenceId>,
+                            ability: Option<&ResolvedAbility>|
+     -> Result<(), String> {
+        if occurrence.is_some_and(|id| !frame_exists(id)) {
+            return Err("retained quantity owner names a missing occurrence".into());
+        }
+        if let Some(ability) = ability {
+            if occurrence.is_some() && has_return_result_metadata(ability) {
+                checked_return_result_frame(
+                    state,
+                    occurrence,
+                    ability.return_result_process,
+                    ability.has_addressed_zone_result_read(),
+                )?;
+            }
+            let summary = crate::types::ability::classify_instruction_result_invocation(
+                ability,
+                crate::types::ability::InstructionResultEntry::ResumeOwned,
+            )
+            .map_err(|error| error.to_string())?;
+            if occurrence.is_none()
+                && matches!(
+                    summary,
+                    crate::types::ability::InstructionResultProcess::Imported { .. }
+                )
+            {
+                return Err("retained quantity reader has no occurrence stamp".into());
+            }
+            validate_retained_result_readers(state, ability, occurrence, HashSet::new())?;
+        }
+        Ok(())
+    };
+    let validate_selected_body = |definition: &AbilityDefinition,
+                                  source: ObjectId,
+                                  controller: PlayerId,
+                                  occurrence: Option<ReturnResultOccurrenceId>,
+                                  expected_process: Option<ReturnResultProcessId>|
+     -> Result<(), String> {
+        use crate::types::ability::{
+            classify_instruction_result_invocation, InstructionResultEntry,
+            InstructionResultProcess,
+        };
+        let mut resolved =
+            crate::game::ability_utils::build_resolved_from_def(definition, source, controller);
+        resolved.bind_return_result_process(expected_process);
+        if let InstructionResultProcess::Imported { .. } =
+            classify_instruction_result_invocation(&resolved, InstructionResultEntry::SelectedBody)
+                .map_err(|error| error.to_string())?
+        {
+            crate::game::effects::validate_selected_instruction_result_owner(
+                state, &resolved, occurrence,
+            )
+            .map_err(|error| error.to_string())?;
+            validate_retained_result_readers(state, &resolved, occurrence, HashSet::new())?;
+        }
+        Ok(())
+    };
+    match &state.waiting_for {
+        WaitingFor::RepeatDecision {
+            return_result_occurrence,
+            ability,
+            ..
+        }
+        | WaitingFor::ChooseTokenHost {
+            return_result_occurrence,
+            pending_ability: ability,
+            ..
+        } => validate_carrier(*return_result_occurrence, Some(ability))?,
+        WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence,
+            expected_return_result_process,
+            branches,
+            continuation,
+            source_id,
+            controller,
+            ..
+        } => {
+            validate_carrier(*return_result_occurrence, continuation.as_deref())?;
+            for definition in branches {
+                validate_selected_body(
+                    definition,
+                    *source_id,
+                    *controller,
+                    *return_result_occurrence,
+                    *expected_return_result_process,
+                )?;
+            }
+        }
+        WaitingFor::VoteChoice {
+            return_result_occurrence,
+            expected_return_result_process,
+            per_choice_effect,
+            outcome_template,
+            source_id,
+            controller,
+            ..
+        } => {
+            validate_carrier(*return_result_occurrence, None)?;
+            for definition in per_choice_effect
+                .iter()
+                .map(Box::as_ref)
+                .chain(outcome_template.as_deref())
+            {
+                validate_selected_body(
+                    definition,
+                    *source_id,
+                    *controller,
+                    *return_result_occurrence,
+                    *expected_return_result_process,
+                )?;
+            }
+        }
+        WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence,
+            expected_return_result_process,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            source_id,
+            chooser,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            return_result_occurrence,
+            expected_return_result_process,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            source_id,
+            chooser,
+            ..
+        } => {
+            validate_carrier(*return_result_occurrence, None)?;
+            for definition in
+                std::iter::once(chosen_pile_effect.as_ref()).chain(unchosen_pile_effect.as_deref())
+            {
+                validate_selected_body(
+                    definition,
+                    *source_id,
+                    *chooser,
+                    *return_result_occurrence,
+                    *expected_return_result_process,
+                )?;
+            }
+        }
+        WaitingFor::SeparatePilesChoice {
+            return_result_occurrence,
+            expected_return_result_process,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            source_id,
+            player,
+            ..
+        } => {
+            validate_carrier(*return_result_occurrence, None)?;
+            for definition in
+                std::iter::once(chosen_pile_effect.as_ref()).chain(unchosen_pile_effect.as_deref())
+            {
+                validate_selected_body(
+                    definition,
+                    *source_id,
+                    *player,
+                    *return_result_occurrence,
+                    *expected_return_result_process,
+                )?;
+            }
+        }
+        WaitingFor::EffectZoneChoice {
+            return_result_occurrence,
+            return_result_process,
+            conditional_enter_with_counters,
+            enters_modified_if,
+            ..
+        } => {
+            validate_zone_entry_result_owner(
+                state,
+                *return_result_occurrence,
+                *return_result_process,
+                conditional_enter_with_counters,
+                enters_modified_if.as_ref(),
+            )?;
+        }
+        _ => {}
+    }
+    if let Some(pending) = &state.pending_die_roll_instruction {
+        crate::game::effects::roll_die::validate_die_instruction_result_owner(state, pending)
+            .map_err(|error| error.to_string())?;
+        validate_carrier(pending.return_result_occurrence, None)?;
+    }
+    if let Some(pending) = &state.pending_scoped_library_search {
+        validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?;
+        if let Some(tail) = pending.after_scope.as_deref() {
+            validate_carrier(pending.return_result_occurrence, Some(tail))?;
+        }
+    }
+    if let Some(pending) = &state.pending_player_scope_sacrifice_choice {
+        validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?;
+    }
+    if let Some(pending) = &state.pending_player_scope_unless_payment {
+        validate_carrier(
+            pending.return_result_occurrence,
+            Some(&pending.pending_effect),
+        )?;
+    }
+    if let Some(pending) = state
+        .pending_discard_batch
+        .as_ref()
+        .and_then(|pending| pending.fan_out.as_ref())
+    {
+        validate_carrier(
+            pending.return_result_occurrence,
+            Some(&pending.scoped_template),
+        )?;
+        validate_carrier(pending.return_result_occurrence, Some(&pending.outer))?;
+    }
+    if let Some(LibrarySearchDeliveryResume::Scoped {
+        return_result_occurrence,
+        after_scope,
+        ..
+    }) = &state.pending_library_search_delivery
+    {
+        validate_carrier(*return_result_occurrence, after_scope.as_deref())?;
+    }
     for frame in state.resolution_stack.iter() {
         match frame {
             ResolutionFrame::OptionalEffect(optional) => validate_optional_frame(optional)?,
             ResolutionFrame::AbilityContinuation(frame) => {
                 let pending = &frame.pending;
-                validate_reveal_readers(
+                validate_retained_result_readers(
                     state,
                     &pending.chain,
                     pending.return_result_occurrence,
-                    HashSet::new(),
+                    retained_continuation_future_results(state, pending),
                 )?;
                 match pending.return_result_occurrence {
                     Some(id) if !frame_exists(id) => {
@@ -13066,12 +14391,30 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                 }
             }
             ResolutionFrame::BatchDelivery(batch) => {
+                if let Some(BatchCompletion::LibrarySearchDeliverySettled {
+                    resume:
+                        LibrarySearchDeliveryResume::Scoped {
+                            return_result_occurrence,
+                            after_scope,
+                            ..
+                        },
+                }) = &batch.completion
+                {
+                    validate_carrier(*return_result_occurrence, after_scope.as_deref())?;
+                }
                 if let Some(BatchCompletion::RecordInstructionZoneResult {
                     occurrence_id,
+                    return_result_process,
                     result_id,
                     settled_records,
                 }) = &batch.completion
                 {
+                    checked_return_result_frame(
+                        state,
+                        Some(*occurrence_id),
+                        *return_result_process,
+                        false,
+                    )?;
                     validate_parked_publisher((*occurrence_id, *result_id), "batch")?;
                     if settled_records.is_some() {
                         return Err(format!(
@@ -13081,21 +14424,79 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                     }
                 }
             }
-            ResolutionFrame::RepeatFor(_)
-            | ResolutionFrame::RepeatUntil(_)
-            | ResolutionFrame::RepeatedOptionalPayment(_)
+            ResolutionFrame::RepeatFor(pending) => {
+                validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?
+            }
+            ResolutionFrame::RepeatUntil(pending) => {
+                validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?
+            }
+            ResolutionFrame::PerPlayerZoneChoice(pending) => {
+                validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?
+            }
+            ResolutionFrame::PerCategoryZoneChoice(pending) => {
+                crate::game::effects::choose_from_zone::validate_per_category_result_owner(
+                    state,
+                    &pending.ability,
+                    &pending.remaining_member_filters,
+                    pending.return_result_occurrence,
+                )
+                .map_err(|error| error.to_string())?;
+                validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?
+            }
+            ResolutionFrame::DieRoll(pending) => {
+                crate::game::effects::roll_die::validate_pending_die_result_owner(state, pending)
+                    .map_err(|error| error.to_string())?;
+                validate_carrier(pending.return_result_occurrence, None)?
+            }
+            ResolutionFrame::CoinFlip(pending) => {
+                crate::game::effects::flip_coin::validate_pending_coin_flip(state, pending)
+                    .map_err(|error| error.to_string())?;
+                validate_carrier(pending.return_result_occurrence, None)?;
+                for definition in [&pending.win_effect, &pending.lose_effect]
+                    .into_iter()
+                    .flatten()
+                {
+                    validate_selected_body(
+                        definition,
+                        pending.source_id,
+                        pending.controller,
+                        pending.return_result_occurrence,
+                        pending.expected_return_result_process,
+                    )?;
+                }
+            }
+            ResolutionFrame::VoteBallot(pending) => {
+                validate_carrier(pending.return_result_occurrence, None)?;
+                validate_selected_body(
+                    &pending.ability_template,
+                    pending.source_id,
+                    pending.controller,
+                    pending.return_result_occurrence,
+                    pending.expected_return_result_process,
+                )?;
+            }
+            ResolutionFrame::ChooseOneOf(pending) => {
+                validate_carrier(
+                    pending.return_result_occurrence,
+                    pending.continuation.as_deref(),
+                )?;
+                for definition in &pending.branches {
+                    validate_selected_body(
+                        definition,
+                        pending.source_id,
+                        pending.controller,
+                        pending.return_result_occurrence,
+                        pending.expected_return_result_process,
+                    )?;
+                }
+            }
+            ResolutionFrame::RepeatedOptionalPayment(_)
             | ResolutionFrame::CounterMoves(_)
             | ResolutionFrame::CounterRemovals(_)
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
-            | ResolutionFrame::ChooseOneOf(_)
-            | ResolutionFrame::VoteBallot(_)
-            | ResolutionFrame::PerPlayerZoneChoice(_)
-            | ResolutionFrame::PerCategoryZoneChoice(_)
-            | ResolutionFrame::CoinFlip(_)
-            | ResolutionFrame::DieRoll(_)
             | ResolutionFrame::Proliferate(_)
             | ResolutionFrame::MultiDraw(_)
             | ResolutionFrame::Discard(_)
@@ -15822,6 +17223,8 @@ pub enum WaitingFor {
     },
     /// CR 701.44d: Player chooses which of their remaining permanents explores next.
     ExploreChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         source_id: ObjectId,
         choosable: Vec<ObjectId>,
@@ -15874,6 +17277,8 @@ pub enum WaitingFor {
     /// variant today because the resume re-enters token creation rather
     /// than attaching an existing entrant, which no cluster member does.
     ChooseTokenHost {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         source_id: ObjectId,
         /// The still-legal stamped entrants (incarnation-current battlefield
@@ -16325,6 +17730,10 @@ pub enum WaitingFor {
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
     ChooseOneOfBranch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_return_result_process: Option<ReturnResultProcessId>,
         player: PlayerId,
         controller: PlayerId,
         source_id: ObjectId,
@@ -16393,6 +17802,10 @@ pub enum WaitingFor {
     /// CR 608.2d: Player chooses object(s) from a zone during effect resolution.
     /// Generalizes the DiscardChoice pattern to sacrifice-from-battlefield and hand-to-battlefield.
     EffectZoneChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_process: Option<ReturnResultProcessId>,
         player: PlayerId,
         cards: Vec<ObjectId>,
         count: usize,
@@ -16892,6 +18305,8 @@ pub enum WaitingFor {
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
     MultiTargetSelection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         legal_targets: Vec<ObjectId>,
         min_targets: usize,
@@ -17116,6 +18531,8 @@ pub enum WaitingFor {
     /// and ward costs (CR 702.21a).
     UnlessPayment {
         player: PlayerId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         /// CR 118.12: The cost to pay. Stored as the unified `AbilityCost`
         /// taxonomy. Forward-compatible deserialization accepts the legacy
         /// `UnlessCost` JSON shape (see `deserialize_ability_cost_compat` in
@@ -17149,6 +18566,8 @@ pub enum WaitingFor {
     /// of their choice or discard a card") and the broader punisher-disjunction
     /// class.
     UnlessPaymentChooseCost {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         /// The sub-costs the paying player may choose between.
         /// Stored as the unified `AbilityCost` taxonomy; forward-compatible
@@ -17179,6 +18598,8 @@ pub enum WaitingFor {
     },
     /// CR 702.21a: Player must choose a card to discard as ward cost payment.
     WardDiscardChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         /// Eligible cards in hand.
         cards: Vec<ObjectId>,
@@ -17195,6 +18616,8 @@ pub enum WaitingFor {
     },
     /// CR 702.21a: Player must choose a permanent to sacrifice as ward cost payment.
     WardSacrificeChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         /// Eligible permanents on the battlefield.
         permanents: Vec<ObjectId>,
@@ -17211,6 +18634,8 @@ pub enum WaitingFor {
     },
     /// CR 118.12: Player must choose permanent(s) to return to hand as unless cost.
     UnlessBounceChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         permanents: Vec<ObjectId>,
         pending_effect: Box<ResolvedAbility>,
@@ -17337,6 +18762,8 @@ pub enum WaitingFor {
         player: PlayerId,
         choice: ManaChoicePrompt,
         context: ManaChoiceContext,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
     },
     /// CR 701.59a / CR 702.163a: Choose graveyard cards with combined mana value
     /// at least the required threshold, then resume casting or effect resolution.
@@ -17385,6 +18812,8 @@ pub enum WaitingFor {
     /// whether to run the process again. Answered by
     /// `GameAction::DecideOptionalEffect { accept }`.
     RepeatDecision {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         /// The ability chain to re-resolve on accept (one further iteration).
         /// `repeat_until` is retained so the next iteration re-prompts.
@@ -17407,6 +18836,8 @@ pub enum WaitingFor {
     /// is the set of legal opponents; `ability` is the resolving clash ability,
     /// carried so the clash can be performed against the chosen opponent.
     ClashChooseOpponent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         candidates: Vec<PlayerId>,
         ability: Box<crate::types::ability::ResolvedAbility>,
@@ -17422,6 +18853,8 @@ pub enum WaitingFor {
     /// choose ability, carried so the zone choice can be presented to the
     /// picked opponent.
     ChooseFromZoneOpponentChooser {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
         player: PlayerId,
         candidates: Vec<PlayerId>,
         ability: Box<crate::types::ability::ResolvedAbility>,
@@ -17484,6 +18917,10 @@ pub enum WaitingFor {
     /// the per-choice tally sub-effects. Lives in the engine — frontend just
     /// renders the modal.
     VoteChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_return_result_process: Option<ReturnResultProcessId>,
         /// The voter currently making a choice.
         player: PlayerId,
         /// CR 701.38d: Remaining votes this player must cast before passing
@@ -17580,6 +19017,10 @@ pub enum WaitingFor {
     /// single opponent this state is skipped (no decision). The chosen
     /// opponent feeds into [`Self::SeparatePilesPartition`].
     SeparatePilesChooseOpponent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_return_result_process: Option<ReturnResultProcessId>,
         /// The controller making the choice.
         player: PlayerId,
         /// Non-eliminated opponents eligible to be chosen.
@@ -17607,6 +19048,10 @@ pub enum WaitingFor {
     /// before partitioning their own). When the subject queue empties, the
     /// engine transitions to [`Self::SeparatePilesChoice`] for `chooser`.
     SeparatePilesPartition {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_return_result_process: Option<ReturnResultProcessId>,
         /// The subject currently partitioning their own objects.
         player: PlayerId,
         /// CR 700.3 + CR 700.3a: Eligible objects controlled by `player`
@@ -17642,6 +19087,10 @@ pub enum WaitingFor {
     /// `GameAction::ChoosePile` per step. When the queue empties, the
     /// chosen-pile sub-effect resolves once per object in each chosen pile.
     SeparatePilesChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_result_occurrence: Option<ReturnResultOccurrenceId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_return_result_process: Option<ReturnResultProcessId>,
         /// The chooser (typically the spell controller).
         player: PlayerId,
         /// Subjects whose chosen pile has not yet been picked.
@@ -22569,12 +24018,19 @@ declare_game_state! {
     /// CR 608.2c: Isolated instruction-result records for every live resolving root.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub return_result_frames:
-        BTreeMap<ReturnResultOccurrenceId, BTreeMap<ReturnResultId, InstructionResult>>,
+        BTreeMap<ReturnResultOccurrenceId, ReturnResultFrame>,
     /// The synchronous execution context; parked continuations carry their own stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_return_result_occurrence: Option<ReturnResultOccurrenceId>,
     #[serde(default = "default_next_return_result_occurrence_id")]
     pub next_return_result_occurrence_id: u64,
+    // Client projections reset this private allocator to its idle default.
+    // Canonical saves retain every advanced value so process ids never repeat.
+    #[serde(
+        default = "default_next_return_result_process_id",
+        skip_serializing_if = "is_default_next_return_result_process_id"
+    )]
+    pub next_return_result_process_id: u64,
 
     /// CR 700.2 + CR 608.2c: The `modal_instruction_ordinal` of the modal
     /// instruction currently resolving. It EDGE-TRIGGERS the mode boundary in
@@ -30283,6 +31739,7 @@ impl GameState {
             return_result_frames: BTreeMap::new(),
             active_return_result_occurrence: None,
             next_return_result_occurrence_id: default_next_return_result_occurrence_id(),
+            next_return_result_process_id: default_next_return_result_process_id(),
             resolving_modal_instruction: None,
             tracked_set_member_causes: im::HashMap::new(),
             tracked_set_participants: HashMap::new(),
@@ -31602,6 +33059,7 @@ impl GameState {
         // Live frames and their references remain compared below; only this
         // monotone source of fresh IDs is normalized for recurrence checks.
         clone.next_return_result_occurrence_id = 0;
+        clone.next_return_result_process_id = 0;
         clone.active_paid_resolution_offer_tail = None;
         clone.active_auto_tap_row_policy = None;
         // CR 104.4b: pip-id counter is a volatile monotonic field; zero it (like
@@ -33302,6 +34760,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         return_result_frames: _,
         active_return_result_occurrence: _,
         next_return_result_occurrence_id: _,
+        next_return_result_process_id: _,
         // CR 700.2: mode-boundary edge latch, cleared in the same depth-0 prelude
         // block as `chain_tracked_set_id` above and meaningful only inside one
         // resolution — the same reason that field is projected out here.
@@ -33672,6 +35131,7 @@ impl PartialEq for GameState {
             && self.return_result_frames == other.return_result_frames
             && self.active_return_result_occurrence == other.active_return_result_occurrence
             && self.next_return_result_occurrence_id == other.next_return_result_occurrence_id
+            && self.next_return_result_process_id == other.next_return_result_process_id
             && self.resolving_modal_instruction == other.resolving_modal_instruction
             && self.tracked_set_member_causes == other.tracked_set_member_causes
             && self.tracked_set_participants == other.tracked_set_participants
@@ -36516,6 +37976,8 @@ mod tests {
         paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
         state.push_change_zone_iteration(PendingChangeZoneIteration {
+            return_result_occurrence: None,
+            return_result_process: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: Some(paused),
@@ -38074,6 +39536,7 @@ mod tests {
             .stack_trigger_event_batches
             .insert(ObjectId(9_003), vec![event.clone()]);
         state.pending_player_scope_sacrifice_choice = Some(PendingPlayerScopeSacrificeChoice {
+            return_result_occurrence: None,
             ability: state
                 .pending_trigger
                 .as_ref()
@@ -40474,6 +41937,7 @@ mod tests {
         let first = ObjectIncarnationRef::of(ObjectId(10), 1);
         let second = ObjectIncarnationRef::of(ObjectId(20), 2);
         PendingScopedLibrarySearch {
+            return_result_occurrence: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::Shuffle {
                     target: TargetFilter::Controller,
@@ -41092,6 +42556,8 @@ mod tests {
             pins: vec![None, Some(ObjectIncarnationRef::of(ObjectId(8), 3))],
         };
         let prompt = WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: PlayerId(0),
             controller: PlayerId(0),
             source_id: ObjectId(7),
@@ -41105,6 +42571,8 @@ mod tests {
             remaining_players: Vec::new(),
         };
         let frame = PendingChooseOneOf {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             controller: PlayerId(0),
             source_id: ObjectId(7),
             branches: Vec::new(),
@@ -42738,6 +44206,7 @@ mod tests {
                 ability_snapshot: None,
                 color_override: None,
                 resume: ManaAbilityResume::UnlessPayment {
+                    return_result_occurrence: None,
                     outer_player: None,
                     cost: Box::new(crate::types::ability::AbilityCost::Blight { count: 1 }),
                     pending_effect: Box::new(ResolvedAbility::new(
@@ -45414,6 +46883,7 @@ mod tests {
             remember_identity: None,
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
+            return_result_occurrence: None,
             player: PlayerId(0),
             source_id: ObjectId(1),
             choosable: vec![ObjectId(2)],
@@ -45480,6 +46950,8 @@ mod tests {
             reciprocal_role: None,
         }));
         variants.push(Box::new(WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: PlayerId(0),
             controller: PlayerId(0),
             source_id: ObjectId(100),
@@ -45660,6 +47132,8 @@ mod tests {
             discard_frame: None,
         }));
         variants.push(Box::new(WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
             count: 1,
@@ -46160,6 +47634,7 @@ mod tests {
                 options: vec![ManaType::Black, ManaType::Green],
             },
             context: ManaChoiceContext::ManaAbility(Box::new(pending.clone())),
+            return_result_occurrence: None,
         };
         assert!(!state.waiting_for.has_pending_cast());
         assert!(state.waiting_for.is_mana_ability_continuation());
@@ -46483,6 +47958,8 @@ mod tests {
             }],
         };
         let wf = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![ObjectId(1), ObjectId(2)],
             count: 1,
@@ -46585,6 +48062,8 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
+            return_result_occurrence: None,
+            return_result_process: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
@@ -47071,6 +48550,8 @@ mod tests {
     #[test]
     fn effect_zone_choice_modern_shape_roundtrips_with_player_id() {
         let wf = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![],
             count: 1,
@@ -49686,6 +51167,7 @@ mod sought_result_current_tests {
                     bad.return_result_frames
                         .get_mut(&occurrence_id)
                         .unwrap()
+                        .results
                         .insert(result_id, InstructionResult::ZoneChanges(Vec::new()));
                 }
                 3 => {
@@ -49795,5 +51277,205 @@ mod u13_counter_result_codec_tests {
             serde_json::from_value::<InstructionResult>(empty).unwrap(),
             InstructionResult::CounterRemovals(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod departure_process_saved_authority_tests {
+    use super::*;
+
+    #[test]
+    fn departure_process_allocator_roundtrips_advanced_authority_and_omits_projected_default() {
+        let mut state = GameState::new_two_player(42);
+        assert!(serde_json::to_value(&state)
+            .unwrap()
+            .get("next_return_result_process_id")
+            .is_none());
+        state.next_return_result_process_id = 38;
+        let saved = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            saved["next_return_result_process_id"],
+            serde_json::json!(38)
+        );
+        assert_eq!(
+            serde_json::from_value::<GameState>(saved)
+                .unwrap()
+                .next_return_result_process_id,
+            38
+        );
+        for projected in [
+            crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0)),
+            crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1)),
+            crate::game::visibility::filter_state_for_unseated_viewer(&state),
+        ] {
+            assert!(!serde_json::to_string(&projected)
+                .unwrap()
+                .contains("return_result_process"));
+            assert_eq!(projected.next_return_result_process_id, 1);
+        }
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("next_return_result_process_id");
+        assert_eq!(
+            serde_json::from_value::<GameState>(legacy)
+                .unwrap()
+                .next_return_result_process_id,
+            1
+        );
+    }
+
+    #[test]
+    fn departure_frame_current_and_legacy_shapes_keep_their_actual_authority() {
+        let result = ReturnResultId(7);
+        let records = InstructionResult::ZoneChanges(vec![]);
+        let owned = ReturnResultFrame {
+            process: Some(ReturnResultProcessId(5)),
+            results: [(result, records.clone())].into_iter().collect(),
+        };
+        let current: ReturnResultFrame =
+            serde_json::from_value(serde_json::to_value(&owned).unwrap()).unwrap();
+        assert_eq!(current, owned);
+        let legacy: ReturnResultFrame =
+            serde_json::from_value(serde_json::to_value(&owned.results).unwrap()).unwrap();
+        assert_eq!(legacy.process, None);
+        assert_eq!(legacy.results[&result], records);
+        assert_ne!(legacy, owned);
+        let mut state = GameState::new_two_player(42);
+        state.next_return_result_occurrence_id = 2;
+        state.next_return_result_process_id = 6;
+        state
+            .return_result_frames
+            .insert(ReturnResultOccurrenceId(1), legacy);
+        assert!(
+            checked_return_result_frame(&state, Some(ReturnResultOccurrenceId(1)), None, false)
+                .is_ok(),
+            "ordinary legacy named results retain their established no-P semantics"
+        );
+        assert_eq!(
+            checked_return_result_frame(&state, Some(ReturnResultOccurrenceId(1)), None, true)
+                .unwrap_err(),
+            "instruction-result process owner mismatch"
+        );
+        state
+            .return_result_frames
+            .insert(ReturnResultOccurrenceId(1), owned);
+        assert!(checked_return_result_frame(
+            &state,
+            Some(ReturnResultOccurrenceId(1)),
+            Some(ReturnResultProcessId(5)),
+            true
+        )
+        .is_ok());
+        assert_eq!(
+            checked_return_result_frame(
+                &state,
+                Some(ReturnResultOccurrenceId(1)),
+                Some(ReturnResultProcessId(7)),
+                true
+            )
+            .unwrap_err(),
+            "instruction-result process owner mismatch"
+        );
+    }
+
+    #[test]
+    fn departure_saved_allocators_refuse_zero_behind_duplicate_and_unowned_current_readers() {
+        let (runner, _, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let original = runner.state();
+        let (&occurrence, frame) = original.return_result_frames.iter().next().unwrap();
+        let process = frame.process.unwrap();
+        assert!(
+            serde_json::from_value::<GameState>(serde_json::to_value(original).unwrap()).is_ok()
+        );
+        for fault in 0..7 {
+            let mut state = original.clone();
+            match fault {
+                0 => state.next_return_result_occurrence_id = 0,
+                1 => state.next_return_result_occurrence_id = occurrence.0,
+                2 => state.next_return_result_process_id = 0,
+                3 => state.next_return_result_process_id = process.0,
+                4 => {
+                    state
+                        .return_result_frames
+                        .get_mut(&occurrence)
+                        .unwrap()
+                        .process = Some(ReturnResultProcessId(0))
+                }
+                5 => {
+                    let duplicate =
+                        ReturnResultOccurrenceId(state.next_return_result_occurrence_id);
+                    state.next_return_result_occurrence_id += 1;
+                    state.return_result_frames.insert(duplicate, frame.clone());
+                }
+                6 => {
+                    state
+                        .return_result_frames
+                        .get_mut(&occurrence)
+                        .unwrap()
+                        .process = None
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_value::<GameState>(serde_json::to_value(state).unwrap()).is_err(),
+                "current saved owner fault {fault}"
+            );
+        }
+        let first = GameState::new_two_player(42);
+        let mut second = first.clone();
+        second.next_return_result_occurrence_id = 11;
+        second.next_return_result_process_id = 37;
+        assert_ne!(first, second);
+        assert_eq!(
+            first.normalize_for_loop(),
+            second.normalize_for_loop(),
+            "only comparison copies normalize idle monotonic allocators"
+        );
+        assert_eq!(second.next_return_result_occurrence_id, 11);
+        assert_eq!(second.next_return_result_process_id, 37);
+    }
+
+    #[test]
+    fn departure_legacy_named_result_public_replacement_pause_still_completes() {
+        fn remove_process_fields(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.remove("return_result_process");
+                    fields.remove("expected_return_result_process");
+                    fields.remove("next_return_result_process_id");
+                    if let Some(serde_json::Value::Object(frames)) =
+                        fields.get_mut("return_result_frames")
+                    {
+                        for frame in frames.values_mut() {
+                            *frame = frame.get("results").unwrap().clone();
+                        }
+                    }
+                    for child in fields.values_mut() {
+                        remove_process_fields(child);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for child in values {
+                        remove_process_fields(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let mut wire = serde_json::to_value(runner.state()).unwrap();
+        remove_process_fields(&mut wire);
+        let loaded: GameState = serde_json::from_value(wire)
+            .expect("historical named-result bare maps and missing process metadata remain usable");
+        assert!(loaded
+            .return_result_frames
+            .values()
+            .all(|frame| frame.process.is_none()));
+        let mut legacy = crate::game::scenario::GameRunner::from_state(loaded);
+        crate::game::effects::seek::tests::finish_sought_pause(&mut legacy, &cards);
+        assert!(legacy.state().return_result_frames.is_empty());
+        assert!(legacy.state().resolution_stack.is_empty());
     }
 }

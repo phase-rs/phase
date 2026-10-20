@@ -237,6 +237,8 @@ pub fn resolve(
                 // (`engine_resolution_choices.rs`) which honors `destination`
                 // for the battlefield → hand move.
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    return_result_occurrence: None,
+                    return_result_process: None,
                     player: ability.controller,
                     cards: eligible,
                     count: 1,
@@ -334,6 +336,8 @@ pub fn resolve(
                 // `EffectZoneChoice` intake (`engine_resolution_choices.rs`)
                 // which honors `destination` for the graveyard → hand move.
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    return_result_occurrence: None,
+                    return_result_process: None,
                     player: selecting_player,
                     cards: matching,
                     count: 1,
@@ -534,7 +538,13 @@ pub fn resolve_all(
                 let occurrence = state.active_return_result_occurrence.ok_or_else(|| {
                     EffectError::MissingParam("return result occurrence".to_string())
                 })?;
-                super::publish_return_result(state, occurrence, result_id, Vec::new())?;
+                super::publish_return_result(
+                    state,
+                    occurrence,
+                    result_id,
+                    ability.return_result_process,
+                    Vec::new(),
+                )?;
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -546,6 +556,8 @@ pub fn resolve_all(
 
         if matching.len() > count {
             state.waiting_for = crate::types::game_state::WaitingFor::EffectZoneChoice {
+                return_result_occurrence: None,
+                return_result_process: None,
                 player: ability.controller,
                 cards: matching,
                 count,
@@ -610,6 +622,7 @@ pub fn resolve_all(
                     EffectError::MissingParam("return result occurrence".to_string())
                 })?,
                 result_id,
+                return_result_process: ability.return_result_process,
                 settled_records: None,
             },
         )

@@ -162,6 +162,8 @@ fn resolve_battlefield(
         subject_pools.into_iter().collect();
 
     state.waiting_for = WaitingFor::SeparatePilesPartition {
+        return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+        expected_return_result_process: ability.return_result_process,
         player: first_subject,
         eligible: first_pool,
         remaining_subjects,
@@ -249,6 +251,8 @@ fn resolve_revealed_from_library_top(
     if candidates.len() >= 2 {
         // Multiplayer: surface a choice prompt for the controller.
         state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            expected_return_result_process: ability.return_result_process,
             player: controller,
             candidates,
             eligible,
@@ -262,6 +266,8 @@ fn resolve_revealed_from_library_top(
         // Two-player game: single opponent, no decision needed.
         let partitioner = candidates.into_iter().next().unwrap_or(controller);
         state.waiting_for = WaitingFor::SeparatePilesPartition {
+            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            expected_return_result_process: ability.return_result_process,
             player: partitioner,
             eligible,
             remaining_subjects: crate::im::Vector::new(),
@@ -324,6 +330,8 @@ fn resolve_exiled_this_way(
 
     if candidates.len() >= 2 {
         state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
+            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            expected_return_result_process: ability.return_result_process,
             player: controller,
             candidates,
             eligible,
@@ -336,6 +344,8 @@ fn resolve_exiled_this_way(
     } else {
         let partitioner = candidates.into_iter().next().unwrap_or(controller);
         state.waiting_for = WaitingFor::SeparatePilesPartition {
+            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            expected_return_result_process: ability.return_result_process,
             player: partitioner,
             eligible,
             remaining_subjects: crate::im::Vector::new(),
@@ -358,6 +368,7 @@ pub fn apply_pile_effect(
     source_id: ObjectId,
     chosen_pile_effect: &crate::types::ability::AbilityDefinition,
     results: &[(PileResult, crate::types::game_state::PileSide)],
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // CR 608.2c + CR 110.2a: The sub-effect controller must be the source's
@@ -391,8 +402,9 @@ pub fn apply_pile_effect(
         for &object_id in chosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(chosen_pile_effect, source_id, source_controller);
+            chain.bind_return_result_process(expected_return_result_process);
             chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
-            super::resolve_ability_chain(state, &chain, events, 1)?;
+            super::resolve_selected_ability_chain(state, &chain, events, 1)?;
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -410,6 +422,7 @@ pub fn apply_unchosen_pile_effect(
     source_id: ObjectId,
     unchosen_pile_effect: &crate::types::ability::AbilityDefinition,
     results: &[(PileResult, crate::types::game_state::PileSide)],
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // CR 608.2c: Same source-controller reasoning as `apply_pile_effect`.
@@ -436,8 +449,9 @@ pub fn apply_unchosen_pile_effect(
         for &object_id in unchosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(unchosen_pile_effect, source_id, source_controller);
+            chain.bind_return_result_process(expected_return_result_process);
             chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
-            super::resolve_ability_chain(state, &chain, events, 1)?;
+            super::resolve_selected_ability_chain(state, &chain, events, 1)?;
         }
     }
     Ok(())
@@ -452,6 +466,8 @@ fn sub_effect_as_resolved(
     let mut resolved =
         ResolvedAbility::new((*def.effect).clone(), Vec::new(), source_id, controller);
     resolved.kind = def.kind;
+    resolved.declares_return_result = def.declares_return_result;
+    resolved.reads_return_result = def.reads_return_result.clone();
     resolved.sub_ability = def
         .sub_ability
         .as_ref()

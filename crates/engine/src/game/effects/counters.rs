@@ -1437,7 +1437,7 @@ pub(crate) fn apply_counter_removal_with_result(
         let Some(crate::types::game_state::InstructionResult::CounterRemovals(result)) = state
             .return_result_frames
             .get_mut(&binding.occurrence)
-            .and_then(|frame| frame.get_mut(&binding.result))
+            .and_then(|frame| frame.results.get_mut(&binding.result))
         else {
             unreachable!("validated counter-removal result disappeared");
         };
@@ -9460,6 +9460,7 @@ mod u13_counter_receipt_owner_tests {
         let binding = CounterRemovalResultBinding {
             occurrence,
             result,
+            process: None,
             source: ObjectIdentityBinding::new(pin, Zone::Battlefield),
             recipient: Some(pin),
             counters: CounterMatch::OfType(charge.clone()),
@@ -9468,6 +9469,7 @@ mod u13_counter_receipt_owner_tests {
             .return_result_frames
             .entry(occurrence)
             .or_default()
+            .results
             .insert(
                 result,
                 InstructionResult::CounterRemovals(CounterRemovalInstructionResult {
@@ -9549,7 +9551,7 @@ mod u13_counter_receipt_owner_tests {
             0
         );
         let InstructionResult::CounterRemovals(receipt) =
-            &state.return_result_frames[&occurrence][&result]
+            &state.return_result_frames[&occurrence].results[&result]
         else {
             panic!("typed result")
         };

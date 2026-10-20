@@ -373,6 +373,8 @@ pub fn resolve(
                 return Ok(());
             }
             state.waiting_for = WaitingFor::EffectZoneChoice {
+                return_result_occurrence: None,
+                return_result_process: None,
                 player: choosing_player,
                 cards: eligible,
                 count: expected.min(eligible_count),
@@ -431,6 +433,8 @@ pub fn resolve(
     // than the placement count allows, prompt before auto-picking the first.
     if collected_targets.len() > expected && expected > 0 {
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: ability.controller,
             cards: collected_targets,
             count: expected,

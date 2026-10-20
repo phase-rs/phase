@@ -2384,6 +2384,7 @@ pub fn fallback_action(
             player,
             choice,
             context,
+            ..
         } => match context {
             ManaChoiceContext::ResolvingEffect(_) => {
                 let issued_actions: Vec<_> = contract
@@ -2828,6 +2829,7 @@ fn resolving_effect_mana_choice(
         player,
         choice,
         context: ManaChoiceContext::ResolvingEffect(resume),
+        ..
     } = &state.waiting_for
     else {
         return None;
@@ -9285,6 +9287,7 @@ mod tests {
             player: PlayerId(0),
             choice: ManaChoicePrompt::SingleColor { options },
             context: ManaChoiceContext::ResolvingEffect(Box::new(resume)),
+            return_result_occurrence: None,
         };
         state
     }
@@ -9306,6 +9309,7 @@ mod tests {
             player: PlayerId(0),
             choice: ManaChoicePrompt::AnyCombination { count, options },
             context: ManaChoiceContext::ResolvingEffect(Box::new(resume)),
+            return_result_occurrence: None,
         };
         state
     }
@@ -12622,6 +12626,8 @@ mod tests {
     ) -> WaitingFor {
         let _ = state;
         WaitingFor::VoteChoice {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: subject,
             remaining_votes: 1,
             options: vec!["friend".to_string(), "foe".to_string()],
@@ -13071,6 +13077,8 @@ mod tests {
         let mut state = make_state();
         let controller = PlayerId(0);
         state.waiting_for = WaitingFor::VoteChoice {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: controller,
             remaining_votes: 1,
             options: vec!["evidence".to_string(), "bribery".to_string()],
@@ -14978,6 +14986,8 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: ai,
             cards,
             count,
@@ -15297,6 +15307,8 @@ mod tests {
             })
             .collect();
         state.waiting_for = WaitingFor::SeparatePilesPartition {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: PlayerId(0),
             eligible: eligible.iter().copied().collect(),
             remaining_subjects: engine::im::Vector::new(),
@@ -15735,6 +15747,8 @@ mod tests {
         push("EffectZoneChoice", &|state| {
             let source = vanilla_in_hand(state, PlayerId(0));
             WaitingFor::EffectZoneChoice {
+                return_result_occurrence: None,
+                return_result_process: None,
                 player: PlayerId(0),
                 cards: hand_pool(state, PlayerId(0), 3),
                 count: 1,
@@ -15802,6 +15816,7 @@ mod tests {
         push("WardDiscardChoice", &|state| {
             let source = vanilla_in_hand(state, PlayerId(0));
             WaitingFor::WardDiscardChoice {
+                return_result_occurrence: None,
                 player: PlayerId(0),
                 cards: hand_pool(state, PlayerId(0), 3),
                 pending_effect: stub_pending_effect(source, PlayerId(1)),
@@ -15815,6 +15830,7 @@ mod tests {
                 .map(|_| add_creature(state, PlayerId(0), 1, 1))
                 .collect();
             WaitingFor::WardSacrificeChoice {
+                return_result_occurrence: None,
                 player: PlayerId(0),
                 permanents,
                 pending_effect: stub_pending_effect(source, PlayerId(1)),
@@ -15828,6 +15844,7 @@ mod tests {
                 .map(|_| add_creature(state, PlayerId(0), 1, 1))
                 .collect();
             WaitingFor::UnlessBounceChoice {
+                return_result_occurrence: None,
                 player: PlayerId(0),
                 permanents,
                 pending_effect: stub_pending_effect(source, PlayerId(1)),
@@ -16389,6 +16406,7 @@ mod tests {
             ai,
         );
         state.waiting_for = WaitingFor::MultiTargetSelection {
+            return_result_occurrence: None,
             player: ai,
             legal_targets: targets.clone(),
             min_targets: 13,
@@ -16424,6 +16442,7 @@ mod tests {
         let source = vanilla_in_hand(&mut state, ai);
         let cards = hand_pool(&mut state, ai, 3);
         state.waiting_for = WaitingFor::WardDiscardChoice {
+            return_result_occurrence: None,
             player: ai,
             cards: cards.clone(),
             pending_effect: stub_pending_effect(source, PlayerId(1)),

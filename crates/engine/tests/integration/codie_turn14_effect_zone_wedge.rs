@@ -249,6 +249,8 @@ fn park_prompt(
     library_position: Option<LibraryPosition>,
 ) {
     runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: P0,
         cards,
         count: 1,

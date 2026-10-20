@@ -1071,6 +1071,8 @@ fn park_resolution_attachment_choice(
     let mut operation = ability.clone();
     let tail = operation.sub_ability.take();
     let waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: ability.controller,
         cards,
         count: bounds.max,

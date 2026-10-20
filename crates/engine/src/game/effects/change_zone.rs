@@ -1106,6 +1106,7 @@ pub fn resolve(
             // CR 614.12: gate the tapped/attacking riders on the chosen object's type.
             let (eff_tapped, eff_attacking) = effective_enter_mods(
                 state,
+                Some(ability),
                 chosen,
                 ability.source_id,
                 effect_enter_tapped,
@@ -1195,6 +1196,7 @@ pub fn resolve(
             // CR 614.12: gate the tapped/attacking riders on the chosen object's type.
             let (eff_tapped, eff_attacking) = effective_enter_mods(
                 state,
+                Some(ability),
                 chosen,
                 ability.source_id,
                 effect_enter_tapped,
@@ -1270,7 +1272,21 @@ pub fn resolve(
             )));
         }
 
+        let retains_zone_reads = crate::types::game_state::validate_zone_entry_result_owner(
+            state,
+            state.active_return_result_occurrence,
+            ability.return_result_process,
+            &effect_conditional_enter_with_counters,
+            effect_enters_modified_if.as_ref(),
+        )
+        .map_err(EffectError::InvalidParam)?;
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: retains_zone_reads
+                .then_some(state.active_return_result_occurrence)
+                .flatten(),
+            return_result_process: retains_zone_reads
+                .then_some(ability.return_result_process)
+                .flatten(),
             player: filter_controller,
             cards: eligible,
             count: choice_count,
@@ -1314,6 +1330,7 @@ pub fn resolve(
     }
 
     let ctx = ChangeZoneIterationCtx {
+        return_result_process: ability.return_result_process,
         source_id: ability.source_id,
         controller: ability.controller,
         origin,
@@ -1411,7 +1428,13 @@ pub fn resolve(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match process_one_zone_move_with_terminal(state, &per_obj_ctx, *obj_id, events) {
+        match process_one_zone_move_with_terminal(
+            state,
+            &per_obj_ctx,
+            Some(ability),
+            *obj_id,
+            events,
+        ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(*obj_id, completion)
@@ -1432,6 +1455,8 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        return_result_occurrence: state.active_return_result_occurrence,
+                        return_result_process: ability.return_result_process,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -1487,6 +1512,8 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        return_result_occurrence: state.active_return_result_occurrence,
+                        return_result_process: ability.return_result_process,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: Some(
@@ -1647,21 +1674,69 @@ pub(crate) fn resolving_stack_ability_for_source(
 
 /// Merge unconditional and conditional entry counters for one object during a
 /// paused multi-object `ChangeZone` resume.
+pub(crate) fn pending_zone_entry_evaluation_ability(
+    state: &GameState,
+    source_id: ObjectId,
+    occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+    conditional: &[(TargetFilter, CounterType, QuantityExpr)],
+    gate: Option<&TargetFilter>,
+) -> Result<Option<ResolvedAbility>, EffectError> {
+    let addressed = crate::types::game_state::validate_zone_entry_result_owner(
+        state,
+        occurrence,
+        expected,
+        conditional,
+        gate,
+    )
+    .map_err(EffectError::InvalidParam)?;
+    if !addressed
+        && conditional.iter().all(|(filter, _, count)| {
+            matches!(
+                (filter, count),
+                (TargetFilter::Any, QuantityExpr::Fixed { .. })
+            )
+        })
+    {
+        return Ok(None);
+    }
+    let mut view = resolving_stack_ability_for_source(state, source_id)
+        .ok_or_else(|| EffectError::MissingParam("zone entry evaluation context".into()))?;
+    // Attribution supplies operands only; its invocation identity is never authority.
+    view.return_result_process = expected;
+    Ok(Some(view))
+}
+
 pub(crate) fn enter_with_counters_for_pending_object(
     state: &GameState,
     source_id: ObjectId,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
     obj_id: ObjectId,
     base: &[(CounterType, u32)],
     conditional: &[(TargetFilter, CounterType, QuantityExpr)],
-) -> Vec<(CounterType, u32)> {
-    if base.is_empty() && conditional.is_empty() {
-        return vec![];
-    }
-    if let Some(ability) = resolving_stack_ability_for_source(state, source_id) {
-        enter_with_counters_for_object(state, &ability, obj_id, base, conditional)
-    } else {
-        base.to_vec()
-    }
+    gate: Option<&TargetFilter>,
+) -> Result<Vec<(CounterType, u32)>, EffectError> {
+    let view = pending_zone_entry_evaluation_ability(
+        state,
+        source_id,
+        state.active_return_result_occurrence,
+        expected,
+        conditional,
+        gate,
+    )?;
+    Ok(match view {
+        Some(ability) => enter_with_counters_for_object(state, &ability, obj_id, base, conditional),
+        None => {
+            let mut counters = base.to_vec();
+            for (filter, kind, count) in conditional {
+                let (TargetFilter::Any, QuantityExpr::Fixed { value }) = (filter, count) else {
+                    unreachable!("only context-free entry counters omit the ability view");
+                };
+                counters.push((kind.clone(), (*value).max(0) as u32));
+            }
+            counters
+        }
+    })
 }
 
 /// Per-iteration context for the multi-target `ChangeZone` loop. Captured once
@@ -1671,6 +1746,7 @@ pub(crate) fn enter_with_counters_for_pending_object(
 /// minus the resume-only fields (`remaining`, `effect_kind`).
 #[derive(Clone)]
 pub(crate) struct ChangeZoneIterationCtx {
+    pub return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub origin: Option<Zone>,
@@ -1718,6 +1794,7 @@ pub(crate) struct ChangeZoneIterationCtx {
 /// as-it-would-exist-on-battlefield check (CR 614.12).
 pub(crate) fn effective_enter_mods(
     state: &GameState,
+    ability: Option<&ResolvedAbility>,
     obj_id: ObjectId,
     source_id: ObjectId,
     base_tapped: EtbTapState,
@@ -1727,7 +1804,11 @@ pub(crate) fn effective_enter_mods(
     match gate {
         None => (base_tapped, base_attacking),
         Some(filter) => {
-            let ctx = crate::game::filter::FilterContext::from_source(state, source_id);
+            let ctx = ability
+                .map(crate::game::filter::FilterContext::from_ability)
+                .unwrap_or_else(|| {
+                    crate::game::filter::FilterContext::from_source(state, source_id)
+                });
             if crate::game::filter::matches_target_filter(state, obj_id, filter, &ctx) {
                 (base_tapped, base_attacking)
             } else {
@@ -1751,12 +1832,13 @@ pub(crate) fn process_one_zone_move(
     obj_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    process_one_zone_move_with_terminal(state, ctx, obj_id, events).into_zone_move_result()
+    process_one_zone_move_with_terminal(state, ctx, None, obj_id, events).into_zone_move_result()
 }
 
 pub(crate) fn process_one_zone_move_with_terminal(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
+    evaluation_view: Option<&ResolvedAbility>,
     obj_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
@@ -1807,8 +1889,12 @@ pub(crate) fn process_one_zone_move_with_terminal(
     // permanent face down with the effect's characteristics. `None` keeps the
     // normal face-up entry for every non-face-down move.
     // CR 614.12: gate the tapped/attacking riders on this chosen object's type.
+    debug_assert!(
+        evaluation_view.is_none_or(|view| view.return_result_process == ctx.return_result_process)
+    );
     let (eff_tapped, eff_attacking) = effective_enter_mods(
         state,
+        evaluation_view,
         obj_id,
         ctx.source_id,
         ctx.enter_tapped,
@@ -1873,6 +1959,8 @@ fn mass_library_order_effect_zone_choice(
         .map(|member| member.identity.object_id)
         .collect();
     WaitingFor::EffectZoneChoice {
+        return_result_occurrence: None,
+        return_result_process: None,
         player: batch.owner,
         cards,
         count: choice_count,
@@ -2322,6 +2410,15 @@ pub fn resolve_all(
         matching.shuffle(state.rng.draw(RandomDraw::Placement));
     }
 
+    let pending_return_result_producer = match ability.declares_return_result {
+        Some(result) => Some((
+            state
+                .active_return_result_occurrence
+                .ok_or_else(|| EffectError::MissingParam("departure producer occurrence".into()))?,
+            result,
+        )),
+        None => None,
+    };
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
@@ -2417,7 +2514,9 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
-                        pending_return_result_producer: None,
+                        return_result_occurrence: None,
+                        return_result_process: ability.return_result_process,
+                        pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: (!entry_target_choice).then(|| {
                             state
@@ -2481,7 +2580,9 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
-                        pending_return_result_producer: None,
+                        return_result_occurrence: None,
+                        return_result_process: ability.return_result_process,
+                        pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
                             boundary.append_delivery_events(&events[delivery_start..]);
@@ -2546,6 +2647,18 @@ pub fn resolve_all(
         &mut events[logical_group_event_start..],
     )
     .expect("completed ChangeZoneAll owns every terminal member outcome");
+
+    if let Some((occurrence, result)) = pending_return_result_producer {
+        super::publish_return_result(
+            state,
+            occurrence,
+            result,
+            ability.return_result_process,
+            crate::types::game_state::settled_logical_zone_change_records(
+                &logical_zone_change_group,
+            ),
+        )?;
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -4148,6 +4261,7 @@ mod tests {
         assert_eq!(
             effective_enter_mods(
                 &state,
+                None,
                 ench,
                 src,
                 crate::types::zones::EtbTapState::Tapped,
@@ -4160,6 +4274,7 @@ mod tests {
         assert_eq!(
             effective_enter_mods(
                 &state,
+                None,
                 plain,
                 src,
                 crate::types::zones::EtbTapState::Tapped,
@@ -4172,6 +4287,7 @@ mod tests {
         assert_eq!(
             effective_enter_mods(
                 &state,
+                None,
                 plain,
                 src,
                 crate::types::zones::EtbTapState::Tapped,
@@ -7031,6 +7147,8 @@ mod tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
+            return_result_occurrence: None,
+            return_result_process: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
@@ -10587,6 +10705,8 @@ mod tests {
         // canonical card that emits this exact prompt with both shocks
         // present, so the test drives the resume path directly.
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: PlayerId(0),
             cards: vec![shock_a, shock_b, graveyard_land],
             count: 3,

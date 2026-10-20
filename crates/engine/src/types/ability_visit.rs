@@ -27,8 +27,8 @@
 //! set is a strict SUPERSET of this module's: it also descends `Effect::Mana`,
 //! `GrantCastingPermission`, `ExileResolvingSpellInsteadOfGraveyard`,
 //! `CreateDelayedTrigger.condition`, the copy family,
-//! `AddPendingEntersModifications`, `EachPlayerCopyChosen`, and `ReturnAsAura`,
-//! all leaves here. So a carrier added there is not necessarily a carrier here,
+//! `AddPendingEntersModifications` and `EachPlayerCopyChosen`, all leaves here.
+//! `ReturnAsAura` descends its registered continuous-modification grants here. So a carrier added there is not necessarily a carrier here,
 //! but a carrier added here is always one there. The superset relation does NOT
 //! extend one level down: this module descends
 //! `ContinuousModification::CopyValues` into `visit_copiable_values_scoped` and
@@ -249,7 +249,7 @@ where
 /// descend the one carrier list: shared (every `Effect`) at this module's root,
 /// exclusive (every definition node) in [`nodes_mut`].
 macro_rules! define_walk {
-    ([$($mut_:tt)?]; [$($bound:tt)+]; $on_effect:ident; $on_node:ident; $arc_iter:ident) => {
+    ([$($mut_:tt)?]; [$($bound:tt)+]; $on_effect:ident; $on_node:ident; $arc_iter:ident; $descend_nested:literal) => {
 /// Effect-axis wrapper over [`scope_prunes_nested_ability`]. Every recursion
 /// into a nested `AbilityDefinition` that is *not* already behind a boundary
 /// gate goes through here.
@@ -262,6 +262,10 @@ where
     F: $($bound)+,
 {
     if scope_prunes_nested_ability(def, scope) {
+        return ControlFlow::Continue(());
+    }
+    if !$descend_nested {
+        $on_node!(visit, Ability, def);
         return ControlFlow::Continue(());
     }
     visit_ability_def_scoped(def, scope, visit)
@@ -283,6 +287,9 @@ where
     F: $($bound)+,
 {
     $on_node!(visit, Ability, def);
+    if !$descend_nested {
+        return ControlFlow::Continue(());
+    }
     visit_effect_scoped(&$($mut_)? def.effect, scope, visit)?;
     if let Some(cost) = &$($mut_)? def.cost {
         visit_cost_scoped(cost, scope, visit)?;
@@ -824,6 +831,13 @@ where
                 }
             }
         }
+        // Installed Aura grants belong to the returned permanent's later
+        // activations/triggers, under the same registered-body boundary as other grants.
+        Effect::ReturnAsAura { grants, .. } => {
+            if scope == ResolutionScope::IncludeRegisteredLater {
+                for modification in grants { visit_continuous_mod_scoped(modification, scope, visit)?; }
+            }
+        }
         // Leaf effects with no nested ability/effect carrier.
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
@@ -1059,9 +1073,6 @@ where
         | Effect::CreateDamageReplacement { .. }
         | Effect::CombineHost { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
-        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
-        // ContinuousModifications, never conjured card names.
-        | Effect::ReturnAsAura { .. }
         | Effect::Specialize
         // CR 608.2d + CR 122.1: counter-kind choice / consume carry no conjure names.
         | Effect::ChooseCounterKind { .. }
@@ -1101,7 +1112,7 @@ macro_rules! exclusive_iter {
     };
 }
 
-define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter);
+define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter; true);
 
 /// A definition node surfaced by the exclusive walk.
 pub enum DefinitionNodeMut<'a> {
@@ -1115,7 +1126,7 @@ pub enum DefinitionNodeMut<'a> {
 pub mod nodes_mut {
     use super::*;
 
-    define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter);
+    define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter; true);
 }
 
 macro_rules! visit_each_node_ref {
@@ -1136,7 +1147,16 @@ pub enum DefinitionNode<'a> {
 pub mod nodes {
     use super::*;
 
-    define_walk!([]; [FnMut(DefinitionNode<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node_ref; shared_iter);
+    define_walk!([]; [FnMut(DefinitionNode<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node_ref; shared_iter; true);
+}
+
+/// The same carrier list, stopping at each invoked definition instead of
+/// flattening its descendants. Result-process validation uses this boundary
+/// to distinguish transparent readers from independently producing children.
+#[allow(dead_code)] // The shared generator also emits sibling traversal entry points.
+pub(crate) mod direct_nodes {
+    use super::*;
+    define_walk!([]; [FnMut(DefinitionNode<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node_ref; shared_iter; false);
 }
 
 /// CR 201.5a: the positions in one definition node where a granter symbol is bound.
@@ -1484,7 +1504,8 @@ fn quantity(q: &$($mut_)? QuantityExpr, v: &mut impl FnMut(Symbol<'_>)) {
 fn quantity_ref(r: &$($mut_)? QuantityRef, v: &mut impl FnMut(Symbol<'_>)) {
     match r {
         QuantityRef::CountersOn { scope, .. } => object_scope(scope, v),
-        QuantityRef::ObjectCount { filter: f } => filter(f, v),
+        QuantityRef::ObjectCount { filter: f }
+        | QuantityRef::ZoneChangeAggregate { filter: f, .. } => filter(f, v),
         QuantityRef::PropertyAggregate(aggregate) => {
             if let CardTypeSetSource::Objects { filter: f } = define_granter_walk!(@source aggregate $($mut_)?) {
                 filter(f, v);

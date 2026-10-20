@@ -9689,6 +9689,26 @@ pub enum CountBinding {
 }
 
 /// A dynamic game quantity — a runtime lookup into the game state.
+/// CR 400.7 + CR 608.2i: the population supplying captured zone departures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ZoneChangeRecordSource {
+    #[default]
+    ThisTurn,
+    InstructionResult {
+        result: ReturnResultId,
+    },
+}
+
+impl ZoneChangeRecordSource {
+    pub fn result_id(&self) -> Option<ReturnResultId> {
+        match self {
+            Self::ThisTurn => None,
+            Self::InstructionResult { result } => Some(*result),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityRef {
@@ -10322,7 +10342,7 @@ pub enum QuantityRef {
         filter: TargetFilter,
     },
     /// CR 400.7 + CR 603.10a + CR 700.4: Aggregate (sum/max/min via `function`) of
-    /// an object `property` over this turn's zone-change records matching
+    /// an object `property` over the selected captured zone-change records matching
     /// `from`/`to` and `filter`, using each moved object's last-known
     /// characteristics. The COUNT of the same population is
     /// `ZoneChangeCountThisTurn`; this is the value-aggregate sibling. CR 208.1
@@ -10332,7 +10352,10 @@ pub enum QuantityRef {
     /// values, consumed by the surrounding effect's own rule, e.g. CR 119 for
     /// life loss.) Used by "[loses life / draws / deals damage] equal to the
     /// total power of [type] that died this turn" (Genesis of the Daleks).
-    ZoneChangeAggregateThisTurn {
+    #[serde(alias = "ZoneChangeAggregateThisTurn")]
+    ZoneChangeAggregate {
+        #[serde(default)]
+        source: ZoneChangeRecordSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<Zone>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10668,7 +10691,451 @@ impl LetterQuery {
     }
 }
 
+// The shared and exclusive dependency walks have exactly the same nested-field classification.
+macro_rules! define_quantity_dependency_walk {
+ ([$($mut_:tt)?]; $nested:ident; $expr:ident; $source:ident) => {
+impl AbilityCondition {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+AbilityCondition::RevealedHasCardType { additional_filter, subtype_filter, .. } => { for value in additional_filter { value.$nested(f); } for value in subtype_filter { value.$nested(f); } },
+AbilityCondition::ObjectsShareQuality { subject, reference, .. } => { subject.$nested(f); reference.$nested(f); },
+AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target, .. } => { target.$nested(f); },
+AbilityCondition::QuantityCheck { lhs, rhs, .. } => { lhs.$expr(f); rhs.$expr(f); },
+AbilityCondition::PreviousEffectAmount { rhs, .. } => { rhs.$expr(f); },
+AbilityCondition::DiscardedCardMatchesFilter { filter, .. } => { filter.$nested(f); },
+AbilityCondition::TargetMatchesFilter { filter, .. } => { filter.$nested(f); },
+AbilityCondition::TriggeringSpellTargetsFilter { filter, .. } => { filter.$nested(f); },
+AbilityCondition::SourceMatchesFilter { filter, .. } => { filter.$nested(f); },
+AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter, .. } => { filter.$nested(f); },
+AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. } => { filter.$nested(f); },
+AbilityCondition::ControllerControlsMatching { filter, .. } => { filter.$nested(f); },
+AbilityCondition::ControllerControlledMatchingAsCast { filter, .. } => { filter.$nested(f); },
+AbilityCondition::ZoneChangedThisWay { filter, .. } => { filter.$nested(f); },
+AbilityCondition::CostPaidObjectMatchesFilter { filter, .. } => { filter.$nested(f); },
+AbilityCondition::ConditionInstead { inner, .. } => { inner.$nested(f); },
+AbilityCondition::And { conditions, .. } => { for value in conditions { value.$nested(f); } },
+AbilityCondition::Or { conditions, .. } => { for value in conditions { value.$nested(f); } },
+AbilityCondition::Not { condition, .. } => { condition.$nested(f); },
+AbilityCondition::ScopedPlayerMatches { filter, .. } => { filter.$nested(f); },
+AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn |
+AbilityCondition::TriggerEventTargetExploitedBySource |
+AbilityCondition::AdditionalCostPaid { .. } |
+AbilityCondition::AdditionalCostPaidInstead |
+AbilityCondition::AlternativeManaCostPaid |
+AbilityCondition::EffectOutcome { .. } |
+AbilityCondition::EventOutcomeWon |
+AbilityCondition::CoinFlipOutcome { .. } |
+AbilityCondition::WhenYouDo |
+AbilityCondition::CounterRemovedThisWay { .. } |
+AbilityCondition::WasCast { .. } |
+AbilityCondition::CastDuringPhase { .. } |
+AbilityCondition::CurrentPhaseIs { .. } |
+AbilityCondition::CastTimingPermission { .. } |
+AbilityCondition::ManaColorSpent { .. } |
+AbilityCondition::SourceEnteredThisTurn |
+AbilityCondition::CastVariantPaid { .. } |
+AbilityCondition::CastVariantPaidInstead { .. } |
+AbilityCondition::HasMaxSpeed |
+AbilityCondition::IsMonarch |
+AbilityCondition::IsInitiative |
+AbilityCondition::HasCityBlessing |
+AbilityCondition::HasEnduringStory |
+AbilityCondition::ControlsCommander { .. } |
+AbilityCondition::IsRingBearer |
+AbilityCondition::CompletedDungeon { .. } |
+AbilityCondition::TargetHasKeywordInstead { .. } |
+AbilityCondition::HasObjectTarget |
+AbilityCondition::IsYourTurn |
+AbilityCondition::WasStartingPlayer { .. } |
+AbilityCondition::SpellCastWithVariantThisTurn { .. } |
+AbilityCondition::FirstCombatPhaseOfTurn |
+AbilityCondition::FirstEndStepOfTurn |
+AbilityCondition::SourceIsTapped |
+AbilityCondition::SourceAttachedToCreature |
+AbilityCondition::DayNightIsNeither |
+AbilityCondition::DayNightIs { .. } |
+AbilityCondition::AbilityUseCountThisTurn { .. } |
+AbilityCondition::SourceLacksKeyword { .. } => {}
+}
+}
+}
+impl CardTypeSetSource {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+CardTypeSetSource::Objects { filter, .. } => { filter.$nested(f); },
+CardTypeSetSource::TurnJournal { filter, .. } => { for value in filter { value.$nested(f); } },
+CardTypeSetSource::AnyOf { sources, .. } => { for source in &$($mut_)? sources.0 { source.$nested(f); } },
+CardTypeSetSource::Zone { .. } |
+CardTypeSetSource::ExiledBySource |
+CardTypeSetSource::TrackedSet { .. } => {}
+}
+}
+}
+impl CastManaSpentMetric {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+CastManaSpentMetric::FromSource { source_filter, .. } => { source_filter.$nested(f); },
+CastManaSpentMetric::Total |
+CastManaSpentMetric::DistinctColors |
+CastManaSpentMetric::OfColor { .. } => {}
+}
+}
+}
+impl FilterProp {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+FilterProp::ControllerMatches { player, .. } => { player.$nested(f); },
+FilterProp::CanEnchant { target, .. } => { target.$nested(f); },
+FilterProp::Counters { count, .. } => { count.$expr(f); },
+FilterProp::Cmc { value, .. } => { value.$expr(f); },
+FilterProp::PtComparison { value, .. } => { value.$expr(f); },
+FilterProp::AnyOf { props, .. } => { for value in props { value.$nested(f); } },
+FilterProp::Not { prop, .. } => { prop.$nested(f); },
+FilterProp::DifferentNameFrom { filter, .. } => { filter.$nested(f); },
+FilterProp::DistinctFrom { reference, .. } => { reference.$nested(f); },
+FilterProp::SharesQuality { reference, .. } => { for value in reference { value.$nested(f); } },
+FilterProp::DealtDamageThisTurn { recipient, .. } => { for value in recipient { value.$nested(f); } },
+FilterProp::TargetsOnly { filter, .. } => { filter.$nested(f); },
+FilterProp::Targets { filter, .. } => { filter.$nested(f); },
+FilterProp::Token |
+FilterProp::NonToken |
+FilterProp::RepresentedByCard |
+FilterProp::ControllerChoseLabel { .. } |
+FilterProp::WasPlayed |
+FilterProp::Attacking { .. } |
+FilterProp::Blocking |
+FilterProp::BlockingSource |
+FilterProp::CombatRelation { .. } |
+FilterProp::BlockStatus { .. } |
+FilterProp::AttackingAlone |
+FilterProp::BlockingAlone |
+FilterProp::Tapped |
+FilterProp::Untapped |
+FilterProp::IsSaddled |
+FilterProp::SaddledSource |
+FilterProp::CrewedThisTurn { .. } |
+FilterProp::ConvokedSource |
+FilterProp::ProtectorMatches { .. } |
+FilterProp::HasHasteOrControlledSinceTurnBegan |
+FilterProp::WithKeyword { .. } |
+FilterProp::HasKeywordKind { .. } |
+FilterProp::WithoutKeyword { .. } |
+FilterProp::WithoutKeywordKind { .. } |
+FilterProp::ManaValueParity { .. } |
+FilterProp::ManaCostIn { .. } |
+FilterProp::InZone { .. } |
+FilterProp::Owned { .. } |
+FilterProp::Foretold |
+FilterProp::HasAdventure |
+FilterProp::EnchantedBy |
+FilterProp::EquippedBy |
+FilterProp::AttachedTo { .. } |
+FilterProp::HasAttachment { .. } |
+FilterProp::HasAnyAttachmentOf { .. } |
+FilterProp::Another |
+FilterProp::Unpaired |
+FilterProp::OtherThanTriggerObject |
+FilterProp::HasColor { .. } |
+FilterProp::PowerGTSource |
+FilterProp::ColorCount { .. } |
+FilterProp::ManaSymbolCount { .. } |
+FilterProp::HasSupertype { .. } |
+FilterProp::IsChosenCreatureType |
+FilterProp::MostPrevalentCreatureTypeIn { .. } |
+FilterProp::IsChosenColor |
+FilterProp::IsChosenCardType |
+FilterProp::MatchesLastChosenCardPredicate |
+FilterProp::HasSingleTarget |
+FilterProp::Modal |
+FilterProp::PrepareSpell |
+FilterProp::NotColor { .. } |
+FilterProp::NotSupertype { .. } |
+FilterProp::Suspected |
+FilterProp::Renowned |
+FilterProp::Goaded |
+FilterProp::ToughnessGTPower |
+FilterProp::PowerExceedsBase |
+FilterProp::InTrackedSet { .. } |
+FilterProp::Modified |
+FilterProp::Historic |
+FilterProp::NotHistoric |
+FilterProp::InAnyZone { .. } |
+FilterProp::WasDealtDamageThisTurn |
+FilterProp::EnteredThisTurn |
+FilterProp::ControlledContinuouslySinceTurnBegan |
+FilterProp::ZoneChangedThisTurn { .. } |
+FilterProp::AttackedThisTurn { .. } |
+FilterProp::BlockedThisTurn |
+FilterProp::AttackedOrBlockedThisTurn |
+FilterProp::CountersPutOnThisTurn { .. } |
+FilterProp::FaceDown |
+FilterProp::Transformed |
+FilterProp::CouldBeTargetedByTriggeringSpell |
+FilterProp::HasXInManaCost |
+FilterProp::HasXInActivationCost |
+FilterProp::WasKicked |
+FilterProp::HasManaAbility |
+FilterProp::HasNoAbilities |
+FilterProp::Named { .. } |
+FilterProp::SameName |
+FilterProp::SameNameAsParentTarget |
+FilterProp::SameNameAsExiledBySource |
+FilterProp::NameMatchesAnyPermanent { .. } |
+FilterProp::IsCommander |
+FilterProp::SharesCreatureTypeWithCommander |
+FilterProp::Other { .. } => {}
+}
+}
+}
+impl PlayerFilter {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+PlayerFilter::OpponentDealtDamage { source, .. } => { for value in source { value.$nested(f); } },
+PlayerFilter::AllExcept { exclude, .. } => { exclude.$nested(f); },
+PlayerFilter::ControlsCount { filter, count, .. } => { filter.$nested(f); count.$expr(f); },
+PlayerFilter::PlayerAttribute { attr, value, .. } => { f(attr); attr.$nested(f); value.$expr(f); },
+PlayerFilter::AnyOf { filters, .. } => { for value in filters { value.$nested(f); } },
+PlayerFilter::TrackedSetPossessor { filter, .. } => { filter.$nested(f); },
+PlayerFilter::Controller |
+PlayerFilter::Opponent |
+PlayerFilter::DefendingPlayer |
+PlayerFilter::OpponentLostLife |
+PlayerFilter::OpponentGainedLife |
+PlayerFilter::HasLostTheGame |
+PlayerFilter::OpponentAttacked { .. } |
+PlayerFilter::OpponentAttackingEnchantedPlayer |
+PlayerFilter::All |
+PlayerFilter::HighestSpeed |
+PlayerFilter::ZoneChangedThisWay |
+PlayerFilter::PerformedActionThisWay { .. } |
+PlayerFilter::OwnersOfCardsExiledBySource |
+PlayerFilter::TriggeringPlayer |
+PlayerFilter::OpponentOtherThanTriggering |
+PlayerFilter::OpponentOfTriggeringPlayer |
+PlayerFilter::OpponentOfTriggeringPlayerNotAttacked |
+PlayerFilter::VotedFor { .. } |
+PlayerFilter::ParentObjectTargetController |
+PlayerFilter::ChosenPlayer { .. } |
+PlayerFilter::ParentObjectTargetOwner |
+PlayerFilter::GrantingObjectCaster |
+PlayerFilter::TargetPlayer => {}
+}
+}
+}
+impl PlayerScope {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+PlayerScope::AllPlayers { exclude, .. } => { for value in exclude { value.$nested(f); } },
+PlayerScope::Controller |
+PlayerScope::ScopedPlayer |
+PlayerScope::Target |
+PlayerScope::Opponent { .. } |
+PlayerScope::RecipientController |
+PlayerScope::DefendingPlayer |
+PlayerScope::ParentObjectTargetController |
+PlayerScope::SourceChosenPlayer |
+PlayerScope::AnyTurn |
+PlayerScope::SpecificPlayer { .. } => {}
+}
+}
+}
 impl QuantityRef {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+QuantityRef::HandSize { player, .. } => { player.$nested(f); },
+QuantityRef::LifeTotal { player, .. } => { player.$nested(f); },
+QuantityRef::GraveyardSize { player, .. } => { player.$nested(f); },
+QuantityRef::StartingLifeTotal { player, .. } => { player.$nested(f); },
+QuantityRef::ObjectCount { filter, .. } => { filter.$nested(f); },
+QuantityRef::ObjectCountDistinct { filter, .. } => { filter.$nested(f); },
+QuantityRef::ObjectCountBySharedQuality { filter, .. } => { filter.$nested(f); },
+QuantityRef::PlayerCount { filter, .. } => { filter.$nested(f); },
+QuantityRef::CountersOnObjects { filter, .. } => { filter.$nested(f); },
+QuantityRef::TargetObjectManaValue { filter, .. } => { filter.$nested(f); },
+QuantityRef::PropertyAggregate(aggregate) => { aggregate.$source().$nested(f); },
+QuantityRef::ControlledByEachPlayer { filter, .. } => { filter.$nested(f); },
+QuantityRef::DistinctCardTypes { source, .. } => { source.$nested(f); },
+QuantityRef::SharedCardTypes { source, .. } => { source.$nested(f); },
+QuantityRef::DistinctSubtypes { source, .. } => { source.$nested(f); },
+QuantityRef::ZoneCardCount { filter, .. } => { for value in filter { value.$nested(f); } },
+QuantityRef::FilteredTrackedSetSize { filter, .. } => { filter.$nested(f); },
+QuantityRef::LifeLostThisTurn { player, .. } => { player.$nested(f); },
+QuantityRef::PartySize { player, .. } => { player.$nested(f); },
+QuantityRef::Speed { player, .. } => { player.$nested(f); },
+QuantityRef::EventContextPlayerCount { filter, .. } => { filter.$nested(f); },
+QuantityRef::SpellsCastThisTurn { filter, .. } => { for value in filter { value.$nested(f); } },
+QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. } => { for value in filter { value.$nested(f); } },
+QuantityRef::EnteredThisTurn { filter, .. } => { filter.$nested(f); },
+QuantityRef::SacrificedThisTurn { player, filter, .. } => { player.$nested(f); filter.$nested(f); },
+QuantityRef::LifeGainedThisTurn { player, .. } => { player.$nested(f); },
+QuantityRef::CardsDrawnThisTurn { player, .. } => { player.$nested(f); },
+QuantityRef::BattlefieldEntriesThisTurn { player, filter, .. } => { player.$nested(f); filter.$nested(f); },
+QuantityRef::LandsPlayedThisTurn { player, .. } => { player.$nested(f); },
+QuantityRef::ZoneChangeCountThisTurn { filter, .. } => { filter.$nested(f); },
+QuantityRef::ZoneChangeAggregate { filter, .. } => { filter.$nested(f); },
+QuantityRef::DamageDealtThisTurn { source, target, .. } => { source.$nested(f); target.$nested(f); },
+QuantityRef::PlayerChosenNumber { player, .. } => { player.$nested(f); },
+QuantityRef::AttackedThisTurn { filter, .. } => { for value in filter { value.$nested(f); } },
+QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player, .. } => { player.$nested(f); },
+QuantityRef::SpellsCastThisGame { filter, .. } => { for value in filter { value.$nested(f); } },
+QuantityRef::CounterAddedThisTurn { target, .. } => { target.$nested(f); },
+QuantityRef::CardsDiscardedThisTurn { player, .. } => { player.$nested(f); },
+QuantityRef::TokensCreatedThisTurn { player, filter, .. } => { player.$nested(f); filter.$nested(f); },
+QuantityRef::PlayerActionsThisTurn { player, .. } => { player.$nested(f); },
+QuantityRef::ManaSpentToCast { metric, .. } => { metric.$nested(f); },
+QuantityRef::DistinctColorsAmong { source, .. } => { source.$nested(f); },
+QuantityRef::DistinctCounterKindsAmong { filter, .. } => { filter.$nested(f); },
+QuantityRef::LifeAboveStarting |
+QuantityRef::TriggeringDiscoverValue |
+QuantityRef::TriggeringScryLookCount |
+QuantityRef::TriggeringScryBottomCount |
+QuantityRef::CountersOn { .. } |
+QuantityRef::PlayerCounter { .. } |
+QuantityRef::TargetControllerCounter { .. } |
+QuantityRef::Variable { .. } |
+QuantityRef::Power { .. } |
+QuantityRef::BasePower { .. } |
+QuantityRef::Intensity { .. } |
+QuantityRef::Toughness { .. } |
+QuantityRef::ObjectManaValue { .. } |
+QuantityRef::ObjectColorCount { .. } |
+QuantityRef::ObjectNameWordCount { .. } |
+QuantityRef::NameStickerLetterCount { .. } |
+QuantityRef::ObjectTypelineComponentCount { .. } |
+QuantityRef::ManaSymbolsInManaCost { .. } |
+QuantityRef::SelfManaValue |
+QuantityRef::TargetZoneCardCount { .. } |
+QuantityRef::Devotion { .. } |
+QuantityRef::CardsExiledBySource |
+QuantityRef::ExiledCardPower { .. } |
+QuantityRef::BasicLandTypeCount { .. } |
+QuantityRef::TrackedSetSize |
+QuantityRef::ExiledFromHandThisResolution |
+QuantityRef::PreviousEffectAmount { .. } |
+QuantityRef::PreviousEffectCount |
+QuantityRef::UnspentMana { .. } |
+QuantityRef::EventContextAmount |
+QuantityRef::AttachmentsOnLeavingObject { .. } |
+QuantityRef::EventContextSourceCostX |
+QuantityRef::EventContextSourceModesChosen |
+QuantityRef::CrimesCommittedThisTurn |
+QuantityRef::BendTypesThisTurn |
+QuantityRef::TurnsTaken |
+QuantityRef::NotedNumber |
+QuantityRef::ChosenNumber |
+QuantityRef::DescendedThisTurn |
+QuantityRef::SpellsCastLastTurn |
+QuantityRef::DungeonsCompleted |
+QuantityRef::CostXPaid |
+QuantityRef::KickerCount |
+QuantityRef::AdditionalCostPaymentCount |
+QuantityRef::AdditionalCostPaymentCountFor { .. } |
+QuantityRef::ConvokedCreatureCount |
+QuantityRef::TimesCostPaidThisResolution |
+QuantityRef::ColorsInCommandersColorIdentity |
+QuantityRef::CommanderCastFromCommandZoneCount |
+QuantityRef::CommanderManaValue { .. } |
+QuantityRef::VoteCount { .. } => {}
+}
+}
+}
+impl TargetFilter {
+ pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+TargetFilter::Typed(typed) => { for prop in &$($mut_)? typed.properties { prop.$nested(f); } },
+TargetFilter::Not { filter, .. } => { filter.$nested(f); },
+TargetFilter::Or { filters, .. } => { for value in filters { value.$nested(f); } },
+TargetFilter::And { filters, .. } => { for value in filters { value.$nested(f); } },
+TargetFilter::PlayerMatching { player, .. } => { player.$nested(f); },
+TargetFilter::TrackedSetFiltered { filter, .. } => { filter.$nested(f); },
+TargetFilter::ChosenDamageSource { filter, .. } => { for value in filter { value.$nested(f); } },
+TargetFilter::None |
+TargetFilter::Any |
+TargetFilter::Player |
+TargetFilter::Controller |
+TargetFilter::SourceController |
+TargetFilter::ControllerAndControlledPermanents { .. } |
+TargetFilter::Opponent |
+TargetFilter::SelfRef |
+TargetFilter::GrantingObject { .. } |
+TargetFilter::SourceOrPaired |
+TargetFilter::StackAbility { .. } |
+TargetFilter::StackSpell |
+TargetFilter::CastingSpell |
+TargetFilter::SpecificObject { .. } |
+TargetFilter::SpecificPlayer { .. } |
+TargetFilter::PlayerWhoChoseLabel { .. } |
+TargetFilter::Neighbor { .. } |
+TargetFilter::ScopedPlayer |
+TargetFilter::AttachedTo |
+TargetFilter::LastCreated |
+TargetFilter::LastRevealed |
+TargetFilter::LastZoneChanged |
+TargetFilter::CostPaidObject |
+TargetFilter::AmassedArmy |
+TargetFilter::ChosenCard |
+TargetFilter::TrackedSet { .. } |
+TargetFilter::ExiledBySource |
+TargetFilter::ExiledCardByIndex { .. } |
+TargetFilter::TriggeringSpellController |
+TargetFilter::TriggeringSpellOwner |
+TargetFilter::TriggeringPlayer |
+TargetFilter::TriggeringSource |
+TargetFilter::EventTarget |
+TargetFilter::TriggeringSourceController |
+TargetFilter::EventTargetController |
+TargetFilter::ParentTarget |
+TargetFilter::ParentTargetSlot { .. } |
+TargetFilter::DeclaredPlayer { .. } |
+TargetFilter::ParentTargetController |
+TargetFilter::ParentTargetOwner |
+TargetFilter::SourceChosenPlayer |
+TargetFilter::OriginalController |
+TargetFilter::OriginalSource |
+TargetFilter::PostReplacementSourceController |
+TargetFilter::PostReplacementDamageSource |
+TargetFilter::PostReplacementDamageTarget |
+TargetFilter::PostReplacementDamageTargetOwner |
+TargetFilter::DefendingPlayer |
+TargetFilter::HasChosenName |
+TargetFilter::Named { .. } |
+TargetFilter::Owner |
+TargetFilter::AllPlayers => {}
+}
+}
+}
+ };
+}
+define_quantity_dependency_walk!([]; for_each_nested_quantity_ref; for_each_ref; source);
+define_quantity_dependency_walk!([mut]; for_each_nested_quantity_ref_mut; each_ref_mut; source_mut);
+
+/// The unresolved reads retained by a zone-entry selection. Base counters are latched.
+pub(crate) fn for_each_zone_entry_quantity_ref(
+    conditional: &[(
+        TargetFilter,
+        crate::types::counter::CounterType,
+        QuantityExpr,
+    )],
+    gate: Option<&TargetFilter>,
+    f: &mut dyn FnMut(&QuantityRef),
+) {
+    for (filter, _, count) in conditional {
+        filter.for_each_nested_quantity_ref(f);
+        count.for_each_ref(f);
+    }
+    if let Some(gate) = gate {
+        gate.for_each_nested_quantity_ref(f);
+    }
+}
+
+impl QuantityRef {
+    pub(crate) fn instruction_result_id(&self) -> Option<ReturnResultId> {
+        match self {
+            Self::ZoneChangeAggregate { source, .. } => source.result_id(),
+            _ => None,
+        }
+    }
+
     /// Borrows the same single player-relativity axis as `player_scope_mut`.
     pub(crate) fn player_scope(&self) -> Option<&PlayerScope> {
         match self {
@@ -10743,7 +11210,7 @@ impl QuantityRef {
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
-            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregate { .. }
             | QuantityRef::DamageDealtThisTurn { .. }
             | QuantityRef::ChosenNumber
             | QuantityRef::NotedNumber
@@ -10810,7 +11277,7 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { filter, .. }
             | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
             | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-            | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+            | QuantityRef::ZoneChangeAggregate { filter, .. }
             | QuantityRef::CounterAddedThisTurn { target: filter, .. }
             | QuantityRef::TokensCreatedThisTurn { filter, .. }
             | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
@@ -11007,7 +11474,7 @@ impl QuantityRef {
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
-            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregate { .. }
             | QuantityRef::DamageDealtThisTurn { .. }
             | QuantityRef::ChosenNumber
             | QuantityRef::NotedNumber
@@ -11032,6 +11499,1166 @@ impl QuantityRef {
             | QuantityRef::VoteCount { .. } => None,
         }
     }
+}
+
+impl AbilityDefinition {
+    pub(crate) fn for_each_own_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        use crate::types::ability_visit::{nodes, DefinitionNode, ResolutionScope};
+        let _ = nodes::visit_ability_def_scoped(
+            self,
+            ResolutionScope::OwnResolutionOnly,
+            &mut |node| {
+                if let DefinitionNode::Ability(definition) = node {
+                    definition.for_each_direct_quantity_ref(f);
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+    }
+    pub(crate) fn for_each_own_quantity_ref_mut(&mut self, f: &mut dyn FnMut(&mut QuantityRef)) {
+        use crate::types::ability_visit::{nodes_mut, DefinitionNodeMut, ResolutionScope};
+        let _ = nodes_mut::visit_ability_def_scoped(
+            self,
+            ResolutionScope::OwnResolutionOnly,
+            &mut |node| {
+                if let DefinitionNodeMut::Ability(definition) = node {
+                    definition.for_each_direct_quantity_ref_mut(f);
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+    }
+}
+
+macro_rules! define_direct_ability_quantity_walk {
+ ([$($mut_:tt)?]; $direct:ident; $effects:ident; $exprs:ident; $refs:ident; $nested:ident; $predicates:ident) => {
+  impl AbilityDefinition {
+    pub(crate) fn $direct(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+        self.effect.$effects(f);
+        if let Some(cost) = &$($mut_)? self.cost {
+            cost.$exprs(&mut |expr| expr.$refs(f));
+            cost.$predicates(f);
+        }
+        if let Some(payment) = &$($mut_)? self.unless_pay {
+            payment.cost.$exprs(&mut |expr| expr.$refs(f));
+            payment.cost.$predicates(f);
+            payment.payer.$nested(f);
+        }
+        if let Some(condition) = &$($mut_)? self.condition { condition.$nested(f); }
+        if let Some(repeat) = &$($mut_)? self.repeat_for { repeat.$refs(f); }
+        if let Some(player) = &$($mut_)? self.player_scope { player.$nested(f); }
+        if let Some(chooser) = &$($mut_)? self.target_chooser { chooser.$nested(f); }
+        if let Some(player) = &$($mut_)? self.optional_player { player.$nested(f); }
+    }
+  }
+ };
+}
+define_direct_ability_quantity_walk!([]; for_each_direct_quantity_ref; for_each_quantity_ref; for_each_quantity_expr; for_each_ref; for_each_nested_quantity_ref; for_each_predicate_quantity_ref);
+define_direct_ability_quantity_walk!([mut]; for_each_direct_quantity_ref_mut; for_each_quantity_ref_mut; for_each_quantity_expr_mut; each_ref_mut; for_each_nested_quantity_ref_mut; for_each_predicate_quantity_ref_mut);
+
+impl ResolvedAbility {
+    pub(crate) fn has_addressed_zone_result_read(&self) -> bool {
+        let mut found = false;
+        self.for_each_own_quantity_ref(&mut |reference| {
+            found |= reference.instruction_result_id().is_some()
+        });
+        found
+    }
+
+    /// Bind this sequential process; independently registered definitions stay unbound.
+    pub(crate) fn bind_return_result_process(
+        &mut self,
+        process: Option<crate::types::game_state::ReturnResultProcessId>,
+    ) {
+        self.return_result_process = process;
+        for child in [&mut self.sub_ability, &mut self.else_ability]
+            .into_iter()
+            .flatten()
+        {
+            if child
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::has_when_you_do_marker)
+            {
+                child.clear_return_result_process_recursive();
+            } else {
+                child.bind_return_result_process(process);
+            }
+        }
+    }
+
+    pub(crate) fn for_each_direct_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        self.effect.for_each_quantity_ref(f);
+        if let Some(condition) = &self.condition {
+            condition.for_each_nested_quantity_ref(f);
+        }
+        if let Some(repeat) = &self.repeat_for {
+            repeat.for_each_ref(f);
+        }
+        if let Some(player) = &self.player_scope {
+            player.for_each_nested_quantity_ref(f);
+        }
+        if let Some(chooser) = &self.target_chooser {
+            chooser.for_each_nested_quantity_ref(f);
+        }
+        if let Some(player) = &self.optional_player {
+            player.for_each_nested_quantity_ref(f);
+        }
+        if let Some(payment) = &self.unless_pay {
+            payment
+                .cost
+                .for_each_quantity_expr(&mut |expr| expr.for_each_ref(f));
+            payment.cost.for_each_predicate_quantity_ref(f);
+            payment.payer.for_each_nested_quantity_ref(f);
+        }
+    }
+
+    pub(crate) fn for_each_own_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        self.for_each_direct_quantity_ref(f);
+        use crate::types::ability_visit::{nodes, DefinitionNode, ResolutionScope};
+        let _ = nodes::visit_effect_scoped(
+            &self.effect,
+            ResolutionScope::OwnResolutionOnly,
+            &mut |node| {
+                if let DefinitionNode::Ability(definition) = node {
+                    definition.for_each_direct_quantity_ref(f);
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+        if let Some(payment) = &self.unless_pay {
+            let _ = nodes::visit_cost_scoped(
+                &payment.cost,
+                ResolutionScope::OwnResolutionOnly,
+                &mut |node| {
+                    if let DefinitionNode::Ability(definition) = node {
+                        definition.for_each_direct_quantity_ref(f);
+                    }
+                    std::ops::ControlFlow::Continue(())
+                },
+            );
+        }
+        for child in [&self.sub_ability, &self.else_ability]
+            .into_iter()
+            .flatten()
+        {
+            if !child
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::has_when_you_do_marker)
+            {
+                child.for_each_own_quantity_ref(f);
+            }
+        }
+    }
+}
+
+/// One executable invocation has at most one instruction-result authority.
+/// This is a structural summary, never saved state or an alternative result store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstructionResultProcess {
+    Unused,
+    Imported {
+        results: BTreeSet<ReturnResultId>,
+    },
+    Local {
+        declarations: BTreeSet<ReturnResultId>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstructionResultEntry {
+    Independent,
+    SelectedBody,
+    ResumeOwned,
+}
+
+#[derive(Clone, Copy)]
+enum ResultScopeNode<'a> {
+    Definition(&'a AbilityDefinition),
+    Resolved(&'a ResolvedAbility),
+}
+
+impl<'a> ResultScopeNode<'a> {
+    fn effect(self) -> &'a Effect {
+        match self {
+            Self::Definition(node) => &node.effect,
+            Self::Resolved(node) => &node.effect,
+        }
+    }
+    fn declaration(self) -> Option<ReturnResultId> {
+        match self {
+            Self::Definition(node) => node.declares_return_result,
+            Self::Resolved(node) => node.declares_return_result,
+        }
+    }
+    fn condition(self) -> Option<&'a AbilityCondition> {
+        match self {
+            Self::Definition(node) => node.condition.as_ref(),
+            Self::Resolved(node) => node.condition.as_ref(),
+        }
+    }
+    fn links(self) -> Vec<Self> {
+        match self {
+            Self::Definition(node) => [&node.sub_ability, &node.else_ability]
+                .into_iter()
+                .flatten()
+                .map(|child| Self::Definition(child))
+                .collect(),
+            Self::Resolved(node) => [&node.sub_ability, &node.else_ability]
+                .into_iter()
+                .flatten()
+                .map(|child| Self::Resolved(child))
+                .collect(),
+        }
+    }
+    fn direct_reads(self, f: &mut dyn FnMut(&QuantityRef)) {
+        match self {
+            Self::Definition(node) => node.for_each_direct_quantity_ref(f),
+            Self::Resolved(node) => node.for_each_direct_quantity_ref(f),
+        }
+    }
+    fn explicit_read(self) -> Option<ReturnResultId> {
+        match self {
+            Self::Definition(node) => node.reads_return_result.as_ref().map(|(id, _)| *id),
+            Self::Resolved(node) => node.reads_return_result.as_ref().map(|(id, _)| *id),
+        }
+    }
+    fn costs(self) -> Vec<&'a AbilityCost> {
+        match self {
+            Self::Definition(node) => node
+                .cost
+                .iter()
+                .chain(node.unless_pay.iter().map(|payment| &payment.cost))
+                .collect(),
+            Self::Resolved(node) => node
+                .unless_pay
+                .iter()
+                .map(|payment| &payment.cost)
+                .collect(),
+        }
+    }
+    fn nested(self, f: &mut dyn FnMut(&AbilityDefinition, bool)) {
+        use crate::types::ability_visit::{direct_nodes, DefinitionNode, ResolutionScope};
+        let mut own = HashSet::new();
+        let mut collect = |node| {
+            if let DefinitionNode::Ability(definition) = node {
+                own.insert(std::ptr::from_ref(definition));
+            }
+            ControlFlow::Continue(())
+        };
+        let _ = direct_nodes::visit_effect_scoped(
+            self.effect(),
+            ResolutionScope::OwnResolutionOnly,
+            &mut collect,
+        );
+        for cost in self.costs() {
+            let _ = direct_nodes::visit_cost_scoped(
+                cost,
+                ResolutionScope::OwnResolutionOnly,
+                &mut collect,
+            );
+        }
+        let mut visit = |node| {
+            if let DefinitionNode::Ability(definition) = node {
+                f(definition, !own.contains(&std::ptr::from_ref(definition)));
+            }
+            ControlFlow::Continue(())
+        };
+        let _ = direct_nodes::visit_effect_scoped(
+            self.effect(),
+            ResolutionScope::IncludeRegisteredLater,
+            &mut visit,
+        );
+        for cost in self.costs() {
+            let _ = direct_nodes::visit_cost_scoped(
+                cost,
+                ResolutionScope::IncludeRegisteredLater,
+                &mut visit,
+            );
+        }
+        if let Self::Definition(node) = self {
+            for mode in &node.mode_abilities {
+                f(mode, true);
+            }
+        }
+    }
+}
+
+// Persistent fields cannot capture a resolving instruction's private records.
+// These checks reuse the existing typed expression/filter/cost walks and the
+// shared registered-definition visitor; they never evaluate or latch a scalar.
+fn refuse_persistent_result_read(reference: &QuantityRef) -> Result<(), EffectError> {
+    if reference.instruction_result_id().is_some() {
+        Err(EffectError::InvalidParam(
+            "foreign instruction-result dependency in persistent payload".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+fn validate_persistent_result_filter(filter: &TargetFilter) -> Result<(), EffectError> {
+    let mut error = None;
+    filter.for_each_nested_quantity_ref(&mut |reference| {
+        if let Err(reason) = refuse_persistent_result_read(reference) {
+            error.get_or_insert(reason);
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
+fn validate_persistent_result_player(filter: &PlayerFilter) -> Result<(), EffectError> {
+    let mut error = None;
+    filter.for_each_nested_quantity_ref(&mut |reference| {
+        if let Err(reason) = refuse_persistent_result_read(reference) {
+            error.get_or_insert(reason);
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+fn validate_persistent_result_activation(
+    restriction: &ActivationRestriction,
+) -> Result<(), EffectError> {
+    if let ActivationRestriction::RequiresCondition {
+        condition: Some(condition),
+    } = restriction
+    {
+        validate_persistent_result_parsed_condition(condition)?;
+    }
+    Ok(())
+}
+
+fn validate_persistent_result_reference(reference: &QuantityRef) -> Result<(), EffectError> {
+    refuse_persistent_result_read(reference)?;
+    let mut error = None;
+    reference.for_each_nested_quantity_ref(&mut |reference| {
+        if let Err(reason) = refuse_persistent_result_read(reference) {
+            error.get_or_insert(reason);
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+fn validate_persistent_result_parsed_condition(
+    condition: &ParsedCondition,
+) -> Result<(), EffectError> {
+    match condition {
+        ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
+            validate_persistent_result_quantity(lhs)?;
+            validate_persistent_result_quantity(rhs)
+        }
+        ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
+            validate_persistent_result_reference(lhs)?;
+            validate_persistent_result_reference(rhs)
+        }
+        ParsedCondition::SourceLacksKeyword { keyword }
+        | ParsedCondition::ControlsCreatureWithKeyword { keyword, .. } => {
+            validate_persistent_result_keyword(keyword)
+        }
+        ParsedCondition::YouAttackedWithAtLeast {
+            filter: Some(filter),
+            ..
+        }
+        | ParsedCondition::YouCastSpellThisTurn {
+            filter: Some(filter),
+        }
+        | ParsedCondition::BattlefieldEntriesThisTurn { filter, .. }
+        | ParsedCondition::SpellTargetsFilter { filter } => {
+            validate_persistent_result_filter(filter)
+        }
+        ParsedCondition::PlayerCountAtLeast { filter, .. } => {
+            validate_persistent_result_player(filter)
+        }
+        ParsedCondition::Not { condition } => {
+            validate_persistent_result_parsed_condition(condition)
+        }
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+            for condition in conditions {
+                validate_persistent_result_parsed_condition(condition)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+fn validate_persistent_result_quantity(value: &QuantityExpr) -> Result<(), EffectError> {
+    let mut error = None;
+    value.for_each_ref(&mut |reference| {
+        if let Err(reason) = validate_persistent_result_reference(reference) {
+            error.get_or_insert(reason);
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+fn validate_persistent_result_cost(cost: &AbilityCost) -> Result<(), EffectError> {
+    let mut error = None;
+    cost.for_each_quantity_expr(&mut |value| {
+        if let Err(reason) = validate_persistent_result_quantity(value) {
+            error.get_or_insert(reason);
+        }
+    });
+    cost.for_each_predicate_quantity_ref(&mut |reference| {
+        if let Err(reason) = refuse_persistent_result_read(reference) {
+            error.get_or_insert(reason);
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+fn validate_persistent_result_keyword(keyword: &Keyword) -> Result<(), EffectError> {
+    use crate::types::keywords::*;
+    match keyword {
+        Keyword::Enchant(filter)
+        | Keyword::Craft {
+            materials: filter, ..
+        } => validate_persistent_result_filter(filter),
+        Keyword::Affinity(filter) => {
+            validate_persistent_result_filter(&TargetFilter::Typed(filter.clone()))
+        }
+        Keyword::Protection(ProtectionTarget::Filter(filter)) => {
+            validate_persistent_result_filter(filter)
+        }
+        Keyword::Emerge(cost) => validate_persistent_result_filter(&cost.sacrifice_filter),
+        Keyword::Mobilize(value) | Keyword::Firebending(value) => {
+            validate_persistent_result_quantity(value)
+        }
+        Keyword::Crew {
+            once_per_turn: Some(restriction),
+            ..
+        } => validate_persistent_result_activation(restriction),
+        Keyword::Disguise(DisguiseCost::Reduced { reduction, .. }) => {
+            validate_persistent_result_quantity(&reduction.count)?;
+            if let Some(condition) = &reduction.condition {
+                validate_persistent_result_parsed_condition(condition)?;
+            }
+            Ok(())
+        }
+        Keyword::Ward(cost) => {
+            fn ward(cost: &WardCost) -> Result<(), EffectError> {
+                match cost {
+                    WardCost::Sacrifice { filter, .. } => validate_persistent_result_filter(filter),
+                    WardCost::Compound(costs) => {
+                        for cost in costs {
+                            ward(cost)?;
+                        }
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            }
+            ward(cost)
+        }
+        Keyword::CumulativeUpkeep(cost)
+        | Keyword::Escalate(cost)
+        | Keyword::Bestow(BestowCost::NonMana(cost))
+        | Keyword::Embalm(EmbalmCost::NonMana(cost))
+        | Keyword::Eternalize(EternalizeCost::NonMana(cost))
+        | Keyword::Cycling(CyclingCost::NonMana(cost))
+        | Keyword::Flashback(FlashbackCost::NonMana(cost))
+        | Keyword::Escape(EscapeCost::NonMana(cost))
+        | Keyword::Evoke(EvokeCost::NonMana(cost))
+        | Keyword::Blitz(BlitzCost::NonMana(cost))
+        | Keyword::Buyback(BuybackCost::NonMana(cost))
+        | Keyword::Echo(EchoCost::NonMana(cost)) => validate_persistent_result_cost(cost),
+        _ => Ok(()),
+    }
+}
+fn validate_persistent_result_condition(condition: &StaticCondition) -> Result<(), EffectError> {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            validate_persistent_result_quantity(lhs)?;
+            validate_persistent_result_quantity(rhs)
+        }
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        }
+        | StaticCondition::DefendingPlayerControls { filter }
+        | StaticCondition::SourceMatchesFilter { filter }
+        | StaticCondition::TopOfLibraryMatches { filter }
+        | StaticCondition::RecipientMatchesFilter { filter } => {
+            validate_persistent_result_filter(filter)
+        }
+        StaticCondition::UnlessPay { scaling, .. } => match scaling {
+            UnlessPayScaling::PerQuantityRef { quantity }
+            | UnlessPayScaling::PerAffectedAndQuantityRef { quantity }
+            | UnlessPayScaling::PerAffectedWithRef { quantity } => {
+                validate_persistent_result_reference(quantity)
+            }
+            UnlessPayScaling::Flat | UnlessPayScaling::PerAffectedCreature => Ok(()),
+        },
+        StaticCondition::Not { condition } => validate_persistent_result_condition(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for condition in conditions {
+                validate_persistent_result_condition(condition)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+fn validate_persistent_result_token_spec(
+    spec: &crate::types::proposed_event::TokenSpec,
+) -> Result<(), EffectError> {
+    for keyword in &spec.characteristics.keywords {
+        validate_persistent_result_keyword(keyword)?;
+    }
+    for definition in &spec.static_abilities {
+        validate_persistent_result_static(definition)?;
+    }
+    if let Some(duration) = &spec.sacrifice_at {
+        validate_persistent_result_duration(duration)?;
+    }
+    Ok(())
+}
+fn validate_persistent_result_duration(duration: &Duration) -> Result<(), EffectError> {
+    match duration {
+        Duration::ForAsLongAs { condition } => validate_persistent_result_condition(condition),
+        Duration::UntilEvent { event } => validate_persistent_result_definition_node(
+            crate::types::ability_visit::DefinitionNode::Trigger(event),
+        ),
+        Duration::UntilNextStepOf { player, .. } => {
+            let mut error = None;
+            player.for_each_nested_quantity_ref(&mut |reference| {
+                if let Err(reason) = refuse_persistent_result_read(reference) {
+                    error.get_or_insert(reason);
+                }
+            });
+            error.map_or(Ok(()), Err)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_persistent_result_modification(
+    modification: &ContinuousModification,
+) -> Result<(), EffectError> {
+    match modification {
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. }
+        | ContinuousModification::AddCounterOnEnter { count: value, .. } => {
+            validate_persistent_result_quantity(value)
+        }
+        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap, .. } => {
+            validate_persistent_result_filter(source)?;
+            if let Some(cap) = cap {
+                validate_persistent_result_activation(cap)?;
+            }
+            Ok(())
+        }
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
+            validate_persistent_result_filter(source)
+        }
+        ContinuousModification::AddKeyword { keyword }
+        | ContinuousModification::RemoveKeyword { keyword } => {
+            validate_persistent_result_keyword(keyword)
+        }
+        ContinuousModification::GrantAbility { definition } => {
+            validate_instruction_result_definition(definition).map(|_| ())
+        }
+        ContinuousModification::GrantStaticAbility { definition } => {
+            validate_persistent_result_static(definition)
+        }
+        ContinuousModification::AddStaticMode { mode } => validate_persistent_result_mode(mode),
+        // Executable/trigger/replacement/copiable descendants are also visited by
+        // the shared IncludeRegisteredLater node walk, with an empty environment.
+        _ => Ok(()),
+    }
+}
+
+fn validate_persistent_result_mode(mode: &StaticMode) -> Result<(), EffectError> {
+    use crate::types::statics::{BlockExceptionKind, HandSizeModification, RequiredDefender};
+    match mode {
+        StaticMode::CantBeActivated {
+            source_filter: filter,
+            ..
+        }
+        | StaticMode::CantBeBlockedBy { filter }
+        | StaticMode::AttachmentRestriction { filter }
+        | StaticMode::BlockRestriction { filter }
+        | StaticMode::MaxUntapPerType { filter, .. }
+        | StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::Quality(filter),
+        } => validate_persistent_result_filter(filter),
+        StaticMode::CastWithKeyword { keyword } | StaticMode::CantHaveKeyword { keyword } => {
+            validate_persistent_result_keyword(keyword)
+        }
+        StaticMode::PlayerProtection(crate::types::keywords::ProtectionTarget::Filter(filter))
+        | StaticMode::CantPayCost {
+            cost: crate::types::statics::CostPaymentProhibition::Sacrifice { filter },
+            ..
+        } => validate_persistent_result_filter(filter),
+        StaticMode::CastWithAlternativeCost { cost, .. }
+        | StaticMode::AlternativeKeywordCost { cost, .. } => validate_persistent_result_cost(cost),
+        StaticMode::TopOfLibraryCastPermission {
+            alt_cost: Some(cost),
+            ..
+        } => validate_persistent_result_cost(cost),
+        StaticMode::GraveyardCastPermission {
+            extra_cost: Some(cost),
+            ..
+        }
+        | StaticMode::ExileCastPermission {
+            extra_cost: Some(cost),
+            ..
+        } => validate_persistent_result_cost(&cost.cost),
+        StaticMode::MustAttackDefender {
+            defender: RequiredDefender::Matching { filter },
+        } => {
+            let mut error = None;
+            filter.for_each_nested_quantity_ref(&mut |reference| {
+                if let Err(reason) = refuse_persistent_result_read(reference) {
+                    error.get_or_insert(reason);
+                }
+            });
+            error.map_or(Ok(()), Err)
+        }
+        StaticMode::MustBeBlocked { by: Some(filter) }
+        | StaticMode::MustBeBlockedByAll {
+            blockers: Some(filter),
+        } => validate_persistent_result_filter(filter),
+        StaticMode::ModifyCost {
+            spell_filter,
+            dynamic_count,
+            ..
+        } => {
+            if let Some(filter) = spell_filter {
+                validate_persistent_result_filter(filter)?;
+            }
+            if let Some(reference) = dynamic_count {
+                refuse_persistent_result_read(reference)?;
+                let mut error = None;
+                reference.for_each_nested_quantity_ref(&mut |reference| {
+                    if let Err(reason) = refuse_persistent_result_read(reference) {
+                        error.get_or_insert(reason);
+                    }
+                });
+                if let Some(reason) = error {
+                    return Err(reason);
+                }
+            }
+            Ok(())
+        }
+        StaticMode::ReduceAbilityCost {
+            dynamic_count,
+            targets,
+            activator,
+            ..
+        } => {
+            if let Some(filter) = targets {
+                validate_persistent_result_filter(filter)?;
+            }
+            if let Some(reference) = dynamic_count {
+                validate_persistent_result_reference(reference)?;
+            }
+            if let Some(player) = activator {
+                let mut error = None;
+                player.for_each_nested_quantity_ref(&mut |reference| {
+                    if let Err(reason) = refuse_persistent_result_read(reference) {
+                        error.get_or_insert(reason);
+                    }
+                });
+                if let Some(reason) = error {
+                    return Err(reason);
+                }
+            }
+            Ok(())
+        }
+        StaticMode::ImposeAdditionalCost {
+            cost, spell_filter, ..
+        } => {
+            validate_persistent_result_cost(cost)?;
+            if let Some(filter) = spell_filter {
+                validate_persistent_result_filter(filter)?;
+            }
+            Ok(())
+        }
+        StaticMode::PerTurnCastLimit {
+            spell_filter: Some(filter),
+            ..
+        } => validate_persistent_result_filter(filter),
+        StaticMode::SuppressTriggers {
+            source_filter,
+            trigger_source_filter,
+            ..
+        } => {
+            validate_persistent_result_filter(source_filter)?;
+            if let Some(filter) = trigger_source_filter {
+                validate_persistent_result_filter(filter)?;
+            }
+            Ok(())
+        }
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter,
+            activation_source_filter,
+            ..
+        } => {
+            for filter in [spell_filter, activation_source_filter]
+                .into_iter()
+                .flatten()
+            {
+                validate_persistent_result_filter(filter)?;
+            }
+            Ok(())
+        }
+        StaticMode::MaximumHandSize {
+            modification: HandSizeModification::EqualTo(value),
+        } => validate_persistent_result_quantity(value),
+        _ => Ok(()),
+    }
+}
+
+fn validate_persistent_result_static(definition: &StaticDefinition) -> Result<(), EffectError> {
+    validate_persistent_result_mode(&definition.mode)?;
+    if let Some(filter) = &definition.affected {
+        validate_persistent_result_filter(filter)?;
+    }
+    if let Some(condition) = &definition.condition {
+        validate_persistent_result_condition(condition)?;
+    }
+    if let Some(condition) = &definition.per_player_condition {
+        validate_persistent_result_parsed_condition(condition)?;
+    }
+    for modification in &definition.modifications {
+        validate_persistent_result_modification(modification)?;
+    }
+    Ok(())
+}
+
+fn validate_persistent_result_trigger_condition(
+    condition: &TriggerCondition,
+) -> Result<(), EffectError> {
+    match condition {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            validate_persistent_result_quantity(lhs)?;
+            validate_persistent_result_quantity(rhs)
+        }
+        TriggerCondition::ControlsType { filter }
+        | TriggerCondition::ControlCount { filter, .. }
+        | TriggerCondition::ControlsNone { filter }
+        | TriggerCondition::DefendingPlayerControlsNone { filter }
+        | TriggerCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | TriggerCondition::SourceMatchesFilter { filter }
+        | TriggerCondition::EventDamageSourceMatchesFilter { filter }
+        | TriggerCondition::EventObjectMatchesFilter { filter }
+        | TriggerCondition::TriggeringSpellTargetsFilter { filter }
+        | TriggerCondition::TriggeringSpellMatchesFilter { filter }
+        | TriggerCondition::DealtDamageThisTurnBySource { source: filter }
+        | TriggerCondition::MinCoAttackers {
+            filter: Some(filter),
+            ..
+        }
+        | TriggerCondition::CastSpellThisTurn {
+            filter: Some(filter),
+        } => validate_persistent_result_filter(filter),
+        TriggerCondition::DuringPlayersTurn { player } => validate_persistent_result_player(player),
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            for condition in conditions {
+                validate_persistent_result_trigger_condition(condition)?;
+            }
+            Ok(())
+        }
+        TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
+            validate_persistent_result_trigger_condition(condition)
+        }
+        _ => Ok(()),
+    }
+}
+fn validate_persistent_result_replacement_condition(
+    condition: &ReplacementCondition,
+) -> Result<(), EffectError> {
+    match condition {
+        ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. }
+        | ReplacementCondition::UnlessQuantity { lhs, rhs, .. } => {
+            validate_persistent_result_quantity(lhs)?;
+            validate_persistent_result_quantity(rhs)
+        }
+        ReplacementCondition::UnlessControlsOtherLeq { filter, .. } => {
+            validate_persistent_result_filter(&TargetFilter::Typed(filter.clone()))
+        }
+        ReplacementCondition::UnlessControlsMatching { filter }
+        | ReplacementCondition::UnlessControlsCountMatching { filter, .. }
+        | ReplacementCondition::IfControlsMatching { filter, .. }
+        | ReplacementCondition::DealtDamageThisTurnBySource { source: filter } => {
+            validate_persistent_result_filter(filter)
+        }
+        ReplacementCondition::And { conditions } => {
+            for condition in conditions {
+                validate_persistent_result_replacement_condition(condition)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+fn validate_persistent_result_definition_node(
+    node: crate::types::ability_visit::DefinitionNode<'_>,
+) -> Result<(), EffectError> {
+    use crate::types::ability_visit::DefinitionNode;
+    match node {
+        DefinitionNode::Ability(_) => Ok(()), // Its independent process is classified at the exact definition edge below.
+        DefinitionNode::Static(definition) => validate_persistent_result_static(definition),
+        DefinitionNode::Trigger(definition) => {
+            for filter in [
+                &definition.valid_card,
+                &definition.valid_target,
+                &definition.valid_subject_player,
+                &definition.valid_source,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                validate_persistent_result_filter(filter)?;
+            }
+            for clause in &definition.zone_change_clauses {
+                if let Some(filter) = &clause.valid_card {
+                    validate_persistent_result_filter(filter)?;
+                }
+            }
+            if let Some(condition) = &definition.condition {
+                validate_persistent_result_trigger_condition(condition)?;
+            }
+            if let Some(TriggerConstraint::NthSpellThisTurn {
+                filter: Some(filter),
+                ..
+            }) = &definition.constraint
+            {
+                validate_persistent_result_filter(filter)?;
+            }
+            if let Some(unless) = &definition.unless_pay {
+                validate_persistent_result_filter(&unless.payer)?;
+                validate_persistent_result_cost(&unless.cost)?;
+            }
+            Ok(())
+        }
+        DefinitionNode::Replacement(definition) => {
+            for filter in [
+                &definition.valid_card,
+                &definition.damage_source_filter,
+                &definition.redirect_target,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                validate_persistent_result_filter(filter)?;
+            }
+            if let Some(condition) = &definition.condition {
+                validate_persistent_result_replacement_condition(condition)?;
+            }
+            if let ReplacementMode::MayCost { cost, .. } = &definition.mode {
+                validate_persistent_result_cost(cost)?;
+            }
+            match &definition.damage_modification {
+                Some(DamageModification::Plus { value })
+                | Some(DamageModification::PreventionMinus {
+                    value: PreventionFormula::Quantity { quantity: value },
+                }) => validate_persistent_result_quantity(value)?,
+                _ => {}
+            }
+            if let Some(spec) = &definition.additional_token_spec {
+                validate_persistent_result_token_spec(spec)?;
+            }
+            if let Some(specs) = &definition.ensure_token_specs {
+                for spec in specs {
+                    validate_persistent_result_token_spec(spec)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+fn validate_persistent_result_payloads(effect: &Effect) -> Result<(), EffectError> {
+    match effect {
+        Effect::Mana { grants, .. } => {
+            // Mana-spend grants belong to the later spell/trigger. The shared
+            // effect visitor deliberately treats Mana as a leaf for its existing
+            // classifiers, so validate this typed independent boundary explicitly.
+            for grant in grants {
+                match grant {
+                    crate::types::mana::ManaSpellGrant::CantBeCountered { filter } => {
+                        validate_persistent_result_filter(filter)?
+                    }
+                    crate::types::mana::ManaSpellGrant::EntersWithCounters {
+                        filter,
+                        count,
+                        ..
+                    } => {
+                        validate_persistent_result_filter(filter)?;
+                        validate_persistent_result_quantity(count)?;
+                    }
+                    crate::types::mana::ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                        keyword,
+                        duration,
+                        ..
+                    } => {
+                        validate_persistent_result_keyword(keyword)?;
+                        validate_persistent_result_duration(duration)?;
+                    }
+                    crate::types::mana::ManaSpellGrant::TriggerOnSpend { filter, ability } => {
+                        validate_persistent_result_filter(filter)?;
+                        validate_instruction_result_definition(ability)?;
+                    }
+                }
+            }
+        }
+        Effect::ReturnAsAura {
+            enchant_filter,
+            grants,
+        } => {
+            validate_persistent_result_filter(enchant_filter)?;
+            for modification in grants {
+                validate_persistent_result_modification(modification)?;
+            }
+        }
+        Effect::GenericEffect {
+            static_abilities, ..
+        }
+        | Effect::Token {
+            static_abilities, ..
+        } => {
+            for definition in static_abilities {
+                validate_persistent_result_static(definition)?;
+            }
+        }
+        Effect::CreateEmblem { statics, .. } => {
+            for definition in statics {
+                validate_persistent_result_static(definition)?;
+            }
+        }
+        _ => {}
+    }
+    if let Effect::GenericEffect {
+        duration: Some(duration),
+        ..
+    } = effect
+    {
+        validate_persistent_result_duration(duration)?;
+    }
+    if let Effect::Token { keywords, .. } = effect {
+        for keyword in keywords {
+            validate_persistent_result_keyword(keyword)?;
+        }
+    }
+
+    let mut error = None;
+    let _ = crate::types::ability_visit::direct_nodes::visit_effect_scoped(
+        effect,
+        crate::types::ability_visit::ResolutionScope::IncludeRegisteredLater,
+        &mut |node| {
+            if let Err(reason) = validate_persistent_result_definition_node(node) {
+                error.get_or_insert(reason);
+            }
+            ControlFlow::Continue(())
+        },
+    );
+    error.map_or(Ok(()), Err)
+}
+
+type ResultProducerEnvironment = std::collections::BTreeMap<ReturnResultId, Option<(Zone, Zone)>>;
+
+fn collect_local_result_declarations(
+    node: ResultScopeNode<'_>,
+    declarations: &mut ResultProducerEnvironment,
+) -> Result<(), EffectError> {
+    if let Some(id) = node.declaration() {
+        let zones = match node.effect() {
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                ..
+            } => Some((origin.unwrap_or(Zone::Battlefield), *destination)),
+            _ => None,
+        };
+        if declarations.insert(id, zones).is_some() {
+            return Err(EffectError::InvalidParam(format!(
+                "duplicate instruction-result declaration {id:?}"
+            )));
+        }
+    }
+    for child in node.links() {
+        if !child
+            .condition()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
+        {
+            collect_local_result_declarations(child, declarations)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_result_process(
+    root: ResultScopeNode<'_>,
+    incoming: &ResultProducerEnvironment,
+    entry: InstructionResultEntry,
+) -> Result<InstructionResultProcess, EffectError> {
+    let mut local = ResultProducerEnvironment::new();
+    collect_local_result_declarations(root, &mut local)?;
+    if local.keys().any(|id| incoming.contains_key(id)) {
+        return Err(EffectError::InvalidParam(
+            "instruction-result declaration crosses process identity".into(),
+        ));
+    }
+    let mut seen = incoming.clone();
+    let mut imports = BTreeSet::new();
+    validate_result_process_node(root, &local, &mut seen, entry, &mut imports)?;
+    if !local.is_empty() {
+        Ok(InstructionResultProcess::Local {
+            declarations: local.keys().copied().collect(),
+        })
+    } else if !imports.is_empty() {
+        Ok(InstructionResultProcess::Imported { results: imports })
+    } else {
+        Ok(InstructionResultProcess::Unused)
+    }
+}
+
+fn validate_result_process_node(
+    node: ResultScopeNode<'_>,
+    local: &ResultProducerEnvironment,
+    seen: &mut ResultProducerEnvironment,
+    entry: InstructionResultEntry,
+    imports: &mut BTreeSet<ReturnResultId>,
+) -> Result<(), EffectError> {
+    // CR 608.2c + CR 608.2i: validate the complete immutable instruction order
+    // before executing anything. Read-only descendants share this authority;
+    // a locally producing child is a separate invocation.
+    validate_persistent_result_payloads(node.effect())?;
+    let mut error = None;
+    let mut read = |id: ReturnResultId, required_zones: Option<(Option<Zone>, Option<Zone>)>| {
+        let result = if let Some(producer) = seen.get(&id) {
+            if !local.contains_key(&id)
+                && !local.is_empty()
+                && entry != InstructionResultEntry::ResumeOwned
+            {
+                Err(EffectError::InvalidParam(format!(
+                    "mixed local/imported instruction-result scope: local {:?}, imported {id:?}",
+                    local.keys().collect::<Vec<_>>()
+                )))
+            } else if required_zones.is_some_and(|(from, to)| {
+                !producer.is_some_and(|(origin, destination)| {
+                    from == Some(origin) && to == Some(destination)
+                })
+            }) {
+                Err(EffectError::InvalidParam(format!(
+                    "incompatible instruction-result producer {id:?}"
+                )))
+            } else {
+                Ok(())
+            }
+        } else if local.contains_key(&id) {
+            Err(EffectError::InvalidParam(format!(
+                "instruction-result read precedes producer {id:?}"
+            )))
+        } else if !local.is_empty() && entry != InstructionResultEntry::ResumeOwned {
+            Err(EffectError::InvalidParam(format!(
+                "mixed local/imported instruction-result scope: local {:?}, imported {id:?}",
+                local.keys().collect::<Vec<_>>()
+            )))
+        } else if entry != InstructionResultEntry::Independent {
+            Ok(())
+        } else {
+            Err(EffectError::InvalidParam(format!(
+                "foreign instruction-result dependency {id:?}"
+            )))
+        };
+        if let Err(reason) = result {
+            error.get_or_insert(reason);
+        }
+        if !local.contains_key(&id) {
+            imports.insert(id);
+        }
+    };
+    node.direct_reads(&mut |reference| {
+        if let QuantityRef::ZoneChangeAggregate {
+            source: ZoneChangeRecordSource::InstructionResult { result },
+            from,
+            to,
+            ..
+        } = reference
+        {
+            read(*result, Some((*from, *to)));
+        }
+    });
+    if let Some(id) = node.explicit_read() {
+        read(id, None);
+    }
+    if let Some(reason) = error {
+        return Err(reason);
+    }
+    // A declaration becomes visible only after that instruction completes.
+    if let Some(id) = node.declaration() {
+        seen.insert(id, local[&id]);
+    }
+    let mut nested_error = None;
+    node.nested(&mut |definition, independent| {
+        if nested_error.is_some() {
+            return;
+        }
+        let nested = ResultScopeNode::Definition(definition);
+        let mut child_local = ResultProducerEnvironment::new();
+        let result = collect_local_result_declarations(nested, &mut child_local).and_then(|()| {
+            if independent {
+                validate_result_process(
+                    nested,
+                    &ResultProducerEnvironment::new(),
+                    InstructionResultEntry::Independent,
+                )
+                .map(|_| ())
+            } else if child_local.is_empty() {
+                validate_result_process_node(nested, local, &mut seen.clone(), entry, imports)
+            } else {
+                validate_result_process(nested, seen, InstructionResultEntry::SelectedBody)
+                    .map(|_| ())
+            }
+        });
+        if let Err(reason) = result {
+            nested_error = Some(reason);
+        }
+    });
+    if let Some(reason) = nested_error {
+        return Err(reason);
+    }
+    for child in node.links() {
+        if child
+            .condition()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
+        {
+            validate_result_process(
+                child,
+                &ResultProducerEnvironment::new(),
+                InstructionResultEntry::Independent,
+            )?;
+        } else {
+            validate_result_process_node(child, local, seen, entry, imports)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a complete canonical definition before admitting executable output.
+pub fn validate_instruction_result_definition(
+    root: &AbilityDefinition,
+) -> Result<InstructionResultProcess, EffectError> {
+    validate_result_process(
+        ResultScopeNode::Definition(root),
+        &ResultProducerEnvironment::new(),
+        InstructionResultEntry::Independent,
+    )
+}
+
+/// The selected entry can be a read-only import. Its caller supplies the exact
+/// occurrence separately; this function never selects from runtime frames.
+pub(crate) fn classify_instruction_result_invocation(
+    root: &ResolvedAbility,
+    entry: InstructionResultEntry,
+) -> Result<InstructionResultProcess, EffectError> {
+    validate_result_process(
+        ResultScopeNode::Resolved(root),
+        &ResultProducerEnvironment::new(),
+        entry,
+    )
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
@@ -12567,7 +14194,16 @@ impl QuantityExpr {
     /// game internals (`game/effects/mod.rs` now delegates here).
     pub fn any_ref(&self, pred: &mut dyn FnMut(&QuantityRef) -> bool) -> bool {
         match self {
-            QuantityExpr::Ref { qty } => pred(qty),
+            QuantityExpr::Ref { qty } => {
+                if pred(qty) {
+                    return true;
+                }
+                let mut found = false;
+                qty.for_each_nested_quantity_ref(&mut |reference| {
+                    found |= pred(reference);
+                });
+                found
+            }
             QuantityExpr::Offset { inner, .. }
             | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
@@ -12586,9 +14222,31 @@ impl QuantityExpr {
     /// composition forms: the mutable twin of [`Self::any_ref`], and the single
     /// traversal authority for rewriting refs (the parser's
     /// `each_quantity_ref_mut` delegates here).
+    pub(crate) fn for_each_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        self.any_ref(&mut |reference| {
+            f(reference);
+            false
+        });
+    }
+
+    pub(crate) fn instruction_result_ids(&self) -> Vec<ReturnResultId> {
+        let mut ids = Vec::new();
+        self.for_each_ref(&mut |reference| {
+            if let QuantityRef::ZoneChangeAggregate { source, .. } = reference {
+                if let Some(id) = source.result_id() {
+                    ids.push(id);
+                }
+            }
+        });
+        ids
+    }
+
     pub fn each_ref_mut(&mut self, f: &mut dyn FnMut(&mut QuantityRef)) {
         match self {
-            QuantityExpr::Ref { qty } => f(qty),
+            QuantityExpr::Ref { qty } => {
+                qty.for_each_nested_quantity_ref_mut(f);
+                f(qty);
+            }
             QuantityExpr::Offset { inner, .. }
             | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
@@ -26377,6 +28035,334 @@ macro_rules! define_effect_quantity_walk {
     };
 }
 
+// Predicate quantities complement, rather than replace, the exhaustive scalar-slot walkers.
+macro_rules! define_effect_predicate_quantity_walk {
+ ([$($mut_:tt)?]; $predicates:ident; $nested:ident) => {
+impl Effect {
+ pub(crate) fn $predicates(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+Effect::StartYourEngines { player_scope, .. } => { player_scope.$nested(f); },
+Effect::ChangeSpeed { player_scope, .. } => { player_scope.$nested(f); },
+Effect::DealDamage { target, .. } => { target.$nested(f); },
+Effect::EachDealsDamageEqualToPower { sources, recipient, extra_source, .. } => { sources.$nested(f); recipient.$nested(f); for nested in extra_source { nested.$nested(f); } },
+Effect::EachSourceDealsDamage { sources, .. } => { sources.$nested(f); },
+Effect::Draw { target, .. } => { target.$nested(f); },
+Effect::Pump { target, .. } => { target.$nested(f); },
+Effect::PairWith { target, .. } => { target.$nested(f); },
+Effect::Destroy { target, .. } => { target.$nested(f); },
+Effect::Regenerate { target, .. } => { target.$nested(f); },
+Effect::RemoveAllDamage { target, .. } => { target.$nested(f); },
+Effect::Counter { target, .. } => { target.$nested(f); },
+Effect::CounterAll { target, .. } => { target.$nested(f); },
+Effect::Token { owner, attach_to, .. } => { owner.$nested(f); for nested in attach_to { nested.$nested(f); } },
+Effect::GainLife { player, .. } => { player.$nested(f); },
+Effect::LoseLife { target, .. } => { for nested in target { nested.$nested(f); } },
+Effect::SetTapState { target, .. } => { target.$nested(f); },
+Effect::RemoveCounter { target, .. } => { target.$nested(f); },
+Effect::Sacrifice { target, .. } => { target.$nested(f); },
+Effect::DiscardCard { target, .. } => { target.$nested(f); },
+Effect::Mill { target, .. } => { target.$nested(f); },
+Effect::Scry { target, .. } => { target.$nested(f); },
+Effect::PumpAll { target, .. } => { target.$nested(f); },
+Effect::DamageAll { target, player_filter, .. } => { target.$nested(f); for nested in player_filter { nested.$nested(f); } },
+Effect::DamageEachPlayer { player_filter, .. } => { player_filter.$nested(f); },
+Effect::DestroyAll { target, .. } => { target.$nested(f); },
+Effect::ChangeZone { target, conditional_enter_with_counters, enters_modified_if, .. } => { target.$nested(f); for (filter, _, _) in conditional_enter_with_counters { filter.$nested(f); } for nested in enters_modified_if { nested.$nested(f); } },
+Effect::ChangeZoneAll { target, .. } => { target.$nested(f); },
+Effect::Dig { player, filter, .. } => { player.$nested(f); filter.$nested(f); },
+Effect::GainControl { target, .. } => { target.$nested(f); },
+Effect::GainControlAll { target, .. } => { target.$nested(f); },
+Effect::ControlNextTurn { target, .. } => { target.$nested(f); },
+Effect::Attach { attachment, target, .. } => { attachment.$nested(f); target.$nested(f); },
+Effect::UnattachAll { attachment, target, .. } => { attachment.$nested(f); target.$nested(f); },
+Effect::Surveil { target, .. } => { target.$nested(f); },
+Effect::Fight { target, subject, .. } => { target.$nested(f); subject.$nested(f); },
+Effect::Bounce { target, .. } => { target.$nested(f); },
+Effect::BounceAll { target, .. } => { target.$nested(f); },
+Effect::ExploreAll { filter, .. } => { filter.$nested(f); },
+Effect::BecomeMonarch { target, .. } => { target.$nested(f); },
+Effect::ProliferateTarget { target, .. } => { target.$nested(f); },
+Effect::Behold { filter, .. } => { filter.$nested(f); },
+Effect::SeparateIntoPiles { object_filter, .. } => { object_filter.$nested(f); },
+Effect::SwitchPT { target, .. } => { target.$nested(f); },
+Effect::CopySpell { target, .. } => { target.$nested(f); },
+Effect::CastCopyOfCard { target, .. } => { target.$nested(f); },
+Effect::CopyTokenOf { target, owner, source_filter, .. } => { target.$nested(f); owner.$nested(f); for nested in source_filter { nested.$nested(f); } },
+Effect::CreateTokenCopyFromPool { owner, type_filter, .. } => { owner.$nested(f); type_filter.$nested(f); },
+Effect::CombineHost { host, .. } => { host.$nested(f); },
+Effect::ChooseAugmentAndCombineWithHost { filter, host, .. } => { filter.$nested(f); host.$nested(f); },
+Effect::Meld { source_filter, partner_filter, .. } => { source_filter.$nested(f); partner_filter.$nested(f); },
+Effect::ExileHaunting { target, .. } => { target.$nested(f); },
+Effect::HideawayConceal { target, .. } => { target.$nested(f); },
+Effect::CopyTokenBlockingAttacker { source_filter, owner, .. } => { source_filter.$nested(f); owner.$nested(f); },
+Effect::BecomeCopy { target, .. } => { target.$nested(f); },
+Effect::ChoosePermanent { filter, .. } => { filter.$nested(f); },
+Effect::GainActivatedAbilitiesOfTarget { target, recipient, .. } => { target.$nested(f); recipient.$nested(f); },
+Effect::ChooseCard { target, .. } => { target.$nested(f); },
+Effect::PutCounter { target, .. } => { target.$nested(f); },
+Effect::ChooseCounterKind { target, .. } => { target.$nested(f); },
+Effect::PutChosenCounter { target, .. } => { target.$nested(f); },
+Effect::PutCounterAll { target, .. } => { target.$nested(f); },
+Effect::MultiplyCounter { target, .. } => { target.$nested(f); },
+Effect::ChooseCounterAdjustment { target, .. } => { target.$nested(f); },
+Effect::DoublePT { target, .. } => { target.$nested(f); },
+Effect::DoublePTAll { target, .. } => { target.$nested(f); },
+Effect::MoveCounters { source, target, .. } => { source.$nested(f); target.$nested(f); },
+Effect::ReproduceEventCounters { target, .. } => { target.$nested(f); },
+Effect::Animate { target, .. } => { target.$nested(f); },
+Effect::ReturnAsAura { enchant_filter, .. } => { enchant_filter.$nested(f); },
+Effect::GenericEffect { target, .. } => { for nested in target { nested.$nested(f); } },
+Effect::Discard { target, unless_filter, filter, .. } => { target.$nested(f); for nested in unless_filter { nested.$nested(f); } for nested in filter { nested.$nested(f); } },
+Effect::Shuffle { target, .. } => { target.$nested(f); },
+Effect::Transform { target, .. } => { target.$nested(f); },
+Effect::FlipPermanent { target, .. } => { target.$nested(f); },
+Effect::SearchLibrary { filter, target_player, .. } => { filter.$nested(f); for nested in target_player { nested.$nested(f); } },
+Effect::SearchOutsideGame { filter, .. } => { filter.$nested(f); },
+Effect::OpenBoosterPack { filter, .. } => { filter.$nested(f); },
+Effect::RevealHand { target, card_filter, .. } => { target.$nested(f); card_filter.$nested(f); },
+Effect::RevealFromHand { filter, .. } => { filter.$nested(f); },
+Effect::Reveal { target, .. } => { target.$nested(f); },
+Effect::RevealChosenNumbers { players, .. } => { players.$nested(f); },
+Effect::RevealTop { player, .. } => { player.$nested(f); },
+Effect::ExileTop { player, .. } => { player.$nested(f); },
+Effect::ExileFaceDownPile { object, player, .. } => { object.$nested(f); player.$nested(f); },
+Effect::TargetOnly { target, .. } => { target.$nested(f); },
+Effect::ChooseDamageSource { source_filter, .. } => { source_filter.$nested(f); },
+Effect::Suspect { target, .. } => { target.$nested(f); },
+Effect::Unsuspect { target, .. } => { target.$nested(f); },
+Effect::Connive { target, .. } => { target.$nested(f); },
+Effect::PhaseOut { target, .. } => { target.$nested(f); },
+Effect::PhaseIn { target, .. } => { target.$nested(f); },
+Effect::ForceBlock { target, .. } => { target.$nested(f); },
+Effect::ForceAttack { target, required_defender, .. } => { target.$nested(f); required_defender.$nested(f); },
+Effect::BecomePrepared { target, .. } => { target.$nested(f); },
+Effect::BecomeUnprepared { target, .. } => { target.$nested(f); },
+Effect::BecomeSaddled { target, .. } => { target.$nested(f); },
+Effect::AddTargetReplacement { target, .. } => { target.$nested(f); },
+Effect::ReduceNextSpellCost { spell_filter, .. } => { for nested in spell_filter { nested.$nested(f); } },
+Effect::GrantNextSpellAbility { spell_filter, .. } => { for nested in spell_filter { nested.$nested(f); } },
+Effect::CreateBoon { recipient, .. } => { recipient.$nested(f); },
+Effect::PayCost { payer, cost, .. } => { payer.$nested(f); cost.$predicates(f); },
+Effect::CastFromZone { target, .. } => { target.$nested(f); },
+Effect::FreeCastFromZones { filter, .. } => { filter.$nested(f); },
+Effect::PreventDamage { target, damage_source_filter, .. } => { target.$nested(f); for nested in damage_source_filter { nested.$nested(f); } },
+Effect::CreateDamageReplacement { source_filter, redirect_object_filter, recipient_object_filter, .. } => { for nested in source_filter { nested.$nested(f); } for nested in redirect_object_filter { nested.$nested(f); } for nested in recipient_object_filter { nested.$nested(f); } },
+Effect::LoseTheGame { target, .. } => { for nested in target { nested.$nested(f); } },
+Effect::WinTheGame { target, .. } => { for nested in target { nested.$nested(f); } },
+Effect::FlipCoin { flipper, .. } => { flipper.$nested(f); },
+Effect::FlipCoins { flipper, .. } => { flipper.$nested(f); },
+Effect::CrankContraptions { target, .. } => { target.$nested(f); },
+Effect::ReassembleContraption { target, .. } => { target.$nested(f); },
+Effect::AssembleContraptionOnSprocket { target, .. } => { target.$nested(f); },
+Effect::ReassembleContraptionOnSprocket { target, .. } => { target.$nested(f); },
+Effect::PutSticker { target, .. } => { target.$nested(f); },
+Effect::ApplySticker { target, .. } => { target.$nested(f); },
+Effect::GrantCastingPermission { target, .. } => { target.$nested(f); },
+Effect::ChooseFromZone { filter, .. } => { for nested in filter { nested.$nested(f); } },
+Effect::RememberCard { target, .. } => { target.$nested(f); },
+Effect::ChooseObjectsIntoTrackedSet { chooser, filter, .. } => { chooser.$nested(f); filter.$nested(f); },
+Effect::ChooseAndSacrificeRest { choose_filter, sacrifice_filter, .. } => { choose_filter.$nested(f); sacrifice_filter.$nested(f); },
+Effect::EachPlayerCopyChosen { choose_filter, .. } => { choose_filter.$nested(f); },
+Effect::Exploit { target, .. } => { target.$nested(f); },
+Effect::GivePlayerCounter { target, .. } => { target.$nested(f); },
+Effect::LoseAllPlayerCounters { target, .. } => { target.$nested(f); },
+Effect::ExileFromTopUntil { player, .. } => { player.$nested(f); },
+Effect::RevealUntil { player, filter, .. } => { player.$nested(f); filter.$nested(f); },
+Effect::Discover { player, .. } => { player.$nested(f); },
+Effect::PhysicalContest { contestant, .. } => { contestant.$nested(f); },
+Effect::Heist { target, .. } => { target.$nested(f); },
+Effect::PutAtLibraryPosition { target, .. } => { target.$nested(f); },
+Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => { player.$nested(f); },
+Effect::PutOnTopOrBottom { target, chooser, .. } => { target.$nested(f); chooser.$nested(f); },
+Effect::Goad { target, .. } => { target.$nested(f); },
+Effect::GoadAll { target, .. } => { target.$nested(f); },
+Effect::Detain { target, .. } => { target.$nested(f); },
+Effect::SetRoomDoorLock { target, .. } => { target.$nested(f); },
+Effect::ExchangeControl { target_a, target_b, .. } => { target_a.$nested(f); target_b.$nested(f); },
+Effect::ChangeTargets { target, forced_to, .. } => { target.$nested(f); for nested in forced_to { nested.$nested(f); } },
+Effect::Manifest { target, object_source, .. } => { target.$nested(f); for nested in object_source { nested.$nested(f); } },
+Effect::Cloak { target, object_source, .. } => { target.$nested(f); for nested in object_source { nested.$nested(f); } },
+Effect::TurnFaceUp { target, .. } => { target.$nested(f); },
+Effect::TurnFaceDown { target, .. } => { target.$nested(f); },
+Effect::ExtraTurn { target, .. } => { target.$nested(f); },
+Effect::GrantExtraLoyaltyActivations { target, .. } => { target.$nested(f); },
+Effect::SkipNextTurn { target, .. } => { target.$nested(f); },
+Effect::SkipNextStep { target, .. } => { target.$nested(f); },
+Effect::AdditionalPhase { attacker_restriction, .. } => { for nested in attacker_restriction { nested.$nested(f); } },
+Effect::Double { target, .. } => { target.$nested(f); },
+Effect::Amass { player, .. } => { player.$nested(f); },
+Effect::Endure { subject, .. } => { subject.$nested(f); },
+Effect::BlightEffect { player, .. } => { player.$nested(f); },
+Effect::Seek { filter, .. } => { filter.$nested(f); },
+Effect::SetLifeTotal { target, .. } => { target.$nested(f); },
+Effect::ExchangeLifeWithStat { player, .. } => { player.$nested(f); },
+Effect::ExchangeLifeTotals { player_a, player_b, .. } => { player_a.$nested(f); player_b.$nested(f); },
+Effect::GiveControl { target, recipient, .. } => { target.$nested(f); recipient.$nested(f); },
+Effect::RemoveFromCombat { target, .. } => { target.$nested(f); },
+Effect::BecomeBlocked { target, .. } => { target.$nested(f); },
+Effect::Conjure { library_players, .. } => { for nested in library_players { nested.$nested(f); } },
+Effect::ApplyPerpetual { target, .. } => { target.$nested(f); },
+Effect::ChooseOneOf { chooser, .. } => { chooser.$nested(f); },
+Effect::Mana { produced, target, .. } => {
+    if let Some(role) = target {
+        match role {
+            ManaTargetRole::Recipient { recipient } => recipient.$nested(f),
+            ManaTargetRole::CountSource { count_source } => count_source.$nested(f),
+            ManaTargetRole::Both { recipient, count_source } => {
+                recipient.$nested(f);
+                count_source.$nested(f);
+            }
+        }
+    }
+    match produced {
+        ManaProduction::AnyTypeProduceableBy { land_filter: filter, .. }
+        | ManaProduction::DistinctColorsAmongPermanents { filter }
+        | ManaProduction::AnyOneColorAmongPermanents { filter, .. } => filter.$nested(f),
+        ManaProduction::Fixed { .. } | ManaProduction::Colorless { .. }
+        | ManaProduction::Mixed { .. } | ManaProduction::AnyOneColor { .. }
+        | ManaProduction::AnyCombination { .. } | ManaProduction::ChosenColor { .. }
+        | ManaProduction::NotedType { .. } | ManaProduction::OpponentLandColors { .. }
+        | ManaProduction::AnyCombinationOfObjectColors { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::AnyInCommandersColorIdentity { .. }
+        | ManaProduction::TriggerEventManaType => {}
+    }
+},
+Effect::ApplyPostReplacementDamage { .. } |
+Effect::Explore |
+Effect::Investigate |
+Effect::Tribute { .. } |
+Effect::TimeTravel |
+Effect::NoOp |
+Effect::Proliferate |
+Effect::Populate |
+Effect::Clash |
+Effect::ExileTopCardContest { .. } |
+Effect::EndTheTurn |
+Effect::EndCombatPhase |
+Effect::Vote { .. } |
+Effect::EpicCopy { .. } |
+Effect::Myriad |
+Effect::Encore |
+Effect::RegisterBending { .. } |
+Effect::Cleanup { .. } |
+Effect::Choose { .. } |
+Effect::OpponentGuess { .. } |
+Effect::SwapChosenLabels { .. } |
+Effect::SolveCase |
+Effect::SetClassLevel { .. } |
+Effect::CreateDelayedTrigger { .. } |
+Effect::AddRestriction { .. } |
+Effect::AddPendingETBCounters { .. } |
+Effect::AddPendingEntersModifications { .. } |
+Effect::CreateEmblem { .. } |
+Effect::NoteNumber { .. } |
+Effect::ExileResolvingSpellInsteadOfGraveyard { .. } |
+Effect::CreateDrawReplacement { .. } |
+Effect::CreatePlaneswalkReplacement { .. } |
+Effect::RollDie { .. } |
+Effect::FlipCoinUntilLose { .. } |
+Effect::RingTemptsYou |
+Effect::VentureIntoDungeon |
+Effect::VentureInto { .. } |
+Effect::TakeTheInitiative |
+Effect::ArrangePlanarDeckTop { .. } |
+Effect::Planeswalk |
+Effect::ChaosEnsues |
+Effect::ReverseTurnOrder |
+Effect::RedistributeLifeTotals |
+Effect::OpenAttractions { .. } |
+Effect::RollToVisitAttractions |
+Effect::AssembleContraptions { .. } |
+Effect::AssembleContraptionsFromRollDifference |
+Effect::ProcessRadCounters |
+Effect::NoteManaSpent |
+Effect::ForEachCategory { .. } |
+Effect::GainEnergy { .. } |
+Effect::HeistExile |
+Effect::Cascade |
+Effect::Ripple { .. } |
+Effect::MiracleCast { .. } |
+Effect::MadnessCast { .. } |
+Effect::GiftDelivery { .. } |
+Effect::ManifestDread |
+Effect::RuntimeHandled { .. } |
+Effect::Incubate { .. } |
+Effect::EmpowerJace { .. } |
+Effect::Monstrosity { .. } |
+Effect::Specialize |
+Effect::Renown { .. } |
+Effect::Bolster { .. } |
+Effect::Adapt { .. } |
+Effect::Learn |
+Effect::Forage |
+Effect::CompletePlayerAction { .. } |
+Effect::Harness |
+Effect::CollectEvidence { .. } |
+Effect::SetDayNight { .. } |
+Effect::Intensify { .. } |
+Effect::DraftFromSpellbook { .. } |
+Effect::Unimplemented { .. } => {}
+}
+}
+}
+impl AbilityCost {
+ pub(crate) fn $predicates(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ match self {
+AbilityCost::Discard { filter, .. } => { for nested in filter { nested.$nested(f); } },
+AbilityCost::Exile { filter, .. } => { for nested in filter { nested.$nested(f); } },
+AbilityCost::ExileMaterials { materials, .. } => { materials.$nested(f); },
+AbilityCost::ExileWithAggregate { filter, .. } => { filter.$nested(f); },
+AbilityCost::TapCreatures { filter, .. } => { filter.$nested(f); },
+AbilityCost::RemoveCounter { target, .. } => { for nested in target { nested.$nested(f); } },
+AbilityCost::ReturnToHand { filter, .. } => { for nested in filter { nested.$nested(f); } },
+AbilityCost::UnattachFrom { filter, .. } => { filter.$nested(f); },
+AbilityCost::Reveal { filter, .. } => { for nested in filter { nested.$nested(f); } },
+AbilityCost::Behold { filter, .. } => { filter.$nested(f); },
+AbilityCost::Sacrifice(cost) => { cost.target.$nested(f); },
+AbilityCost::PerCounter { base, target, .. } => { base.$predicates(f); target.$nested(f); },
+AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+    for cost in costs { cost.$predicates(f); }
+},
+AbilityCost::EffectCost { effect } => { effect.$predicates(f); },
+AbilityCost::Mana { .. } |
+AbilityCost::ManaDynamic { .. } |
+AbilityCost::Tap |
+AbilityCost::Untap |
+AbilityCost::Loyalty { .. } |
+AbilityCost::PayLife { .. } |
+AbilityCost::CollectEvidence { .. } |
+AbilityCost::PayEnergy { .. } |
+AbilityCost::PaySpeed { .. } |
+AbilityCost::Unattach |
+AbilityCost::Mill { .. } |
+AbilityCost::Exert |
+AbilityCost::Blight { .. } |
+AbilityCost::Waterbend { .. } |
+AbilityCost::NinjutsuFamily { .. } |
+AbilityCost::KeywordCostOfCastSpell { .. } |
+AbilityCost::GetPlayerCounters { .. } |
+AbilityCost::Unimplemented { .. } => {}
+}
+}
+}
+ };
+}
+define_effect_predicate_quantity_walk!([]; for_each_predicate_quantity_ref; for_each_nested_quantity_ref);
+define_effect_predicate_quantity_walk!([mut]; for_each_predicate_quantity_ref_mut; for_each_nested_quantity_ref_mut);
+
+impl Effect {
+    pub(crate) fn for_each_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        self.for_each_quantity_expr(&mut |expr| expr.for_each_ref(f));
+        self.for_each_predicate_quantity_ref(f);
+    }
+    pub(crate) fn for_each_quantity_ref_mut(&mut self, f: &mut dyn FnMut(&mut QuantityRef)) {
+        self.for_each_quantity_expr_mut(&mut |expr| expr.each_ref_mut(f));
+        self.for_each_predicate_quantity_ref_mut(f);
+    }
+}
+
 impl Effect {
     define_effect_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
     define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
@@ -36401,6 +38387,9 @@ pub struct ResolvedAbility {
     pub reads_chosen_group: Option<ChosenGroupId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declares_return_result: Option<ReturnResultId>,
+    /// Private invocation expectation, independent of its occurrence lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reads_return_result: Option<(ReturnResultId, ReturnResultReadSpec)>,
     /// Attribution only. Triggered abilities additionally carry the exact
@@ -36914,6 +38903,7 @@ impl PartialEq for ResolvedAbility {
             declares_chosen_group: a_declares_chosen_group,
             reads_chosen_group: a_reads_chosen_group,
             declares_return_result: a_declares_return_result,
+            return_result_process: a_return_result_process,
             reads_return_result: a_reads_return_result,
             source_id: a_source_id,
             cast_occurrence: a_cast_occurrence,
@@ -36989,6 +38979,7 @@ impl PartialEq for ResolvedAbility {
             declares_chosen_group: b_declares_chosen_group,
             reads_chosen_group: b_reads_chosen_group,
             declares_return_result: b_declares_return_result,
+            return_result_process: b_return_result_process,
             reads_return_result: b_reads_return_result,
             source_id: b_source_id,
             cast_occurrence: b_cast_occurrence,
@@ -37064,6 +39055,7 @@ impl PartialEq for ResolvedAbility {
             && a_declares_chosen_group == b_declares_chosen_group
             && a_reads_chosen_group == b_reads_chosen_group
             && a_declares_return_result == b_declares_return_result
+            && a_return_result_process == b_return_result_process
             && a_reads_return_result == b_reads_return_result
             && a_source_id == b_source_id
             && a_cast_occurrence == b_cast_occurrence
@@ -37472,6 +39464,7 @@ impl ResolvedAbility {
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
+            return_result_process: None,
             reads_return_result: None,
             source_id,
             cast_occurrence: None,
@@ -37861,7 +39854,19 @@ impl ResolvedAbility {
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context
     /// or a definition occurrence would reintroduce object-identity drift.
+    /// Clear invocation ownership when cloning onto an independent stack entry.
+    pub(crate) fn clear_return_result_process_recursive(&mut self) {
+        self.return_result_process = None;
+        if let Some(sub) = &mut self.sub_ability {
+            sub.clear_return_result_process_recursive();
+        }
+        if let Some(otherwise) = &mut self.else_ability {
+            otherwise.clear_return_result_process_recursive();
+        }
+    }
+
     pub fn clear_trigger_identity_recursive(&mut self) {
+        self.return_result_process = None;
         self.source_id = ObjectId(0);
         self.source_incarnation = None;
         self.trigger_source = None;
@@ -47002,5 +49007,460 @@ mod mandatory_counter_adjustment_serde_tests {
             raw["counters"] = invalid;
             assert!(serde_json::from_value::<Effect>(raw).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod departure_process_copy_tests {
+    use super::*;
+    use crate::types::game_state::ReturnResultProcessId;
+
+    #[test]
+    fn departure_process_is_exact_runtime_identity_and_only_comparison_copies_clear_it() {
+        let mut first = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(100), PlayerId(0));
+        first.description = Some("Supplemental canonical process body".into());
+        first.sub_ability = Some(Box::new(first.clone()));
+        first.bind_return_result_process(Some(ReturnResultProcessId(5)));
+        let retained = first.clone();
+        assert_eq!(retained, first);
+        assert_eq!(
+            retained.sub_ability.as_ref().unwrap().return_result_process,
+            Some(ReturnResultProcessId(5))
+        );
+        let mut second = first.clone();
+        second.bind_return_result_process(Some(ReturnResultProcessId(7)));
+        assert_ne!(
+            first, second,
+            "exact runtime equality includes independently retained process authority"
+        );
+        let first_wire = serde_json::to_value(&first).unwrap();
+        let decoded: ResolvedAbility = serde_json::from_value(first_wire).unwrap();
+        assert_eq!(decoded, first);
+        let mut first_comparison = first.clone();
+        let mut second_comparison = second.clone();
+        first_comparison.clear_trigger_identity_recursive();
+        second_comparison.clear_trigger_identity_recursive();
+        assert_eq!(first_comparison, second_comparison);
+        assert_eq!(first.return_result_process, Some(ReturnResultProcessId(5)));
+        assert_eq!(second.return_result_process, Some(ReturnResultProcessId(7)));
+        let mut independent = first.clone();
+        independent.clear_return_result_process_recursive();
+        assert_eq!(independent.return_result_process, None);
+        assert_eq!(
+            independent
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .return_result_process,
+            None
+        );
+        assert_eq!(independent.description, first.description);
+        assert_eq!(independent.source_id, first.source_id);
+        let definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        let built = crate::game::ability_utils::build_resolved_from_def(
+            &definition,
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert_eq!(built.return_result_process, None);
+        assert!(!serde_json::to_string(&definition)
+            .unwrap()
+            .contains("return_result_process"));
+        let mut legacy = serde_json::to_value(&first).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("return_result_process");
+        let legacy: ResolvedAbility = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.return_result_process, None);
+        assert_eq!(legacy.sub_ability.as_ref().unwrap().return_result_process, Some(ReturnResultProcessId(5)), "decoding never silently rewrites another actual executable's independently saved identity");
+    }
+}
+
+#[cfg(test)]
+mod departure_owned_dependency_walk_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn reference(id: u32) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: ZoneChangeRecordSource::InstructionResult {
+                    result: ReturnResultId(id),
+                },
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        }
+    }
+    fn predicate(id: u32) -> TargetFilter {
+        let mut typed = TypedFilter::default();
+        typed.properties.push(FilterProp::Cmc {
+            comparator: Comparator::LT,
+            value: reference(id),
+        });
+        TargetFilter::Not {
+            filter: Box::new(TargetFilter::Not {
+                filter: Box::new(TargetFilter::Typed(typed)),
+            }),
+        }
+    }
+    fn gain(id: u32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: reference(id),
+            },
+        )
+    }
+
+    #[test]
+    fn departure_owned_cost_expression_filter_condition_walks_and_mutation_agree() {
+        let mut nested = gain(3);
+        nested.cost = Some(AbilityCost::PayLife {
+            amount: reference(2),
+        });
+        let nested_cost = AbilityCost::EffectCost {
+            effect: Box::new(Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![nested],
+                kind: ChooseOneOfKind::Ordinary,
+            }),
+        };
+        let mut movement: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZone", "origin":"Graveyard", "destination":"Battlefield"})).unwrap();
+        let Effect::ChangeZone {
+            target,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            enters_modified_if,
+            ..
+        } = &mut movement
+        else {
+            unreachable!()
+        };
+        *target = predicate(8);
+        *enter_with_counters = vec![(CounterType::Plus1Plus1, reference(7))];
+        *conditional_enter_with_counters = vec![(predicate(4), CounterType::Lore, reference(5))];
+        *enters_modified_if = Some(predicate(6));
+        let mut root = AbilityDefinition::new(AbilityKind::Spell, movement);
+        root.cost = Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: reference(1),
+                },
+                nested_cost,
+            ],
+        });
+        root.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: reference(9),
+            comparator: Comparator::GE,
+            rhs: reference(10),
+        });
+        root.repeat_for = Some(reference(11));
+        root.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Discard {
+                count: reference(12),
+                filter: Some(predicate(13)),
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            },
+            payer: predicate(17),
+        });
+        let mut sequential = gain(14);
+        let mut reflexive = gain(16);
+        reflexive.condition = Some(AbilityCondition::WhenYouDo);
+        sequential.sub_ability = Some(Box::new(reflexive));
+        root.sub_ability = Some(Box::new(sequential));
+        root.else_ability = Some(Box::new(gain(15)));
+        let mut shared = Vec::new();
+        root.for_each_own_quantity_ref(&mut |reference| {
+            if let Some(id) = reference.instruction_result_id() {
+                shared.push(id.0);
+            }
+        });
+        assert_eq!(shared.iter().copied().collect::<BTreeSet<_>>(), (1..=15).chain(std::iter::once(17)).collect(), "owned nested definition costs, payer predicates, expressions, nested predicates, entry gates and both condition operands all participate");
+        assert_eq!(
+            shared.len(),
+            16,
+            "each actual owned scalar/predicate dependency is visited exactly once"
+        );
+        let mut mutable = Vec::new();
+        root.for_each_own_quantity_ref_mut(&mut |reference| {
+            if let QuantityRef::ZoneChangeAggregate {
+                source: ZoneChangeRecordSource::InstructionResult { result },
+                ..
+            } = reference
+            {
+                mutable.push(result.0);
+                result.0 += 100;
+            }
+        });
+        assert_eq!(
+            mutable, shared,
+            "query and mutation share the same full owned traversal and order"
+        );
+        let mut rewritten = Vec::new();
+        root.for_each_own_quantity_ref(&mut |reference| {
+            if let Some(id) = reference.instruction_result_id() {
+                rewritten.push(id.0);
+            }
+        });
+        assert_eq!(
+            rewritten,
+            shared.iter().map(|id| id + 100).collect::<Vec<_>>()
+        );
+        let reflexive = root
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap();
+        let Effect::GainLife { amount, .. } = reflexive.effect.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(
+            amount.instruction_result_ids(),
+            vec![ReturnResultId(16)],
+            "an independently registered body never inherits the parent's relocation"
+        );
+        let root_wire = serde_json::to_value(&root).unwrap();
+        let loaded: AbilityDefinition = serde_json::from_value(root_wire).unwrap();
+        assert_eq!(loaded, root);
+    }
+
+    #[test]
+    fn departure_zone_entry_shared_walk_excludes_latched_counters_and_visits_nested_predicates() {
+        let conditional = vec![(
+            predicate(1),
+            CounterType::Plus1Plus1,
+            QuantityExpr::Offset {
+                inner: Box::new(reference(2)),
+                offset: 3,
+            },
+        )];
+        let gate = predicate(3);
+        let mut ids = Vec::new();
+        for_each_zone_entry_quantity_ref(&conditional, Some(&gate), &mut |reference| {
+            if let Some(id) = reference.instruction_result_id() {
+                ids.push(id);
+            }
+        });
+        assert_eq!(
+            ids,
+            vec![ReturnResultId(1), ReturnResultId(2), ReturnResultId(3)]
+        );
+        let mut none = Vec::new();
+        for_each_zone_entry_quantity_ref(
+            &[(
+                TargetFilter::Any,
+                CounterType::Plus1Plus1,
+                QuantityExpr::Fixed { value: 5 },
+            )],
+            None,
+            &mut |reference| none.push(reference.clone()),
+        );
+        assert!(
+            none.is_empty(),
+            "literal quantities and already latched u32 entry counters need no result owner"
+        );
+    }
+}
+
+#[cfg(test)]
+mod departure_persistent_boundary_tests {
+    use super::*;
+    fn quantity(source: ZoneChangeRecordSource) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source,
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        }
+    }
+    fn whole(effect: Effect) -> AbilityDefinition {
+        let effect_producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll","origin":"Battlefield","destination":"Exile"})).unwrap();
+        let mut root = AbilityDefinition::new(AbilityKind::Spell, effect_producer);
+        root.declares_return_result = Some(ReturnResultId(7));
+        root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+        root
+    }
+    #[test]
+    fn persistent_filters_modifiers_keywords_tokens_and_emblems_refuse_resolving_results_without_refusing_current_queries(
+    ) {
+        for instruction in [false, true] {
+            let value = quantity(if instruction {
+                ZoneChangeRecordSource::InstructionResult {
+                    result: ReturnResultId(7),
+                }
+            } else {
+                ZoneChangeRecordSource::ThisTurn
+            });
+            let mut filter = TypedFilter::creature();
+            filter.properties.push(FilterProp::Cmc {
+                comparator: Comparator::LT,
+                value: value.clone(),
+            });
+            let filter = TargetFilter::Typed(filter);
+            let mut static_def = StaticDefinition::new(StaticMode::Continuous)
+                .affected(filter.clone())
+                .modifications(vec![ContinuousModification::AddDynamicPower {
+                    value: value.clone(),
+                }]);
+            static_def.condition = Some(StaticCondition::QuantityComparison {
+                lhs: value.clone(),
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            });
+            let mut trigger =
+                TriggerDefinition::new(crate::types::triggers::TriggerMode::SpellCast)
+                    .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp));
+            trigger.valid_card = Some(filter.clone());
+            for effect in [
+                Effect::ReturnAsAura {
+                    enchant_filter: filter.clone(),
+                    grants: vec![],
+                },
+                Effect::ReturnAsAura {
+                    enchant_filter: TargetFilter::Any,
+                    grants: vec![ContinuousModification::AddDynamicPower {
+                        value: value.clone(),
+                    }],
+                },
+                Effect::ReturnAsAura {
+                    enchant_filter: TargetFilter::Any,
+                    grants: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Enchant(filter.clone()),
+                    }],
+                },
+                Effect::GenericEffect {
+                    static_abilities: vec![static_def.clone()],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    end_cost: None,
+                },
+                Effect::Token {
+                    name: "Supplemental persistent token".into(),
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    types: vec!["Creature".into()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![static_def.clone()],
+                    enter_with_counters: vec![],
+                },
+                Effect::CreateEmblem {
+                    statics: vec![static_def],
+                    triggers: vec![],
+                },
+                Effect::CreateEmblem {
+                    statics: vec![],
+                    triggers: vec![trigger],
+                },
+            ] {
+                let root = whole(effect);
+                let before = serde_json::to_value(&root).unwrap();
+                let result = validate_instruction_result_definition(&root);
+                if instruction {
+                    assert!(format!("{:?}", result.unwrap_err())
+                        .contains("foreign instruction-result dependency"));
+                } else {
+                    assert!(
+                        result.is_ok(),
+                        "ordinary persistent live queries retain their independent lifetime"
+                    );
+                }
+                assert_eq!(
+                    serde_json::to_value(&root).unwrap(),
+                    before,
+                    "immutable refusal never latches or rewrites a persistent scalar"
+                );
+            }
+        }
+    }
+    #[test]
+    fn shared_and_mutable_registered_aura_grants_are_independent_and_keep_complete_local_bodies() {
+        use crate::types::ability_visit::{
+            nodes, nodes_mut, DefinitionNode, DefinitionNodeMut, ResolutionScope,
+        };
+        let mut local = whole(Effect::GainLife {
+            amount: quantity(ZoneChangeRecordSource::InstructionResult {
+                result: ReturnResultId(7),
+            }),
+            player: TargetFilter::Controller,
+        });
+        local.kind = AbilityKind::Activated;
+        let mut aura = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ReturnAsAura {
+                enchant_filter: TargetFilter::Any,
+                grants: vec![ContinuousModification::GrantAbility {
+                    definition: Box::new(local),
+                }],
+            },
+        );
+        assert!(validate_instruction_result_definition(&aura).is_ok());
+        for scope in [
+            ResolutionScope::OwnResolutionOnly,
+            ResolutionScope::IncludeRegisteredLater,
+        ] {
+            let mut shared = vec![];
+            let mut mutable = vec![];
+            let _ = nodes::visit_ability_def_scoped(&aura, scope, &mut |node| {
+                if let DefinitionNode::Ability(definition) = node {
+                    shared.push(definition.declares_return_result);
+                }
+                ControlFlow::Continue(())
+            });
+            let _ = nodes_mut::visit_ability_def_scoped(&mut aura, scope, &mut |node| {
+                if let DefinitionNodeMut::Ability(definition) = node {
+                    mutable.push(definition.declares_return_result);
+                }
+                ControlFlow::Continue(())
+            });
+            assert_eq!(shared, mutable);
+            assert_eq!(
+                shared.len(),
+                if scope == ResolutionScope::OwnResolutionOnly {
+                    1
+                } else {
+                    3
+                }
+            );
+        }
+        let Effect::ReturnAsAura { grants, .. } = aura.effect.as_mut() else {
+            unreachable!()
+        };
+        let ContinuousModification::GrantAbility { definition } = &mut grants[0] else {
+            unreachable!()
+        };
+        *definition = Box::new(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: quantity(ZoneChangeRecordSource::InstructionResult {
+                    result: ReturnResultId(7),
+                }),
+                player: TargetFilter::Controller,
+            },
+        ));
+        let root = whole(*aura.effect);
+        assert!(
+            validate_instruction_result_definition(&root).is_err(),
+            "a matching outer integer never authorizes an isolated independently granted reader"
+        );
     }
 }

@@ -6415,6 +6415,7 @@ mod tests {
         // re-prompts the controller every iteration, so `None` is semantically
         // right here, not compiler appeasement.
         state.push_repeat_until(PendingRepeatUntil {
+            return_result_occurrence: None,
             ability: Box::new(repeat_ability),
             stop_progress: None,
             iteration_progress: None,
@@ -8767,6 +8768,8 @@ mod tests {
         ];
 
         state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             player: PlayerId(0),
             controller: PlayerId(0),
             source_id: source,

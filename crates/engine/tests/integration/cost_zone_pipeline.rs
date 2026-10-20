@@ -1189,6 +1189,7 @@ fn unless_bounce_cost_pauses_for_moved_redirect_before_avoiding_the_effect() {
 
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::UnlessBounceChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![bounced],
         pending_effect: Box::new(ResolvedAbility::new(
@@ -1260,6 +1261,7 @@ fn unless_bounce_cost_remains_paid_when_the_replacement_dispatcher_prevents_its_
 
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::UnlessBounceChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![bounced],
         pending_effect: Box::new(ResolvedAbility::new(
@@ -1347,6 +1349,7 @@ fn collect_evidence_and_unless_bounce_costs_complete_synchronously_without_repla
         .id();
     let mut bounce_runner = bounce_scenario.build();
     bounce_runner.state_mut().waiting_for = WaitingFor::UnlessBounceChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![bounced],
         pending_effect: Box::new(ResolvedAbility::new(
@@ -1396,6 +1399,7 @@ fn ward_multi_sacrifice_payment_reparks_each_replacement_before_effect_resolved(
         .id();
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![first, second],
         pending_effect: Box::new(ResolvedAbility::new(
@@ -1505,6 +1509,7 @@ fn ward_sequential_sacrifice_payment_reprompts_only_after_replacement_resolves()
         .id();
     let mut runner = scenario.build();
     runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![first, second],
         pending_effect: Box::new(ResolvedAbility::new(
@@ -1616,6 +1621,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         .id();
     let mut aggregate_runner = aggregate_scenario.build();
     aggregate_runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![aggregate_first, aggregate_second],
         pending_effect: Box::new(ResolvedAbility::new(
@@ -1661,6 +1667,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         .id();
     let mut sequential_runner = sequential_scenario.build();
     sequential_runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        return_result_occurrence: None,
         player: P0,
         permanents: vec![sequential_first, sequential_second],
         pending_effect: Box::new(ResolvedAbility::new(
@@ -3767,6 +3774,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         P0,
     );
     let resume = ManaAbilityResume::UnlessPayment {
+        return_result_occurrence: None,
         outer_player: Some(P0),
         cost: Box::new(unless_cost.clone()),
         pending_effect: Box::new(pending_effect.clone()),
@@ -3796,6 +3804,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         }) if matches!(
             &pending.resume,
             ManaAbilityResume::UnlessPayment {
+                return_result_occurrence: _,
                 outer_player: Some(P0),
                 cost,
                 pending_effect: paused_effect,
@@ -3838,6 +3847,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
     assert!(runner.state().pending_cost_move_resume.is_none());
     match &resumed.waiting_for {
         WaitingFor::UnlessPayment {
+            return_result_occurrence: _,
             player,
             cost,
             pending_effect: resumed_effect,
@@ -3979,6 +3989,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         P0,
     );
     runner.state_mut().waiting_for = WaitingFor::UnlessPayment {
+        return_result_occurrence: None,
         player: P0,
         cost: unless_cost.clone(),
         pending_effect: Box::new(pending_effect.clone()),
@@ -3999,6 +4010,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) if matches!(
             &pending.resume,
             ManaAbilityResume::UnlessPayment {
+                return_result_occurrence: _,
                 outer_player: Some(P0),
                 cost,
                 pending_effect: paused_effect,
@@ -9337,6 +9349,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
         &ability,
         &mut initial_events,
         ManaAbilityResume::UnlessPayment {
+            return_result_occurrence: None,
             outer_player: Some(P0),
             cost: Box::new(unless_cost.clone()),
             pending_effect: Box::new(pending_effect.clone()),
@@ -9362,6 +9375,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
     assert!(matches!(
         resumed.waiting_for,
         WaitingFor::UnlessPayment {
+            return_result_occurrence: _,
             player: P0,
             ref cost,
             pending_effect: ref resumed_effect,
@@ -14118,6 +14132,8 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
     ] {
         let mut runner = GameRunner::from_state(base_state.clone());
         runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+            return_result_occurrence: None,
+            return_result_process: None,
             player: P0,
             cards: vec![hand_first, library_first, hand_second, library_second],
             count: 4,

@@ -145,6 +145,7 @@ fn answered_mana_color_does_not_suspend_each_opponents_life_change() {
                 player: P0,
                 choice: ManaChoicePrompt::SingleColor { options },
                 context: ManaChoiceContext::ManaAbility(pending),
+                ..
             } if pending.source_id == grove
                 && options.contains(&ManaType::Red)
                 && options.contains(&ManaType::Green)
