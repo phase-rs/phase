@@ -4695,7 +4695,7 @@ pub enum RestrictionPlayerScope {
     /// `ParentTargetedPlayer` ("that player", CR 608.2c — a reused *player* target):
     /// this derives a player from an *object* target's controller (CR 109.4).
     /// Mirrors `PlayerFilter::ParentObjectTargetController` /
-    /// `PlayerScope::ParentObjectTargetController` on the sibling enums.
+    /// `PlayerScope::ParentObjectTarget` on the sibling enums.
     ParentObjectTargetController,
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
@@ -8758,12 +8758,22 @@ pub enum PlayerScope {
     /// intervening-if quantities such as "no opponent has more life than that
     /// player."
     DefendingPlayer,
-    /// CR 109.4 + CR 608.2c: The controller of the first object target of
-    /// the resolving ability ("that opponent" anaphoring the controller of
-    /// a bounced/destroyed creature). The player-scalar-axis analogue of
-    /// `ControllerRef::ParentTargetController`. Resolved via
-    /// `ability_utils::parent_target_controller`.
-    ParentObjectTargetController,
+    /// CR 109.4 + CR 108.3 + CR 608.2c: The controller or owner (per
+    /// `possession`) of the first object target of the resolving ability —
+    /// "that opponent" anaphoring the controller of a bounced creature, or
+    /// "that graveyard" anaphoring the owner of a targeted card in a graveyard
+    /// or exile. The player-scalar-axis analogue of
+    /// `ControllerRef::ParentTargetController` / `ParentTargetOwner`. Resolved
+    /// via `ability_utils::parent_target_controller` / `parent_target_owner`.
+    ///
+    /// Backward-compat: deserializes from the legacy tag
+    /// `ParentObjectTargetController` (no fields) via `#[serde(alias)]`,
+    /// defaulting `possession = PossessionAxis::Controller`.
+    #[serde(alias = "ParentObjectTargetController")]
+    ParentObjectTarget {
+        #[serde(default = "default_parent_object_target_possession")]
+        possession: PossessionAxis,
+    },
     /// CR 613.1 + CR 109.4: The player PERSISTED on the source via
     /// `ChosenAttribute::Player` (an "as ~ enters the battlefield, choose a
     /// player" replacement). The player-scalar-axis analogue of
@@ -12040,7 +12050,7 @@ pub enum PlayerFilter {
     /// CR 109.4 + CR 608.2c: The controller of the first object target of
     /// the resolving ability ("reduce that opponent's speed" anaphoring the
     /// controller of a bounced creature). The `PlayerFilter`-axis analogue
-    /// of `PlayerScope::ParentObjectTargetController` and
+    /// of `PlayerScope::ParentObjectTarget` and
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
@@ -12930,7 +12940,7 @@ impl StaticMode {
             | PlayerScope::Target
             | PlayerScope::Opponent { .. }
             | PlayerScope::AllPlayers { .. }
-            | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,
@@ -21932,6 +21942,12 @@ fn default_counter_transfer_mode() -> CounterTransferMode {
 
 fn default_sum_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
+}
+
+/// Backward-compat default for the legacy `PlayerScope::ParentObjectTargetController` unit tag.
+/// Old saves carried no `possession` field; the tag itself meant the controller.
+fn default_parent_object_target_possession() -> PossessionAxis {
+    PossessionAxis::Controller
 }
 
 /// Backward-compat default for the legacy
@@ -31081,6 +31097,20 @@ pub struct SpellContext {
     /// stays with a paused payment's continuation until that cost completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pay_cost_paid_life_amount: Option<u32>,
+    /// CR 602.2b + CR 601.2h + CR 608.2h: counters actually removed while paying
+    /// THIS activated ability's cost (summed over its counter leaves), written by the
+    /// activation's own cost payment as each counter leg completes (a removal that
+    /// waits on a replacement choice is credited once it settles, CR 118.11); the
+    /// mana route binds it at production (CR 605.3b). Taken off the
+    /// root at the chain's depth-0 entry and seeded into `last_effect_amount`, so
+    /// "… removed this way" / "that much" read it. `None` = no counter cost;
+    /// `Some(0)` = a counter cost that removed none. CR 707.10: a copy of the
+    /// ability copies all decisions made for it and can't pay the cost again, so a
+    /// copy keeps the original's count (the official copier rulings: "If the activated
+    /// ability's cost contains a choice, such as … a number of counters to remove,
+    /// the copy uses that same information").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_removed_counter_amount: Option<u32>,
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
@@ -42374,6 +42404,18 @@ mod tests {
                 filter: TargetFilter::Any,
                 comparator: Comparator::GE,
                 count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            }
+        );
+    }
+
+    #[test]
+    fn player_scope_legacy_parent_object_target_controller_alias_defaults_to_controller() {
+        let json = r#"{"type": "ParentObjectTargetController"}"#;
+        let deserialized: PlayerScope = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            deserialized,
+            PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
             }
         );
     }

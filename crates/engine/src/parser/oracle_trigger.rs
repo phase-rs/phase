@@ -2094,8 +2094,18 @@ fn lower_trigger_effect_chain(
     // without a `multi_target` spec still permit choosing zero targets.
     // Do not stamp this onto non-target head clauses in chains like
     // "draw a card. Attach any number of target Equipment ..."
+    // CR 115.6 + CR 601.2c: an `Attach` clause owns its HOST quantifier through
+    // the clause-level host capture (`imp::UtilityImperativeAst::Attach::
+    // host_target`), not through a trigger-body scan. The old stamp let any
+    // later "up to one target" in the same trigger body mark a mandatory Attach
+    // host optional (Hunter's Bow, Novel Nunchaku), so the resolver's declined-
+    // host no-op made an illegal decline look legal.
     if modifiers.has_up_to
         && ability.multi_target.is_none()
+        && !matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Attach { .. }
+        )
         && ability
             .effect
             .target_filter()

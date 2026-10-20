@@ -26229,7 +26229,9 @@ mod starting_life_board_state_tests {
             PlayerScope::Target,
             PlayerScope::ScopedPlayer,
             PlayerScope::RecipientController,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            },
         ] {
             assert!(!ability_condition_is_board_state_evaluable(&condition(
                 scope
@@ -27896,12 +27898,15 @@ fn activate_with_cost_carrier(
         )? {
             return Ok(waiting);
         }
+        // CR 602.2b: this activation's own payment writes its removed-counter
+        // count onto `resolved`, which the pause clones and the push consumes.
         if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
             state,
             player,
             source_id,
             cost,
             Some(ability_index),
+            &mut resolved.context.cost_removed_counter_amount,
             events,
         )? {
             let pending = pending_activation_after_cost_pause(
@@ -27945,6 +27950,9 @@ fn activate_with_cost_carrier(
     // reversed (never recorded from post-payment facts).
     let mut resolved = resolved;
     let record = take_activation_record(&mut resolved, player)?;
+    // CR 602.2b + CR 601.2h + CR 608.2h: `resolved.context.cost_removed_counter_amount`
+    // already holds this activation's cost-removed counter count: the count was
+    // written by this activation's own payment.
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     let announced_targets = declared_targets_in_chain(&resolved);
@@ -29139,7 +29147,7 @@ fn object_scope_reads_chosen_target(scope: &ObjectScope, read: TargetRead) -> bo
 
 fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> bool {
     match player {
-        PlayerScope::Target | PlayerScope::ParentObjectTargetController => read.includes_bindable(),
+        PlayerScope::Target | PlayerScope::ParentObjectTarget { .. } => read.includes_bindable(),
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
             .is_some_and(|x| player_scope_reads_chosen_target(x, read)),
@@ -29930,10 +29938,13 @@ pub enum ActivationCostGuardSite {
     ManaResume = 6,
     /// `finalize_mana_payment_with_phyrexian_choices`'s activation branch.
     PhyrexianResume = 7,
+    /// `finish_counter_cost_payment`, the counter-cost tail shared by the
+    /// selected handlers and the deferred-removal resume.
+    CounterCostTail = 8,
 }
 
 impl ActivationCostGuardSite {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 }
 
 /// CR 601.2f + CR 601.2h: an activation's cost is paid only after its total is

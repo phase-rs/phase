@@ -35864,8 +35864,16 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, Some(0), &mut events)
-        .expect("fetchland-style composite cost should be payable");
+    pay_ability_cost_for_activation(
+        &mut state,
+        PlayerId(0),
+        fetch,
+        &cost,
+        Some(0),
+        &mut None,
+        &mut events,
+    )
+    .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
     assert_eq!(state.objects.get(&fetch).unwrap().zone, Zone::Graveyard);
@@ -37874,6 +37882,7 @@ mod remove_counter_cost {
             source,
             &cost,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("cost should pay with 2 +1/+1 counters available");
@@ -37960,6 +37969,7 @@ mod remove_counter_cost {
             source,
             &cost,
             Some(0),
+            &mut None,
             &mut events,
         )
         .unwrap();
@@ -39428,6 +39438,7 @@ mod unattach_cost {
             equipment,
             &cost,
             Some(0),
+            &mut None,
             &mut Vec::new(),
         )
         .expect("attached Equipment should be able to unattach as a cost");
@@ -41778,6 +41789,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -41838,6 +41850,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("first exert");
@@ -41847,6 +41860,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("second exert");
@@ -41895,6 +41909,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -41915,6 +41930,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -61137,7 +61153,9 @@ fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
         player: PlayerScope::Target
     }));
     assert!(reads(&QuantityRef::LifeTotal {
-        player: PlayerScope::ParentObjectTargetController
+        player: PlayerScope::ParentObjectTarget {
+            possession: crate::types::ability::PossessionAxis::Controller
+        }
     }));
     assert!(!reads(&QuantityRef::HandSize {
         player: PlayerScope::Controller

@@ -2713,9 +2713,29 @@ const NOVEL_NUNCHAKU_ORACLE: &str = "When this Equipment enters, attach it to ta
 
 struct NunchakuOutcome {
     target_prompts: usize,
+    attach_resolutions: usize,
     fights: usize,
     attached: bool,
     theirs_damage: u32,
+}
+
+/// The drive loop is capped: prove it stopped because resolution completed
+/// (empty stack at Priority), not because it ran out of iterations.
+fn assert_settled_at_priority(runner: &GameRunner) {
+    assert!(
+        runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Novel Nunchaku did not finish resolving: {:?} (stack depth {})",
+        runner.state().waiting_for,
+        runner.state().stack.len()
+    );
+}
+
+fn resolved_count(events: &[GameEvent], kind: EffectKind) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::EffectResolved { kind: k, .. } if *k == kind))
+        .count()
 }
 
 fn cast_novel_nunchaku(mine_refuses: bool) -> NunchakuOutcome {
@@ -2740,8 +2760,8 @@ fn cast_novel_nunchaku(mine_refuses: bool) -> NunchakuOutcome {
     grant_priority(&mut runner, P0);
     runner.cast(nunchaku).commit();
     let wants = [TargetRef::Object(mine), TargetRef::Object(theirs)];
-    let mut next = 0;
     let mut target_prompts = 0;
+    let mut attach_resolutions = 0;
     let mut fights = 0;
     for _ in 0..60 {
         let result = match runner.state().waiting_for.clone() {
@@ -2752,10 +2772,10 @@ fn cast_novel_nunchaku(mine_refuses: bool) -> NunchakuOutcome {
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
                 target_prompts += 1;
                 let legal = current_slot_legal_targets(&runner);
-                let pick = wants.get(next).filter(|want| legal.contains(want)).cloned();
-                if pick.is_some() {
-                    next += 1;
-                }
+                // Any legal wanted target fills the slot: the mandatory Attach
+                // host is auto-selected when it is the only legal host, so the
+                // surviving prompt can be the fight slot (which wants `theirs`).
+                let pick = wants.iter().find(|want| legal.contains(*want)).cloned();
                 runner
                     .act(GameAction::ChooseTarget { target: pick })
                     .expect("target")
@@ -2764,22 +2784,13 @@ fn cast_novel_nunchaku(mine_refuses: bool) -> NunchakuOutcome {
             WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority).expect("pass"),
             other => panic!("unexpected {other:?}"),
         };
-        fights += result
-            .events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    GameEvent::EffectResolved {
-                        kind: EffectKind::Fight,
-                        ..
-                    }
-                )
-            })
-            .count();
+        fights += resolved_count(&result.events, EffectKind::Fight);
+        attach_resolutions += resolved_count(&result.events, EffectKind::Attach);
     }
+    assert_settled_at_priority(&runner);
     NunchakuOutcome {
         target_prompts,
+        attach_resolutions,
         fights,
         attached: live(&runner, nunchaku).attached_to.is_some(),
         theirs_damage: live(&runner, theirs).damage_marked,
@@ -2790,21 +2801,82 @@ fn cast_novel_nunchaku(mine_refuses: bool) -> NunchakuOutcome {
 #[test]
 fn novel_nunchaku_refused_attach_has_no_reflexive_fight() {
     let attached = cast_novel_nunchaku(false);
+    assert_eq!(attached.attach_resolutions, 1);
     assert!(attached.attached);
     assert_eq!(
-        attached.target_prompts, 2,
-        "enters target, then fight target"
+        attached.target_prompts, 1,
+        "the single legal Attach host is auto-selected; the fight slot prompts"
     );
     assert!(attached.fights > 0);
     assert_eq!(attached.theirs_damage, 4);
 
+    // CR 701.3b: the host is a legal target but can't be equipped, so Attach
+    // resolves and the Equipment doesn't move; CR 603.12: the reflexive "when
+    // you do" trigger never fires, so there is no fight target and no fight.
     let refused = cast_novel_nunchaku(true);
+    assert_eq!(
+        refused.attach_resolutions, 1,
+        "Attach resolves against the refusing host"
+    );
     assert!(!refused.attached);
     assert_eq!(
-        refused.target_prompts, 1,
-        "only the enters trigger's target"
+        refused.target_prompts, 0,
+        "the host is auto-selected and no reflexive fight slot exists"
     );
     assert_eq!(refused.fights, 0);
+    assert_eq!(refused.theirs_damage, 0);
+
+    // CR 601.2c + CR 603.3d: with no "creature you control" the mandatory host
+    // has no legal target, so the enters trigger is removed before it is put on
+    // the stack; nothing attaches and the reflexive fight never exists.
+    let no_host = cast_novel_nunchaku_without_a_host();
+    assert_eq!(no_host.attach_resolutions, 0, "the trigger never resolves");
+    assert!(!no_host.attached);
+    assert_eq!(no_host.target_prompts, 0, "no host means no target prompt");
+    assert_eq!(no_host.fights, 0);
+}
+
+/// Cast Novel Nunchaku with no creature you control (the mandatory host has no
+/// legal target); the enters trigger is removed per CR 603.3d.
+fn cast_novel_nunchaku_without_a_host() -> NunchakuOutcome {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theirs = scenario.add_creature(P1, "theirs", 2, 5).id();
+    let nunchaku = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Novel Nunchaku", NOVEL_NUNCHAKU_ORACLE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::Colorless));
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    runner.cast(nunchaku).commit();
+    let mut attach_resolutions = 0;
+    let mut fights = 0;
+    for _ in 0..60 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+                continue;
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority).expect("pass"),
+            other => panic!("unexpected {other:?}"),
+        };
+        fights += resolved_count(&result.events, EffectKind::Fight);
+        attach_resolutions += resolved_count(&result.events, EffectKind::Attach);
+    }
+    assert_settled_at_priority(&runner);
+    NunchakuOutcome {
+        target_prompts: 0,
+        attach_resolutions,
+        fights,
+        attached: live(&runner, nunchaku).attached_to.is_some(),
+        theirs_damage: live(&runner, theirs).damage_marked,
+    }
 }
 
 const TEST_SWORD_ORACLE: &str = "Equipped creature gets +1/+1.\nEquip {1}";

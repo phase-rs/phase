@@ -46,6 +46,13 @@ pub(crate) struct ParsedEffectClause {
     pub(crate) distribute: Option<DistributionUnit>,
     /// CR 115.1d: Multi-target spec for "any number of" / "up to N" / fixed-count targeting.
     pub(crate) multi_target: Option<MultiTargetSpec>,
+    /// CR 115.6: the Attach HOST operand's printed "up to N target …" — the
+    /// clause-level zero-target authority for the host frame. Stamped ONLY by
+    /// the typed host capture in `imperative.rs`; the generalized clause-count
+    /// detector (`lower::apply_optional_target_fixup`) writes `multi_target`
+    /// and never this flag. Consumed by the assembly OR-stamp.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) optional_targeting: bool,
     /// CR 608.2c: Leading conditional guard from "if X, Y" clause structure.
     /// Set when `parse_clause_ast` detects a leading conditional and the condition
     /// text is parseable by the nom condition combinator pipeline.
@@ -582,8 +589,12 @@ pub(crate) enum ContinuationAst {
     /// (Stangg / Shark Shredder). Only ChangeZone honors the gate;
     /// CopyTokenOf / Token always enter unconditionally.
     EntersTappedAttacking { moved_filter: Option<TargetFilter> },
-    /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
-    /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
+    /// CR 122.6 + CR 614.12: an entry-counter rider — "The token enters with X
+    /// +1/+1 counters on it, where X is …", or an unconditional "<it | that creature
+    /// | each of them> enters with N additional <counter> counter(s) on it" after
+    /// a battlefield mover. Absorbs into the preceding `Token`'s or battlefield
+    /// `ChangeZone`'s `enter_with_counters`. (The name predates the `ChangeZone`
+    /// producer.)
     TokenEntersWithCounters {
         counter_type: CounterType,
         count: QuantityExpr,
@@ -1593,6 +1604,14 @@ pub(crate) enum UtilityImperativeAst {
         /// `Effect::Attach.selection`; the HOST operand's timing stays the
         /// ability-level `TargetChoiceTiming`.
         selection: AttachSelection,
+        /// CR 115.6: the HOST operand's printed target-count spec ("attach this
+        /// Equipment to up to one target creature you control"). `None` means
+        /// the host is mandatory; `Some(spec)` keeps the count, not just a
+        /// boolean, and is mirrored onto `ParsedEffectClause.optional_targeting`.
+        /// Captured independently of whether the ATTACHMENT operand claims an
+        /// announced slot; the trigger-body `has_up_to` stamp is gated separately
+        /// for Attach.
+        host_target: Option<MultiTargetSpec>,
     },
     /// CR 608.2c (rules of English — number agreement) + CR 400.7: an Attach
     /// instruction whose ATTACHMENT operand is a plural anaphor ("attach
@@ -2174,6 +2193,7 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
+        optional_targeting: false,
         effect,
         duration: None,
         sub_ability: None,

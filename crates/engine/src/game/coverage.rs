@@ -1518,7 +1518,12 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::AnyTurn => "any turn".to_string(),
         // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
         PlayerScope::SpecificPlayer { .. } => "that player".to_string(),
-        PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
+        PlayerScope::ParentObjectTarget {
+            possession: crate::types::ability::PossessionAxis::Controller,
+        } => "parent target's controller".to_string(),
+        PlayerScope::ParentObjectTarget {
+            possession: crate::types::ability::PossessionAxis::Owner,
+        } => "parent target's owner".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
         }

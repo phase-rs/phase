@@ -22,8 +22,8 @@ use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_event_context_quantity_with_context, parse_for_each_clause, parse_for_each_clause_expr,
-    parse_for_each_clause_expr_with_context, parse_for_each_short_of_clause_expr,
-    parse_player_attribute_attr_clause, parse_quantity_ref,
+    parse_for_each_clause_expr_with_context, parse_for_each_grouped_clause_expr,
+    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
@@ -5471,6 +5471,12 @@ pub(crate) fn strip_for_each_prefix_with_difference(
                 let offset = text.len() - remainder.len();
                 return (Some(short_of), None, text[offset..].to_string());
             }
+            // CR 107.1 + CR 608.2c: "for each N <things>" repeats once per
+            // complete group of N (Sage of Hours).
+            if let Some(grouped) = parse_for_each_grouped_clause_expr(clause) {
+                let offset = text.len() - remainder.len();
+                return (Some(grouped), None, text[offset..].to_string());
+            }
             let parsed_clause = parsed_comparison
                 .clone()
                 .map(|(qty, difference)| (qty, Some(difference)))
@@ -8195,66 +8201,215 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
     Some(MultiTargetSpec::up_to(max))
 }
 
+/// CR 601.2c + CR 115.1a / CR 115.1c / CR 115.1d: Recover the announced exact
+/// target count from a targeted imperative spell, activated ability, or triggered ability.
 pub(crate) fn extract_exact_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let mut parser = terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" "));
-        let Ok((after_verb, _)) = parser.parse(lower.as_str()) else {
-            continue;
-        };
-        let (count, _) = strip_exact_target_prefix(after_verb)?;
-        return Some(MultiTargetSpec::exact(count));
-    }
-    None
+    let (after_verb, ()) = parse_required_target_count_verb(&lower).ok()?;
+    let (count, _) = strip_exact_target_prefix(after_verb)?;
+    Some(MultiTargetSpec::exact(count))
 }
 
-/// CR 115.1d: Recover bounded multi-target counts from imperative text where the
-/// verb precedes the count phrase — "return one or two target permanent cards
-/// from your graveyard" (Trystan's Command mode 2). The targeted-action parser
-/// strips the count via `parse_target` but does not attach `MultiTargetSpec`.
+/// CR 601.2c + CR 115.1a / CR 115.1c / CR 115.1d: Recover bounded announced
+/// target counts from imperative spell, activated-ability, or triggered-ability text
+/// where the verb precedes the count phrase — "return one or two target permanent
+/// cards from your graveyard" (Trystan's Command mode 2), or "put one, two, or three
+/// target creature cards" (Aberrant Return). The targeted-action parser strips the
+/// count via `parse_target` but does not attach `MultiTargetSpec`.
 pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let Ok((after_verb, _)) =
-            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
-        else {
-            continue;
-        };
-        for (prefix, min, max) in [
-            ("one or two ", 1usize, 2usize),
-            ("one, two, or three ", 1, 3),
-        ] {
-            if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(after_verb) {
-                if tag::<_, _, OracleError<'_>>("target ")
-                    .parse(after_prefix)
-                    .is_ok()
-                {
-                    return Some(MultiTargetSpec::fixed(min, max));
-                }
-            }
-        }
-    }
-    None
+    let (_, (_, spec, _)) = (
+        parse_required_target_count_verb,
+        parse_bounded_target_cardinality,
+        tag::<_, _, OracleError<'_>>(" target "),
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    Some(spec)
 }
 
-/// CR 115.1d: Recover "up to N target …" from imperative text where the verb
-/// precedes the count phrase — "tap up to four target permanents" (Elder
-/// Deep-Fiend). The targeted-action parser strips the count via
-/// `strip_optional_target_prefix` but does not attach `MultiTargetSpec`.
-pub(crate) fn extract_optional_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
-    let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let Ok((after_verb, _)) =
-            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
-        else {
-            continue;
-        };
-        let (_, multi_target) = strip_optional_target_prefix(after_verb);
-        if multi_target.is_some() {
-            return multi_target;
-        }
+/// CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: Detect a clause
+/// whose printed "up to N target …" / "any number of target …" quantifier
+/// governs the clause's FIRST target phrase, wherever that phrase sits. The
+/// spell/ability still requires targets (CR 115.6) while allowing zero to be
+/// chosen, so the recovered `MultiTargetSpec` has a fixed minimum of zero.
+///
+/// Detection is a two-offset match over masked, lowercased text:
+/// - P1 first-target-phrase: the first word-boundary occurrence of a target
+///   article (`target ` / `other target ` / `another target `) is at byte
+///   offset `first_target`.
+/// - P2 quantifier governs that phrase: `strip_optional_target_prefix` — the
+///   single authority for the optional-count vocabulary — matches at a word
+///   boundary, and the article it leaves behind starts at the SAME offset. A
+///   quantifier that governs anything else (a resource count, a later
+///   conjunct, an earlier mandatory phrase, a quoted granted ability) therefore
+///   declines.
+///
+/// Both scans use `nom_primitives::scan_preceded`; double-quoted spans are
+/// masked first with `nom_primitives::mask_double_quoted_spans_preserving_len`
+/// (byte-length preserving, so the offsets stay valid). An unterminated quote
+/// passes the remainder through unchanged — a malformed quoted "up to one
+/// target" is accepted as visible text; no corpus card has one.
+///
+/// Capacity exclusions: `Counter`, `Attach`, `CopySpell`, `BecomeCopy`,
+/// `DealDamage`, `MoveCounters`, `Token` and `Transform` decline. These effects
+/// have no safe representation for a declined optional target yet (the resolver
+/// errors, acts on the wrong object, or a later stage drops the spec), so keep
+/// base behavior until the effect grows the capability.
+/// - `Counter` has no field for the announced count, so "counter up to N
+///   target …" cannot carry the spec (Double Negative, Katara's Reversal, Repel
+///   Intruders, Repulsive Mutation, Tishana's Tidebinder).
+/// - `Attach` prints a target phrase for its HOST operand and/or its ATTACHMENT
+///   operand; the host frame is captured separately by the typed host capture in
+///   `imperative.rs`, and writing the host's "up to one" into
+///   `clause.multi_target` would bind the wrong operand (Luxior, Ignited; The
+///   Aetherspark; Sting, Bilbo's Sword).
+/// - `CopySpell` copies one object and a zero-target decline would copy the top
+///   of the stack instead (Display of Power).
+/// - `BecomeCopy` errors `MissingParam` on a declined copy source (Fleeting
+///   Reflection).
+/// - `DealDamage` is one segment of a damage COMPOUND ("2 damage to target
+///   opponent and 2 damage to up to one target creature or planeswalker" —
+///   Rakdos Firewheeler, Burning Sun's Avatar, Ravager of the Fells, Dragonspark
+///   Reactor, Chandra, Pyromaster, Soul of Shandalar, Trick Shot, Conduct
+///   Electricity). CR 115.6 + CR 601.2c: zero chosen targets is legal for the
+///   segment, but the chain walker then INHERITS the parent's player target:
+///   `inherited_parent_occurrences` gates only object targets on
+///   `has_independent_target_slot`, so the declined "creature or planeswalker"
+///   segment becomes the first segment's "target opponent" and the spell deals
+///   damage to that player. Follow-up: gate the `TargetRef::Player(_)` arm on
+///   `!has_independent_target_slot` too, then lift the exclusion.
+/// - `MoveCounters` reads only `ability.optional_targeting` in its engine arms,
+///   so the stamped spec would be dropped and a declined target still demanded
+///   (Heroic Sacrifice; Donatello, Mutant Mechanic; Graft Surgeon; Host of the
+///   Hereafter and the other stamped carriers).
+/// - `Token` treats a declined `attach_to` host as named and creates no token
+///   (Cut In; Eriette's Whisper; Gadwick's First Duel; Living Lectern; Shatter
+///   the Oath; Twisted Fealty; Witch's Mark).
+/// - `Transform` cannot tell a declined DECLARED target from its printed
+///   no-target self-transform: `transform_effect::resolve` maps an empty subject
+///   list to `ability.source_id` (`[] => source_id`), so "Transform up to one
+///   target Werewolf you control" (Waxing Moon) transforms the SOURCE on a
+///   decline and the error aborts the rest of the chain, losing the trample
+///   sibling. Follow-up: `transform_effect::resolve` must no-op on a declined
+///   declared optional target instead of falling through to `source_id`, then
+///   lift the exclusion.
+///
+/// Follow-ups (the reason each exclusion is temporary): the engine's
+/// `MoveCounters` arms must move to `targeting_is_optional()`; `become_copy.rs`
+/// already honours `multi_target` in its slot path, but its resolver needs an
+/// explicit empty-source no-op instead of `MissingParam` (`become_copy.rs:64-74`);
+/// `token.rs`'s host-request derivation must treat a declined optional host as
+/// `NotRequested`; `copy_spell.rs` needs an explicit zero-target decline; and the
+/// `DealDamage` / `Transform` follow-ups named above.
+///
+/// The write-side guards (no existing authority, announced non-context target)
+/// live in [`apply_optional_target_fixup`], the single clause-level caller. The
+/// compound producers that discard a sub-clause's spec (damage-compound copy,
+/// damage-chain segment, compound-shuffle operand) call this detector directly
+/// on the sub-clause text.
+pub(crate) fn extract_optional_target_multi_target(
+    text: &str,
+    effect: &Effect,
+) -> Option<MultiTargetSpec> {
+    if matches!(
+        effect,
+        Effect::Counter { .. }
+            | Effect::Attach { .. }
+            | Effect::CopySpell { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::DealDamage { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::Token { .. }
+            | Effect::Transform { .. }
+    ) {
+        return None;
     }
-    None
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let lower = masked.to_ascii_lowercase();
+    let (before, (), _) = nom_primitives::scan_preceded(lower.as_str(), |input| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("target "),
+                tag("other target "),
+                tag("another target "),
+            )),
+        )
+        .parse(input)
+    })?;
+    let first_target = before.len();
+    let (_, spec, rest) =
+        nom_primitives::scan_preceded(lower.as_str(), |input| match strip_optional_target_prefix(
+            input,
+        ) {
+            (rest, Some(spec)) => Ok((rest, spec)),
+            _ => Err(oracle_err(input)),
+        })?;
+    (lower.len() - rest.len() == first_target).then_some(spec)
+}
+
+/// CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: The single
+/// clause-level owner of the optional target-count fixup.
+///
+/// Called from `lower_clause_ast` — the `Imperative` arm, the
+/// `SubjectPredicate` arm (with `original_clause`, the text this clause was
+/// asked to lower), and the recursive `Conditional` body — after the clause's
+/// own effect lowering has settled. One other direct caller exists:
+/// `try_parse_for_each_effect` in `oracle_effect/mod.rs`, the for-each numeric
+/// producer, which lowers its base effect without going through the clause
+/// junction and so must make the same call. The clause fragment, not the
+/// enclosing chunk, is authoritative here: every sticky multi-sentence chunk
+/// the chunker can produce is claimed by an earlier parser before the generic
+/// tail, so the chunk this fixup owns is single-sentence on every measured
+/// route.
+///
+/// Guards:
+/// - P5 write gate: an existing `multi_target` is never overridden. Typed specs
+///   set by the clause's own parser (e.g. the distribution family's finite
+///   `{0,3}`) and the `refine_put_at_library_position` spec both win.
+/// - The effect must surface an announced target: `Effect::target_filter()` is
+///   `Some` and is not a context reference. A SelfRef/`ParentTarget` body has
+///   no target phrase the quantifier could govern.
+/// - The surfaced slot must not be the untyped `TargetFilter::Any`: that means
+///   the clause's lowering dropped the printed object type, so an announced
+///   count on it would be inert (Razorgrass Invoker's subject `Pump`).
+///   `EachSourceDealsDamage` is the one live carve-out: its untyped recipient
+///   is the printed one ("any target", CR 115.4), so it keeps the spec.
+/// - `extract_optional_target_multi_target` declines the eight effects that
+///   cannot yet represent a declined optional target (`Counter`, `Attach`,
+///   `CopySpell`, `BecomeCopy`, `DealDamage`, `MoveCounters`, `Token`,
+///   `Transform`), keeping their base behavior.
+///
+/// This function never writes `optional_targeting`; that flag belongs to the
+/// Attach HOST frame captured in `imperative.rs`, and non-Attach clauses are
+/// already optional through the min-0 `multi_target`
+/// (`ResolvedAbility::targeting_is_optional`, CR 601.2c).
+pub(crate) fn apply_optional_target_fixup(clause: &mut ParsedEffectClause, clause_text: &str) {
+    if clause.multi_target.is_some() {
+        return;
+    }
+    let Some(filter) = clause.effect.target_filter() else {
+        return;
+    };
+    if filter.is_context_ref() {
+        return;
+    }
+    // CR 115.1 + CR 115.4 + CR 601.2c: an untyped `Any` slot cannot carry the
+    // announced count — the lowering dropped the printed object type, so the
+    // slot would offer every target while the effect still reads its own
+    // referent (Razorgrass Invoker's subject `Pump`). `EachSourceDealsDamage`
+    // keeps the spec: "any target" is a printed untyped recipient. Mirrors the
+    // untyped-slot guard in the multi-slot splitter (`multi_target_list.rs`).
+    if filter == &TargetFilter::Any
+        && !matches!(clause.effect, Effect::EachSourceDealsDamage { .. })
+    {
+        return;
+    }
+    let Some(spec) = extract_optional_target_multi_target(clause_text, &clause.effect) else {
+        return;
+    };
+    clause.multi_target = Some(spec);
 }
 
 /// CR 115.1d: Recover "verb up to N <filter>" when the phrase omits the word
@@ -8604,9 +8759,40 @@ pub(super) fn parse_each_of_up_to_damage_target<'a>(
 /// UpTo(ObjectCount), min_count: 0 }` by `parse_one_or_more_sacrifice` — not a
 /// `MultiTargetSpec`. Routing it through this list would strip the quantifier
 /// and collapse the count to a fixed 1 (issue #458).
+/// `put` is intentionally absent; see `REQUIRED_TARGET_COUNT_ONLY_VERBS`.
 const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
+
+/// CR 601.2c + CR 115.1a: Verbs admitted ONLY to the required announced-count
+/// extractors (`extract_exact_target_multi_target`,
+/// `extract_bounded_target_multi_target`). "put" stays out of
+/// `MULTI_TARGET_VERBS` because that list also drives `strip_any_number_quantifier`
+/// (and through it `extract_verb_up_to_multi_target`), which strips an UNGUARDED
+/// "up to N" / "any number of" — a resource or resolution-choice count on "put"
+/// ("put up to three +1/+1 counters …", "put any number of land cards from your
+/// hand …"). Both required-count extractors demand the "target" article directly
+/// after the count, so "put two +1/+1 counters on target creature" never reads as
+/// a target count. The optional "put up to N target …" form is not admitted: put
+/// already carries that cardinality on its own channel (`ChangeZone.up_to` /
+/// `choice_count` from `parse_put_ast`).
+const REQUIRED_TARGET_COUNT_ONLY_VERBS: &[&str] = &["put"];
+
+/// CR 601.2c: the imperative verb (and its trailing space) opening a clause whose
+/// required announced target count is recovered post-parse — every
+/// `MULTI_TARGET_VERBS` verb plus `REQUIRED_TARGET_COUNT_ONLY_VERBS`.
+fn parse_required_target_count_verb(input: &str) -> OracleResult<'_, ()> {
+    for &verb in MULTI_TARGET_VERBS
+        .iter()
+        .chain(REQUIRED_TARGET_COUNT_ONLY_VERBS)
+    {
+        if let Ok((rest, _)) = terminated(tag::<_, _, OracleError<'_>>(verb), tag(" ")).parse(input)
+        {
+            return Ok((rest, ()));
+        }
+    }
+    Err(oracle_err(input))
+}
 
 /// CR 115.1d + CR 601.2d: The bounded target-cardinality lists. The stem carries
 /// the bare `" or "` that enumerates a target COUNT, never a disjunction of two
@@ -8616,7 +8802,8 @@ const MULTI_TARGET_VERBS: &[&str] = &[
 /// noun it needs off the stem (`" targets"`, `" target "`, `" target"`) rather
 /// than re-spelling the list, so a future cardinality ("one, two, three, or
 /// four …") is added here once. Consumers: `strip_bounded_targets_placeholder`,
-/// `strip_bounded_target_prefix`, `subject::…each-of`, `oracle_target`'s
+/// `strip_bounded_target_prefix`, `extract_bounded_target_multi_target`,
+/// `subject::…each-of`, `oracle_target`'s
 /// bare-count target arm, and the binary-choice splitter's divide/distribute
 /// bail (which keys on this cardinality axis — shared by CR 601.2d's "damage or
 /// counters" halves — rather than on a distribution verb).
@@ -9596,6 +9783,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let (target, _) = parse_target(stripped_target_text);
 
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::DealDamage {
             amount,
@@ -9682,6 +9870,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PutCounter {
             counter_type,
@@ -9752,6 +9941,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
             amount,
@@ -9870,6 +10060,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: to_effect,
         duration: None,
@@ -14517,10 +14708,47 @@ mod tests {
     }
 
     #[test]
+    fn extract_required_target_count_admits_put_only_with_target_article() {
+        assert_eq!(
+            super::extract_exact_target_multi_target(
+                "put two target lands on top of their owners' libraries"
+            ),
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+        );
+        let bounded = "put one, two, or three target creature cards from graveyards onto the battlefield under your control";
+        assert_eq!(
+            super::extract_bounded_target_multi_target(bounded),
+            Some(MultiTargetSpec::fixed(1, 3))
+        );
+        assert_eq!(super::extract_exact_target_multi_target(bounded), None);
+        for text in [
+            "put two +1/+1 counters on target creature",
+            "put two land cards from your hand onto the battlefield",
+        ] {
+            assert_eq!(super::extract_exact_target_multi_target(text), None);
+            assert_eq!(super::extract_bounded_target_multi_target(text), None);
+        }
+        assert_eq!(
+            super::extract_bounded_target_multi_target(
+                "return one or two target permanent cards from your graveyard to your hand"
+            ),
+            Some(MultiTargetSpec::fixed(1, 2))
+        );
+    }
+
+    #[test]
     fn extract_optional_target_multi_target_recovers_tap_up_to_four() {
         use crate::types::ability::MultiTargetSpec;
-        let spec = super::extract_optional_target_multi_target("tap up to four target permanents")
-            .expect("Elder Deep-Fiend cast trigger shape");
+        let effect = Effect::SetTapState {
+            target: TargetFilter::Any,
+            scope: EffectScope::Single,
+            state: crate::types::ability::TapStateChange::Tap,
+        };
+        let spec = super::extract_optional_target_multi_target(
+            "tap up to four target permanents",
+            &effect,
+        )
+        .expect("Elder Deep-Fiend cast trigger shape");
         assert_eq!(
             spec,
             MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 4 })
