@@ -1021,6 +1021,8 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
 /// Chain cycle's nested optional `CopySpell` would keep the original spell's
 /// `source_id` and a second-generation copy could not find its source.
 pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
+    // Every caller creates an independent stack copy, including Epic's snapshot.
+    ability.return_result_process = None;
     ability.source_id = source_id;
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         set_resolved_source_recursive(sub_ability, source_id);

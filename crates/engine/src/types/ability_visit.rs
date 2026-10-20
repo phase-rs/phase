@@ -1159,6 +1159,13 @@ pub(crate) mod direct_nodes {
     define_walk!([]; [FnMut(DefinitionNode<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node_ref; shared_iter; false);
 }
 
+/// Exclusive twin of the direct-node walk, preserving the same scope gates.
+#[allow(dead_code)] // The generator emits the same sibling entry points.
+pub(crate) mod direct_nodes_mut {
+    use super::*;
+    define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter; false);
+}
+
 /// CR 201.5a: the positions in one definition node where a granter symbol is bound.
 ///
 /// The parser can place a symbol elsewhere; every entry that parses masked text then refuses

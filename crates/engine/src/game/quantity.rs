@@ -795,7 +795,7 @@ pub(crate) fn validate_addressed_cost_reads(
             error.get_or_insert(reason);
         }
     };
-    cost.for_each_quantity_expr(&mut |expr| expr.for_each_ref(&mut check));
+    cost.for_each_resolution_quantity_expr(&mut |expr| expr.for_each_ref(&mut check));
     cost.for_each_predicate_quantity_ref(&mut check);
     error.map_or(Ok(()), Err)
 }

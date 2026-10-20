@@ -160,7 +160,35 @@ fn redact_instruction_result_owner(waiting: &mut WaitingFor) {
                 body.clear_return_result_process_recursive();
             }
         }
-        WaitingFor::ExploreChoice {
+        WaitingFor::ChooseTokenHost {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::UnlessPayment {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::WardDiscardChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::WardSacrificeChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::UnlessBounceChoice {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::RepeatDecision {
+            return_result_occurrence,
+            ..
+        }
+        | WaitingFor::ExploreChoice {
             return_result_occurrence,
             ..
         }

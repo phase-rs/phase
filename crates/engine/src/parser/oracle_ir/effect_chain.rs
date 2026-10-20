@@ -1186,7 +1186,14 @@ impl ClauseIr {
 
     pub(crate) fn for_each_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
         self.parsed.effect.for_each_quantity_ref(f);
+        self.parsed.effect.for_each_selected_import_quantity_ref(f);
         self.disposition.for_each_quantity_ref(f);
+        if let Some(player) = &self.player_scope {
+            player.for_each_nested_quantity_ref(f);
+        }
+        if let Some(chooser) = &self.target_chooser {
+            chooser.for_each_nested_quantity_ref(f);
+        }
         for condition in [&self.condition, &self.parsed.condition]
             .into_iter()
             .flatten()
@@ -1197,7 +1204,7 @@ impl ClauseIr {
             repeat.for_each_ref(f);
         }
         if let Some(sub) = &self.parsed.sub_ability {
-            sub.for_each_own_quantity_ref(f);
+            sub.for_each_imported_quantity_ref(f);
         }
         for payment in [&self.unless_pay, &self.parsed.unless_pay]
             .into_iter()
@@ -1205,14 +1212,25 @@ impl ClauseIr {
         {
             payment
                 .cost
-                .for_each_quantity_expr(&mut |expr| expr.for_each_ref(f));
+                .for_each_resolution_quantity_expr(&mut |expr| expr.for_each_ref(f));
             payment.cost.for_each_predicate_quantity_ref(f);
+            payment.cost.for_each_selected_import_quantity_ref(f);
+            payment.payer.for_each_nested_quantity_ref(f);
         }
     }
 
     fn for_each_quantity_ref_mut(&mut self, f: &mut dyn FnMut(&mut QuantityRef)) {
         self.parsed.effect.for_each_quantity_ref_mut(f);
+        self.parsed
+            .effect
+            .for_each_selected_import_quantity_ref_mut(f);
         self.disposition.for_each_quantity_ref_mut(f);
+        if let Some(player) = &mut self.player_scope {
+            player.for_each_nested_quantity_ref_mut(f);
+        }
+        if let Some(chooser) = &mut self.target_chooser {
+            chooser.for_each_nested_quantity_ref_mut(f);
+        }
         for condition in [&mut self.condition, &mut self.parsed.condition]
             .into_iter()
             .flatten()
@@ -1223,7 +1241,7 @@ impl ClauseIr {
             repeat.each_ref_mut(f);
         }
         if let Some(sub) = &mut self.parsed.sub_ability {
-            sub.for_each_own_quantity_ref_mut(f);
+            sub.for_each_imported_quantity_ref_mut(f);
         }
         for payment in [&mut self.unless_pay, &mut self.parsed.unless_pay]
             .into_iter()
@@ -1231,8 +1249,10 @@ impl ClauseIr {
         {
             payment
                 .cost
-                .for_each_quantity_expr_mut(&mut |expr| expr.each_ref_mut(f));
+                .for_each_resolution_quantity_expr_mut(&mut |expr| expr.each_ref_mut(f));
             payment.cost.for_each_predicate_quantity_ref_mut(f);
+            payment.cost.for_each_selected_import_quantity_ref_mut(f);
+            payment.payer.for_each_nested_quantity_ref_mut(f);
         }
     }
 
@@ -2649,6 +2669,365 @@ mod departure_result_tests {
             assert!(relocated
                 .iter()
                 .any(|clause| matches!(clause.parsed.effect, Effect::Unimplemented { .. })));
+        }
+    }
+
+    #[test]
+    fn departure_absorption_remints_all_enclosing_fields_and_thirteen_selected_edges() {
+        use crate::types::ability::*;
+        fn quantity(id: u32) -> QuantityExpr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate {
+                    source: ZoneChangeRecordSource::InstructionResult {
+                        result: ReturnResultId(id),
+                    },
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Exile),
+                    filter: TargetFilter::Any,
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                },
+            }
+        }
+        fn player(id: u32) -> PlayerFilter {
+            PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::PreviousEffectCount),
+                comparator: Comparator::GE,
+                value: Box::new(quantity(id)),
+            }
+        }
+        fn payer(id: u32) -> TargetFilter {
+            TargetFilter::PlayerMatching {
+                player: Box::new(player(id)),
+            }
+        }
+        fn wrapper(edge: usize, body: AbilityDefinition) -> Effect {
+            let body = Box::new(body);
+            match edge {
+                0 | 1 => Effect::Vote {
+                    choices: if edge == 0 {
+                        vec!["read".into()]
+                    } else {
+                        vec![]
+                    },
+                    per_choice_effect: if edge == 0 {
+                        vec![body.clone()]
+                    } else {
+                        vec![]
+                    },
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AllPlayers,
+                    tally_mode: VoteTally::PerVote,
+                    subject: if edge == 1 {
+                        VoteSubject::Objects {
+                            candidate_filter: TargetFilter::Any,
+                            outcome_template: body,
+                        }
+                    } else {
+                        VoteSubject::Named
+                    },
+                    visibility: VoteVisibility::Open,
+                },
+                2 | 3 => Effect::SeparateIntoPiles {
+                    partition_subject: VoterScope::EachOpponent,
+                    object_filter: TargetFilter::Any,
+                    chooser: PlayerScope::Controller,
+                    pile_source: PileSource::Battlefield,
+                    chosen_pile_effect: if edge == 2 {
+                        body.clone()
+                    } else {
+                        Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
+                    },
+                    unchosen_pile_effect: (edge == 3).then_some(body),
+                },
+                4 => Effect::ExileTopCardContest {
+                    winner_effect: body,
+                },
+                5 => Effect::RevealFromHand {
+                    filter: TargetFilter::Any,
+                    on_decline: Some(body),
+                },
+                6 => Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 1,
+                    modifier: None,
+                    results: vec![DieResultBranch {
+                        min: 1,
+                        max: 1,
+                        effect: body,
+                    }],
+                },
+                7 | 8 => Effect::FlipCoin {
+                    win_effect: (edge == 7).then_some(body.clone()),
+                    lose_effect: (edge == 8).then_some(body),
+                    flipper: TargetFilter::Controller,
+                },
+                9 | 10 => Effect::FlipCoins {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    win_effect: (edge == 9).then_some(body.clone()),
+                    lose_effect: (edge == 10).then_some(body),
+                    flipper: TargetFilter::Controller,
+                },
+                11 => Effect::FlipCoinUntilLose { win_effect: body },
+                12 => Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![*body],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+                _ => unreachable!(),
+            }
+        }
+        // Expected fields are selected directly, independently of both walks.
+        fn selected(effect: &Effect, edge: usize) -> &AbilityDefinition {
+            match (effect, edge) {
+                (
+                    Effect::Vote {
+                        per_choice_effect, ..
+                    },
+                    0,
+                ) => &per_choice_effect[0],
+                (
+                    Effect::Vote {
+                        subject:
+                            VoteSubject::Objects {
+                                outcome_template, ..
+                            },
+                        ..
+                    },
+                    1,
+                ) => outcome_template,
+                (
+                    Effect::SeparateIntoPiles {
+                        chosen_pile_effect, ..
+                    },
+                    2,
+                ) => chosen_pile_effect,
+                (
+                    Effect::SeparateIntoPiles {
+                        unchosen_pile_effect: Some(body),
+                        ..
+                    },
+                    3,
+                ) => body,
+                (Effect::ExileTopCardContest { winner_effect }, 4) => winner_effect,
+                (
+                    Effect::RevealFromHand {
+                        on_decline: Some(body),
+                        ..
+                    },
+                    5,
+                ) => body,
+                (Effect::RollDie { results, .. }, 6) => &results[0].effect,
+                (
+                    Effect::FlipCoin {
+                        win_effect: Some(body),
+                        ..
+                    },
+                    7,
+                ) => body,
+                (
+                    Effect::FlipCoin {
+                        lose_effect: Some(body),
+                        ..
+                    },
+                    8,
+                ) => body,
+                (
+                    Effect::FlipCoins {
+                        win_effect: Some(body),
+                        ..
+                    },
+                    9,
+                ) => body,
+                (
+                    Effect::FlipCoins {
+                        lose_effect: Some(body),
+                        ..
+                    },
+                    10,
+                ) => body,
+                (Effect::FlipCoinUntilLose { win_effect }, 11) => win_effect,
+                (Effect::ChooseOneOf { branches, .. }, 12) => &branches[0],
+                _ => unreachable!(),
+            }
+        }
+        let base = parse_effect_chain_ir(PRINTED, AbilityKind::Spell, &mut Default::default());
+        assert_eq!(base.clauses[0].id, ClauseId(0));
+        for edge in 0..13 {
+            for cost_position in 0..3 {
+                for local in [false, true] {
+                    let mut imported = base.clauses.clone();
+                    let mut body = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            player: TargetFilter::Controller,
+                            amount: quantity(0),
+                        },
+                    );
+                    if local {
+                        let mut producer = AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            base.clauses[0].parsed.effect.clone(),
+                        );
+                        producer.declares_return_result = Some(ReturnResultId(0));
+                        producer.sub_ability = Some(Box::new(body));
+                        body = producer;
+                    }
+                    let effect = wrapper(edge, body);
+                    let clause = imported.last_mut().unwrap();
+                    clause.parsed.effect = Effect::NoOp;
+                    clause.player_scope = Some(player(0));
+                    clause.target_chooser = Some(player(0));
+                    clause.unless_pay = Some(UnlessPayModifier {
+                        cost: AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 0 },
+                        },
+                        payer: payer(0),
+                    });
+                    clause.parsed.unless_pay = clause.unless_pay.clone();
+                    match cost_position {
+                        0 => clause.parsed.effect = effect,
+                        1 => {
+                            clause.unless_pay.as_mut().unwrap().cost = AbilityCost::EffectCost {
+                                effect: Box::new(effect),
+                            }
+                        }
+                        2 => {
+                            clause.parsed.unless_pay.as_mut().unwrap().cost =
+                                AbilityCost::EffectCost {
+                                    effect: Box::new(effect),
+                                }
+                        }
+                        _ => unreachable!(),
+                    }
+                    let mut prefix = base.clauses.clone();
+                    // A colliding R0 remains declared by its original direct reader;
+                    // its distinct object population cannot become the imported source.
+                    if let Effect::ChangeZoneAll { target, .. } = &mut prefix[0].parsed.effect {
+                        *target = TargetFilter::SpecificObject {
+                            id: crate::types::identifiers::ObjectId(999),
+                        };
+                    }
+                    let mut builder = ClauseIrBuilder::new(PRINTED);
+                    builder.absorb_clauses(prefix);
+                    builder.absorb_clauses(imported.clone());
+                    let relocated = builder.finish();
+                    let expected = relocated[2].id.0;
+                    assert_eq!(expected, 2);
+                    assert_eq!(relocated[0].declares_instruction_result, Some(ClauseId(0)));
+                    assert_eq!(relocated[2].declares_instruction_result, Some(ClauseId(2)));
+                    let clause = relocated.last().unwrap();
+                    assert_eq!(clause.player_scope, Some(player(expected)));
+                    assert_eq!(clause.target_chooser, Some(player(expected)));
+                    assert_eq!(clause.unless_pay.as_ref().unwrap().payer, payer(expected));
+                    assert_eq!(
+                        clause.parsed.unless_pay.as_ref().unwrap().payer,
+                        payer(expected)
+                    );
+                    let effect = match cost_position {
+                        0 => &clause.parsed.effect,
+                        1 | 2 => {
+                            let payment = if cost_position == 1 {
+                                clause.unless_pay.as_ref().unwrap()
+                            } else {
+                                clause.parsed.unless_pay.as_ref().unwrap()
+                            };
+                            let AbilityCost::EffectCost { effect } = &payment.cost else {
+                                unreachable!()
+                            };
+                            effect
+                        }
+                        _ => unreachable!(),
+                    };
+                    let body = selected(effect, edge);
+                    let reader = if local {
+                        assert_eq!(body.declares_return_result, Some(ReturnResultId(0)));
+                        body.sub_ability.as_deref().unwrap()
+                    } else {
+                        body
+                    };
+                    let Effect::GainLife { amount, .. } = reader.effect.as_ref() else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        *amount,
+                        quantity(if local { 0 } else { expected }),
+                        "edge {edge}, cost {cost_position}, local {local}"
+                    );
+                    if cost_position == 0 {
+                        let mut combined = base.clone();
+                        combined.clauses = relocated.clone();
+                        let executable = assemble_effect_chain(&combined);
+                        assert!(
+                            !matches!(*executable.effect, Effect::Unimplemented { .. }),
+                            "complete reminted selected edge {edge}, local {local} assembles"
+                        );
+                        if edge == 12 && !local {
+                            use crate::game::scenario::{GameScenario, P0};
+                            use crate::types::actions::GameAction;
+                            use crate::types::game_state::WaitingFor;
+                            // Supplemental canonical composition isolates the selected
+                            // import after the direct field assertions above.
+                            let last = combined.clauses.last_mut().unwrap();
+                            last.player_scope = None;
+                            last.target_chooser = None;
+                            last.unless_pay = None;
+                            last.parsed.unless_pay = None;
+                            let executable = assemble_effect_chain(&combined);
+                            let mut scenario = GameScenario::new();
+                            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                            let first = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+                            let second = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+                            let spell = scenario
+                                .add_spell_to_hand(
+                                    P0,
+                                    "Supplemental reminted selected import",
+                                    false,
+                                )
+                                .with_ability_definition(executable)
+                                .id();
+                            let mut runner = scenario.build();
+                            runner.cast(spell).resolve();
+                            assert!(matches!(
+                                runner.state().waiting_for,
+                                WaitingFor::ChooseOneOfBranch { .. }
+                            ));
+                            let saved = serde_json::to_value(runner.state()).unwrap();
+                            *runner.state_mut() = serde_json::from_value(saved).unwrap();
+                            runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+                            assert_eq!(
+                                runner.state().players[0].life,
+                                25,
+                                "the selected import reads reminted five, not colliding empty R0"
+                            );
+                            assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+                            assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
+                            assert!(matches!(
+                                runner.state().waiting_for,
+                                WaitingFor::Priority { .. }
+                            ));
+                            assert!(runner.state().stack.is_empty());
+                            assert!(runner.state().resolution_stack.is_empty());
+                            assert!(runner.state().return_result_frames.is_empty());
+                        }
+                    }
+                    // Invalid enclosing imports refuse the complete owned reader,
+                    // without mutating the caller's original batch.
+                    let mut malformed = imported.clone();
+                    malformed[0].id = ClauseId(99);
+                    let original = malformed.clone();
+                    let mut bad = ClauseIrBuilder::new(PRINTED);
+                    bad.absorb_clauses(malformed);
+                    let refused = bad.finish();
+                    assert!(matches!(
+                        refused.last().unwrap().parsed.effect,
+                        Effect::Unimplemented { .. }
+                    ));
+                    assert_eq!(original[0].id, ClauseId(99));
+                    assert_eq!(imported[0].id, ClauseId(0));
+                }
+            }
         }
     }
 

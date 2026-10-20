@@ -11530,6 +11530,49 @@ impl AbilityDefinition {
     }
 }
 
+// Relocation visits only dependencies imported into this process. A selected
+// body with declarations owns its own structural address domain.
+macro_rules! define_imported_result_quantity_walk {
+    ([$($mut_:tt)?]; $imports:ident; $selected:ident; $direct:ident;
+     $nodes:ident; $node:ident) => {
+        impl AbilityDefinition {
+            pub(crate) fn $imports(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+                let mut local = ResultProducerEnvironment::new();
+                let _ = collect_local_result_declarations(ResultScopeNode::Definition(self), &mut local);
+                if !local.is_empty() || self.condition.as_ref().is_some_and(AbilityCondition::has_when_you_do_marker) {
+                    return;
+                }
+                self.$direct(f);
+                self.effect.$selected(f);
+                if let Some(cost) = & $($mut_)? self.cost { cost.$selected(f); }
+                if let Some(payment) = & $($mut_)? self.unless_pay { payment.cost.$selected(f); }
+                if let Some(child) = & $($mut_)? self.sub_ability { child.$imports(f); }
+                if let Some(child) = & $($mut_)? self.else_ability { child.$imports(f); }
+            }
+        }
+        impl Effect {
+            pub(crate) fn $selected(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+                use crate::types::ability_visit::{ $nodes, $node, ResolutionScope };
+                let _ = $nodes::visit_effect_scoped(self, ResolutionScope::OwnResolutionOnly, &mut |node| {
+                    if let $node::Ability(definition) = node { definition.$imports(f); }
+                    ControlFlow::Continue(())
+                });
+            }
+        }
+        impl AbilityCost {
+            pub(crate) fn $selected(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+                use crate::types::ability_visit::{ $nodes, $node, ResolutionScope };
+                let _ = $nodes::visit_cost_scoped(self, ResolutionScope::OwnResolutionOnly, &mut |node| {
+                    if let $node::Ability(definition) = node { definition.$imports(f); }
+                    ControlFlow::Continue(())
+                });
+            }
+        }
+    };
+}
+define_imported_result_quantity_walk!([]; for_each_imported_quantity_ref; for_each_selected_import_quantity_ref; for_each_direct_quantity_ref; direct_nodes; DefinitionNode);
+define_imported_result_quantity_walk!([mut]; for_each_imported_quantity_ref_mut; for_each_selected_import_quantity_ref_mut; for_each_direct_quantity_ref_mut; direct_nodes_mut; DefinitionNodeMut);
+
 macro_rules! define_direct_ability_quantity_walk {
  ([$($mut_:tt)?]; $direct:ident; $effects:ident; $exprs:ident; $refs:ident; $nested:ident; $predicates:ident) => {
   impl AbilityDefinition {
@@ -11553,8 +11596,8 @@ macro_rules! define_direct_ability_quantity_walk {
   }
  };
 }
-define_direct_ability_quantity_walk!([]; for_each_direct_quantity_ref; for_each_quantity_ref; for_each_quantity_expr; for_each_ref; for_each_nested_quantity_ref; for_each_predicate_quantity_ref);
-define_direct_ability_quantity_walk!([mut]; for_each_direct_quantity_ref_mut; for_each_quantity_ref_mut; for_each_quantity_expr_mut; each_ref_mut; for_each_nested_quantity_ref_mut; for_each_predicate_quantity_ref_mut);
+define_direct_ability_quantity_walk!([]; for_each_direct_quantity_ref; for_each_quantity_ref; for_each_resolution_quantity_expr; for_each_ref; for_each_nested_quantity_ref; for_each_predicate_quantity_ref);
+define_direct_ability_quantity_walk!([mut]; for_each_direct_quantity_ref_mut; for_each_quantity_ref_mut; for_each_resolution_quantity_expr_mut; each_ref_mut; for_each_nested_quantity_ref_mut; for_each_predicate_quantity_ref_mut);
 
 impl ResolvedAbility {
     pub(crate) fn has_addressed_zone_result_read(&self) -> bool {
@@ -11607,7 +11650,7 @@ impl ResolvedAbility {
         if let Some(payment) = &self.unless_pay {
             payment
                 .cost
-                .for_each_quantity_expr(&mut |expr| expr.for_each_ref(f));
+                .for_each_resolution_quantity_expr(&mut |expr| expr.for_each_ref(f));
             payment.cost.for_each_predicate_quantity_ref(f);
             payment.payer.for_each_nested_quantity_ref(f);
         }
@@ -11890,8 +11933,9 @@ fn validate_persistent_result_quantity(value: &QuantityExpr) -> Result<(), Effec
     error.map_or(Ok(()), Err)
 }
 fn validate_persistent_result_cost(cost: &AbilityCost) -> Result<(), EffectError> {
+    validate_result_cost_payloads(cost)?;
     let mut error = None;
-    cost.for_each_quantity_expr(&mut |value| {
+    cost.for_each_resolution_quantity_expr(&mut |value| {
         if let Err(reason) = validate_persistent_result_quantity(value) {
             error.get_or_insert(reason);
         }
@@ -12369,8 +12413,56 @@ fn validate_persistent_result_definition_node(
         }
     }
 }
+fn validate_result_cost_payloads(cost: &AbilityCost) -> Result<(), EffectError> {
+    let mut error = None;
+    cost.for_each_cost_node(&mut |node| {
+        if let AbilityCost::EffectCost { effect } = node {
+            if let Err(reason) = validate_persistent_result_payloads(effect) {
+                error.get_or_insert(reason);
+            }
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
+pub(crate) fn validate_instruction_result_effect_context(
+    effect: &Effect,
+) -> Result<(), EffectError> {
+    if let Effect::Choose {
+        choice_type:
+            ChoiceType::Opponent {
+                restriction: Some(filter),
+                ..
+            },
+        ..
+    } = effect
+    {
+        let mut addressed = false;
+        filter.for_each_nested_quantity_ref(&mut |reference| {
+            addressed |= reference.instruction_result_id().is_some();
+        });
+        if addressed {
+            return Err(EffectError::InvalidParam(
+                "instruction-result opponent restriction requires executable context".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_persistent_result_payloads(effect: &Effect) -> Result<(), EffectError> {
+    validate_instruction_result_effect_context(effect)?;
     match effect {
+        Effect::PayCost { cost, .. } => validate_result_cost_payloads(cost)?,
+        Effect::CreateDrawReplacement { replacement_effect }
+        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            let definition =
+                AbilityDefinition::new(AbilityKind::Spell, (**replacement_effect).clone());
+            validate_instruction_result_definition(&definition)?;
+        }
+        Effect::EpicCopy { spell } => {
+            classify_instruction_result_invocation(spell, InstructionResultEntry::Independent)?;
+        }
         Effect::Mana { grants, .. } => {
             // Mana-spend grants belong to the later spell/trigger. The shared
             // effect visitor deliberately treats Mana as a leaf for its existing
@@ -12495,12 +12587,10 @@ fn validate_result_process(
 ) -> Result<InstructionResultProcess, EffectError> {
     let mut local = ResultProducerEnvironment::new();
     collect_local_result_declarations(root, &mut local)?;
-    if local.keys().any(|id| incoming.contains_key(id)) {
-        return Err(EffectError::InvalidParam(
-            "instruction-result declaration crosses process identity".into(),
-        ));
-    }
     let mut seen = incoming.clone();
+    // Local addresses belong to this invocation's namespace. An enclosing
+    // equal integer cannot satisfy a read before this process's declaration.
+    seen.retain(|id, _| !local.contains_key(id));
     let mut imports = BTreeSet::new();
     validate_result_process_node(root, &local, &mut seen, entry, &mut imports)?;
     if !local.is_empty() {
@@ -12525,6 +12615,9 @@ fn validate_result_process_node(
     // before executing anything. Read-only descendants share this authority;
     // a locally producing child is a separate invocation.
     validate_persistent_result_payloads(node.effect())?;
+    for cost in node.costs() {
+        validate_result_cost_payloads(cost)?;
+    }
     let mut error = None;
     let mut read = |id: ReturnResultId, required_zones: Option<(Option<Zone>, Option<Zone>)>| {
         let result = if let Some(producer) = seen.get(&id) {
@@ -16966,6 +17059,8 @@ macro_rules! define_ability_cost_quantity_walk {
 impl AbilityCost {
     define_ability_cost_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
     define_ability_cost_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
+    define_ability_cost_quantity_walk!([]; for_each_resolution_quantity_expr; as_ref; as_deref);
+    define_ability_cost_quantity_walk!([mut]; for_each_resolution_quantity_expr_mut; as_mut; as_deref_mut);
 
     /// Visit every node of this cost tree in pre-order, recursing the container
     /// arms (`Composite`, `OneOf`, `PerCounter`). The exhaustive match keeps
@@ -27360,16 +27455,17 @@ impl Effect {
 }
 
 macro_rules! define_effect_quantity_walk {
-    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident; $scalar:ident; $independent:literal) => {
     /// Visits every `QuantityExpr` carried by this effect —
     /// including the secondary quantity slots that `count_expr()` (the
     /// PRIMARY count/amount accessor) intentionally does not expose, such as
     /// `Token::enter_with_counters` entry-counter quantities,
     /// `Dig::keep_count_expr`, `PutSticker::max_ticket_cost`, dynamic
     /// `PtValue::Quantity` power/toughness, and `ChangeZone`'s
-    /// (conditional) entry counters — and recurses through variants that
-    /// embed another `Effect`/`ResolvedAbility` (`CreateDrawReplacement`,
-    /// `CreatePlaneswalkReplacement`, `EpicCopy`).
+    /// (conditional) entry counters. The generic scalar expansion also recurses
+    /// through raw `Effect`/`ResolvedAbility` payloads (`CreateDrawReplacement`,
+    /// `CreatePlaneswalkReplacement`, `EpicCopy`). The resolution-only expansion
+    /// stops at those independent invocation boundaries.
     ///
     /// Nested domain types that carry their own quantities are walked
     /// through composed exhaustive sub-visitors (each a no-wildcard match on
@@ -27568,7 +27664,7 @@ macro_rules! define_effect_quantity_walk {
                 // The epic copy is a full `ResolvedAbility` chain; walk its
                 // effect (and continuation branches) so its quantity slots
                 // are not invisible to callers.
-                visit_resolved_ability(spell, f);
+                if $independent { visit_resolved_ability(spell, f); }
             }
             Effect::CastCopyOfCard { count, .. } => {
                 if let Some(q) = count {
@@ -27665,12 +27761,12 @@ macro_rules! define_effect_quantity_walk {
             Effect::CreateDrawReplacement {
                 replacement_effect, ..
             } => {
-                replacement_effect.$name(f);
+                if $independent { replacement_effect.$name(f); }
             }
             Effect::CreatePlaneswalkReplacement {
                 replacement_effect, ..
             } => {
-                replacement_effect.$name(f);
+                if $independent { replacement_effect.$name(f); }
             }
             Effect::RollDie {
                 count, modifier, ..
@@ -27680,7 +27776,7 @@ macro_rules! define_effect_quantity_walk {
                 // resolved against each natural roll during THIS effect's
                 // resolution (`game/effects/roll_die.rs`).
                 if let Some(m) = modifier {
-                    m.$name(f);
+                    m.$scalar(f);
                 }
             }
             Effect::FlipCoins { count, .. } => {
@@ -27691,7 +27787,7 @@ macro_rules! define_effect_quantity_walk {
                 // AnyOneColor, AnyOneColorAmongPermanents, …) resolve during
                 // THIS effect's resolution (`resolve_count` in
                 // `game/effects/mana.rs`).
-                produced.$name(f);
+                produced.$scalar(f);
             }
             // CR 401.7: the countered spell's replacement destination may be a
             // dynamic library slot, resolved when the counter moves the spell
@@ -28166,8 +28262,8 @@ Effect::EachPlayerCopyChosen { choose_filter, .. } => { choose_filter.$nested(f)
 Effect::Exploit { target, .. } => { target.$nested(f); },
 Effect::GivePlayerCounter { target, .. } => { target.$nested(f); },
 Effect::LoseAllPlayerCounters { target, .. } => { target.$nested(f); },
-Effect::ExileFromTopUntil { player, .. } => { player.$nested(f); },
-Effect::RevealUntil { player, filter, .. } => { player.$nested(f); filter.$nested(f); },
+Effect::ExileFromTopUntil { player, until } => { player.$nested(f); if let UntilCondition::NextMatches { filter, .. } = until { filter.$nested(f); } },
+Effect::RevealUntil { player, filter, kept_destination_if, .. } => { player.$nested(f); filter.$nested(f); if let Some((route, _)) = kept_destination_if { route.$nested(f); } },
 Effect::Discover { player, .. } => { player.$nested(f); },
 Effect::PhysicalContest { contestant, .. } => { contestant.$nested(f); },
 Effect::Heist { target, .. } => { target.$nested(f); },
@@ -28229,6 +28325,9 @@ Effect::Mana { produced, target, .. } => {
         | ManaProduction::TriggerEventManaType => {}
     }
 },
+Effect::Vote { subject, .. } => { if let VoteSubject::Objects { candidate_filter, .. } = subject { candidate_filter.$nested(f); } },
+Effect::Choose { choice_type, .. } => { if let ChoiceType::Opponent { restriction: Some(filter), .. } = choice_type { filter.$nested(f); } },
+Effect::ForEachCategory { action, .. } => { if let ForEachCategoryAction::PutCounter { target, .. } = action { target.$nested(f); } },
 Effect::ApplyPostReplacementDamage { .. } |
 Effect::Explore |
 Effect::Investigate |
@@ -28241,13 +28340,11 @@ Effect::Clash |
 Effect::ExileTopCardContest { .. } |
 Effect::EndTheTurn |
 Effect::EndCombatPhase |
-Effect::Vote { .. } |
 Effect::EpicCopy { .. } |
 Effect::Myriad |
 Effect::Encore |
 Effect::RegisterBending { .. } |
 Effect::Cleanup { .. } |
-Effect::Choose { .. } |
 Effect::OpponentGuess { .. } |
 Effect::SwapChosenLabels { .. } |
 Effect::SolveCase |
@@ -28278,7 +28375,6 @@ Effect::AssembleContraptions { .. } |
 Effect::AssembleContraptionsFromRollDifference |
 Effect::ProcessRadCounters |
 Effect::NoteManaSpent |
-Effect::ForEachCategory { .. } |
 Effect::GainEnergy { .. } |
 Effect::HeistExile |
 Effect::Cascade |
@@ -28354,18 +28450,20 @@ define_effect_predicate_quantity_walk!([mut]; for_each_predicate_quantity_ref_mu
 
 impl Effect {
     pub(crate) fn for_each_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
-        self.for_each_quantity_expr(&mut |expr| expr.for_each_ref(f));
+        self.for_each_resolution_quantity_expr(&mut |expr| expr.for_each_ref(f));
         self.for_each_predicate_quantity_ref(f);
     }
     pub(crate) fn for_each_quantity_ref_mut(&mut self, f: &mut dyn FnMut(&mut QuantityRef)) {
-        self.for_each_quantity_expr_mut(&mut |expr| expr.each_ref_mut(f));
+        self.for_each_resolution_quantity_expr_mut(&mut |expr| expr.each_ref_mut(f));
         self.for_each_predicate_quantity_ref_mut(f);
     }
 }
 
 impl Effect {
-    define_effect_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
-    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
+    define_effect_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref; for_each_quantity_expr; true);
+    define_effect_quantity_walk!([]; for_each_resolution_quantity_expr; as_ref; as_deref; for_each_quantity_expr; false);
+    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut; for_each_quantity_expr_mut; true);
+    define_effect_quantity_walk!([mut]; for_each_resolution_quantity_expr_mut; as_mut; as_deref_mut; for_each_quantity_expr_mut; false);
 
     /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
     /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
@@ -49231,6 +49329,280 @@ mod departure_owned_dependency_walk_tests {
         let root_wire = serde_json::to_value(&root).unwrap();
         let loaded: AbilityDefinition = serde_json::from_value(root_wire).unwrap();
         assert_eq!(loaded, root);
+    }
+
+    #[test]
+    fn departure_five_nested_predicate_slots_walk_mutate_and_exclude_the_unevaluated_guess_sibling()
+    {
+        let restriction = |id| PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::Controller,
+            }),
+            comparator: Comparator::GE,
+            value: Box::new(reference(id)),
+        };
+        let choice = |id| ChoiceType::Opponent {
+            restriction: Some(Box::new(restriction(id))),
+            distinctness: PlayerChoiceDistinctness::Independent,
+        };
+        let mut effects = vec![
+            Effect::ForEachCategory {
+                category: IterationCategory::Color,
+                chooser: Chooser::Controller,
+                action: ForEachCategoryAction::PutCounter {
+                    target: predicate(1),
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            },
+            Effect::Vote {
+                choices: vec![],
+                per_choice_effect: vec![],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Objects {
+                    candidate_filter: predicate(2),
+                    outcome_template: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::NoOp,
+                    )),
+                },
+                visibility: VoteVisibility::Open,
+            },
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    filter: predicate(3),
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            },
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Graveyard,
+                rest_order: DigRestOrder::Preserve,
+                enter_tapped: Default::default(),
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+                kept_destination_if: Some((Box::new(predicate(4)), Zone::Battlefield)),
+            },
+            Effect::Choose {
+                choice_type: choice(5),
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+            Effect::OpponentGuess {
+                guesser: ControllerRef::Opponent,
+                subject: Box::new(GuessSubject::CommittedChoice {
+                    choice_type: choice(6),
+                }),
+            },
+        ];
+        for (index, effect) in effects.iter_mut().enumerate() {
+            let mut shared = vec![];
+            effect.for_each_quantity_ref(&mut |reference| {
+                if let Some(id) = reference.instruction_result_id() {
+                    shared.push(id);
+                }
+            });
+            assert_eq!(
+                shared,
+                if index < 5 {
+                    vec![ReturnResultId(index as u32 + 1)]
+                } else {
+                    vec![]
+                }
+            );
+            let mut mutable = vec![];
+            effect.for_each_quantity_ref_mut(&mut |reference| {
+                if let QuantityRef::ZoneChangeAggregate {
+                    source: ZoneChangeRecordSource::InstructionResult { result },
+                    ..
+                } = reference
+                {
+                    mutable.push(*result);
+                    result.0 += 100;
+                }
+            });
+            assert_eq!(mutable, shared);
+        }
+        // Whole typed fields are independent expected oracles, not either walk.
+        let Effect::ForEachCategory {
+            action: ForEachCategoryAction::PutCounter { target, .. },
+            ..
+        } = &effects[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(*target, predicate(101));
+        let Effect::Vote {
+            subject: VoteSubject::Objects {
+                candidate_filter, ..
+            },
+            ..
+        } = &effects[1]
+        else {
+            unreachable!()
+        };
+        assert_eq!(*candidate_filter, predicate(102));
+        let Effect::ExileFromTopUntil {
+            until: UntilCondition::NextMatches { filter, .. },
+            ..
+        } = &effects[2]
+        else {
+            unreachable!()
+        };
+        assert_eq!(*filter, predicate(103));
+        let Effect::RevealUntil {
+            kept_destination_if: Some((filter, _)),
+            ..
+        } = &effects[3]
+        else {
+            unreachable!()
+        };
+        assert_eq!(filter.as_ref(), &predicate(104));
+        let Effect::Choose { choice_type, .. } = &effects[4] else {
+            unreachable!()
+        };
+        assert_eq!(*choice_type, choice(105));
+        let Effect::OpponentGuess { subject, .. } = &effects[5] else {
+            unreachable!()
+        };
+        assert_eq!(
+            subject.as_ref(),
+            &GuessSubject::CommittedChoice {
+                choice_type: choice(6)
+            }
+        );
+    }
+
+    #[test]
+    fn departure_raw_carriers_preserve_generic_scalar_walk_but_validate_separate_processes() {
+        let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
+        let mut local = AbilityDefinition::new(AbilityKind::Spell, producer.clone());
+        local.declares_return_result = Some(ReturnResultId(7));
+        local.sub_ability = Some(Box::new(gain(7)));
+        let mut outer = AbilityDefinition::new(AbilityKind::Spell, producer);
+        outer.declares_return_result = Some(ReturnResultId(7));
+        outer.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![local.clone()],
+                kind: ChooseOneOfKind::Ordinary,
+            },
+        )));
+        assert!(
+            validate_instruction_result_definition(&outer).is_ok(),
+            "a complete child namespace may reuse an enclosing integer"
+        );
+        let mut early = local.clone();
+        early.effect = gain(7).effect;
+        early.declares_return_result = None;
+        early.sub_ability = Some(Box::new(local.clone()));
+        assert!(
+            validate_instruction_result_definition(&early).is_err(),
+            "an equal enclosing integer cannot satisfy a local pre-declaration read"
+        );
+        for raw in [
+            Effect::CreateDrawReplacement {
+                replacement_effect: gain(7).effect.clone(),
+            },
+            Effect::CreatePlaneswalkReplacement {
+                replacement_effect: gain(7).effect.clone(),
+            },
+            Effect::EpicCopy {
+                spell: Box::new(crate::game::ability_utils::build_resolved_from_def(
+                    &local,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                )),
+            },
+        ] {
+            let mut scalar = vec![];
+            raw.for_each_quantity_expr(&mut |quantity| {
+                scalar.extend(quantity.instruction_result_ids());
+            });
+            assert_eq!(
+                scalar,
+                vec![ReturnResultId(7)],
+                "the existing generic scalar consumer population is unchanged"
+            );
+            let mut direct = vec![];
+            raw.for_each_quantity_ref(&mut |reference| direct.push(reference.clone()));
+            assert!(
+                direct.is_empty(),
+                "later raw executables are not current reads"
+            );
+            let valid = matches!(raw, Effect::EpicCopy { .. });
+            assert_eq!(validate_persistent_result_payloads(&raw).is_ok(), valid);
+            let cost = AbilityCost::Composite {
+                costs: vec![AbilityCost::EffectCost {
+                    effect: Box::new(raw),
+                }],
+            };
+            assert_eq!(
+                validate_result_cost_payloads(&cost).is_ok(),
+                valid,
+                "raw boundaries stay independent inside recursively nested costs"
+            );
+            assert_eq!(
+                validate_persistent_result_cost(&cost).is_ok(),
+                valid,
+                "installed cost fields preserve the same independent raw boundaries"
+            );
+        }
+    }
+
+    #[test]
+    fn departure_registered_later_definition_edges_never_relocate_enclosing_imports() {
+        for boon in [false, true] {
+            for complete in [false, true] {
+                let mut body = gain(7);
+                if complete {
+                    let effect: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
+                    let mut producer = AbilityDefinition::new(AbilityKind::Spell, effect);
+                    producer.declares_return_result = Some(ReturnResultId(7));
+                    producer.sub_ability = Some(Box::new(body));
+                    body = producer;
+                }
+                let mut effect = if boon {
+                    Effect::CreateBoon {
+                        recipient: TargetFilter::Controller,
+                        trigger: Box::new(
+                            TriggerDefinition::new(crate::types::triggers::TriggerMode::SpellCast)
+                                .execute(body),
+                        ),
+                    }
+                } else {
+                    Effect::CreateDelayedTrigger {
+                        condition: DelayedTriggerCondition::AtNextPhase {
+                            phase: crate::types::phase::Phase::End,
+                        },
+                        effect: Box::new(body),
+                        uses_tracked_set: false,
+                    }
+                };
+                let before = effect.clone();
+                let mut visited = vec![];
+                effect.for_each_selected_import_quantity_ref(&mut |reference| {
+                    visited.push(reference.clone())
+                });
+                effect.for_each_selected_import_quantity_ref_mut(&mut |reference| {
+                    visited.push(reference.clone());
+                });
+                assert!(visited.is_empty());
+                assert_eq!(effect, before);
+                assert_eq!(validate_instruction_result_definition(&AbilityDefinition::new(AbilityKind::Spell, effect)).is_ok(), complete,
+                    "registered-later bodies validate independently instead of importing a colliding enclosing id");
+            }
+        }
     }
 
     #[test]

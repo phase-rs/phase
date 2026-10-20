@@ -3071,6 +3071,7 @@ fn departure_drain_retained_public_program(runner: &mut engine::game::scenario::
             assert!(runner.state().resolution_stack.is_empty());
             return;
         }
+        departure_assert_private_result_views(runner.state());
         let action = departure_retained_public_action(runner.state());
         let saved = serde_json::to_value(runner.state()).unwrap();
         *runner.state_mut() = serde_json::from_value(saved)
@@ -3104,6 +3105,42 @@ fn departure_rewrite_lookup(
             }
         }
         _ => {}
+    }
+}
+
+// Actual public prompts plus supplemental typed stored custody use the same redactor.
+fn departure_assert_private_result_views(state: &GameState) {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::types::game_state::PendingTriggerOrder;
+    let mut stored = state.clone();
+    stored.pending_trigger_order = Some(PendingTriggerOrder {
+        groups: vec![],
+        resume_after_ordering: Some(Box::new(state.waiting_for.clone())),
+    });
+    for authoritative in [state, &stored] {
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let projected = match viewer {
+                Some(player) => {
+                    engine::game::visibility::filter_state_for_viewer(authoritative, player)
+                }
+                None => engine::game::visibility::filter_state_for_unseated_viewer(authoritative),
+            };
+            assert!(projected.return_result_frames.is_empty());
+            assert!(projected.resolution_stack.is_empty());
+            let plain = serde_json::to_string(&projected).unwrap();
+            let wire =
+                serde_json::to_string(&ClientGameStateRef::wrap(authoritative, viewer)).unwrap();
+            for value in [plain, wire] {
+                assert!(
+                    !value.contains("return_result_process"),
+                    "independent process expectation is private"
+                );
+                assert!(
+                    !value.contains("return_result_occurrence"),
+                    "lookup selectors are private in current and stored prompts"
+                );
+            }
+        }
     }
 }
 
@@ -3431,17 +3468,7 @@ fn departure_assert_retained_hostile_reads(
             "{family:?} invalid response cannot mutate or consume the existing work"
         );
     }
-    for projected in [
-        engine::game::visibility::filter_state_for_viewer(positive.state(), PlayerId(0)),
-        engine::game::visibility::filter_state_for_viewer(positive.state(), PlayerId(1)),
-        engine::game::visibility::filter_state_for_unseated_viewer(positive.state()),
-    ] {
-        assert!(projected.return_result_frames.is_empty());
-        assert!(projected.resolution_stack.is_empty());
-        assert!(!serde_json::to_string(&projected)
-            .unwrap()
-            .contains("return_result_process"));
-    }
+    departure_assert_private_result_views(positive.state());
 }
 
 #[test]
@@ -5741,6 +5768,7 @@ fn departure_controller_repeat_decision_restores_import_before_the_next_real_bra
                 panic!("the real repeat controller prompt retains the next executable");
             };
             assert_eq!(*player, PlayerId(0));
+            departure_assert_private_result_views(runner.state());
             let occurrence = *occurrence;
             let process = ability.return_result_process.unwrap();
             assert_eq!(
@@ -7924,6 +7952,7 @@ fn departure_token_host_public_resume_reads_the_actual_bound_counter_after_nonde
     departure_assert_program_complete(&foreign, foreign_spell, 0, 0);
     for empty in [false, true] {
         let (mut runner, spell, hosts) = departure_token_host_runner(false, empty, false);
+        departure_assert_private_result_views(runner.state());
         let WaitingFor::ChooseTokenHost {
             return_result_occurrence: Some(occurrence),
             pending_ability,
@@ -9891,4 +9920,872 @@ fn departure_mana_spend_grant_refuses_outer_import_and_runs_its_complete_local_p
             departure_assert_program_complete(&runner, marker, 3, 0);
         }
     }
+}
+
+// Supplemental typed compositions: the predicate is the sole addressed read.
+fn departure_hidden_predicate_runner(
+    row: u8,
+    foreign: bool,
+    empty: bool,
+    source_mode: u8,
+) -> (
+    engine::game::scenario::GameRunner,
+    engine::types::identifiers::ObjectId,
+    Vec<engine::types::identifiers::ObjectId>,
+) {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::mana::{ManaColor, ManaCost};
+    departure_public_program_runner(foreign, empty, 2, |scenario| {
+        let Effect::GainLife { mut amount, .. } = *departure_gain_definition(7, P0).effect else {
+            unreachable!()
+        };
+        if source_mode == 1 {
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate { source, .. },
+            } = &mut amount
+            else {
+                unreachable!()
+            };
+            *source = ZoneChangeRecordSource::ThisTurn;
+        } else if source_mode == 2 {
+            amount = QuantityExpr::Fixed { value: 5 };
+        }
+        let mut typed = TypedFilter::default();
+        typed.properties.push(FilterProp::Cmc {
+            comparator: if row == 2 {
+                Comparator::EQ
+            } else {
+                Comparator::LT
+            },
+            value: amount,
+        });
+        let predicate = TargetFilter::Typed(typed);
+        let (effect, subjects) = match row {
+            0 => {
+                let subjects = [
+                    ManaColor::Red,
+                    ManaColor::Red,
+                    ManaColor::Green,
+                    ManaColor::Green,
+                ]
+                .iter()
+                .enumerate()
+                .map(|(index, color)| {
+                    scenario
+                        .add_artifact_from_oracle(
+                            P0,
+                            &format!("Supplemental filter category {index}"),
+                            "",
+                        )
+                        .with_mana_cost(ManaCost::generic(2))
+                        .with_color(vec![*color])
+                        .id()
+                })
+                .collect::<Vec<_>>();
+                (
+                    Effect::ForEachCategory {
+                        category: IterationCategory::Color,
+                        chooser: Chooser::Controller,
+                        action: ForEachCategoryAction::PutCounter {
+                            target: predicate,
+                            counter_type: CounterType::Plus1Plus1,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    },
+                    subjects,
+                )
+            }
+            1 => {
+                let subjects = (0..2)
+                    .map(|index| {
+                        scenario
+                            .add_artifact_from_oracle(
+                                P0,
+                                &format!("Supplemental filter vote {index}"),
+                                "",
+                            )
+                            .with_mana_cost(ManaCost::generic(2 + index))
+                            .id()
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    Effect::Vote {
+                        choices: vec![],
+                        per_choice_effect: vec![],
+                        starting_with: ControllerRef::You,
+                        voter_scope: VoterScope::AllPlayers,
+                        tally_mode: VoteTally::TopVotes {
+                            tie: TieResolution::AllTied,
+                        },
+                        subject: VoteSubject::Objects {
+                            candidate_filter: predicate,
+                            outcome_template: Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::NoOp,
+                            )),
+                        },
+                        visibility: VoteVisibility::Open,
+                    },
+                    subjects,
+                )
+            }
+            2 | 3 => {
+                let hit = scenario
+                    .add_land_to_library_top(P0, "Supplemental predicate library hit")
+                    .with_mana_cost(ManaCost::generic(if row == 2 {
+                        if foreign {
+                            7
+                        } else {
+                            5
+                        }
+                    } else {
+                        3
+                    }))
+                    .id();
+                if row == 2 && source_mode == 3 {
+                    let replacement = ReplacementDefinition::new(
+                        engine::types::replacements::ReplacementEvent::Moved,
+                    )
+                    .valid_card(TargetFilter::SpecificObject { id: hit })
+                    .destination_zone(Zone::Exile)
+                    .mode(ReplacementMode::MayCost {
+                        cost: AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        decline: Some(Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::NoOp,
+                        ))),
+                    });
+                    scenario
+                        .add_artifact_from_oracle(P0, "Supplemental until delivery pause", "")
+                        .with_replacement_definition(replacement);
+                }
+                let effect = if row == 2 {
+                    Effect::ExileFromTopUntil {
+                        player: TargetFilter::Controller,
+                        until: UntilCondition::NextMatches {
+                            filter: TargetFilter::And {
+                                filters: vec![TargetFilter::SpecificObject { id: hit }, predicate],
+                            },
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    }
+                } else {
+                    Effect::RevealUntil {
+                        player: TargetFilter::Controller,
+                        filter: TargetFilter::SpecificObject { id: hit },
+                        count: QuantityExpr::Fixed { value: 1 },
+                        matched_disposition: RevealUntilDisposition::KeepEach,
+                        kept_destination: Zone::Hand,
+                        rest_destination: Zone::Graveyard,
+                        rest_order: DigRestOrder::Preserve,
+                        enter_tapped: Default::default(),
+                        enters_attacking: false,
+                        kept_optional_to: None,
+                        enters_under: None,
+                        kept_destination_if: Some((Box::new(predicate), Zone::Battlefield)),
+                    }
+                };
+                (effect, vec![hit])
+            }
+            _ => unreachable!(),
+        };
+        let mut reader = AbilityDefinition::new(AbilityKind::Spell, effect);
+        if row >= 2 {
+            reader.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            )));
+        }
+        (
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![
+                        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                        reader,
+                    ],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ),
+            subjects,
+        )
+    })
+}
+
+#[test]
+fn departure_five_hidden_predicates_are_the_only_read_and_category_retains_public_custody() {
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    for row in 0..4 {
+        let (mut foreign, foreign_spell, _) =
+            departure_hidden_predicate_runner(row, true, false, 0);
+        let (&foreign_o, foreign_frame) =
+            foreign.state().return_result_frames.iter().next().unwrap();
+        let foreign_frame = foreign_frame.clone();
+        // The foreign frame is from a real completed producer and actual public pause.
+        foreign.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+        departure_assert_program_complete(&foreign, foreign_spell, 0, 0);
+        for mode in 0..3 {
+            for empty in [false, true] {
+                let (mut runner, spell, subjects) =
+                    departure_hidden_predicate_runner(row, false, empty, mode);
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch {
+                        player: PlayerId(0),
+                        ..
+                    }
+                ));
+                if mode == 0 {
+                    departure_assert_retained_hostile_reads(
+                        &runner,
+                        DepartureRetainedFamily::Branch,
+                        foreign_o,
+                        foreign_frame.clone(),
+                    );
+                }
+                let saved = serde_json::to_value(runner.state()).unwrap();
+                *runner.state_mut() = serde_json::from_value(saved)
+                    .expect("filter-only selected import survives reload");
+                runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                let eligible = !empty || mode == 2;
+                match row {
+                    0 => {
+                        for member in 0..if eligible { 2 } else { 0 } {
+                            let WaitingFor::ChooseFromZoneChoice {
+                                player,
+                                cards,
+                                count,
+                                ..
+                            } = &runner.state().waiting_for
+                            else {
+                                panic!("two live category members must each pause");
+                            };
+                            assert_eq!(*player, PlayerId(0));
+                            assert_eq!(*count, 1);
+                            assert_eq!(cards.len(), 2);
+                            let chosen = cards[1];
+                            let pending = runner.state().active_per_category_zone_choice().unwrap();
+                            if mode == 0 {
+                                assert!(
+                                    pending.return_result_occurrence.is_some(),
+                                    "remaining predicates alone keep O live"
+                                );
+                                departure_assert_retained_hostile_reads(
+                                    &runner,
+                                    DepartureRetainedFamily::CategoryCounter,
+                                    foreign_o,
+                                    foreign_frame.clone(),
+                                );
+                            }
+                            assert!(
+                                runner
+                                    .state()
+                                    .resolution_stack
+                                    .ability_continuations()
+                                    .next()
+                                    .is_none(),
+                                "category has no outer executable tail"
+                            );
+                            let saved = serde_json::to_value(runner.state()).unwrap();
+                            *runner.state_mut() = serde_json::from_value(saved)
+                                .expect("remaining category predicate survives each re-pause");
+                            runner
+                                .act(GameAction::SelectCards {
+                                    cards: vec![chosen],
+                                })
+                                .unwrap();
+                            assert_eq!(
+                                runner.state().objects[&chosen].counters[&CounterType::Plus1Plus1],
+                                1
+                            );
+                            assert!(member < 2);
+                        }
+                        assert_eq!(
+                            subjects
+                                .iter()
+                                .map(|id| runner.state().objects[id]
+                                    .counters
+                                    .get(&CounterType::Plus1Plus1)
+                                    .copied()
+                                    .unwrap_or(0))
+                                .sum::<u32>(),
+                            if eligible { 2 } else { 0 }
+                        );
+                    }
+                    1 if eligible => {
+                        for seat in 0..2 {
+                            let WaitingFor::VoteChoice {
+                                player,
+                                candidate_objects,
+                                return_result_occurrence,
+                                ..
+                            } = &runner.state().waiting_for
+                            else {
+                                panic!("enumerated object candidates reach public vote");
+                            };
+                            assert_eq!(*player, PlayerId(seat));
+                            assert_eq!(candidate_objects.len(), 2);
+                            assert!(
+                                return_result_occurrence.is_none(),
+                                "candidate IDs are latched and outcome has no live read"
+                            );
+                            let saved = serde_json::to_value(runner.state()).unwrap();
+                            *runner.state_mut() = serde_json::from_value(saved).unwrap();
+                            runner
+                                .act(GameAction::SubmitVoteCandidate { candidate_index: 1 })
+                                .unwrap();
+                        }
+                    }
+                    2 => {
+                        assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Exile);
+                        assert!(runner.state().library_of(PlayerId(0)).is_empty(), "the buried matching card or known-empty scan reaches the actual reader");
+                    }
+                    3 => assert_eq!(
+                        runner.state().objects[&subjects[0]].zone,
+                        if eligible {
+                            Zone::Battlefield
+                        } else {
+                            Zone::Hand
+                        }
+                    ),
+                    _ => {}
+                }
+                departure_assert_program_complete(
+                    &runner,
+                    spell,
+                    if row == 0 || row == 1 || (row == 2 && empty && mode != 2) {
+                        0
+                    } else {
+                        1
+                    },
+                    0,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_opponent_restriction_refuses_before_root_and_keeps_this_turn_fixed_and_nonreader_guesses(
+) {
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    for mode in 0..4 {
+        let Effect::GainLife { mut amount, .. } = *departure_gain_definition(7, P0).effect else {
+            unreachable!()
+        };
+        if mode == 1 {
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate { source, .. },
+            } = &mut amount
+            else {
+                unreachable!()
+            };
+            *source = ZoneChangeRecordSource::ThisTurn;
+        } else if mode == 2 {
+            amount = QuantityExpr::Fixed { value: 5 };
+        }
+        let choice_type = ChoiceType::Opponent {
+            restriction: Some(Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(amount),
+            })),
+            distinctness: PlayerChoiceDistinctness::Independent,
+        };
+        let effect = if mode == 3 {
+            Effect::OpponentGuess {
+                guesser: ControllerRef::Opponent,
+                subject: Box::new(GuessSubject::CommittedChoice { choice_type }),
+            }
+        } else {
+            Effect::Choose {
+                choice_type,
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            }
+        };
+        let mut root = departure_exile_definition(7);
+        let mut body = AbilityDefinition::new(AbilityKind::Spell, effect);
+        let mut tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        body.sub_ability = Some(Box::new(tail));
+        root.sub_ability = Some(Box::new(body));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Supplemental opponent predicate", false)
+            .with_ability_definition(root.clone())
+            .id();
+        for player in [P0, P1] {
+            for _ in 0..5 {
+                scenario.add_card_to_library_top(player, "Library witness");
+            }
+        }
+        let mut runner = scenario.build();
+        if mode == 0 {
+            let mut state = runner.state().clone();
+            let before = serde_json::to_value(&state).unwrap();
+            let mut events = Vec::new();
+            let resolved = build_resolved_from_def(&root, spell, P0);
+            let error = resolve_ability_chain(&mut state, &resolved, &mut events).unwrap_err();
+            assert!(
+                format!("{error:?}").contains("opponent restriction requires executable context")
+            );
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            assert!(events.is_empty());
+        }
+        runner.cast(spell).commit();
+        for _ in 0..8 {
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                && !runner.state().stack.is_empty()
+            {
+                runner.act(GameAction::PassPriority).unwrap();
+            } else {
+                break;
+            }
+        }
+        if mode == 0 {
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+            assert_eq!(runner.state().next_return_result_occurrence_id, 1);
+            assert_eq!(runner.state().next_return_result_process_id, 1);
+            departure_assert_program_complete(&runner, spell, 0, 0);
+        } else {
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+            if mode != 3 {
+                let WaitingFor::NamedChoice {
+                    player, options, ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("ordinary source-only predicate remains a functioning public opponent choice");
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(options, &vec!["1".to_string()]);
+                runner
+                    .act(GameAction::ChooseOption { choice: "1".into() })
+                    .unwrap();
+            }
+            departure_assert_program_complete(&runner, spell, 1, 0);
+        }
+    }
+}
+
+#[test]
+fn departure_raw_replacements_refuse_outer_imports_before_producers_and_install_independent_controls(
+) {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    for planeswalk in [false, true] {
+        for mode in 0..4 {
+            let Effect::GainLife { mut amount, .. } = *departure_gain_definition(7, P0).effect
+            else {
+                unreachable!()
+            };
+            if mode == 1 {
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                } = &mut amount
+                else {
+                    unreachable!()
+                };
+                *source = ZoneChangeRecordSource::ThisTurn;
+            } else if mode == 2 {
+                amount = QuantityExpr::Fixed { value: 5 };
+            }
+            let replacement_effect = if mode == 3 {
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![
+                        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                        departure_selected_local_body(false, false),
+                    ],
+                    kind: ChooseOneOfKind::Ordinary,
+                }
+            } else {
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount,
+                }
+            };
+            let effect = if planeswalk {
+                Effect::CreatePlaneswalkReplacement {
+                    replacement_effect: Box::new(replacement_effect),
+                }
+            } else {
+                Effect::CreateDrawReplacement {
+                    replacement_effect: Box::new(replacement_effect),
+                }
+            };
+            let mut root = departure_exile_definition(7);
+            root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+            let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+            let spell = scenario
+                .add_spell_to_hand(P0, "Supplemental raw replacement carrier", false)
+                .with_ability_definition(root.clone())
+                .id();
+            for player in [P0, PlayerId(1)] {
+                for _ in 0..8 {
+                    scenario.add_card_to_library_top(player, "Library witness");
+                }
+            }
+            let mut runner = scenario.build();
+            if mode == 0 {
+                let mut state = runner.state().clone();
+                let before = serde_json::to_value(&state).unwrap();
+                let mut events = Vec::new();
+                let error = resolve_ability_chain(
+                    &mut state,
+                    &build_resolved_from_def(&root, spell, P0),
+                    &mut events,
+                )
+                .unwrap_err();
+                assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
+                assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                assert!(events.is_empty());
+            }
+            runner.cast(spell).resolve();
+            departure_assert_program_complete(&runner, spell, 0, 0);
+            if mode == 0 {
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+                assert!(runner.state().pending_damage_replacements.is_empty());
+                assert_eq!(runner.state().next_return_result_process_id, 1);
+            } else {
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+                let substitute = runner
+                    .state()
+                    .pending_damage_replacements
+                    .last()
+                    .expect("the actual carrier installed its later raw executable")
+                    .runtime_execute
+                    .as_deref()
+                    .unwrap()
+                    .clone();
+                assert!(substitute.return_result_process.is_none());
+                // Supplemental independent invocation of the actually installed body;
+                // public selection and priority complete its nested local process.
+                let mut events = Vec::new();
+                resolve_ability_chain(runner.state_mut(), &substitute, &mut events).unwrap();
+                if mode == 3 {
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ChooseOneOfBranch { player: P0, .. }
+                    ));
+                    let saved = serde_json::to_value(runner.state()).unwrap();
+                    *runner.state_mut() = serde_json::from_value(saved).unwrap();
+                    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                }
+                assert_eq!(
+                    runner.state().players[0].life,
+                    20 + if mode == 1 || mode == 3 { 3 } else { 5 }
+                );
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(runner.state().stack.is_empty());
+                assert!(runner.state().resolution_stack.is_empty());
+                assert!(runner.state().return_result_frames.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process() {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{ReturnResultProcessId, StackEntryKind, WaitingFor};
+    use engine::types::identifiers::ObjectId;
+    for mode in 0..3 {
+        let (mut runner, spell, _) = departure_public_program_runner(false, false, 2, |_| {
+            let definition = if mode == 0 {
+                departure_selected_local_body(false, false)
+            } else {
+                let mut definition = departure_gain_definition(7, P0);
+                let Effect::GainLife { amount, .. } = definition.effect.as_mut() else {
+                    unreachable!()
+                };
+                if mode == 1 {
+                    let QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                    } = amount
+                    else {
+                        unreachable!()
+                    };
+                    *source = ZoneChangeRecordSource::ThisTurn;
+                } else {
+                    *amount = QuantityExpr::Fixed { value: 5 };
+                }
+                definition
+            };
+            let mut snapshot = build_resolved_from_def(&definition, ObjectId(0), P0);
+            snapshot.return_result_process = Some(ReturnResultProcessId(901));
+            (
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::EpicCopy {
+                        spell: Box::new(snapshot),
+                    },
+                ),
+                vec![],
+            )
+        });
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        let copy = runner
+            .state()
+            .stack
+            .back()
+            .expect("Epic creates an actual independent stack copy");
+        let copy_id = copy.id;
+        assert_ne!(copy_id, spell);
+        assert!(runner.state().objects[&copy_id].is_token);
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &copy.kind
+        else {
+            unreachable!()
+        };
+        assert!(
+            ability.return_result_process.is_none(),
+            "Epic source-rebinding clears stale snapshot authority before stack storage"
+        );
+        assert!(ability
+            .sub_ability
+            .as_deref()
+            .is_none_or(|child| child.return_result_process.is_none()));
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved)
+            .expect("independent copy is structurally valid before local publication");
+        for _ in 0..8 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        departure_assert_program_complete(&runner, spell, if mode == 0 { 3 } else { 5 }, 0);
+        assert!(runner.state().next_return_result_process_id > 1);
+    }
+}
+
+#[test]
+fn departure_next_matches_filter_survives_actual_replacement_delivery_and_reload() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::ReturnResultId;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{InstructionResult, RevealedInstructionResult, WaitingFor};
+    let (mut foreign, foreign_spell, _) = departure_hidden_predicate_runner(2, true, false, 0);
+    let (&foreign_o, foreign_frame) = foreign.state().return_result_frames.iter().next().unwrap();
+    let foreign_frame = foreign_frame.clone();
+    foreign.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+    departure_assert_program_complete(&foreign, foreign_spell, 0, 0);
+    for empty in [false, true] {
+        let (mut runner, spell, subjects) = departure_hidden_predicate_runner(2, false, empty, 3);
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+        let WaitingFor::ReplacementChoice { player, .. } = &runner.state().waiting_for else {
+            panic!("the matching library card pauses in its actual delivery");
+        };
+        assert_eq!(*player, PlayerId(0));
+        assert!(runner.state().pending_exile_from_top_until.is_some());
+        let continuation = runner
+            .state()
+            .resolution_stack
+            .ability_continuations()
+            .find(|pending| {
+                matches!(
+                    pending.chain.effect,
+                    engine::types::ability::Effect::ExileFromTopUntil { .. }
+                )
+            })
+            .expect("the actual unresolved predicate is retained for resumed delivery");
+        assert!(continuation.return_result_occurrence.is_some());
+        assert_eq!(
+            runner.state().return_result_frames[&continuation.return_result_occurrence.unwrap()]
+                .process,
+            continuation.chain.return_result_process
+        );
+        let original = continuation.return_result_occurrence.unwrap();
+        assert_ne!(
+            foreign_frame.process,
+            continuation.chain.return_result_process
+        );
+        for fault in 0..if empty { 6 } else { 7 } {
+            let mut hostile = runner.state().clone();
+            match fault {
+                0 => {
+                    hostile.return_result_frames.remove(&original);
+                    hostile
+                        .return_result_frames
+                        .insert(foreign_o, foreign_frame.clone());
+                    hostile.next_return_result_occurrence_id = foreign_o.0 + 1;
+                    hostile.next_return_result_process_id = foreign_frame.process.unwrap().0 + 1;
+                    let mut stack = serde_json::to_value(&hostile.resolution_stack).unwrap();
+                    departure_rewrite_lookup(
+                        &mut stack,
+                        &serde_json::to_value(original).unwrap(),
+                        &serde_json::to_value(foreign_o).unwrap(),
+                    );
+                    hostile.resolution_stack = serde_json::from_value(stack).unwrap();
+                }
+                1 => hostile.return_result_frames.clear(),
+                2 => {
+                    hostile
+                        .return_result_frames
+                        .get_mut(&original)
+                        .unwrap()
+                        .results
+                        .remove(&ReturnResultId(7));
+                }
+                3 => {
+                    hostile
+                        .return_result_frames
+                        .get_mut(&original)
+                        .unwrap()
+                        .results
+                        .insert(
+                            ReturnResultId(7),
+                            InstructionResult::RevealedCards(RevealedInstructionResult {
+                                revealed_cards: vec![],
+                            }),
+                        );
+                }
+                4 => {
+                    let mut stack = serde_json::to_value(&hostile.resolution_stack).unwrap();
+                    assert!(departure_clear_continuation_process(&mut stack) > 0);
+                    hostile.resolution_stack = serde_json::from_value(stack).unwrap();
+                }
+                5 => {
+                    let mut stack = serde_json::to_value(&hostile.resolution_stack).unwrap();
+                    departure_rewrite_lookup(
+                        &mut stack,
+                        &serde_json::to_value(original).unwrap(),
+                        &serde_json::Value::Null,
+                    );
+                    hostile.resolution_stack = serde_json::from_value(stack).unwrap();
+                }
+                6 => {
+                    let InstructionResult::ZoneChanges(records) = hostile
+                        .return_result_frames
+                        .get_mut(&original)
+                        .unwrap()
+                        .results
+                        .get_mut(&ReturnResultId(7))
+                        .unwrap()
+                    else {
+                        unreachable!()
+                    };
+                    records[0].trigger_source_context = None;
+                }
+                _ => unreachable!(),
+            }
+            let error =
+                serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap())
+                    .unwrap_err()
+                    .to_string();
+            if fault == 0 || fault == 4 {
+                assert!(
+                    error.contains("instruction-result process owner mismatch"),
+                    "resumed filter reload: {error}"
+                );
+            }
+            let mut reached = GameRunner::from_state(hostile);
+            let before = serde_json::to_value(reached.state()).unwrap();
+            let error = reached
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap_err()
+                .to_string();
+            if fault == 0 || fault == 4 {
+                assert!(
+                    error.contains("instruction-result process owner mismatch"),
+                    "resumed filter response: {error}"
+                );
+            }
+            assert_eq!(
+                serde_json::to_value(reached.state()).unwrap(),
+                before,
+                "invalid resumed filter cannot deliver or consume the replacement"
+            );
+        }
+        departure_assert_private_result_views(runner.state());
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved).expect(
+            "the live per-card filter keeps its exact process through replacement delivery",
+        );
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .unwrap();
+        assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Exile);
+        assert!(runner.state().pending_exile_from_top_until.is_none());
+        departure_assert_program_complete(&runner, spell, if empty { 0 } else { 1 }, 0);
+    }
+}
+
+#[test]
+fn departure_epic_import_is_refused_before_the_outer_producer_can_execute() {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+    let mut root = departure_exile_definition(7);
+    let snapshot = build_resolved_from_def(&departure_gain_definition(7, P0), victim, P0);
+    root.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::EpicCopy {
+            spell: Box::new(snapshot),
+        },
+    )));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Supplemental invalid Epic import", false)
+        .with_ability_definition(root.clone())
+        .id();
+    let mut runner = scenario.build();
+    let mut state = runner.state().clone();
+    let before = serde_json::to_value(&state).unwrap();
+    let mut events = Vec::new();
+    let error = resolve_ability_chain(
+        &mut state,
+        &build_resolved_from_def(&root, spell, P0),
+        &mut events,
+    )
+    .unwrap_err();
+    assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    assert!(events.is_empty());
+    runner.cast(spell).resolve();
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+    assert_eq!(runner.state().next_return_result_process_id, 1);
+    departure_assert_program_complete(&runner, spell, 0, 0);
 }
