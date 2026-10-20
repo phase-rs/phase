@@ -10693,7 +10693,7 @@ impl LetterQuery {
 
 // The shared and exclusive dependency walks have exactly the same nested-field classification.
 macro_rules! define_quantity_dependency_walk {
- ([$($mut_:tt)?]; $nested:ident; $expr:ident; $source:ident) => {
+ ([$($mut_:tt)?]; $nested:ident; $expr:ident; $source:ident; $ordinary:expr; $all_nested:ident; $all_expr:ident) => {
 impl AbilityCondition {
  pub(crate) fn $nested(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
  match self {
@@ -10892,8 +10892,11 @@ impl PlayerFilter {
  match self {
 PlayerFilter::OpponentDealtDamage { source, .. } => { for value in source { value.$nested(f); } },
 PlayerFilter::AllExcept { exclude, .. } => { exclude.$nested(f); },
-PlayerFilter::ControlsCount { filter, count, .. } => { filter.$nested(f); count.$expr(f); },
-PlayerFilter::PlayerAttribute { attr, value, .. } => { f(attr); attr.$nested(f); value.$expr(f); },
+PlayerFilter::ControlsCount { filter, count, .. } => {
+    if $ordinary { filter.$nested(f); count.$expr(f); }
+    else { filter.$all_nested(f); count.$all_expr(f); }
+},
+PlayerFilter::PlayerAttribute { attr, value, .. } => { if $ordinary { f(attr); } attr.$nested(f); value.$expr(f); },
 PlayerFilter::AnyOf { filters, .. } => { for value in filters { value.$nested(f); } },
 PlayerFilter::TrackedSetPossessor { filter, .. } => { filter.$nested(f); },
 PlayerFilter::Controller |
@@ -11106,8 +11109,17 @@ TargetFilter::AllPlayers => {}
 }
  };
 }
-define_quantity_dependency_walk!([]; for_each_nested_quantity_ref; for_each_ref; source);
-define_quantity_dependency_walk!([mut]; for_each_nested_quantity_ref_mut; each_ref_mut; source_mut);
+define_quantity_dependency_walk!([]; for_each_nested_quantity_ref; for_each_ref; source; true; for_each_nested_quantity_ref; for_each_ref);
+define_quantity_dependency_walk!([mut]; for_each_nested_quantity_ref_mut; each_ref_mut; source_mut; true; for_each_nested_quantity_ref_mut; each_ref_mut);
+// The same topology selects only quantities evaluated inside ControlsCount's
+// source-only predicate. Other bound quantity/filter readers are untouched.
+define_quantity_dependency_walk!([]; for_each_source_only_player_quantity_ref; for_each_source_only_player_quantity_ref; source; false; for_each_nested_quantity_ref; for_each_ref);
+
+impl QuantityExpr {
+    fn for_each_source_only_player_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        self.for_each_ref(&mut |reference| reference.for_each_source_only_player_quantity_ref(f));
+    }
+}
 
 /// The unresolved reads retained by a zone-entry selection. Base counters are latched.
 pub(crate) fn for_each_zone_entry_quantity_ref(
@@ -11530,6 +11542,15 @@ impl AbilityDefinition {
     }
 }
 
+impl AbilityCost {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ = crate::types::ability_visit::effects_mut::visit_cost(self, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            ControlFlow::Continue(())
+        });
+    }
+}
+
 // Relocation visits only dependencies imported into this process. A selected
 // body with declarations owns its own structural address domain.
 macro_rules! define_imported_result_quantity_walk {
@@ -11546,7 +11567,9 @@ macro_rules! define_imported_result_quantity_walk {
                 self.effect.$selected(f);
                 if let Some(cost) = & $($mut_)? self.cost { cost.$selected(f); }
                 if let Some(payment) = & $($mut_)? self.unless_pay { payment.cost.$selected(f); }
-                if let Some(child) = & $($mut_)? self.sub_ability { child.$imports(f); }
+                if let Some(child) = & $($mut_)? self.sub_ability {
+                    if !self.effect.sub_ability_resolves_later(child.sub_link) { child.$imports(f); }
+                }
                 if let Some(child) = & $($mut_)? self.else_ability { child.$imports(f); }
             }
         }
@@ -11614,14 +11637,22 @@ impl ResolvedAbility {
         process: Option<crate::types::game_state::ReturnResultProcessId>,
     ) {
         self.return_result_process = process;
-        for child in [&mut self.sub_ability, &mut self.else_ability]
-            .into_iter()
-            .flatten()
-        {
-            if child
-                .condition
-                .as_ref()
-                .is_some_and(AbilityCondition::has_when_you_do_marker)
+        let later_sub = self
+            .sub_ability
+            .as_deref()
+            .is_some_and(|child| self.effect.sub_ability_resolves_later(child.sub_link));
+        for (child, later) in [
+            (&mut self.sub_ability, later_sub),
+            (&mut self.else_ability, false),
+        ] {
+            let Some(child) = child else {
+                continue;
+            };
+            if later
+                || child
+                    .condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::has_when_you_do_marker)
             {
                 child.clear_return_result_process_recursive();
             } else {
@@ -11681,14 +11712,19 @@ impl ResolvedAbility {
                 },
             );
         }
-        for child in [&self.sub_ability, &self.else_ability]
-            .into_iter()
-            .flatten()
-        {
-            if !child
-                .condition
-                .as_ref()
-                .is_some_and(AbilityCondition::has_when_you_do_marker)
+        let later_sub = self
+            .sub_ability
+            .as_deref()
+            .is_some_and(|child| self.effect.sub_ability_resolves_later(child.sub_link));
+        for (child, later) in [(&self.sub_ability, later_sub), (&self.else_ability, false)] {
+            let Some(child) = child else {
+                continue;
+            };
+            if !later
+                && !child
+                    .condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::has_when_you_do_marker)
             {
                 child.for_each_own_quantity_ref(f);
             }
@@ -11722,6 +11758,112 @@ enum ResultScopeNode<'a> {
     Resolved(&'a ResolvedAbility),
 }
 
+impl Effect {
+    /// CR 615.5: only this prevention rider is installed for later damage.
+    /// Sequential siblings still execute in the current instruction chain.
+    pub(crate) fn sub_ability_resolves_later(&self, link: SubAbilityLink) -> bool {
+        matches!(self, Effect::PreventDamage { .. }) && link == SubAbilityLink::ContinuationStep
+    }
+
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ = crate::types::ability_visit::effects_mut::visit_effect(self, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            ControlFlow::Continue(())
+        });
+        let _ = crate::types::ability_visit::nodes_mut::visit_effect(
+            self,
+            &mut clear_registered_result_processes,
+        );
+    }
+
+    pub(crate) fn clear_raw_return_result_processes(&mut self) {
+        match self {
+            Effect::EpicCopy { spell } => spell.clear_return_result_process_recursive(),
+            // The generic visitor's Mana leaf remains intentional.
+            Effect::Mana { grants, .. } => {
+                for grant in grants {
+                    if let crate::types::mana::ManaSpellGrant::TriggerOnSpend { ability, .. } =
+                        grant
+                    {
+                        ability.clear_embedded_return_result_processes();
+                    }
+                }
+            }
+            Effect::ApplyPerpetual { modification, .. } => {
+                modification.clear_embedded_return_result_processes()
+            }
+            _ => {}
+        }
+    }
+}
+
+impl PerpetualModification {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        if let Self::GrantAbility { modifications } = self {
+            for modification in modifications {
+                match modification {
+                    PerpetualGrantModification::GrantAbility { definition } => {
+                        definition.clear_embedded_return_result_processes()
+                    }
+                    PerpetualGrantModification::GrantTrigger { trigger } => {
+                        let _ = crate::types::ability_visit::effects_mut::visit_trigger(
+                            trigger,
+                            &mut |effect| {
+                                effect.clear_raw_return_result_processes();
+                                ControlFlow::Continue(())
+                            },
+                        );
+                        let _ = crate::types::ability_visit::nodes_mut::visit_trigger(
+                            trigger,
+                            &mut clear_registered_result_processes,
+                        );
+                    }
+                    PerpetualGrantModification::AddStaticMode { mode } => {
+                        let mut definition = StaticDefinition::new(mode.clone());
+                        let _ = crate::types::ability_visit::effects_mut::visit_static(
+                            &mut definition,
+                            &mut |effect| {
+                                effect.clear_raw_return_result_processes();
+                                ControlFlow::Continue(())
+                            },
+                        );
+                        let _ = crate::types::ability_visit::nodes_mut::visit_static(
+                            &mut definition,
+                            &mut clear_registered_result_processes,
+                        );
+                        *mode = definition.mode;
+                    }
+                    PerpetualGrantModification::AddKeyword { .. } => {}
+                }
+            }
+        }
+    }
+}
+
+impl AbilityDefinition {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ = crate::types::ability_visit::effects_mut::visit_ability_def(self, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            ControlFlow::Continue(())
+        });
+        let _ = crate::types::ability_visit::nodes_mut::visit_ability_def(
+            self,
+            &mut clear_registered_result_processes,
+        );
+    }
+}
+
+pub(crate) fn clear_registered_result_processes(
+    node: crate::types::ability_visit::DefinitionNodeMut<'_>,
+) -> ControlFlow<()> {
+    if let crate::types::ability_visit::DefinitionNodeMut::Replacement(definition) = node {
+        if let Some(body) = &mut definition.runtime_execute {
+            body.clear_return_result_process_recursive();
+        }
+    }
+    ControlFlow::Continue(())
+}
+
 impl<'a> ResultScopeNode<'a> {
     fn effect(self) -> &'a Effect {
         match self {
@@ -11753,6 +11895,68 @@ impl<'a> ResultScopeNode<'a> {
                 .flatten()
                 .map(|child| Self::Resolved(child))
                 .collect(),
+        }
+    }
+    fn link_is_independent(self, child: Self) -> bool {
+        if child
+            .condition()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
+        {
+            return true;
+        }
+        match (self, child) {
+            (Self::Definition(parent), Self::Definition(child)) => {
+                parent
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|sub| std::ptr::eq(sub, child))
+                    && parent.effect.sub_ability_resolves_later(child.sub_link)
+            }
+            (Self::Resolved(parent), Self::Resolved(child)) => {
+                parent
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|sub| std::ptr::eq(sub, child))
+                    && parent.effect.sub_ability_resolves_later(child.sub_link)
+            }
+            _ => false,
+        }
+    }
+    fn player_scope(self) -> Option<&'a PlayerFilter> {
+        match self {
+            Self::Definition(node) => node.player_scope.as_ref(),
+            Self::Resolved(node) => node.player_scope.as_ref(),
+        }
+    }
+    fn source_only_player_reads(self, f: &mut dyn FnMut(&QuantityRef)) {
+        let (condition, repeat, chooser, optional, payment) = match self {
+            Self::Definition(node) => (
+                &node.condition,
+                &node.repeat_for,
+                &node.target_chooser,
+                &node.optional_player,
+                &node.unless_pay,
+            ),
+            Self::Resolved(node) => (
+                &node.condition,
+                &node.repeat_for,
+                &node.target_chooser,
+                &node.optional_player,
+                &node.unless_pay,
+            ),
+        };
+        if let Some(condition) = condition {
+            condition.for_each_source_only_object_quantity_ref(f);
+            condition.for_each_source_only_player_quantity_ref(f);
+        }
+        if let Some(repeat) = repeat {
+            repeat.for_each_source_only_player_quantity_ref(f);
+        }
+        for player in [chooser, optional].into_iter().flatten() {
+            player.for_each_source_only_player_quantity_ref(f);
+        }
+        if let Some(payment) = payment {
+            payment.payer.for_each_source_only_player_quantity_ref(f);
         }
     }
     fn direct_reads(self, f: &mut dyn FnMut(&QuantityRef)) {
@@ -12413,8 +12617,21 @@ fn validate_persistent_result_definition_node(
         }
     }
 }
-fn validate_result_cost_payloads(cost: &AbilityCost) -> Result<(), EffectError> {
+pub(crate) fn validate_result_cost_payloads(cost: &AbilityCost) -> Result<(), EffectError> {
     let mut error = None;
+    let mut check = |reference: &QuantityRef| {
+        if reference.instruction_result_id().is_some() {
+            error.get_or_insert_with(|| {
+                EffectError::InvalidParam(
+                    "instruction-result player threshold requires executable context".into(),
+                )
+            });
+        }
+    };
+    cost.for_each_source_only_player_quantity_ref(&mut check);
+    cost.for_each_resolution_quantity_expr(&mut |quantity| {
+        quantity.for_each_source_only_player_quantity_ref(&mut check)
+    });
     cost.for_each_cost_node(&mut |node| {
         if let AbilityCost::EffectCost { effect } = node {
             if let Err(reason) = validate_persistent_result_payloads(effect) {
@@ -12428,6 +12645,139 @@ fn validate_result_cost_payloads(cost: &AbilityCost) -> Result<(), EffectError> 
 pub(crate) fn validate_instruction_result_effect_context(
     effect: &Effect,
 ) -> Result<(), EffectError> {
+    let mut source_only_error = None;
+    let mut check_source_only = |reference: &QuantityRef| {
+        if reference.instruction_result_id().is_some() {
+            source_only_error.get_or_insert_with(|| {
+                EffectError::InvalidParam(
+                    "instruction-result player threshold requires executable context".into(),
+                )
+            });
+        }
+    };
+    effect.for_each_source_only_player_quantity_ref(&mut check_source_only);
+    effect.for_each_resolution_quantity_expr(&mut |quantity| {
+        quantity.for_each_source_only_player_quantity_ref(&mut check_source_only);
+    });
+    if let Some(error) = source_only_error {
+        return Err(error);
+    }
+    // These selectors retain only source/controller (or selected ids), so
+    // their actual object matcher cannot evaluate a current process result.
+    match effect {
+        Effect::ChooseAndSacrificeRest {
+            choose_filter,
+            sacrifice_filter,
+            ..
+        } => {
+            validate_source_only_result_filter(choose_filter)?;
+            validate_source_only_result_filter(sacrifice_filter)?;
+        }
+        Effect::EachPlayerCopyChosen { choose_filter, .. } => {
+            validate_source_only_result_filter(choose_filter)?
+        }
+        Effect::ChooseDamageSource { source_filter } => {
+            validate_source_only_result_filter(source_filter)?
+        }
+        Effect::RememberCard { target } => validate_source_only_result_filter(target)?,
+        Effect::ApplyPerpetual { target, .. }
+            if target
+                .extract_in_zone()
+                .is_some_and(|zone| zone != Zone::Battlefield) =>
+        {
+            validate_source_only_result_filter(target)?
+        }
+        _ => {}
+    }
+    // These current scalar consumers deliberately have source-only contexts.
+    // Validate the typed slot before the complete root can run its producer.
+    match effect {
+        Effect::AdditionalPhase { count, .. }
+        | Effect::Bolster { count }
+        | Effect::SkipNextTurn { count, .. }
+        | Effect::AddPendingETBCounters { count, .. }
+        | Effect::GrantExtraLoyaltyActivations { amount: count, .. } => {
+            validate_source_only_result_quantity(count)?;
+        }
+        Effect::SkipNextStep {
+            count,
+            scope: SkipScope::NextOccurrence,
+            ..
+        } => {
+            validate_source_only_result_quantity(count)?;
+        }
+        Effect::ChooseAndSacrificeRest {
+            total_power_cap: Some(cap),
+            ..
+        } => {
+            validate_source_only_result_quantity(cap)?;
+        }
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            ..
+        } => {
+            validate_source_only_result_quantity(count)?;
+            validate_source_only_result_quantity(life_payment)?;
+        }
+        Effect::PreventDamage {
+            amount_dynamic: Some(amount),
+            ..
+        } => {
+            validate_source_only_result_quantity(amount)?;
+        }
+        _ => {}
+    }
+    match effect {
+        Effect::StartYourEngines { player_scope }
+        | Effect::ChangeSpeed { player_scope, .. }
+        | Effect::DamageEachPlayer {
+            player_filter: player_scope,
+            ..
+        }
+        | Effect::ChooseOneOf {
+            chooser: player_scope,
+            ..
+        }
+        | Effect::RevealChosenNumbers {
+            players: player_scope,
+        } => {
+            validate_source_only_result_player_counts(player_scope)?;
+        }
+        Effect::DamageAll {
+            player_filter: Some(filter),
+            ..
+        }
+        | Effect::Conjure {
+            library_players: Some(filter),
+            ..
+        } => {
+            validate_source_only_result_player_counts(filter)?;
+        }
+        _ => {}
+    }
+    match effect {
+        Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        }
+        | Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } => {
+            for modification in additional_modifications {
+                match modification {
+                    ContinuousModification::AddCounterOnEnter { count, .. }
+                    | ContinuousModification::SetPowerDynamic { value: count }
+                    | ContinuousModification::SetToughnessDynamic { value: count } => {
+                        validate_source_only_result_quantity(count)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
     if let Effect::Choose {
         choice_type:
             ChoiceType::Opponent {
@@ -12450,10 +12800,91 @@ pub(crate) fn validate_instruction_result_effect_context(
     Ok(())
 }
 
+fn validate_source_only_result_quantity(quantity: &QuantityExpr) -> Result<(), EffectError> {
+    let mut addressed = false;
+    quantity
+        .for_each_ref(&mut |reference| addressed |= reference.instruction_result_id().is_some());
+    if addressed {
+        Err(EffectError::InvalidParam(
+            "instruction-result quantity requires executable context".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_source_only_result_filter(filter: &TargetFilter) -> Result<(), EffectError> {
+    let mut addressed = false;
+    filter.for_each_nested_quantity_ref(&mut |reference| {
+        addressed |= reference.instruction_result_id().is_some()
+    });
+    if addressed {
+        Err(EffectError::InvalidParam(
+            "instruction-result object predicate requires executable context".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_source_only_result_player_counts(
+    filter: &PlayerFilter,
+) -> Result<(), EffectError> {
+    let mut error = None;
+    filter.for_each_source_only_player_quantity_ref(&mut |reference| {
+        if reference.instruction_result_id().is_some() {
+            error.get_or_insert_with(|| {
+                EffectError::InvalidParam(
+                    "instruction-result player threshold requires executable context".into(),
+                )
+            });
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
 fn validate_persistent_result_payloads(effect: &Effect) -> Result<(), EffectError> {
     validate_instruction_result_effect_context(effect)?;
     match effect {
         Effect::PayCost { cost, .. } => validate_result_cost_payloads(cost)?,
+        Effect::CreateDamageReplacement {
+            source_filter,
+            modification,
+            ..
+        } => {
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+            replacement.damage_source_filter = source_filter.clone();
+            replacement.damage_modification = modification.clone();
+            validate_persistent_result_definition_node(
+                crate::types::ability_visit::DefinitionNode::Replacement(&replacement),
+            )?;
+        }
+        Effect::PreventDamage {
+            damage_source_filter,
+            target,
+            recipient_scope,
+            ..
+        } => {
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+            replacement.damage_source_filter = damage_source_filter.clone();
+            // The untargeted recipient filter is retained for later damage;
+            // a declared Single recipient instead latches its identity.
+            let retains_recipient_filter = match target {
+                TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
+                | TargetFilter::SelfRef => true,
+                TargetFilter::Any
+                | TargetFilter::ParentTarget
+                | TargetFilter::ControllerAndControlledPermanents { .. } => false,
+                filter => !filter.is_context_ref(),
+            };
+            if *recipient_scope == EffectScope::All && retains_recipient_filter {
+                replacement.valid_card = Some(target.clone());
+            }
+            validate_persistent_result_definition_node(
+                crate::types::ability_visit::DefinitionNode::Replacement(&replacement),
+            )?;
+        }
         Effect::CreateDrawReplacement { replacement_effect }
         | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             let definition =
@@ -12550,6 +12981,24 @@ fn validate_persistent_result_payloads(effect: &Effect) -> Result<(), EffectErro
 
 type ResultProducerEnvironment = std::collections::BTreeMap<ReturnResultId, Option<(Zone, Zone)>>;
 
+impl AbilityCondition {
+    fn for_each_source_only_object_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
+        match self {
+            Self::TriggeringSpellTargetsFilter { filter } => filter.for_each_nested_quantity_ref(f),
+            Self::ConditionInstead { inner, .. } => {
+                inner.for_each_source_only_object_quantity_ref(f)
+            }
+            Self::And { conditions } | Self::Or { conditions } => {
+                for condition in conditions {
+                    condition.for_each_source_only_object_quantity_ref(f);
+                }
+            }
+            Self::Not { condition } => condition.for_each_source_only_object_quantity_ref(f),
+            _ => {}
+        }
+    }
+}
+
 fn collect_local_result_declarations(
     node: ResultScopeNode<'_>,
     declarations: &mut ResultProducerEnvironment,
@@ -12570,10 +13019,7 @@ fn collect_local_result_declarations(
         }
     }
     for child in node.links() {
-        if !child
-            .condition()
-            .is_some_and(AbilityCondition::has_when_you_do_marker)
-        {
+        if !node.link_is_independent(child) {
             collect_local_result_declarations(child, declarations)?;
         }
     }
@@ -12615,6 +13061,22 @@ fn validate_result_process_node(
     // before executing anything. Read-only descendants share this authority;
     // a locally producing child is a separate invocation.
     validate_persistent_result_payloads(node.effect())?;
+    if let Some(scope) = node.player_scope() {
+        validate_source_only_result_player_counts(scope)?;
+    }
+    let mut source_only_error = None;
+    node.source_only_player_reads(&mut |reference| {
+        if reference.instruction_result_id().is_some() {
+            source_only_error.get_or_insert_with(|| {
+                EffectError::InvalidParam(
+                    "instruction-result player threshold requires executable context".into(),
+                )
+            });
+        }
+    });
+    if let Some(error) = source_only_error {
+        return Err(error);
+    }
     for cost in node.costs() {
         validate_result_cost_payloads(cost)?;
     }
@@ -12714,10 +13176,7 @@ fn validate_result_process_node(
         return Err(reason);
     }
     for child in node.links() {
-        if child
-            .condition()
-            .is_some_and(AbilityCondition::has_when_you_do_marker)
-        {
+        if node.link_is_independent(child) {
             validate_result_process(
                 child,
                 &ResultProducerEnvironment::new(),
@@ -27919,8 +28378,8 @@ macro_rules! define_effect_quantity_walk {
             Effect::SkipNextTurn { count, .. } => {
                 f(count);
             }
-            Effect::SkipNextStep { count, .. } => {
-                f(count);
+            Effect::SkipNextStep { count, scope, .. } => {
+                if $independent || *scope == SkipScope::NextOccurrence { f(count); }
             }
             Effect::AdditionalPhase { count, .. } => {
                 f(count);
@@ -28447,6 +28906,7 @@ AbilityCost::Unimplemented { .. } => {}
 }
 define_effect_predicate_quantity_walk!([]; for_each_predicate_quantity_ref; for_each_nested_quantity_ref);
 define_effect_predicate_quantity_walk!([mut]; for_each_predicate_quantity_ref_mut; for_each_nested_quantity_ref_mut);
+define_effect_predicate_quantity_walk!([]; for_each_source_only_player_quantity_ref; for_each_source_only_player_quantity_ref);
 
 impl Effect {
     pub(crate) fn for_each_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
@@ -39955,6 +40415,16 @@ impl ResolvedAbility {
     /// Clear invocation ownership when cloning onto an independent stack entry.
     pub(crate) fn clear_return_result_process_recursive(&mut self) {
         self.return_result_process = None;
+        self.effect.clear_embedded_return_result_processes();
+        if let Some(payment) = &mut self.unless_pay {
+            let _ = crate::types::ability_visit::effects_mut::visit_cost(
+                &mut payment.cost,
+                &mut |effect| {
+                    effect.clear_raw_return_result_processes();
+                    ControlFlow::Continue(())
+                },
+            );
+        }
         if let Some(sub) = &mut self.sub_ability {
             sub.clear_return_result_process_recursive();
         }
@@ -49601,6 +50071,464 @@ mod departure_owned_dependency_walk_tests {
                 assert_eq!(effect, before);
                 assert_eq!(validate_instruction_result_definition(&AbilityDefinition::new(AbilityKind::Spell, effect)).is_ok(), complete,
                     "registered-later bodies validate independently instead of importing a colliding enclosing id");
+            }
+        }
+    }
+
+    #[test]
+    fn departure_source_only_object_filter_slots_and_condition_refuse_at_complete_root_admission() {
+        for mode in 0..3 {
+            let mut filter = predicate(7);
+            filter.for_each_nested_quantity_ref_mut(&mut |reference| {
+                if let QuantityRef::ZoneChangeAggregate { source, .. } = reference {
+                    if mode == 1 {
+                        *source = ZoneChangeRecordSource::ThisTurn;
+                    }
+                }
+            });
+            if mode == 2 {
+                let mut typed = TypedFilter::default();
+                typed.properties.push(FilterProp::Cmc {
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Fixed { value: 3 },
+                });
+                filter = TargetFilter::Typed(typed);
+            }
+            let mut hidden = TypedFilter::default();
+            hidden
+                .properties
+                .push(FilterProp::InZone { zone: Zone::Hand });
+            let modification = PerpetualModification::GrantKeywords { keywords: vec![] };
+            let effects = vec![
+                Effect::ChooseAndSacrificeRest {
+                    categories: vec![],
+                    chooser_scope: Default::default(),
+                    choose_filter: filter.clone(),
+                    sacrifice_filter: TargetFilter::Any,
+                    total_power_cap: None,
+                    keeper_constraint: None,
+                    keeper_counter: None,
+                },
+                Effect::ChooseAndSacrificeRest {
+                    categories: vec![],
+                    chooser_scope: Default::default(),
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: filter.clone(),
+                    total_power_cap: None,
+                    keeper_constraint: None,
+                    keeper_counter: None,
+                },
+                Effect::EachPlayerCopyChosen {
+                    choose_filter: filter.clone(),
+                    min: 1,
+                    max: 1,
+                    copy_modifications: vec![],
+                    scale: None,
+                    choose_scope: Default::default(),
+                },
+                Effect::ChooseDamageSource {
+                    source_filter: filter.clone(),
+                },
+                Effect::RememberCard {
+                    target: filter.clone(),
+                },
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::And {
+                        filters: vec![TargetFilter::Typed(hidden), filter.clone()],
+                    },
+                    modification: modification.clone(),
+                },
+            ];
+            let root = |body: AbilityDefinition| {
+                let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
+                let mut root = AbilityDefinition::new(AbilityKind::Spell, producer);
+                root.declares_return_result = Some(ReturnResultId(7));
+                root.sub_ability = Some(Box::new(body));
+                root
+            };
+            for (slot, effect) in effects.into_iter().enumerate() {
+                assert_eq!(
+                    validate_instruction_result_definition(&root(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        effect
+                    )))
+                    .is_ok(),
+                    mode != 0,
+                    "source-only object slot {slot}, mode {mode}"
+                );
+            }
+            let mut condition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            condition.condition = Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::And {
+                    conditions: vec![AbilityCondition::TriggeringSpellTargetsFilter {
+                        filter: filter.clone(),
+                    }],
+                }),
+            });
+            assert_eq!(
+                validate_instruction_result_definition(&root(condition)).is_ok(),
+                mode != 0
+            );
+            assert!(
+                validate_instruction_result_definition(&root(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ApplyPerpetual {
+                        target: filter,
+                        modification
+                    }
+                )))
+                .is_ok(),
+                "the ordinary battlefield perpetual path retains the bound ability"
+            );
+        }
+    }
+
+    #[test]
+    fn departure_controls_count_nested_operands_refuse_only_the_source_only_predicate() {
+        for operand in 0..2 {
+            let player = PlayerFilter::ControlsCount {
+                relation: PlayerRelation::Controller,
+                filter: if operand == 0 {
+                    TargetFilter::Any
+                } else {
+                    predicate(7)
+                },
+                comparator: Comparator::LT,
+                count: Box::new(if operand == 0 {
+                    reference(7)
+                } else {
+                    QuantityExpr::Fixed { value: 2 }
+                }),
+            };
+            let mut typed = TypedFilter::default();
+            typed.properties.push(FilterProp::ControllerMatches {
+                player: Box::new(player.clone()),
+            });
+            for filter in [
+                TargetFilter::PlayerMatching {
+                    player: Box::new(player.clone()),
+                },
+                TargetFilter::Typed(typed),
+            ] {
+                let effect = Effect::GainLife {
+                    player: filter,
+                    amount: QuantityExpr::Fixed { value: 1 },
+                };
+                assert!(
+                    validate_instruction_result_effect_context(&effect).is_err(),
+                    "operand {operand} is source-only even through a nested target property"
+                );
+            }
+            for quantity in [
+                QuantityRef::PlayerCount {
+                    filter: player.clone(),
+                },
+                QuantityRef::EventContextPlayerCount { filter: player },
+            ] {
+                let effect = Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Ref { qty: quantity },
+                };
+                assert!(validate_instruction_result_effect_context(&effect).is_err());
+            }
+        }
+        assert!(
+            validate_instruction_result_effect_context(&Effect::GainLife {
+                player: predicate(7),
+                amount: reference(7)
+            })
+            .is_ok(),
+            "ordinary bound scalar and object-filter readers retain their executable context"
+        );
+    }
+
+    #[test]
+    fn departure_source_only_scalar_slots_and_copy_exceptions_refuse_only_addressed_inputs() {
+        let complete_root = |effect: Effect| {
+            let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
+            let mut root = AbilityDefinition::new(AbilityKind::Spell, producer);
+            root.declares_return_result = Some(ReturnResultId(7));
+            root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+            root
+        };
+        for mode in 0..3 {
+            let quantity = match mode {
+                0 => reference(7),
+                1 => {
+                    let mut quantity = reference(7);
+                    let QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                    } = &mut quantity
+                    else {
+                        unreachable!()
+                    };
+                    *source = ZoneChangeRecordSource::ThisTurn;
+                    quantity
+                }
+                _ => QuantityExpr::Fixed { value: 3 },
+            };
+            let effects = vec![
+                Effect::AdditionalPhase {
+                    recipient: ExtraPhaseRecipient::Controller,
+                    segment: TurnSegment::Step(Phase::Upkeep),
+                    after: ExtraPhaseAnchor::Step(Phase::PreCombatMain),
+                    followed_by: vec![],
+                    count: quantity.clone(),
+                    attacker_restriction: None,
+                },
+                Effect::Bolster {
+                    count: quantity.clone(),
+                },
+                Effect::ChooseAndSacrificeRest {
+                    categories: vec![],
+                    chooser_scope: Default::default(),
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: TargetFilter::Any,
+                    total_power_cap: Some(quantity.clone()),
+                    keeper_constraint: None,
+                    keeper_counter: None,
+                },
+                Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                    count: quantity.clone(),
+                    life_payment: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    life_payment: quantity.clone(),
+                    player: TargetFilter::Controller,
+                },
+                Effect::GrantExtraLoyaltyActivations {
+                    amount: quantity.clone(),
+                    target: TargetFilter::Controller,
+                },
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: Some(quantity.clone()),
+                    target: TargetFilter::Controller,
+                    recipient_scope: EffectScope::All,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                Effect::SkipNextTurn {
+                    target: TargetFilter::Controller,
+                    count: quantity.clone(),
+                },
+                Effect::SkipNextStep {
+                    target: TargetFilter::Controller,
+                    step: StepSkipTarget::Step(Phase::Draw),
+                    count: quantity.clone(),
+                    scope: SkipScope::NextOccurrence,
+                },
+                Effect::AddPendingETBCounters {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: quantity.clone(),
+                },
+            ];
+            assert_eq!(
+                effects.len(),
+                10,
+                "nine effect owners have ten actual scalar fields"
+            );
+            for (slot, effect) in effects.into_iter().enumerate() {
+                assert_eq!(
+                    validate_instruction_result_effect_context(&effect).is_ok(),
+                    mode != 0,
+                    "slot {slot}, mode {mode}"
+                );
+                assert_eq!(
+                    validate_instruction_result_definition(&complete_root(effect)).is_ok(),
+                    mode != 0,
+                    "complete root, slot {slot}, mode {mode}"
+                );
+            }
+            for modification in [
+                ContinuousModification::AddCounterOnEnter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: quantity.clone(),
+                    if_type: None,
+                },
+                ContinuousModification::SetPowerDynamic {
+                    value: quantity.clone(),
+                },
+                ContinuousModification::SetToughnessDynamic {
+                    value: quantity.clone(),
+                },
+            ] {
+                for effect in [
+                    Effect::BecomeCopy {
+                        target: TargetFilter::SelfRef,
+                        recipient: CopyRecipient::Source,
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: vec![modification.clone()],
+                    },
+                    Effect::CopyTokenOf {
+                        target: TargetFilter::SelfRef,
+                        owner: TargetFilter::Controller,
+                        source_filter: None,
+                        enters_attacking: false,
+                        tapped: false,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        extra_keywords: vec![],
+                        additional_modifications: vec![modification],
+                    },
+                ] {
+                    assert_eq!(
+                        validate_instruction_result_effect_context(&effect).is_ok(),
+                        mode != 0
+                    );
+                    assert_eq!(
+                        validate_instruction_result_definition(&complete_root(effect)).is_ok(),
+                        mode != 0
+                    );
+                }
+            }
+            let ignored = Effect::SkipNextStep {
+                target: TargetFilter::Controller,
+                step: StepSkipTarget::CombatPhase,
+                count: quantity,
+                scope: SkipScope::AllOfNextTurn,
+            };
+            assert!(validate_instruction_result_effect_context(&ignored).is_ok());
+            assert!(
+                validate_instruction_result_definition(&complete_root(ignored.clone())).is_ok()
+            );
+            let mut current = vec![];
+            ignored.for_each_quantity_ref(&mut |reference| current.push(reference.clone()));
+            assert!(
+                current.is_empty(),
+                "the turn-scoped sibling never consumes count"
+            );
+            let mut generic = 0;
+            ignored.for_each_quantity_expr(&mut |_| generic += 1);
+            assert_eq!(
+                generic, 1,
+                "generic scalar traversal keeps its existing population"
+            );
+        }
+    }
+
+    #[test]
+    fn departure_damage_constructor_payloads_and_only_the_installed_prevention_link_are_independent(
+    ) {
+        let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
+        let prevention = |target, scope, source| Effect::PreventDamage {
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target,
+            recipient_scope: scope,
+            scope: PreventionScope::AllDamage,
+            damage_source_filter: source,
+            prevention_duration: None,
+        };
+        for effect in [
+            Effect::CreateDamageReplacement {
+                source_filter: None,
+                combat_scope: None,
+                target_filter: None,
+                modification: Some(DamageModification::Plus {
+                    value: reference(7),
+                }),
+                redirect_to: None,
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+                redirect_lifetime: Default::default(),
+            },
+            Effect::CreateDamageReplacement {
+                source_filter: None,
+                combat_scope: None,
+                target_filter: None,
+                modification: Some(DamageModification::PreventionMinus {
+                    value: PreventionFormula::Quantity {
+                        quantity: reference(7),
+                    },
+                }),
+                redirect_to: None,
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+                redirect_lifetime: Default::default(),
+            },
+            Effect::CreateDamageReplacement {
+                source_filter: Some(predicate(7)),
+                combat_scope: None,
+                target_filter: None,
+                modification: Some(DamageModification::Double),
+                redirect_to: None,
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+                redirect_lifetime: Default::default(),
+            },
+            prevention(
+                TargetFilter::Controller,
+                EffectScope::All,
+                Some(predicate(7)),
+            ),
+            prevention(predicate(7), EffectScope::All, None),
+        ] {
+            let mut root = AbilityDefinition::new(AbilityKind::Spell, producer.clone());
+            root.declares_return_result = Some(ReturnResultId(7));
+            root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+            assert!(
+                validate_instruction_result_definition(&root).is_err(),
+                "later shield data cannot capture the caller R7"
+            );
+        }
+        for link in [
+            SubAbilityLink::ContinuationStep,
+            SubAbilityLink::SequentialSibling,
+        ] {
+            for complete in [false, true] {
+                let local_id = if complete && link == SubAbilityLink::SequentialSibling {
+                    11
+                } else {
+                    7
+                };
+                let mut rider = gain(local_id);
+                if complete {
+                    let mut local = AbilityDefinition::new(AbilityKind::Spell, producer.clone());
+                    local.declares_return_result = Some(ReturnResultId(local_id));
+                    local.sub_ability = Some(Box::new(rider));
+                    rider = local;
+                }
+                rider.sub_link = link;
+                let mut shield = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    prevention(TargetFilter::Controller, EffectScope::All, None),
+                );
+                shield.sub_ability = Some(Box::new(rider));
+                let mut root = AbilityDefinition::new(AbilityKind::Spell, producer.clone());
+                root.declares_return_result = Some(ReturnResultId(7));
+                root.sub_ability = Some(Box::new(shield));
+                assert_eq!(
+                    validate_instruction_result_definition(&root).is_ok(),
+                    complete || link == SubAbilityLink::SequentialSibling
+                );
+                if complete {
+                    let mut resolved = crate::game::ability_utils::build_resolved_from_def(
+                        &root,
+                        ObjectId(1),
+                        PlayerId(0),
+                    );
+                    resolved.bind_return_result_process(Some(
+                        crate::types::game_state::ReturnResultProcessId(8),
+                    ));
+                    let rider = resolved
+                        .sub_ability
+                        .as_ref()
+                        .unwrap()
+                        .sub_ability
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(
+                        rider.return_result_process.is_none(),
+                        link == SubAbilityLink::ContinuationStep
+                    );
+                }
             }
         }
     }

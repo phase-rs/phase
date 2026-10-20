@@ -12966,13 +12966,14 @@ fn validate_retained_payment_result_owner(
         .map_err(|error| error.to_string())?;
     validate_retained_result_readers(state, body, occurrence, HashSet::new())?;
     if let Some(cost) = cost {
+        super::ability::validate_result_cost_payloads(cost).map_err(|error| error.to_string())?;
         let mut results = vec![];
         let mut read = |reference: &super::ability::QuantityRef| {
             if let Some(result) = reference.instruction_result_id() {
                 results.push(result);
             }
         };
-        cost.for_each_quantity_expr(&mut |expr| expr.for_each_ref(&mut read));
+        cost.for_each_resolution_quantity_expr(&mut |expr| expr.for_each_ref(&mut read));
         cost.for_each_predicate_quantity_ref(&mut read);
         if !results.is_empty() {
             let frame =
@@ -13567,14 +13568,19 @@ fn validate_retained_result_readers(
     if let Some(result) = invalid_quantity {
         return Err(format!("invalid addressed departure reader {result:?}"));
     }
-    for child in [&root.sub_ability, &root.else_ability]
-        .into_iter()
-        .flatten()
-    {
-        if !child
-            .condition
-            .as_ref()
-            .is_some_and(super::ability::AbilityCondition::has_when_you_do_marker)
+    let later_sub = root
+        .sub_ability
+        .as_deref()
+        .is_some_and(|child| root.effect.sub_ability_resolves_later(child.sub_link));
+    for (child, later) in [(&root.sub_ability, later_sub), (&root.else_ability, false)] {
+        let Some(child) = child else {
+            continue;
+        };
+        if !later
+            && !child
+                .condition
+                .as_ref()
+                .is_some_and(super::ability::AbilityCondition::has_when_you_do_marker)
         {
             validate_retained_result_readers(state, child, occurrence, future.clone())?;
         }

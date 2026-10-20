@@ -883,6 +883,19 @@ fn resolve_mana_types_impl(
     controller: crate::types::player::PlayerId,
     source_id: crate::types::identifiers::ObjectId,
 ) -> Vec<ManaType> {
+    // A source-only survey has no invocation authority. Absence of a viable
+    // output is the existing unavailable result here, before scalar evaluation.
+    if ability.is_none() {
+        let mut addressed = false;
+        produced.for_each_quantity_expr(&mut |quantity| {
+            quantity.for_each_ref(&mut |reference| {
+                addressed |= reference.instruction_result_id().is_some();
+            })
+        });
+        if addressed {
+            return Vec::new();
+        }
+    }
     match produced {
         // CR 106.1a: Colored mana is produced in the five standard colors.
         ManaProduction::Fixed { colors, .. } => colors.iter().map(mana_color_to_type).collect(),
@@ -4265,6 +4278,61 @@ mod tests {
             assert_eq!(units[0].color, ManaType::Green);
             assert!(units[0].source_could_produce_two_or_more_colors);
         }
+    }
+
+    #[test]
+    fn departure_source_only_mana_output_stays_unavailable_despite_an_actual_ambient_result() {
+        use crate::types::actions::GameAction;
+        let (mut runner, spell, _, _) = departure_dynamic_mana_runner(4, false, false);
+        let WaitingFor::ChooseManaColor {
+            return_result_occurrence,
+            context: ManaChoiceContext::ResolvingEffect(body),
+            ..
+        } = &runner.state().waiting_for
+        else {
+            unreachable!()
+        };
+        let occurrence = return_result_occurrence.unwrap();
+        let body = body.clone();
+        let Effect::Mana { produced, .. } = &body.effect else {
+            unreachable!()
+        };
+        let produced = produced.clone();
+        let previous = runner.state().active_return_result_occurrence;
+        runner.state_mut().active_return_result_occurrence = Some(occurrence);
+        assert!(resolve_mana_types(&produced, runner.state(), body.controller, body.source_id).is_empty(), "source-only output cannot authenticate the actual available R7 by borrowing ambient O/P");
+        assert_eq!(
+            resolve_mana_types_for_ability(&produced, runner.state(), &body).len(),
+            5
+        );
+        let fixed = ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 3 },
+        };
+        assert_eq!(
+            resolve_mana_types(&fixed, runner.state(), body.controller, body.source_id),
+            vec![ManaType::Colorless; 3]
+        );
+        let mut journal = produced;
+        journal.for_each_quantity_expr_mut(&mut |quantity| {
+            quantity.each_ref_mut(&mut |reference| {
+                if let QuantityRef::ZoneChangeAggregate { source, .. } = reference {
+                    *source = crate::types::ability::ZoneChangeRecordSource::ThisTurn;
+                }
+            })
+        });
+        assert_eq!(
+            resolve_mana_types(&journal, runner.state(), body.controller, body.source_id).len(),
+            5
+        );
+        runner.state_mut().active_return_result_occurrence = previous;
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
+            })
+            .unwrap();
+        assert_departure_mana_completion(&runner, spell);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 5);
     }
 
     #[test]

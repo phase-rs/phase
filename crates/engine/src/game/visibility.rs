@@ -256,6 +256,61 @@ fn redact_instruction_result_owner(waiting: &mut WaitingFor) {
         } => body.clear_return_result_process_recursive(),
         _ => {}
     }
+    match waiting {
+        WaitingFor::ChooseOneOfBranch { branches, .. } => {
+            for branch in branches {
+                branch.clear_embedded_return_result_processes();
+            }
+        }
+        WaitingFor::VoteChoice {
+            per_choice_effect,
+            outcome_template,
+            ..
+        } => {
+            for branch in per_choice_effect {
+                branch.clear_embedded_return_result_processes();
+            }
+            if let Some(outcome_template) = outcome_template {
+                outcome_template.clear_embedded_return_result_processes();
+            }
+        }
+        WaitingFor::SeparatePilesChooseOpponent {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        }
+        | WaitingFor::SeparatePilesPartition {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        }
+        | WaitingFor::SeparatePilesChoice {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            chosen_pile_effect.clear_embedded_return_result_processes();
+            if let Some(branch) = unchosen_pile_effect {
+                branch.clear_embedded_return_result_processes();
+            }
+        }
+        WaitingFor::UnlessPayment { cost, .. } => cost.clear_embedded_return_result_processes(),
+        WaitingFor::UnlessPaymentChooseCost {
+            costs,
+            remaining_choices,
+            chosen,
+            ..
+        } => {
+            for cost in costs
+                .iter_mut()
+                .chain(remaining_choices.iter_mut().flatten())
+                .chain(chosen)
+            {
+                cost.clear_embedded_return_result_processes();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A paid cast offered during resolution carries private ownership of the
@@ -4226,6 +4281,9 @@ fn redact_source_context_hidden_members(
     context: &mut crate::types::game_state::TriggerSourceContext,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    for entry in &mut context.trigger_entries {
+        redact_raw_result_trigger(&mut entry.definition);
+    }
     redact_payment_source_snapshots(&mut context.mana_spent_source_snapshots, hidden_ids);
     redact_linked_exile_members(&mut context.linked_exile_snapshot, hidden_ids);
 }
@@ -4261,7 +4319,7 @@ fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
-    ability.return_result_process = None;
+    ability.clear_return_result_process_recursive();
     ability.context.counter_removal_result = None;
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
@@ -4498,7 +4556,138 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 /// its delivery, an Epic spell copy, and a resolution-installed prevention rider,
 /// CR 615.5). Only hidden-source payment entries are blanked and hidden linked-exile
 /// members' mana values zeroed.
+fn redact_raw_result_trigger(definition: &mut crate::types::ability::TriggerDefinition) {
+    let _ = crate::types::ability_visit::effects_mut::visit_trigger(definition, &mut |effect| {
+        effect.clear_raw_return_result_processes();
+        std::ops::ControlFlow::Continue(())
+    });
+    let _ = crate::types::ability_visit::nodes_mut::visit_trigger(
+        definition,
+        &mut crate::types::ability::clear_registered_result_processes,
+    );
+}
+
+fn redact_raw_result_static(definition: &mut crate::types::ability::StaticDefinition) {
+    let _ = crate::types::ability_visit::effects_mut::visit_static(definition, &mut |effect| {
+        effect.clear_raw_return_result_processes();
+        std::ops::ControlFlow::Continue(())
+    });
+    let _ = crate::types::ability_visit::nodes_mut::visit_static(
+        definition,
+        &mut crate::types::ability::clear_registered_result_processes,
+    );
+}
+
+fn redact_raw_result_replacement(definition: &mut crate::types::ability::ReplacementDefinition) {
+    let _ =
+        crate::types::ability_visit::effects_mut::visit_replacement(definition, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            std::ops::ControlFlow::Continue(())
+        });
+    let _ = crate::types::ability_visit::nodes_mut::visit_replacement(
+        definition,
+        &mut crate::types::ability::clear_registered_result_processes,
+    );
+    if let Some(body) = &mut definition.runtime_execute {
+        body.clear_return_result_process_recursive();
+    }
+}
+
+fn redact_raw_result_copiable(values: &mut crate::types::ability::CopiableValues) {
+    let _ =
+        crate::types::ability_visit::effects_mut::visit_copiable_values(values, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            std::ops::ControlFlow::Continue(())
+        });
+    let _ = crate::types::ability_visit::nodes_mut::visit_copiable_values(
+        values,
+        &mut crate::types::ability::clear_registered_result_processes,
+    );
+    for replacement in Arc::make_mut(&mut values.replacement_definitions) {
+        redact_raw_result_replacement(replacement);
+    }
+}
+
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
+    // Canonical templates can themselves contain Epic's raw runtime snapshot.
+    // Apply the same typed effect walk before exposing their public card data.
+    for (_, object) in state.objects.iter_mut() {
+        for modification in &mut object.perpetual_mods {
+            modification.clear_embedded_return_result_processes();
+        }
+        for definition in Arc::make_mut(&mut object.abilities)
+            .iter_mut()
+            .chain(Arc::make_mut(&mut object.base_abilities).iter_mut())
+        {
+            definition.clear_embedded_return_result_processes();
+        }
+        for index in 0..object.trigger_definitions.len() {
+            if let Some(entry) = object.trigger_definitions.get_mut(index) {
+                redact_raw_result_trigger(&mut entry.definition);
+            }
+        }
+        for trigger in Arc::make_mut(&mut object.base_trigger_definitions) {
+            redact_raw_result_trigger(trigger);
+        }
+        for index in 0..object.static_definitions.len() {
+            if let Some(definition) = object.static_definitions.get_mut(index) {
+                redact_raw_result_static(definition);
+            }
+        }
+        for definition in Arc::make_mut(&mut object.base_static_definitions) {
+            redact_raw_result_static(definition);
+        }
+        for index in 0..object.replacement_definitions.len() {
+            if let Some(definition) = object.replacement_definitions.get_mut(index) {
+                redact_raw_result_replacement(definition);
+            }
+        }
+        for definition in Arc::make_mut(&mut object.base_replacement_definitions) {
+            redact_raw_result_replacement(definition);
+        }
+        if let Some(face) = &mut object.back_face {
+            for definition in &mut face.abilities {
+                definition.clear_embedded_return_result_processes();
+            }
+            for index in 0..face.trigger_definitions.len() {
+                if let Some(definition) = face.trigger_definitions.get_mut(index) {
+                    redact_raw_result_trigger(definition);
+                }
+            }
+            for index in 0..face.static_definitions.len() {
+                if let Some(definition) = face.static_definitions.get_mut(index) {
+                    redact_raw_result_static(definition);
+                }
+            }
+            for index in 0..face.replacement_definitions.len() {
+                if let Some(definition) = face.replacement_definitions.get_mut(index) {
+                    redact_raw_result_replacement(definition);
+                }
+            }
+        }
+        if let Some(cleave) = &mut object.cleave_variant {
+            for definition in &mut cleave.abilities {
+                definition.clear_embedded_return_result_processes();
+            }
+            for definition in &mut cleave.triggers {
+                redact_raw_result_trigger(definition);
+            }
+            for definition in &mut cleave.static_abilities {
+                redact_raw_result_static(definition);
+            }
+            for definition in &mut cleave.replacements {
+                redact_raw_result_replacement(definition);
+            }
+        }
+    }
+    for values in state.lki_copiable_values.values_mut() {
+        redact_raw_result_copiable(values);
+    }
+    for (_, versions) in state.lki_copiable_values_by_incarnation.iter_mut() {
+        for (_, values) in versions.iter_mut() {
+            redact_raw_result_copiable(values);
+        }
+    }
     if let Some(pending) = state.pending_cast.as_deref_mut() {
         redact_pending_cast_payment(pending, hidden_ids);
     }
@@ -4525,6 +4714,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
         redact_ability_payment(&mut epic.spell, hidden_ids);
     }
     for replacement in &mut state.pending_damage_replacements {
+        redact_raw_result_replacement(replacement);
         if let Some(rider) = replacement.runtime_execute.as_deref_mut() {
             redact_ability_payment(rider, hidden_ids);
         }

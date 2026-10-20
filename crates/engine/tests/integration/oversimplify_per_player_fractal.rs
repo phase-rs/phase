@@ -10548,17 +10548,46 @@ fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process(
             (
                 AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::EpicCopy {
-                        spell: Box::new(snapshot),
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                            AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::EpicCopy {
+                                    spell: Box::new(snapshot),
+                                },
+                            ),
+                        ],
+                        kind: ChooseOneOfKind::Ordinary,
                     },
                 ),
                 vec![],
             )
         });
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
+        let WaitingFor::ChooseOneOfBranch {
+            player, branches, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("retain the raw Epic snapshot before consumption/copy-time clearing");
+        };
+        assert_eq!(*player, P0);
+        let Effect::EpicCopy { spell: snapshot } = branches[1].effect.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(
+            snapshot.return_result_process,
+            Some(ReturnResultProcessId(901))
+        );
+        departure_assert_private_result_views(runner.state());
+        let retained = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(retained.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(runner.state()).unwrap(),
+            retained,
+            "authoritative saves retain the raw snapshot identity"
+        );
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
         let copy = runner
             .state()
             .stack
@@ -10788,4 +10817,959 @@ fn departure_epic_import_is_refused_before_the_outer_producer_can_execute() {
     assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
     assert_eq!(runner.state().next_return_result_process_id, 1);
     departure_assert_program_complete(&runner, spell, 0, 0);
+}
+
+fn departure_independent_epic_cost(mode: u8) -> engine::types::ability::AbilityCost {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::game_state::ReturnResultProcessId;
+    use engine::types::identifiers::ObjectId;
+    let definition = if mode == 0 {
+        departure_selected_local_body(false, false)
+    } else {
+        let mut definition = departure_gain_definition(7, P0);
+        let Effect::GainLife { amount, .. } = definition.effect.as_mut() else {
+            unreachable!()
+        };
+        if mode == 1 {
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate { source, .. },
+            } = amount
+            else {
+                unreachable!()
+            };
+            *source = ZoneChangeRecordSource::ThisTurn;
+        } else if mode == 2 {
+            *amount = QuantityExpr::Fixed { value: 5 };
+        }
+        definition
+    };
+    let mut snapshot = build_resolved_from_def(&definition, ObjectId(0), P0);
+    snapshot.return_result_process = Some(ReturnResultProcessId(901));
+    AbilityCost::EffectCost {
+        effect: Box::new(Effect::EpicCopy {
+            spell: Box::new(snapshot),
+        }),
+    }
+}
+
+#[test]
+fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_epic_results() {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::actions::{GameAction, UnlessCostBranch};
+    use engine::types::game_state::WaitingFor;
+    for mode in 0..3 {
+        for decline in [false, true] {
+            let (mut runner, spell, _) = departure_public_program_runner(false, false, 2, |_| {
+                let mut body = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                body.unless_pay = Some(UnlessPayModifier {
+                    cost: AbilityCost::OneOf {
+                        costs: vec![
+                            AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                            departure_independent_epic_cost(mode),
+                        ],
+                    },
+                    payer: TargetFilter::Controller,
+                });
+                let mut tail = departure_dual_reader();
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                body.sub_ability = Some(Box::new(tail));
+                (body, vec![])
+            });
+            let WaitingFor::UnlessPaymentChooseCost {
+                player,
+                costs,
+                pending_effect,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("the ordinary payable alternative must expose a real public payment choice");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(costs.len(), 2);
+            let AbilityCost::EffectCost { effect } = &costs[1] else {
+                unreachable!()
+            };
+            let Effect::EpicCopy { spell: retained } = effect.as_ref() else {
+                unreachable!()
+            };
+            assert_eq!(
+                retained.return_result_process,
+                Some(engine::types::game_state::ReturnResultProcessId(901))
+            );
+            assert!(pending_effect.return_result_process.is_some());
+            let authoritative = serde_json::to_value(runner.state()).unwrap();
+            assert!(authoritative.to_string().contains("901"));
+            departure_assert_private_result_views(runner.state());
+            *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+            runner
+                .act(GameAction::ChooseUnlessCostBranch {
+                    choice: if decline {
+                        UnlessCostBranch::Decline
+                    } else {
+                        UnlessCostBranch::Pay { index: 0 }
+                    },
+                })
+                .unwrap();
+            departure_assert_program_complete(&runner, spell, if decline { 5 } else { 4 }, 2);
+            assert!(
+                runner.state().stack.is_empty(),
+                "the unsupported Epic cost alternative was never executed"
+            );
+        }
+    }
+}
+
+#[test]
+fn departure_nested_mana_payment_custody_validates_its_independent_epic_alternative_separately() {
+    use engine::types::ability::AbilityCost;
+    use engine::types::game_state::{ManaAbilityResume, PendingCostMoveResume};
+    for effect_cost in [false, true] {
+        let (mut runner, spell, sources) =
+            departure_payment_mana_child_runner(effect_cost, false, false);
+        let mut reached_count = 0;
+        departure_finish_payment_mana_child(&mut runner, |reached| {
+            reached_count += 1;
+            // Supplemental typed custody: Epic is not a payable EffectCost.
+            // The public source/payment pause is real; only the retained cost
+            // alternative is changed here to isolate the second validator.
+            let mut custody = reached.state().clone();
+            let Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) =
+                &mut custody.pending_cost_move_resume
+            else {
+                unreachable!()
+            };
+            let cost = match &mut pending.resume {
+                ManaAbilityResume::UnlessPayment { cost, .. }
+                | ManaAbilityResume::EffectPayCost { cost, .. } => cost,
+                _ => unreachable!(),
+            };
+            **cost = AbilityCost::OneOf {
+                costs: vec![(**cost).clone(), departure_independent_epic_cost(0)],
+            };
+            let saved = serde_json::to_value(&custody).unwrap();
+            let loaded: GameState = serde_json::from_value(saved.clone())
+                .expect("local R11 is not a missing parent R7 payment result");
+            assert_eq!(serde_json::to_value(loaded).unwrap(), saved);
+        });
+        assert_eq!(reached_count, 1);
+        assert_eq!(runner.state().objects[&sources[0]].zone, Zone::Exile);
+        departure_assert_program_complete(&runner, spell, 5, -3);
+    }
+}
+
+#[test]
+fn departure_source_only_bolster_prevention_step_and_player_thresholds_refuse_before_the_root() {
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::*;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::phase::Phase;
+    for owner in 0..7 {
+        for mode in 0..3 {
+            for empty in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let mut victims = vec![];
+                if !empty {
+                    victims.push(scenario.add_creature(P0, "Centaur Courser", 3, 3).id());
+                    victims.push(scenario.add_creature(P0, "Grizzly Bears", 2, 2).id());
+                }
+                let survivor = scenario
+                    .add_creature(P0, "Supplemental surviving bolster member", 2, 20)
+                    .id();
+                let Effect::GainLife { mut amount, .. } = *departure_gain_definition(7, P0).effect
+                else {
+                    unreachable!()
+                };
+                if mode == 1 {
+                    let QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                    } = &mut amount
+                    else {
+                        unreachable!()
+                    };
+                    *source = ZoneChangeRecordSource::ThisTurn;
+                } else if mode == 2 {
+                    amount = QuantityExpr::Fixed { value: 3 };
+                }
+                let filter = PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Controller,
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                    comparator: Comparator::LT,
+                    count: Box::new(amount.clone()),
+                };
+                let effect = match owner {
+                    0 => Effect::Bolster {
+                        count: amount.clone(),
+                    },
+                    1 => Effect::PreventDamage {
+                        amount: PreventionAmount::All,
+                        amount_dynamic: Some(amount.clone()),
+                        target: TargetFilter::Controller,
+                        recipient_scope: EffectScope::All,
+                        scope: PreventionScope::AllDamage,
+                        damage_source_filter: None,
+                        prevention_duration: None,
+                    },
+                    2 => Effect::SkipNextStep {
+                        target: TargetFilter::Controller,
+                        step: StepSkipTarget::Step(Phase::Draw),
+                        count: amount.clone(),
+                        scope: SkipScope::NextOccurrence,
+                    },
+                    3 => Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    4 => Effect::StartYourEngines {
+                        player_scope: filter.clone(),
+                    },
+                    5 => Effect::DamageEachPlayer {
+                        player_filter: filter.clone(),
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    6 => Effect::DamageAll {
+                        target: TargetFilter::None,
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player_filter: Some(filter.clone()),
+                        damage_source: None,
+                    },
+                    _ => unreachable!(),
+                };
+                let mut body = AbilityDefinition::new(AbilityKind::Spell, effect);
+                if owner == 3 {
+                    body.player_scope = Some(filter);
+                }
+                let mut root = departure_exile_definition(7);
+                let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+                    unreachable!()
+                };
+                *target = TargetFilter::Or {
+                    filters: victims
+                        .iter()
+                        .map(|id| TargetFilter::SpecificObject { id: *id })
+                        .collect(),
+                };
+                root.sub_ability = Some(Box::new(body));
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Supplemental source-only consumer", false)
+                    .with_ability_definition(root.clone())
+                    .id();
+                let damage = scenario
+                    .add_spell_to_hand(P0, "Supplemental later damage event", false)
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 8 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    ))
+                    .id();
+                for seat in [P0, P1] {
+                    for _ in 0..8 {
+                        scenario.add_card_to_library_top(seat, "Library witness");
+                    }
+                }
+                let mut runner = scenario.build();
+                if mode == 0 {
+                    let mut state = runner.state().clone();
+                    let before = serde_json::to_value(&state).unwrap();
+                    let mut events = vec![];
+                    let error = resolve_ability_chain(
+                        &mut state,
+                        &build_resolved_from_def(&root, spell, P0),
+                        &mut events,
+                    )
+                    .unwrap_err();
+                    assert!(format!("{error:?}").contains("executable context"));
+                    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                    assert!(events.is_empty());
+                }
+                runner.cast(spell).resolve();
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(runner.state().stack.is_empty());
+                assert!(runner.state().resolution_stack.is_empty());
+                assert!(runner.state().return_result_frames.is_empty());
+                assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+                for victim in &victims {
+                    assert_eq!(
+                        runner.state().objects[victim].zone,
+                        if mode == 0 {
+                            Zone::Battlefield
+                        } else {
+                            Zone::Exile
+                        }
+                    );
+                }
+                let value = if mode == 2 {
+                    3
+                } else if empty {
+                    0
+                } else {
+                    5
+                };
+                if mode == 0 {
+                    assert_eq!(runner.state().next_return_result_process_id, 1);
+                    assert_eq!(runner.state().players[0].life, 20);
+                    assert!(runner.state().pending_damage_replacements.is_empty());
+                } else {
+                    match owner {
+                        0 => assert_eq!(
+                            runner.state().objects[&survivor]
+                                .counters
+                                .get(&CounterType::Plus1Plus1)
+                                .copied()
+                                .unwrap_or(0),
+                            value
+                        ),
+                        1 => {
+                            runner.cast(damage).resolve();
+                            departure_assert_program_complete(
+                                &runner,
+                                spell,
+                                -(8 - value as i32),
+                                0,
+                            );
+                        }
+                        2 => assert_eq!(
+                            runner.state().steps_to_skip[0]
+                                .get(&Phase::Draw)
+                                .copied()
+                                .unwrap_or(0),
+                            value
+                        ),
+                        3 => assert_eq!(runner.state().players[0].life, 20 + i32::from(value > 1)),
+                        4 => assert_eq!(
+                            runner.state().players[0].speed,
+                            if value > 1 { Some(1) } else { None }
+                        ),
+                        5 | 6 => {
+                            assert_eq!(runner.state().players[0].life, 20 - i32::from(value > 1))
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_direct_damage_shields_validate_later_formulas_and_both_filter_axes_before_installing()
+{
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::*;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    for slot in 0..5 {
+        for mode in 0..4 {
+            for empty in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let victims = if empty {
+                    vec![]
+                } else {
+                    vec![
+                        scenario.add_creature(P0, "Centaur Courser", 3, 3).id(),
+                        scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+                    ]
+                };
+                let recipient = scenario
+                    .add_creature(P0, "Supplemental damage recipient", 1, 30)
+                    .with_mana_cost(ManaCost::generic(2))
+                    .id();
+                let Effect::GainLife { mut amount, .. } =
+                    *departure_gain_definition(if mode == 3 { 99 } else { 7 }, P0).effect
+                else {
+                    unreachable!()
+                };
+                if mode == 1 {
+                    let QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                    } = &mut amount
+                    else {
+                        unreachable!()
+                    };
+                    *source = ZoneChangeRecordSource::ThisTurn;
+                } else if mode == 2 {
+                    amount = QuantityExpr::Fixed { value: 3 };
+                }
+                let mut typed = TypedFilter::default();
+                typed.properties.push(FilterProp::Cmc {
+                    comparator: Comparator::LT,
+                    value: amount.clone(),
+                });
+                let filter = TargetFilter::Typed(typed);
+                let effect = if slot < 3 {
+                    Effect::CreateDamageReplacement {
+                        source_filter: (slot == 2).then_some(filter.clone()),
+                        combat_scope: None,
+                        target_filter: None,
+                        modification: Some(match slot {
+                            0 => DamageModification::Plus {
+                                value: amount.clone(),
+                            },
+                            1 => DamageModification::PreventionMinus {
+                                value: PreventionFormula::Quantity {
+                                    quantity: amount.clone(),
+                                },
+                            },
+                            _ => DamageModification::Double,
+                        }),
+                        redirect_to: None,
+                        redirect_amount: None,
+                        redirect_object_filter: None,
+                        recipient_object_filter: None,
+                        redirect_lifetime: Default::default(),
+                    }
+                } else {
+                    Effect::PreventDamage {
+                        amount: PreventionAmount::All,
+                        amount_dynamic: None,
+                        target: if slot == 4 {
+                            filter.clone()
+                        } else {
+                            TargetFilter::Controller
+                        },
+                        recipient_scope: EffectScope::All,
+                        scope: PreventionScope::AllDamage,
+                        damage_source_filter: (slot == 3).then_some(filter),
+                        prevention_duration: None,
+                    }
+                };
+                let mut root = departure_exile_definition(7);
+                let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+                    unreachable!()
+                };
+                *target = TargetFilter::Or {
+                    filters: victims
+                        .iter()
+                        .map(|id| TargetFilter::SpecificObject { id: *id })
+                        .collect(),
+                };
+                root.sub_ability =
+                    Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Supplemental direct shield constructor", false)
+                    .with_ability_definition(root.clone())
+                    .id();
+                let damage = scenario
+                    .add_spell_to_hand(P0, "Supplemental actual damage", false)
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 8 },
+                            target: if slot == 4 {
+                                TargetFilter::SpecificObject { id: recipient }
+                            } else {
+                                TargetFilter::Controller
+                            },
+                            damage_source: None,
+                            excess: None,
+                        },
+                    ))
+                    .with_mana_cost(ManaCost::generic(2))
+                    .id();
+                scenario.with_mana_pool(
+                    P0,
+                    vec![ManaUnit::new(ManaType::Black, damage, false, vec![]); 2],
+                );
+                for player in [P0, P1] {
+                    for _ in 0..8 {
+                        scenario.add_card_to_library_top(player, "Library witness");
+                    }
+                }
+                let mut runner = scenario.build();
+                if mode == 0 || mode == 3 {
+                    let mut state = runner.state().clone();
+                    let before = serde_json::to_value(&state).unwrap();
+                    let mut events = vec![];
+                    let error = resolve_ability_chain(
+                        &mut state,
+                        &build_resolved_from_def(&root, spell, P0),
+                        &mut events,
+                    )
+                    .unwrap_err();
+                    assert!(format!("{error:?}").contains("instruction-result"));
+                    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                    assert!(events.is_empty());
+                }
+                runner.cast(spell).resolve();
+                departure_assert_program_complete(&runner, spell, 0, 0);
+                if mode == 0 || mode == 3 {
+                    for victim in &victims {
+                        assert_eq!(runner.state().objects[victim].zone, Zone::Battlefield);
+                    }
+                    assert!(runner.state().pending_damage_replacements.is_empty());
+                    assert_eq!(runner.state().next_return_result_process_id, 1);
+                    continue;
+                }
+                assert_eq!(
+                    runner.state().pending_damage_replacements.len(),
+                    1,
+                    "ordinary constructor actually installs the shield"
+                );
+                let saved = serde_json::to_value(runner.state()).unwrap();
+                *runner.state_mut() = serde_json::from_value(saved).unwrap();
+                let value = if mode == 2 {
+                    3
+                } else if empty {
+                    0
+                } else {
+                    5
+                };
+                if slot == 4 {
+                    runner.cast(damage).target_object(recipient).resolve();
+                } else {
+                    runner.cast(damage).resolve();
+                }
+                let damage_count = match slot {
+                    0 => 8 + value,
+                    1 => 8 - value,
+                    2 => {
+                        if value > 2 {
+                            16
+                        } else {
+                            8
+                        }
+                    }
+                    3 | 4 => {
+                        if value > 2 {
+                            0
+                        } else {
+                            8
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                if slot == 4 {
+                    assert_eq!(
+                        runner.state().objects[&recipient].damage_marked,
+                        damage_count
+                    );
+                }
+                departure_assert_program_complete(
+                    &runner,
+                    spell,
+                    if slot == 4 { 0 } else { -(damage_count as i32) },
+                    0,
+                );
+                assert_eq!(
+                    runner.state().players[0].mana_pool.total(),
+                    0,
+                    "actual later damage spell paid its whole cost"
+                );
+                assert_eq!(runner.state().objects[&damage].zone, Zone::Graveyard);
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_prevention_rider_installs_unbound_and_gets_a_fresh_process_on_actual_later_damage() {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    for sibling in [false, true] {
+        for mode in 0..3 {
+            if sibling && mode != 0 {
+                continue;
+            }
+            for empty in [false, true] {
+                let (mut runner, spell, subjects) =
+                    departure_public_program_runner(false, empty, 2, |scenario| {
+                        let damage = scenario
+                            .add_spell_to_hand(P0, "Supplemental later rider damage", false)
+                            .with_ability_definition(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::DealDamage {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    target: TargetFilter::Controller,
+                                    damage_source: None,
+                                    excess: None,
+                                },
+                            ))
+                            .id();
+                        let mut shield = AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::PreventDamage {
+                                amount: PreventionAmount::All,
+                                amount_dynamic: None,
+                                target: TargetFilter::Controller,
+                                recipient_scope: EffectScope::All,
+                                scope: PreventionScope::AllDamage,
+                                damage_source_filter: None,
+                                prevention_duration: None,
+                            },
+                        );
+                        let mut rider = if sibling {
+                            departure_gain_definition(7, P0)
+                        } else if mode == 0 {
+                            departure_selected_local_body(true, false)
+                        } else {
+                            let mut ordinary = departure_gain_definition(7, P0);
+                            let Effect::GainLife { amount, .. } = ordinary.effect.as_mut() else {
+                                unreachable!()
+                            };
+                            if mode == 1 {
+                                let QuantityExpr::Ref {
+                                    qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                                } = amount
+                                else {
+                                    unreachable!()
+                                };
+                                *source = ZoneChangeRecordSource::ThisTurn;
+                            } else {
+                                *amount = QuantityExpr::Fixed { value: 4 };
+                            }
+                            ordinary
+                        };
+                        rider.sub_link = if sibling {
+                            SubAbilityLink::SequentialSibling
+                        } else {
+                            SubAbilityLink::ContinuationStep
+                        };
+                        shield.sub_ability = Some(Box::new(rider));
+                        (shield, vec![damage])
+                    });
+                let before_damage_process = runner.state().next_return_result_process_id;
+                let shield = runner.state().pending_damage_replacements.last().unwrap();
+                assert_eq!(shield.runtime_execute.is_some(), !sibling);
+                if let Some(rider) = &shield.runtime_execute {
+                    assert!(rider.return_result_process.is_none());
+                }
+                departure_assert_program_complete(
+                    &runner,
+                    spell,
+                    if sibling && !empty { 5 } else { 0 },
+                    0,
+                );
+                let saved = serde_json::to_value(runner.state()).unwrap();
+                *runner.state_mut() = serde_json::from_value(saved).unwrap();
+                runner.cast(subjects[0]).resolve();
+                if !sibling && mode == 0 {
+                    let WaitingFor::ChooseOneOfBranch { player, .. } = &runner.state().waiting_for
+                    else {
+                        panic!("the actual prevention event invokes the complete local rider and reaches its public child");
+                    };
+                    assert_eq!(*player, P0);
+                    assert!(runner.state().next_return_result_process_id > before_damage_process);
+                    let saved = serde_json::to_value(runner.state()).unwrap();
+                    *runner.state_mut() = serde_json::from_value(saved).unwrap();
+                    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                }
+                departure_assert_program_complete(
+                    &runner,
+                    spell,
+                    if sibling || mode == 1 {
+                        if empty {
+                            0
+                        } else {
+                            5
+                        }
+                    } else if mode == 2 {
+                        4
+                    } else {
+                        3
+                    },
+                    0,
+                );
+                assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Graveyard);
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_unselected_epic_cost_and_installed_rider_cannot_import_the_callers_result() {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::phase::Phase;
+    for cost_payload in [false, true] {
+        for empty in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let victim = (!empty).then(|| scenario.add_creature(P0, "Centaur Courser", 3, 3).id());
+            let mut body = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            if cost_payload {
+                body.unless_pay = Some(UnlessPayModifier {
+                    cost: AbilityCost::OneOf {
+                        costs: vec![
+                            AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                            departure_independent_epic_cost(3),
+                        ],
+                    },
+                    payer: TargetFilter::Controller,
+                });
+            } else {
+                body.effect = Box::new(Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::Controller,
+                    recipient_scope: EffectScope::All,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                });
+                let mut imported = departure_gain_definition(7, P0);
+                imported.sub_link = SubAbilityLink::ContinuationStep;
+                body.sub_ability = Some(Box::new(imported));
+            }
+            let mut root = departure_exile_definition(7);
+            root.sub_ability = Some(Box::new(body));
+            let spell = scenario
+                .add_spell_to_hand(
+                    P0,
+                    "Supplemental independent payload refuses caller import",
+                    false,
+                )
+                .with_ability_definition(root.clone())
+                .id();
+            let mut runner = scenario.build();
+            let mut state = runner.state().clone();
+            let before = serde_json::to_value(&state).unwrap();
+            let mut events = vec![];
+            let error = resolve_ability_chain(
+                &mut state,
+                &build_resolved_from_def(&root, spell, P0),
+                &mut events,
+            )
+            .unwrap_err();
+            assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            assert!(events.is_empty());
+            runner.cast(spell).resolve();
+            if let Some(victim) = victim {
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+            }
+            assert!(runner.state().pending_damage_replacements.is_empty());
+            assert_eq!(runner.state().next_return_result_process_id, 1);
+            departure_assert_program_complete(&runner, spell, 0, 0);
+        }
+    }
+}
+
+#[test]
+fn departure_direct_shield_source_choice_latches_identity_for_actual_later_damage() {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::phase::Phase;
+    for prevention in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+        let damage = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        let chosen = scenario
+            .add_creature(P0, "Supplemental chosen damage source", 1, 9)
+            .with_ability_definition(damage.clone())
+            .id();
+        let other = scenario
+            .add_creature(P0, "Supplemental other damage source", 1, 9)
+            .with_ability_definition(damage)
+            .id();
+        let filter = Some(TargetFilter::ChosenDamageSource { filter: None });
+        let effect = if prevention {
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Controller,
+                recipient_scope: EffectScope::All,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: filter,
+                prevention_duration: None,
+            }
+        } else {
+            Effect::CreateDamageReplacement {
+                source_filter: filter,
+                combat_scope: None,
+                target_filter: None,
+                modification: Some(DamageModification::PreventionMinus {
+                    value: PreventionFormula::Fixed(99),
+                }),
+                redirect_to: None,
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+                redirect_lifetime: Default::default(),
+            }
+        };
+        let mut root = departure_exile_definition(7);
+        let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+            unreachable!()
+        };
+        *target = TargetFilter::SpecificObject { id: victim };
+        root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+        let spell = scenario
+            .add_spell_to_hand(P0, "Supplemental shield source identity", false)
+            .with_ability_definition(root)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("ordinary chosen-source constructor reaches its actual public choice");
+        };
+        assert!(options.contains(&chosen));
+        assert!(options.contains(&other));
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved).unwrap();
+        runner
+            .act(GameAction::ChooseDamageSource { source: chosen })
+            .unwrap();
+        departure_assert_program_complete(&runner, spell, 0, 0);
+        assert_eq!(
+            runner
+                .state()
+                .pending_damage_replacements
+                .last()
+                .unwrap()
+                .damage_source_filter,
+            Some(TargetFilter::SpecificObject { id: chosen })
+        );
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved).unwrap();
+        runner.activate(chosen, 0).resolve();
+        departure_assert_program_complete(&runner, spell, 0, 0);
+        runner.activate(other, 0).resolve();
+        departure_assert_program_complete(&runner, spell, -3, 0);
+    }
+}
+
+#[test]
+fn departure_source_only_object_predicate_refuses_before_root_and_ordinary_filter_reaches_public_tail(
+) {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::mana::ManaCost;
+    use engine::types::phase::Phase;
+    for mode in 0..3 {
+        for empty in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let victims = if empty {
+                vec![]
+            } else {
+                vec![
+                    scenario.add_creature(P0, "Centaur Courser", 3, 3).id(),
+                    scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+                ]
+            };
+            let member = scenario
+                .add_creature(P0, "Supplemental remembered filter member", 2, 20)
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            let Effect::GainLife { mut amount, .. } = *departure_gain_definition(7, P0).effect
+            else {
+                unreachable!()
+            };
+            if mode == 1 {
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                } = &mut amount
+                else {
+                    unreachable!()
+                };
+                *source = ZoneChangeRecordSource::ThisTurn;
+            } else if mode == 2 {
+                amount = QuantityExpr::Fixed { value: 3 };
+            }
+            let mut filter = TypedFilter::creature();
+            filter.properties.extend([
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+                FilterProp::Cmc {
+                    comparator: Comparator::LT,
+                    value: amount,
+                },
+            ]);
+            let mut body = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RememberCard {
+                    target: TargetFilter::Typed(filter),
+                },
+            );
+            body.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            )));
+            let mut root = departure_exile_definition(7);
+            let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+                unreachable!()
+            };
+            *target = TargetFilter::Or {
+                filters: victims
+                    .iter()
+                    .map(|id| TargetFilter::SpecificObject { id: *id })
+                    .collect(),
+            };
+            root.sub_ability = Some(Box::new(body));
+            let spell = scenario
+                .add_spell_to_hand(P0, "Supplemental source-only object predicate", false)
+                .with_ability_definition(root.clone())
+                .id();
+            let mut runner = scenario.build();
+            if mode == 0 {
+                let mut state = runner.state().clone();
+                let before = serde_json::to_value(&state).unwrap();
+                let mut events = vec![];
+                let error = resolve_ability_chain(
+                    &mut state,
+                    &build_resolved_from_def(&root, spell, P0),
+                    &mut events,
+                )
+                .unwrap_err();
+                assert!(
+                    format!("{error:?}").contains("object predicate requires executable context")
+                );
+                assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                assert!(events.is_empty());
+            }
+            runner.cast(spell).resolve();
+            if mode == 0 {
+                for victim in &victims {
+                    assert_eq!(runner.state().objects[victim].zone, Zone::Battlefield);
+                }
+                assert_eq!(runner.state().next_return_result_process_id, 1);
+            } else {
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { .. }
+                ));
+                let selected = runner.state().objects[&spell].chosen_attributes.iter().any(|choice| matches!(choice, ChosenAttribute::Card(pin) if pin.object_id == member));
+                assert_eq!(selected, mode == 2 || !empty, "the actual source-only filter reads the fixed/turn quantity while the source is still on stack");
+                let saved = serde_json::to_value(runner.state()).unwrap();
+                *runner.state_mut() = serde_json::from_value(saved).unwrap();
+                runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+            }
+            departure_assert_program_complete(&runner, spell, 0, 0);
+        }
+    }
 }

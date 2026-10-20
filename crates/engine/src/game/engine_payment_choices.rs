@@ -101,8 +101,12 @@ pub(crate) fn validate_payment_result_owner(
             addressed.push(result);
         }
     };
+    let mut payload_error = None;
     let mut cost = |cost: &AbilityCost| {
-        cost.for_each_quantity_expr(&mut |expr| expr.for_each_ref(&mut read));
+        if let Err(error) = crate::types::ability::validate_result_cost_payloads(cost) {
+            payload_error.get_or_insert(error);
+        }
+        cost.for_each_resolution_quantity_expr(&mut |expr| expr.for_each_ref(&mut read));
         cost.for_each_predicate_quantity_ref(&mut read);
     };
     match waiting {
@@ -126,6 +130,9 @@ pub(crate) fn validate_payment_result_owner(
             ..
         } => filter.for_each_nested_quantity_ref(&mut read),
         _ => {}
+    }
+    if let Some(error) = payload_error {
+        return Err(error);
     }
     if !addressed.is_empty() {
         let frame = crate::types::game_state::checked_return_result_frame(

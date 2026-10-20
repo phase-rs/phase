@@ -1851,6 +1851,9 @@ pub(crate) fn validate_addressed_quantity_reads(
     ability: &ResolvedAbility,
 ) -> Result<(), EffectError> {
     crate::types::ability::validate_instruction_result_effect_context(&ability.effect)?;
+    if let Some(scope) = &ability.player_scope {
+        crate::types::ability::validate_source_only_result_player_counts(scope)?;
+    }
     let mut unavailable = None;
     let mut check = |reference: &QuantityRef| {
         if let Err(error) = crate::game::quantity::validate_addressed_quantity_ref(

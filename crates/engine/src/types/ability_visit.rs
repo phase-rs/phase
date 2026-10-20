@@ -228,7 +228,10 @@ where
     // reviewer diffing the two sibling walkers sees the gate as the only
     // difference.
     if let Some(sub) = &def.sub_ability {
-        if !scope_prunes_nested_ability(sub, scope) {
+        if !scope_prunes_nested_ability(sub, scope)
+            && !(scope == ResolutionScope::OwnResolutionOnly
+                && def.effect.sub_ability_resolves_later(sub.sub_link))
+        {
             visit_ability_def_costs_scoped(sub, scope, visit)?;
         }
     }
@@ -295,7 +298,10 @@ where
         visit_cost_scoped(cost, scope, visit)?;
     }
     if let Some(sub) = &$($mut_)? def.sub_ability {
-        visit_nested_ability_def_scoped(sub, scope, visit)?;
+        if !(scope == ResolutionScope::OwnResolutionOnly
+            && def.effect.sub_ability_resolves_later(sub.sub_link)) {
+            visit_nested_ability_def_scoped(sub, scope, visit)?;
+        }
     }
     if let Some(else_ability) = &$($mut_)? def.else_ability {
         visit_nested_ability_def_scoped(else_ability, scope, visit)?;
@@ -1113,6 +1119,19 @@ macro_rules! exclusive_iter {
 }
 
 define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter; true);
+
+macro_rules! visit_each_effect_mut {
+    ($visit:ident, $effect:ident) => {
+        $visit(&mut *$effect)?
+    };
+}
+
+/// Exclusive effect-axis twin; uses the same typed carrier and scope decisions.
+#[allow(dead_code)]
+pub(crate) mod effects_mut {
+    use super::*;
+    define_walk!([mut]; [FnMut(&mut Effect) -> ControlFlow<()>]; visit_each_effect_mut; skip_nodes; exclusive_iter; true);
+}
 
 /// A definition node surfaced by the exclusive walk.
 pub enum DefinitionNodeMut<'a> {

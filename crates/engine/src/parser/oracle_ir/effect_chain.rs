@@ -1423,7 +1423,7 @@ impl ClauseIr {
 // Continuations remain part of their source clause until assembly. In particular,
 // an absorbed token counter clause must participate in address binding and reminting.
 macro_rules! define_disposition_quantity_walk {
-    ([$($mut_:tt)?]; $walk:ident; $refs:ident; $nested:ident; $owned:ident; $exprs:ident; $predicates:ident) => {
+    ([$($mut_:tt)?]; $walk:ident; $refs:ident; $nested:ident; $owned:ident; $exprs:ident; $predicates:ident; $selected:ident) => {
         impl ClauseDisposition {
             fn $walk(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
                 match self {
@@ -1438,6 +1438,7 @@ macro_rules! define_disposition_quantity_walk {
                     Self::ModifyPrior { modifier: PriorModifier::AltCost(cost) } => {
                         cost.$exprs(&mut |expr| expr.$refs(f));
                         cost.$predicates(f);
+                        cost.$selected(f);
                     }
                     Self::DrawnThisTurnFollowup { life_payment } => life_payment.$refs(f),
                     Self::ReplicatePerKeyword { .. }
@@ -1496,8 +1497,8 @@ macro_rules! define_disposition_quantity_walk {
         }
     };
 }
-define_disposition_quantity_walk!([]; for_each_quantity_ref; for_each_ref; for_each_nested_quantity_ref; for_each_own_quantity_ref; for_each_quantity_expr; for_each_predicate_quantity_ref);
-define_disposition_quantity_walk!([mut]; for_each_quantity_ref_mut; each_ref_mut; for_each_nested_quantity_ref_mut; for_each_own_quantity_ref_mut; for_each_quantity_expr_mut; for_each_predicate_quantity_ref_mut);
+define_disposition_quantity_walk!([]; for_each_quantity_ref; for_each_ref; for_each_nested_quantity_ref; for_each_imported_quantity_ref; for_each_resolution_quantity_expr; for_each_predicate_quantity_ref; for_each_selected_import_quantity_ref);
+define_disposition_quantity_walk!([mut]; for_each_quantity_ref_mut; each_ref_mut; for_each_nested_quantity_ref_mut; for_each_imported_quantity_ref_mut; for_each_resolution_quantity_expr_mut; for_each_predicate_quantity_ref_mut; for_each_selected_import_quantity_ref_mut);
 
 impl ClauseDisposition {
     /// The self-patch continuation parsed from a clause's own text (formerly the
@@ -2855,7 +2856,7 @@ mod departure_result_tests {
         let base = parse_effect_chain_ir(PRINTED, AbilityKind::Spell, &mut Default::default());
         assert_eq!(base.clauses[0].id, ClauseId(0));
         for edge in 0..13 {
-            for cost_position in 0..3 {
+            for cost_position in 0..8 {
                 for local in [false, true] {
                     let mut imported = base.clauses.clone();
                     let mut body = AbilityDefinition::new(
@@ -2899,6 +2900,42 @@ mod departure_result_tests {
                                     effect: Box::new(effect),
                                 }
                         }
+                        3 => {
+                            clause.disposition = ClauseDisposition::Absorb {
+                                rider: Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)),
+                                kind: AbsorbKind::DieExile,
+                            }
+                        }
+                        4 => {
+                            clause.disposition = ClauseDisposition::BranchOtherwise {
+                                else_def: Box::new(AbilityDefinition::new(
+                                    AbilityKind::Spell,
+                                    effect,
+                                )),
+                                kind: OtherwiseKind::Bound,
+                            }
+                        }
+                        5 | 6 => {
+                            let body = Box::new(AbilityDefinition::new(AbilityKind::Spell, effect));
+                            clause.disposition = ClauseDisposition::ReplaceMeaning {
+                                kind: if cost_position == 5 {
+                                    ReplaceMeaningKind::DigAlt(body)
+                                } else {
+                                    ReplaceMeaningKind::Instead(body)
+                                },
+                            };
+                        }
+                        7 => {
+                            clause.disposition = ClauseDisposition::ModifyPrior {
+                                modifier: PriorModifier::AltCost(AbilityCost::Composite {
+                                    costs: vec![AbilityCost::OneOf {
+                                        costs: vec![AbilityCost::EffectCost {
+                                            effect: Box::new(effect),
+                                        }],
+                                    }],
+                                }),
+                            }
+                        }
                         _ => unreachable!(),
                     }
                     let mut prefix = base.clauses.clone();
@@ -2938,6 +2975,34 @@ mod departure_result_tests {
                             };
                             effect
                         }
+                        3..=6 => {
+                            let rider = match &clause.disposition {
+                                ClauseDisposition::Absorb { rider, .. } => rider,
+                                ClauseDisposition::BranchOtherwise { else_def, .. } => else_def,
+                                ClauseDisposition::ReplaceMeaning {
+                                    kind:
+                                        ReplaceMeaningKind::DigAlt(body)
+                                        | ReplaceMeaningKind::Instead(body),
+                                } => body,
+                                _ => unreachable!(),
+                            };
+                            rider.effect.as_ref()
+                        }
+                        7 => {
+                            let ClauseDisposition::ModifyPrior {
+                                modifier: PriorModifier::AltCost(AbilityCost::Composite { costs }),
+                            } = &clause.disposition
+                            else {
+                                unreachable!()
+                            };
+                            let AbilityCost::OneOf { costs } = &costs[0] else {
+                                unreachable!()
+                            };
+                            let AbilityCost::EffectCost { effect } = &costs[0] else {
+                                unreachable!()
+                            };
+                            effect
+                        }
                         _ => unreachable!(),
                     };
                     let body = selected(effect, edge);
@@ -2955,7 +3020,7 @@ mod departure_result_tests {
                         quantity(if local { 0 } else { expected }),
                         "edge {edge}, cost {cost_position}, local {local}"
                     );
-                    if cost_position == 0 {
+                    if cost_position == 0 || cost_position == 3 {
                         let mut combined = base.clone();
                         combined.clauses = relocated.clone();
                         let executable = assemble_effect_chain(&combined);
@@ -3027,6 +3092,122 @@ mod departure_result_tests {
                     assert_eq!(original[0].id, ClauseId(99));
                     assert_eq!(imported[0].id, ClauseId(0));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn departure_disposition_raw_epic_payloads_preserve_their_independent_namespace() {
+        use crate::types::ability::*;
+        use crate::types::identifiers::ObjectId;
+        use crate::types::player::PlayerId;
+        let base = parse_effect_chain_ir(PRINTED, AbilityKind::Spell, &mut Default::default());
+        for disposition in 0..5 {
+            for local in [false, true] {
+                let read = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeAggregate {
+                                source: ZoneChangeRecordSource::InstructionResult {
+                                    result: ReturnResultId(0),
+                                },
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Exile),
+                                filter: TargetFilter::Any,
+                                function: AggregateFunction::Sum,
+                                property: ObjectProperty::Power,
+                            },
+                        },
+                    },
+                );
+                let mut body = read.clone();
+                if local {
+                    body = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        base.clauses[0].parsed.effect.clone(),
+                    );
+                    body.declares_return_result = Some(ReturnResultId(0));
+                    body.sub_ability = Some(Box::new(read));
+                }
+                let snapshot = crate::game::ability_utils::build_resolved_from_def(
+                    &body,
+                    ObjectId(33),
+                    PlayerId(0),
+                );
+                let effect = Effect::EpicCopy {
+                    spell: Box::new(snapshot.clone()),
+                };
+                let mut imported = base.clauses.clone();
+                let clause = imported.last_mut().unwrap();
+                clause.parsed.effect = Effect::NoOp;
+                let body = Box::new(AbilityDefinition::new(AbilityKind::Spell, effect));
+                clause.disposition = match disposition {
+                    0 => ClauseDisposition::Absorb {
+                        rider: body,
+                        kind: AbsorbKind::DieExile,
+                    },
+                    1 => ClauseDisposition::BranchOtherwise {
+                        else_def: body,
+                        kind: OtherwiseKind::Bound,
+                    },
+                    2 => ClauseDisposition::ReplaceMeaning {
+                        kind: ReplaceMeaningKind::DigAlt(body),
+                    },
+                    3 => ClauseDisposition::ReplaceMeaning {
+                        kind: ReplaceMeaningKind::Instead(body),
+                    },
+                    4 => ClauseDisposition::ModifyPrior {
+                        modifier: PriorModifier::AltCost(AbilityCost::Composite {
+                            costs: vec![AbilityCost::OneOf {
+                                costs: vec![AbilityCost::EffectCost {
+                                    effect: body.effect,
+                                }],
+                            }],
+                        }),
+                    },
+                    _ => unreachable!(),
+                };
+                let mut builder = ClauseIrBuilder::new(PRINTED);
+                builder.absorb_clauses(base.clauses.clone());
+                builder.absorb_clauses(imported);
+                let relocated = builder.finish();
+                let effect = match &relocated.last().unwrap().disposition {
+                    ClauseDisposition::Absorb { rider, .. } => rider.effect.as_ref(),
+                    ClauseDisposition::BranchOtherwise { else_def, .. } => else_def.effect.as_ref(),
+                    ClauseDisposition::ReplaceMeaning {
+                        kind: ReplaceMeaningKind::DigAlt(body) | ReplaceMeaningKind::Instead(body),
+                    } => body.effect.as_ref(),
+                    ClauseDisposition::ModifyPrior {
+                        modifier: PriorModifier::AltCost(AbilityCost::Composite { costs }),
+                    } => {
+                        let AbilityCost::OneOf { costs } = &costs[0] else {
+                            unreachable!()
+                        };
+                        let AbilityCost::EffectCost { effect } = &costs[0] else {
+                            unreachable!()
+                        };
+                        effect
+                    }
+                    _ => unreachable!(),
+                };
+                let Effect::EpicCopy { spell } = effect else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    spell.as_ref(),
+                    &snapshot,
+                    "raw independent namespace is never relocated by disposition {disposition}"
+                );
+                assert_eq!(
+                    validate_instruction_result_definition(&AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        effect.clone()
+                    ))
+                    .is_ok(),
+                    local
+                );
             }
         }
     }
