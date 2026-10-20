@@ -8,7 +8,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::character::complete::satisfy;
-use nom::combinator::{all_consuming, eof, map, map_opt, map_res, opt, peek, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_opt, map_res, not, opt, peek, value, verify};
 use nom::multi::{many0, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -5204,6 +5204,16 @@ pub fn parse_kicker_count_where_x_expression(input: &str) -> OracleResult<'_, Qu
     Ok(("", quantity))
 }
 
+/// CR 107.1 + CR 608.2c: the group size N of "for each N <counted clause>"
+/// (N ≥ 2) — "for each five counters removed this way" counts complete groups
+/// of five. The single definition of a group size: the expression-level
+/// for-each grammar accepts it (dividing the count), and every reference-level
+/// for-each entry declines it, because a `QuantityRef` cannot express the
+/// grouping and would silently read the bare count.
+pub(crate) fn parse_for_each_group_size(input: &str) -> OracleResult<'_, u32> {
+    terminated(verify(parse_number, |n: &u32| *n >= 2), tag(" ")).parse(input)
+}
+
 /// Parse the inner content after "for each ".
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_for_each_clause_ref_with_they_controller(
@@ -5401,6 +5411,10 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
     input: &'a str,
     antecedents: &PlayerAntecedents,
 ) -> OracleResult<'a, QuantityRef> {
+    // CR 107.1: a QuantityRef cannot express "complete groups of N"; a leading
+    // group size belongs to the for-each expression grammar, so ref-only
+    // consumers decline it.
+    let (input, ()) = not(parse_for_each_group_size).parse(input)?;
     alt((
         // CR 123.6d + CR 123.6e: first, so no earlier arm can stop `alt` with a
         // stranded remainder; its "unique vowel"/"<letter>'s" + sticker-set
@@ -7313,6 +7327,10 @@ fn parse_for_each_controlled_type_with_property(input: &str) -> OracleResult<'_,
 pub(crate) fn parse_for_each_clause_ref_with_difference(
     input: &str,
 ) -> OracleResult<'_, (QuantityRef, QuantityExpr)> {
+    // CR 107.1: a QuantityRef cannot express "complete groups of N"; a leading
+    // group size belongs to the for-each expression grammar, so ref-only
+    // consumers decline it.
+    let (input, ()) = not(parse_for_each_group_size).parse(input)?;
     let (rest, quantity) = parse_for_each_controlled_type_with_property(input)?;
     let difference = match &quantity {
         QuantityRef::ObjectCount {
@@ -7621,10 +7639,14 @@ mod tests {
         assert_eq!(
             player_property_quantity(
                 PlayerProperty::Speed,
-                PlayerScope::ParentObjectTargetController
+                PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller
+                }
             ),
             QuantityRef::Speed {
-                player: PlayerScope::ParentObjectTargetController
+                player: PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller
+                }
             }
         );
     }

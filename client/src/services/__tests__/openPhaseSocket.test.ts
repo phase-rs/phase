@@ -421,6 +421,17 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it("rejects Full v152 before it can read a deferred counter-cost removal", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 152 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
   it("rejects Full v151 before it can read the shortcut suggestion", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -432,10 +443,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v151 before it can silently drop an activated grant's kind selector", async () => {
+  it.each([152, 153, 154])("rejects Full v%s before it can read a parked ChangeZone frame's pre-event member entries", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 151 }));
+    ws.deliverMessage(helloFrame({ protocol_version: version }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -443,21 +454,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v152 before it can silently drop an activated grant's kind selector", async () => {
+  it("accepts the literal Full v155 pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 152 }));
-
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
-  });
-
-  it("accepts the literal Full v153 kind-selected activated-grant protocol", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 153 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 155 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();

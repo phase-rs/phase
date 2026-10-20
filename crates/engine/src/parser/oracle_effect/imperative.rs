@@ -7066,6 +7066,10 @@ pub(super) fn parse_utility_imperative_ast(
                 target,
                 multi_target,
                 selection,
+                // The attachment here is a DESCRIBED filter; the recipient text
+                // is the host but this arm's quantifier belongs to the
+                // attachment, so no host-optional flag is claimed (CR 115.6).
+                host_target: None,
             });
         }
     }
@@ -7082,6 +7086,7 @@ pub(super) fn parse_utility_imperative_ast(
                 selection: AttachSelection::AtResolution {
                     count: AttachCardinality::One,
                 },
+                host_target: None,
             });
         }
     }
@@ -7123,6 +7128,14 @@ pub(super) fn parse_utility_imperative_ast(
             let (attachment, _attachment_rem) = parse_attachment_anaphor(&attachment_text, ctx);
             let (target, _target_rem) =
                 parse_attach_recipient(&target_text, ctx, Some(&attachment));
+            // CR 115.6 + CR 601.2c: the HOST operand's zero-target authority is
+            // its own printed quantifier, independent of whether the ATTACHMENT
+            // operand claimed an announced slot. "attach target Equipment you
+            // control to up to one target creature you control" (Iron Hills
+            // Stalwart) has a required Equipment and an optional host; the old
+            // `!attach_attachment_claims_announcement_slot` gate dropped the
+            // host frame and let the trigger-wide `has_up_to` stamp stand in.
+            let host_target = super::strip_optional_target_prefix(target_text.trim()).1;
             #[cfg(debug_assertions)]
             assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
@@ -7132,6 +7145,7 @@ pub(super) fn parse_utility_imperative_ast(
                 target,
                 multi_target,
                 selection,
+                host_target,
             });
         }
     }
@@ -7152,6 +7166,7 @@ pub(super) fn parse_utility_imperative_ast(
             selection: AttachSelection::AtResolution {
                 count: AttachCardinality::One,
             },
+            host_target: None,
         });
     }
     None
@@ -10054,6 +10069,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         });
     }
     ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect,
         duration: None,
@@ -15668,6 +15684,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             multi_target,
             selection,
+            host_target,
         })) => {
             // CR 115.1a/c/d/e + CR 608.2d: `clause.multi_target` stays the
             // ANNOUNCED target-count spec. It is already empty for a described
@@ -15684,6 +15701,14 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 selection,
             });
             clause.multi_target = multi_target;
+            // CR 115.6: the Attach HOST frame's printed "up to one target …".
+            // The ONLY writer of `optional_targeting` for an Attach clause (the
+            // generalized clause-count detector never touches it; the trigger
+            // stamp has its own `Effect::Attach` guard). Barret,
+            // Avalanche Leader / Thorin, Mountain-King print no host quantifier,
+            // so the capture writes nothing for them (their optional operand is
+            // the attachment, carried by `multi_target`).
+            clause.optional_targeting = host_target.is_some();
             clause
         }
         ImperativeFamilyAst::Structured(ImperativeAst::Utility(

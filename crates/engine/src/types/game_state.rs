@@ -1905,6 +1905,30 @@ pub(crate) fn terminal_battlefield_departure_row(
         .then(|| &state.zone_changes_this_turn[index])
 }
 
+impl GameState {
+    /// CR 603.10 + CR 400.7: the settled observation of the battlefield entry `record` describes,
+    /// or `None`. Exact: this turn's row at this record's ledger index, naming this record's object
+    /// at its post-entry incarnation; a later entry reusing the storage id is a different object
+    /// (CR 400.7) and never answers for this one. Self-validating, so a restored row answers only
+    /// for the identical (turn, index, object, incarnation) entry.
+    pub(crate) fn battlefield_entry_observation(
+        &self,
+        record: &ZoneChangeRecord,
+    ) -> Option<&TriggerSourceContext> {
+        if record.to_zone != Zone::Battlefield || record.recorded_turn_number != self.turn_number {
+            return None;
+        }
+        self.battlefield_entry_observations
+            .get(&record.turn_zone_change_index)
+            .filter(|row| {
+                row.identity.reference.object_id == record.object_id
+                    && record
+                        .entered_incarnation
+                        .is_none_or(|incarnation| row.identity.reference.incarnation == incarnation)
+            })
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4282,7 +4306,9 @@ impl PendingZoneChangeDelivery {
 /// chooses two shock lands; only the first ever entered the battlefield).
 ///
 /// The struct stashes the per-iteration context (`ChangeZoneIterationCtx`)
-/// plus the unprocessed object ids; `drain_pending_change_zone_iteration`
+/// plus the unprocessed members, each carrying the entry modifications it was
+/// resolved to before the event's first member moved (`ChangeZoneMemberEntry`),
+/// not the raw gate spec; `drain_pending_change_zone_iteration`
 /// (in `effects/mod.rs`) re-enters the loop after each `ReplacementChoice`
 /// resolves. Drained before the repeat-for frame because the outer
 /// `repeat_for` loop may have stashed a chain that contains this inner
@@ -4301,18 +4327,14 @@ pub struct PendingChangeZoneIteration {
     /// The chosen member that is currently completing outside the ordinary
     /// `remaining` loop. Required even when the tail is empty.
     pub paused_current: Option<PendingZoneChangeDelivery>,
-    pub remaining: Vec<ObjectId>,
+    /// The unprocessed members with their pre-event entry modifications
+    /// (CR 603.6a).
+    pub remaining: Vec<ChangeZoneMemberEntry>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
     pub enter_transformed: bool,
-    #[serde(
-        default,
-        with = "crate::types::zones::etb_tap_bool_compat",
-        skip_serializing_if = "EtbTapState::is_unspecified"
-    )]
-    pub enter_tapped: EtbTapState,
     /// CR 110.2a: Resolved-once controller override on ETB. `Some(pid)`
     /// routes the object to `pid`. `None` leaves the object under its
     /// owner's control. Resolved from `Effect::ChangeZone.enters_under`
@@ -4320,18 +4342,6 @@ pub struct PendingChangeZoneIteration {
     /// across an interactive pause.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_under_player: Option<PlayerId>,
-    pub enters_attacking: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
-    /// Conditional entry-counter specs carried across a pause so each remaining
-    /// object can be re-evaluated per-object on resume (Winter Soldier Hero
-    /// rider through `EffectZoneChoice`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditional_enter_with_counters: Vec<(
-        crate::types::ability::TargetFilter,
-        crate::types::counter::CounterType,
-        crate::types::ability::QuantityExpr,
-    )>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
@@ -4350,8 +4360,8 @@ pub struct PendingChangeZoneIteration {
     /// replacement-ordering / as-enters pause so a paused-then-resumed
     /// face-down return (Yedora's dying creatures → face-down Forest lands)
     /// still applies the profile on resume. `None` = normal face-up entry.
-    /// Mirrors the `enter_tapped`/`enter_transformed`/`enters_under_player`
-    /// carry-through pattern on this same struct.
+    /// Mirrors the `enter_transformed`/`enters_under_player` carry-through
+    /// pattern on this same struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
     /// CR 401.4 + CR 701.24a: Library placement override carried across a
@@ -4359,18 +4369,26 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
-    /// CR 614.12: gates the `enter_tapped`/`enters_attacking` riders on the
-    /// moved object's type, carried across a replacement-ordering / as-enters
-    /// pause so a paused-then-resumed gated move (Summoner's Grimoire) still
-    /// applies the riders only to a matching object on resume. `None` = apply
-    /// unconditionally. Mirrors the `enter_tapped`/`face_down_profile`
-    /// carry-through pattern on this same struct.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enters_modified_if: Option<crate::types::ability::TargetFilter>,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enter_attached_to: Option<AttachTarget>,
     pub effect_kind: crate::types::ability::EffectKind,
+}
+
+/// CR 603.6a + CR 614.12: one member of a ChangeZone event with the
+/// effect-carried modifications it enters with — its gated entry counters and
+/// gated tapped/attacking riders — resolved against the board as it was before
+/// the event's first member moved. A co-entrant is not on the battlefield then,
+/// so neither its statics nor its presence affect another member's gates
+/// (Heliod, Sun-Crowned ruling 2020-01-24).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeZoneMemberEntry {
+    pub object_id: ObjectId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enter_with_counters: Vec<(CounterType, u32)>,
+    #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
+    pub enter_tapped: EtbTapState,
+    pub enters_attacking: bool,
 }
 
 /// CR 707.2 + CR 614.1a + CR 616.1: Resume state for `CopyTokenOf` when a
@@ -6031,6 +6049,83 @@ pub struct PendingCounterRemoval {
 pub struct PendingCounterRemovalInFlight {
     pub removal: PendingCounterRemoval,
     pub counter_count_before: u32,
+}
+
+/// CR 118.3 + CR 601.2h + CR 616.1: a counter-removal cost whose current removal
+/// waits on a replacement choice. `in_flight` is that removal (settled by
+/// measurement once the replacement pipeline delivers it, CR 118.11);
+/// `remaining` are the cost's later removals, still unpaid. Held by
+/// [`PendingCostMoveResume::CounterCostRemovalPayment`] on the stack route and
+/// by [`ManaAbilityCostCursor::counter_removal`] on the mana route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PausedCounterCostRemoval {
+    pub in_flight: PendingCounterRemovalInFlight,
+    pub remaining: Vec<PendingCounterRemoval>,
+    /// Where this removal's replacement subtree begins, recorded when the payer
+    /// proposed it. Required on the wire: a missing boundary must not decode as
+    /// depth 0, which would read a mid-resolution subtree as retired.
+    pub replacement_subtree: ReplacementSubtreeBoundary,
+}
+
+/// CR 616.1 + CR 608.2c: where a counter removal's replacement subtree begins.
+/// Everything the removal's replacement installs (its post-effect drain, an
+/// effect removal queue, a rider) is above this position: on frames above
+/// `resolution_depth`, or nested (CR 616.1g) into the post-replacement frame
+/// that was the drain owner when the removal was proposed
+/// (`install_post_replacement_drain`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementSubtreeBoundary {
+    pub resolution_depth: usize,
+    pub enclosing: Option<EnclosingPostReplacementFrame>,
+}
+
+/// The post-replacement frame a removal's own post-effect drain nests into, and
+/// how many drains it held when the removal was proposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnclosingPostReplacementFrame {
+    /// The frame's identity. `None` for an unstamped frame: never dispatched,
+    /// journal-replayed, or from a pre-identity payload. An unstamped frame is
+    /// then read positionally.
+    pub frame: Option<PostReplacementFrameId>,
+    pub drains: usize,
+}
+
+impl ReplacementSubtreeBoundary {
+    /// The current position of `stack`, as the payer records it.
+    pub(crate) fn at(stack: &ResolutionStack) -> Self {
+        Self {
+            resolution_depth: stack.len(),
+            enclosing: stack
+                .active_post_replacement_or_paired_parent()
+                .map(|drains| EnclosingPostReplacementFrame {
+                    frame: drains.frame_id(),
+                    drains: drains.len(),
+                }),
+        }
+    }
+
+    /// Whether nothing the subtree installed remains: no frame above the
+    /// recorded depth, and the enclosing frame (found by identity, wherever it
+    /// now sits) holds no more drains than it did.
+    pub(crate) fn is_retired(&self, stack: &ResolutionStack) -> bool {
+        stack.len() <= self.resolution_depth
+            && self
+                .enclosing
+                .is_none_or(|enclosing| enclosing.is_retired(stack))
+    }
+}
+
+impl EnclosingPostReplacementFrame {
+    fn is_retired(self, stack: &ResolutionStack) -> bool {
+        let drains_now = match self.frame {
+            Some(id) => stack.post_replacement_frame_drain_count(id),
+            None => stack
+                .active_post_replacement_or_paired_parent()
+                .map(PostReplacementDrainStack::len),
+        };
+        // A consumed frame took its nested drains with it.
+        drains_now.is_none_or(|drains| drains <= self.drains)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -8089,6 +8184,17 @@ pub struct ManaAbilityCostCursor {
     /// count rather than sharing one value.
     #[serde(default)]
     pub next_counter_choice: usize,
+    /// CR 602.2b + CR 605.3b + CR 118.11: counters actually removed by this
+    /// activation's counter legs so far; `Some(0)` = a counter leg removed none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_removed_counters: Option<u32>,
+    /// CR 118.11 + CR 616.1: a counter leg of this cost whose removal waits on a
+    /// replacement choice. The cursor has already advanced past that leg; on
+    /// resume the removal is settled by measurement, credited to
+    /// `cost_removed_counters`, and the leg's later removals are paid before
+    /// any later component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_removal: Option<Box<PausedCounterCostRemoval>>,
     /// The current selected-exile component, after the move that paused has
     /// been consumed. Its remaining objects must move before the cost cursor
     /// advances to the next component.
@@ -8274,6 +8380,21 @@ pub enum PendingCostMoveResume {
         player: PlayerId,
         pending: Box<PendingCast>,
     },
+    /// CR 118.3 + CR 122.1 + CR 601.2h + CR 602.2b + CR 616.1: A counter-removal
+    /// cost of a cast or activation paused while a replacement choice settles
+    /// its current removal. The resume settles that removal by measurement,
+    /// credits an activation's own removed-counter count (CR 118.11), pays the
+    /// cost's later removals, then runs `completion`. `pending` is `None` only
+    /// between the cost payer parking this root and its caller attaching the
+    /// payment (`unattached_activation_slot_mut`); `cost_paid_object` is the
+    /// selected object the handlers stamp once the cost is paid.
+    CounterCostRemovalPayment {
+        player: PlayerId,
+        pending: Option<Box<PendingCast>>,
+        removal: Box<PausedCounterCostRemoval>,
+        cost_paid_object: Option<ObjectId>,
+        completion: PendingCostMoveCompletion,
+    },
     /// CR 606.4 + CR 614.1a + CR 616.1: A loyalty activation paused on a
     /// counter-cost replacement-ordering choice (e.g. Doubling Season vs an
     /// opponent's Vorinclex halving the loyalty counters). The counter is
@@ -8333,7 +8454,67 @@ pub enum PendingCostMoveResume {
     RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
 }
 
+/// CR 616.1 + CR 608.2c: where a parked counter-cost root's own replacement
+/// subtree stands. Private plumbing; not serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CounterCostRootSubtree {
+    Absent,
+    Unfinished,
+    Retired,
+}
+
+impl GameState {
+    /// CR 616.1 + CR 608.2c: whether the parked root holds a counter-cost
+    /// removal, and if so whether everything that removal's replacement
+    /// installed has finished.
+    pub(crate) fn counter_cost_root_subtree(&self) -> CounterCostRootSubtree {
+        match self
+            .pending_cost_move_resume
+            .as_ref()
+            .and_then(PendingCostMoveResume::paused_counter_removal)
+        {
+            None => CounterCostRootSubtree::Absent,
+            Some(paused)
+                if paused
+                    .replacement_subtree
+                    .is_retired(&self.resolution_stack) =>
+            {
+                CounterCostRootSubtree::Retired
+            }
+            Some(_) => CounterCostRootSubtree::Unfinished,
+        }
+    }
+
+    /// CR 601.2h + CR 605.3b + CR 616.1: a parked counter-cost root whose
+    /// replacement subtree has retired is due: it is the innermost unfinished
+    /// work and resumes before any other resolution work.
+    pub(crate) fn counter_cost_root_is_due(&self) -> bool {
+        self.counter_cost_root_subtree() == CounterCostRootSubtree::Retired
+    }
+}
+
 impl PendingCostMoveResume {
+    /// CR 601.2h + CR 616.1: the counter-cost removal this root holds paused on
+    /// its replacement choice — the stack route's own record, or the mana cursor's.
+    /// Exhaustive so a new root is classified.
+    pub(crate) fn paused_counter_removal(&self) -> Option<&PausedCounterCostRemoval> {
+        match self {
+            Self::CounterCostRemovalPayment { removal, .. } => Some(removal),
+            Self::ManaAbilityPayment { cursor, .. } => cursor.counter_removal.as_deref(),
+            Self::Cast { .. }
+            | Self::SacrificeForCost { .. }
+            | Self::WardSacrificePayment { .. }
+            | Self::ReplacementMayCost { .. }
+            | Self::Foretell { .. }
+            | Self::CollectEvidencePayment { .. }
+            | Self::UnlessBouncePayment { .. }
+            | Self::ActivationMillPayment { .. }
+            | Self::LoyaltyActivation { .. }
+            | Self::CounterAdditionUnlessPayment { .. }
+            | Self::RandomDiscardUnlessPayment(_) => None,
+        }
+    }
+
     /// CR 601.2h + CR 602.2b + CR 605.3b + CR 116.2h: Whether the paused cost
     /// move belongs to casting a spell, activating an ability (a mana ability
     /// included) or performing a special action, none of which gives a player
@@ -8345,6 +8526,7 @@ impl PendingCostMoveResume {
             PendingCostMoveResume::Cast { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. } => true,
             // CR 116.2h: foretelling is a special action; its {2} is paid before
             // its exile move, which can then pause on a replacement.
@@ -8365,6 +8547,43 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
+        }
+    }
+
+    /// CR 601.2h + CR 602.2b: the payment slot and completion of a root the
+    /// cost payer parked before its caller could attach the paused cast or
+    /// activation. `None` for an attached root and for every root that never
+    /// takes a caller's payment.
+    pub(crate) fn unattached_activation_slot_mut(
+        &mut self,
+    ) -> Option<(
+        &mut Option<Box<PendingCast>>,
+        &mut PendingCostMoveCompletion,
+    )> {
+        match self {
+            PendingCostMoveResume::Cast {
+                pending: slot @ None,
+                completion,
+                ..
+            }
+            | PendingCostMoveResume::CounterCostRemovalPayment {
+                pending: slot @ None,
+                completion,
+                ..
+            } => Some((slot, completion)),
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+            | PendingCostMoveResume::SacrificeForCost { .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::CollectEvidencePayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => None,
         }
     }
 }
@@ -8883,7 +9102,10 @@ impl GameState {
             }
             PendingCastOwner::CostMove => match self.pending_cost_move_resume.as_ref()? {
                 PendingCostMoveResume::Cast { pending, .. }
-                | PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.as_deref(),
+                | PendingCostMoveResume::SacrificeForCost { pending, .. }
+                | PendingCostMoveResume::CounterCostRemovalPayment { pending, .. } => {
+                    pending.as_deref()
+                }
                 PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
                     match resume.as_ref() {
                         CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
@@ -8925,7 +9147,10 @@ impl GameState {
             }
             PendingCastOwner::CostMove => match self.pending_cost_move_resume.as_mut()? {
                 PendingCostMoveResume::Cast { pending, .. }
-                | PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.as_deref_mut(),
+                | PendingCostMoveResume::SacrificeForCost { pending, .. }
+                | PendingCostMoveResume::CounterCostRemovalPayment { pending, .. } => {
+                    pending.as_deref_mut()
+                }
                 PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
                     match resume.as_mut() {
                         CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
@@ -9275,6 +9500,7 @@ fn visit_cost_move_resume_events(
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::ActivationMillPayment { .. }
+        | PendingCostMoveResume::CounterCostRemovalPayment { .. }
         | PendingCostMoveResume::LoyaltyActivation { .. } => {}
     }
 }
@@ -9624,6 +9850,11 @@ pub struct PendingManaAbility {
     /// resolve in inline mana ability resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 602.2b + CR 605.3b + CR 118.11: the cost cursor's final
+    /// `ManaAbilityCostCursor::cost_removed_counters` total, carried across the
+    /// CR 605.3b colour prompt into `produce_mana_from_ability`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_removed_counters: Option<u32>,
     /// CR 605.3a: Other identical, choice-free mana sources the controller
     /// could activate for the same `SingleColor` prompt (their other
     /// Treasures, etc.). Computed only when the prompt is `SingleColor` and the
@@ -22873,6 +23104,16 @@ declare_game_state! {
     /// CR 400.7: Zone-change snapshots this turn, enabling data-driven condition queries.
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
     pub zone_changes_this_turn: im::Vector<ZoneChangeRecord>,
+    /// CR 603.10 + CR 603.6a + CR 611.3c: each battlefield entry's entrant as it existed
+    /// immediately after its entry event — continuous effects applied, later instructions of the
+    /// same resolution (CR 608.2c) not yet applied. Keyed by the entry's
+    /// `ZoneChangeRecord::turn_zone_change_index` (the `zone_changes_this_turn` index space;
+    /// cleared with it). Written only by `zones::settle_battlefield_entry_observations`; read only
+    /// through `GameState::battlefield_entry_observation`. An entry with no row was never settled,
+    /// and enter observers read the live entrant (or its record). Engine-internal: stripped from
+    /// every viewer projection.
+    #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
+    pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -24901,6 +25142,15 @@ impl PostReplacementDrain {
 impl PostReplacementDrainStack {
     pub fn is_empty(&self) -> bool {
         self.drains.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.drains.len()
+    }
+
+    /// Every drain in this frame, outermost first. Read-only.
+    pub(crate) fn drains(&self) -> impl Iterator<Item = &PostReplacementDrain> {
+        self.drains.iter()
     }
 
     /// Is there a continuation that has not run yet?
@@ -27516,6 +27766,33 @@ impl GameState {
             .expect("the active spell-resolution frame must be structurally consumable")
     }
 
+    /// CR 608.2c + CR 608.2e + CR 101.4 + CR 118.12a: make the continuation
+    /// directly below the active paused drain that drain's active child, as
+    /// `ResolutionStack::promote_ability_continuation_after_post_replacement_draw`
+    /// does — unless it sits below a parked counter-cost root's replacement
+    /// subtree. A continuation below the root's boundary is outer work (a later
+    /// seat's "unless" choice of a resolving ability, say), and outer work never
+    /// rises above the root's subtree: it stays where it is, and the drain retires
+    /// as the top. The stack is `[.., continuation, drain]` here, so the
+    /// continuation is below the boundary exactly when `len < depth + 2`. The one
+    /// guard for both promote callers.
+    fn promote_paused_drain_tail_within_counter_cost_subtree(
+        &mut self,
+    ) -> Result<bool, ResolutionStackError> {
+        let continuation_is_outer = self
+            .pending_cost_move_resume
+            .as_ref()
+            .and_then(PendingCostMoveResume::paused_counter_removal)
+            .is_some_and(|paused| {
+                self.resolution_stack.len() < paused.replacement_subtree.resolution_depth + 2
+            });
+        if continuation_is_outer {
+            return Ok(false);
+        }
+        self.resolution_stack
+            .promote_ability_continuation_after_post_replacement_draw()
+    }
+
     /// Removes a completed independent MultiDraw frame. A frame carrying the
     /// deferred connive re-entry remains resident until that exact link is
     /// consumed by its action/resume owner.
@@ -27556,9 +27833,7 @@ impl GameState {
             .observe_draw_sequence_frame_id(next_frame_id);
         let completed = self.resolution_stack.take_active_multi_draw()?;
         if paired_post_replacement {
-            let _ = self
-                .resolution_stack
-                .promote_ability_continuation_after_post_replacement_draw()?;
+            let _ = self.promote_paused_drain_tail_within_counter_cost_subtree()?;
         }
         Ok(completed)
     }
@@ -27631,9 +27906,7 @@ impl GameState {
             // own later instructions (an outer chain's tail parked outside the
             // pair) now resume with that outer event context readable, so promote
             // them out from under its frame; their completion retires it.
-            let _ = self
-                .resolution_stack
-                .promote_ability_continuation_after_post_replacement_draw();
+            let _ = self.promote_paused_drain_tail_within_counter_cost_subtree();
             // CR 614.12a + CR 614.13a: a Devour-only ChangeZone snapshot stays
             // resident while its exact post-replacement child resolves. Once that
             // child is retired, the snapshot is again the active owner and its
@@ -29631,6 +29904,7 @@ impl GameState {
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
+            battlefield_entry_observations: im::OrdMap::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -32664,6 +32938,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players_who_sacrificed_artifact_this_turn: _,
         sacrificed_permanents_this_turn: _,
         zone_changes_this_turn: _,
+        battlefield_entry_observations: _,
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
@@ -33025,6 +33300,7 @@ impl PartialEq for GameState {
                 == other.players_who_sacrificed_artifact_this_turn
             && self.sacrificed_permanents_this_turn == other.sacrificed_permanents_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
+            && self.battlefield_entry_observations == other.battlefield_entry_observations
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
@@ -35772,18 +36048,13 @@ mod tests {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             enter_transformed: false,
-            enter_tapped: EtbTapState::Unspecified,
             enters_under_player: None,
-            enters_attacking: false,
-            enter_with_counters: Vec::new(),
-            conditional_enter_with_counters: Vec::new(),
             duration: None,
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::FaceDown,
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
-            enters_modified_if: None,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         });
@@ -39386,6 +39657,7 @@ mod tests {
                         chosen_exiled: Vec::new(),
                         chosen_sacrificed_battlefield: Vec::new(),
                         cost_paid_object: None,
+                        cost_removed_counters: None,
                         batch_siblings: Vec::new(),
                     }),
                 },
@@ -39499,6 +39771,7 @@ mod tests {
                     chosen_exiled: Vec::new(),
                     chosen_sacrificed_battlefield: Vec::new(),
                     cost_paid_object: None,
+                    cost_removed_counters: None,
                     batch_siblings: Vec::new(),
                 })),
             };
@@ -42010,6 +42283,7 @@ mod tests {
                 chosen_exiled: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
+                cost_removed_counters: None,
                 batch_siblings: Vec::new(),
             };
             let mut state = GameState::new_two_player(7);
@@ -45162,6 +45436,7 @@ mod tests {
                     chosen_exiled: Vec::new(),
                     chosen_sacrificed_battlefield: Vec::new(),
                     cost_paid_object: None,
+                    cost_removed_counters: None,
                     batch_siblings: Vec::new(),
                 }),
             },
@@ -45392,6 +45667,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let mut state = GameState::new_two_player(42);
@@ -45834,17 +46110,20 @@ mod tests {
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
-            remaining: vec![],
+            // CR 603.6a + CR 614.12: a member carries the entry modifications
+            // resolved before the event's first member moved.
+            remaining: vec![ChangeZoneMemberEntry {
+                object_id: ObjectId(9),
+                enter_with_counters: vec![(CounterType::Plus1Plus1, 2)],
+                enter_tapped: EtbTapState::Tapped,
+                enters_attacking: true,
+            }],
             source_id: ObjectId(7),
             controller: PlayerId(0),
             origin: None,
             destination: Zone::Battlefield,
             enter_transformed: false,
-            enter_tapped: EtbTapState::Unspecified,
             enters_under_player: Some(PlayerId(1)),
-            enters_attacking: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -45863,10 +46142,24 @@ mod tests {
             }),
             library_placement: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
-            enters_modified_if: None,
             enter_attached_to: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
+        // The resolved members are the only entry-modification authority: the
+        // raw gate spec is no longer carried.
+        let carrier = serde_json::to_value(&original).expect("serialize carrier");
+        for removed in [
+            "enter_tapped",
+            "enters_attacking",
+            "enter_with_counters",
+            "conditional_enter_with_counters",
+            "enters_modified_if",
+        ] {
+            assert!(
+                carrier.get(removed).is_none(),
+                "carrier must not emit the removed `{removed}` field: {json}"
+            );
+        }
         // Modern shape must be emitted, NOT the legacy bool field.
         assert!(
             json.contains("\"enters_under_player\""),
@@ -45903,6 +46196,23 @@ mod tests {
         assert!(
             error.to_string().contains("immediately_before_latched"),
             "missing latch rejection must name the missing authority: {error}"
+        );
+
+        // The carrier itself never accepts bare-id members. A persisted v1–v6
+        // carrier is migrated or refused before this decode by
+        // `migrate_legacy_change_zone_carrier` (`types/resolution.rs`), reached
+        // from the v1 reader arm and from
+        // `migrate_legacy_change_zone_member_entries` for v2–v6.
+        let mut bare_ids = serde_json::to_value(&original).expect("serialize modern carrier");
+        bare_ids
+            .as_object_mut()
+            .expect("pending carrier serializes as an object")
+            .insert("remaining".to_string(), serde_json::json!([7]));
+        let error = serde_json::from_value::<PendingChangeZoneIteration>(bare_ids)
+            .expect_err("legacy bare-id members must reject");
+        assert!(
+            error.to_string().contains("ChangeZoneMemberEntry"),
+            "bare-id member rejection must name the member carrier: {error}"
         );
 
         // A same-kind child is a distinct operation. It must not absorb the
@@ -48882,6 +49192,205 @@ mod shared_zone_storage_tests {
             dandan.loop_fingerprint(),
             stray.loop_fingerprint(),
             "the non-canonical seat's own container is hashed too"
+        );
+    }
+}
+
+/// CR 616.1g + CR 608.2c: a counter removal's replacement subtree boundary sees
+/// a child drain that nests into the enclosing post-replacement frame, which a
+/// stack-depth check alone cannot.
+#[cfg(test)]
+mod replacement_subtree_boundary_tests {
+    use super::{
+        GameState, PendingContinuation, PostReplacementDrain, PostReplacementDrainStack,
+        ReplacementSubtreeBoundary, ResidentDrainPolicy,
+    };
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, ResolvedAbility,
+        TargetFilter,
+    };
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::resolution::AbilityContinuationFrame;
+
+    fn ready_drain(name: &str) -> PostReplacementDrain {
+        PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented(name, "subtree-boundary fixture"),
+            ),
+        )))
+    }
+
+    /// One post-replacement frame whose only drain is dispatched (stamping the
+    /// frame) and paused, as an outer post-effect waiting on a prompt is.
+    fn state_with_paused_enclosing_frame() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.install_post_replacement_drain(ready_drain("outer"), ResidentDrainPolicy::Replace);
+        let (_, outer) = state
+            .begin_post_replacement_dispatch()
+            .expect("the outer drain dispatches");
+        assert!(state.pause_post_replacement_dispatch(outer));
+        state
+    }
+
+    #[test]
+    fn a_child_nested_into_the_enclosing_frame_keeps_the_subtree_live() {
+        let mut state = state_with_paused_enclosing_frame();
+        let boundary = ReplacementSubtreeBoundary::at(&state.resolution_stack);
+        assert!(
+            boundary
+                .enclosing
+                .is_some_and(|enclosing| enclosing.frame.is_some() && enclosing.drains == 1),
+            "reach: the boundary names the stamped enclosing frame: {boundary:?}"
+        );
+
+        state.install_post_replacement_drain(ready_drain("child"), ResidentDrainPolicy::Replace);
+        let (_, child) = state
+            .begin_post_replacement_dispatch()
+            .expect("the nested child drain dispatches");
+        assert_eq!(
+            state.resolution_stack.len(),
+            boundary.resolution_depth,
+            "the child nested into the frame without growing the stack"
+        );
+        assert!(
+            !boundary.is_retired(&state.resolution_stack),
+            "a nested child drain keeps the subtree live"
+        );
+
+        assert!(state.finish_post_replacement_dispatch(child).is_some());
+        assert!(
+            boundary.is_retired(&state.resolution_stack),
+            "the subtree retires with the nested child"
+        );
+    }
+
+    #[test]
+    fn a_nested_child_stays_live_after_the_frame_above_its_parent_is_consumed() {
+        let mut state = state_with_paused_enclosing_frame();
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(70),
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state.push_ability_continuation(AbilityContinuationFrame {
+            pending,
+            choose_zone_trigger_context: None,
+        });
+        let boundary = ReplacementSubtreeBoundary::at(&state.resolution_stack);
+        assert!(
+            boundary
+                .enclosing
+                .is_some_and(|enclosing| enclosing.frame.is_some() && enclosing.drains == 1),
+            "reach: the frame below the continuation is the paired parent: {boundary:?}"
+        );
+
+        state.install_post_replacement_drain(ready_drain("child"), ResidentDrainPolicy::Replace);
+        let (_, child) = state
+            .begin_post_replacement_dispatch()
+            .expect("the nested child drain dispatches");
+        state
+            .take_active_ability_continuation()
+            .expect("the continuation is the top frame")
+            .expect("the continuation is present");
+        assert_eq!(
+            state.resolution_stack.len(),
+            boundary.resolution_depth - 1,
+            "reach: the frame above the parent was consumed first"
+        );
+        assert!(
+            !boundary.is_retired(&state.resolution_stack),
+            "the enclosing frame, found by identity, still holds the nested child"
+        );
+
+        assert!(state.finish_post_replacement_dispatch(child).is_some());
+        assert!(
+            boundary.is_retired(&state.resolution_stack),
+            "the subtree retires with the nested child"
+        );
+    }
+
+    /// A type-level contract fixture, not a claimed production shape: with the
+    /// frame above the parent consumed and a fresh, unstamped frame pushed in its
+    /// place, the stack is as deep as when the boundary was recorded and the
+    /// active frame holds one drain. Only the identity read sees that the
+    /// enclosing frame still holds the nested child.
+    #[test]
+    fn a_nested_child_is_read_in_its_own_frame_not_the_active_one() {
+        let mut state = state_with_paused_enclosing_frame();
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(71),
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state.push_ability_continuation(AbilityContinuationFrame {
+            pending,
+            choose_zone_trigger_context: None,
+        });
+        let boundary = ReplacementSubtreeBoundary::at(&state.resolution_stack);
+        let enclosing = boundary
+            .enclosing
+            .expect("reach: the frame below the continuation is the paired parent");
+        let parent_id = enclosing
+            .frame
+            .expect("reach: the paused enclosing frame is stamped");
+        assert_eq!(enclosing.drains, 1);
+
+        state.install_post_replacement_drain(ready_drain("child"), ResidentDrainPolicy::Replace);
+        let (_, child) = state
+            .begin_post_replacement_dispatch()
+            .expect("the nested child drain dispatches");
+        state
+            .take_active_ability_continuation()
+            .expect("the continuation is the top frame")
+            .expect("the continuation is present");
+        let mut unrelated = PostReplacementDrainStack::default();
+        assert!(unrelated.install(ready_drain("unrelated"), ResidentDrainPolicy::Replace));
+        state.resolution_stack.push_post_replacement(unrelated);
+
+        assert_eq!(
+            state.resolution_stack.len(),
+            boundary.resolution_depth,
+            "reach: the stack is as deep as when the boundary was recorded"
+        );
+        assert_eq!(
+            state
+                .resolution_stack
+                .active_post_replacement_or_paired_parent()
+                .map(PostReplacementDrainStack::len),
+            Some(1),
+            "reach: the active frame is the unrelated one, holding one drain"
+        );
+        assert_eq!(
+            state
+                .resolution_stack
+                .post_replacement_frame_drain_count(parent_id),
+            Some(2),
+            "reach: the enclosing frame holds the nested child"
+        );
+        assert!(
+            !boundary.is_retired(&state.resolution_stack),
+            "the enclosing frame is read by identity, not as the active frame"
+        );
+
+        state
+            .resolution_stack
+            .take_active_post_replacement()
+            .expect("the unrelated frame is the top")
+            .expect("the unrelated frame is present");
+        assert!(state.finish_post_replacement_dispatch(child).is_some());
+        assert!(
+            boundary.is_retired(&state.resolution_stack),
+            "the subtree retires with the nested child"
         );
     }
 }

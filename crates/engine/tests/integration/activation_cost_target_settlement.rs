@@ -1697,6 +1697,28 @@ fn a_settled_mana_payment_reaches_the_mana_resume_guard() {
     });
 }
 
+/// The counter-cost tail shared by both selected counter handlers and the
+/// deferred-removal resume. It is reached only past the handler's own entry
+/// guard in the same action, or from the resume of an activation that already
+/// passed it, so no live `Open` carrier reaches the tail first: G2 only, with
+/// G1 held by the census's structural check that the tail calls the guard.
+#[test]
+fn a_selected_counter_cost_reaches_the_counter_cost_tail_guard() {
+    guard_reach(ActivationCostGuardSite::CounterCostTail, &|| {
+        let (r, fodder) = at_cost_prompt(
+            "{1}, Remove a +1/+1 counter from a creature you control",
+            1,
+            1,
+        );
+        (
+            r,
+            GameAction::SelectCards {
+                cards: vec![fodder],
+            },
+        )
+    });
+}
+
 /// The untargeted direct payment, reached for real. An untargeted cost never
 /// defers its lock, so no carrier it sees can be `Open`: G1 for it is the
 /// census's structural check. (`ReturnAfterAutomatic` is reached only after a
