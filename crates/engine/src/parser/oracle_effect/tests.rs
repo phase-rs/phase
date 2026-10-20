@@ -76538,6 +76538,341 @@ fn choose_ast_in_chain(chunk: &str, chain_lower: &str) -> Option<ChooseImperativ
     super::imperative::parse_choose_ast(chunk, &lower, &mut ctx)
 }
 
+const COMPOUND_CHOICE_GAMBLE: &str = "Choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.";
+
+/// SHAPE U-C1: CR 115.10a + CR 608.2d, the compound instruction carries both
+/// domains and marks only its object choice as a resolution-time choice.
+#[test]
+fn compound_choice_c1_creature_and_opponent_ast() {
+    let chunk = "choose a creature you control and an opponent";
+    assert_eq!(
+        choose_ast_in_chain(chunk, &COMPOUND_CHOICE_GAMBLE.to_ascii_lowercase()),
+        Some(ChooseImperativeAst::ObjectAndPlayer {
+            object: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            player: ChoiceType::opponent(),
+        })
+    );
+    let mut ctx = ParseContext {
+        chosen_player_count: 2,
+        ..ParseContext::default()
+    };
+    assert!(matches!(
+        super::imperative::parse_choose_ast(chunk, chunk, &mut ctx),
+        Some(ChooseImperativeAst::ObjectAndPlayer { .. })
+    ));
+    assert_eq!(
+        ctx.declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution)
+    );
+    assert_eq!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::ChosenPlayer { index: 2 })
+    );
+}
+
+/// SHAPE U-C2: the building block composes an artifact domain with the player
+/// noun; neither leg is hard-coded to the synthetic creature/opponent fixture.
+#[test]
+fn compound_choice_c2_artifact_and_player_ast() {
+    let chunk = "choose an artifact you control and a player";
+    assert_eq!(
+        choose_ast_in_chain(chunk, chunk),
+        Some(ChooseImperativeAst::ObjectAndPlayer {
+            object: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You)
+            ),
+            player: ChoiceType::player(),
+        })
+    );
+}
+
+/// SHAPE U-C3: unsupported domains/cardinalities cannot claim this arm;
+/// explicit targets and the legacy single-object instruction keep their owners.
+#[test]
+fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
+    // Positive reach guard for the compound-arm declines: the same entry point
+    // recognizes the supported one-object/one-opponent input in this test.
+    let supported = "choose a creature you control and an opponent";
+    assert!(matches!(
+        choose_ast_in_chain(supported, supported),
+        Some(ChooseImperativeAst::ObjectAndPlayer { .. })
+    ));
+    for text in [
+        "choose a color and an opponent",
+        "choose any number of creatures you control and an opponent",
+    ] {
+        assert!(
+            !matches!(
+                choose_ast_in_chain(text, text),
+                Some(ChooseImperativeAst::ObjectAndPlayer { .. })
+            ),
+            "must decline the compound object/player arm: {text}"
+        );
+    }
+    let explicit = "choose target creature and target player";
+    assert!(matches!(
+        choose_ast_in_chain(explicit, explicit),
+        Some(ChooseImperativeAst::TwoTargets { .. })
+    ));
+    let legacy = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
+    assert_eq!(
+        legacy.effect.as_ref(),
+        &Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        }
+    );
+    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Stack);
+    // A bare Effect cannot represent both instructions. The chain succeeds in
+    // U-C4; this lower-level entry point must fail closed rather than lose one.
+    assert!(matches!(
+        super::imperative::lower_choose_ast(ChooseImperativeAst::ObjectAndPlayer {
+            object: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            player: ChoiceType::opponent(),
+        }),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+/// Keep the coin-branch representation in one helper for the FlipCoins rebase.
+fn flip_lose_branch(def: &AbilityDefinition) -> &AbilityDefinition {
+    let Effect::FlipCoin { lose_effect, .. } = def.effect.as_ref() else {
+        panic!("expected FlipCoin, got {def:#?}");
+    };
+    lose_effect
+        .as_deref()
+        .expect("the lost flip must have a branch")
+}
+
+/// SHAPE U-C4: the whole synthetic spell lowers to object -> opponent -> flip,
+/// with an anaphoric object and chosen-player recipient in the lost branch.
+#[test]
+fn compound_choice_c4_full_gamble_execute_shape() {
+    let head = parse_effect_chain(COMPOUND_CHOICE_GAMBLE, AbilityKind::Spell);
+    assert_eq!(
+        head.effect.as_ref(),
+        &Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        }
+    );
+    // CR 115.10a: no declared target; only the head requests an object choice.
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Resolution);
+    let choose = head.sub_ability.as_deref().expect("opponent instruction");
+    assert_eq!(
+        choose.effect.as_ref(),
+        &Effect::Choose {
+            choice_type: ChoiceType::opponent(),
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        }
+    );
+    assert_eq!(choose.target_choice_timing, TargetChoiceTiming::Stack);
+    let flip = choose.sub_ability.as_deref().expect("flip instruction");
+    assert_eq!(flip.target_choice_timing, TargetChoiceTiming::Stack);
+    let give = flip_lose_branch(flip);
+    assert_eq!(
+        give.effect.as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::ParentTarget,
+            recipient: TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 })
+            ),
+        }
+    );
+    assert_attachment_chain_has_no_unimplemented(&head);
+    assert_attachment_chain_has_no_unimplemented(give);
+}
+
+/// SHAPE P3: the public Oracle pipeline must preserve the enclosing choice
+/// across the nested coin-branch parse, not just across ordinary clauses.
+#[test]
+fn compound_choice_c7_oracle_coin_branch_reads_the_chosen_opponent() {
+    let parsed = sorcery(COMPOUND_CHOICE_GAMBLE, "Risky Gamble");
+    assert_eq!(parsed.abilities.len(), 1, "one complete spell chain");
+    let root = &parsed.abilities[0];
+    assert_eq!(root.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert!(matches!(root.effect.as_ref(), Effect::TargetOnly { .. }));
+    let choose = root.sub_ability.as_deref().expect("opponent instruction");
+    assert_eq!(
+        choose.effect.as_ref(),
+        &Effect::Choose {
+            choice_type: ChoiceType::opponent(),
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        }
+    );
+    let give = flip_lose_branch(choose.sub_ability.as_deref().expect("flip instruction"));
+    assert_eq!(
+        give.effect.as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::ParentTarget,
+            recipient: TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 })
+            ),
+        }
+    );
+    assert_attachment_chain_has_no_unimplemented(root);
+    assert_attachment_chain_has_no_unimplemented(give);
+}
+
+/// SHAPE P3 preservation: without an enclosing choice the identical lost-flip
+/// instruction keeps its old recipient and its complete serialized branch.
+#[test]
+fn compound_choice_c8_coin_branch_without_a_choice_keeps_its_legacy_bytes() {
+    const GIVE: &str = "that opponent gains control of that creature";
+    let legacy = parse_effect_chain(
+        &format!("flip a coin. if you lose the flip, {GIVE}."),
+        AbilityKind::Spell,
+    );
+    let legacy_give = flip_lose_branch(&legacy);
+    assert_eq!(
+        legacy_give.effect.as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::ParentTarget,
+            recipient: TargetFilter::ParentTargetController,
+        },
+        "no chosen-player antecedent must retain the existing recipient"
+    );
+    // This is the pre-fix fold's literal nested parse with the default context.
+    // Compare the whole branch, including its shell, rather than only the enum.
+    let mut ctx = ParseContext::default();
+    let old_branch =
+        lower_effect_chain_ir(&parse_effect_chain_ir(GIVE, AbilityKind::Spell, &mut ctx));
+    assert_eq!(
+        serde_json::to_vec(legacy_give).expect("legacy folded branch serializes"),
+        serde_json::to_vec(&old_branch).expect("original nested parse serializes")
+    );
+    assert_attachment_chain_has_no_unimplemented(legacy_give);
+
+    // Positive reach guard for the absence of a chosen-player recipient above:
+    // the same branch WITH the compound choice must read ChosenPlayer{0}.
+    let chosen = parse_effect_chain(COMPOUND_CHOICE_GAMBLE, AbilityKind::Spell);
+    let flip = chosen
+        .sub_ability
+        .as_deref()
+        .expect("opponent instruction")
+        .sub_ability
+        .as_deref()
+        .expect("flip instruction");
+    let Effect::GiveControl { recipient, .. } = flip_lose_branch(flip).effect.as_ref() else {
+        panic!("expected the chosen-opponent handoff, got {chosen:#?}");
+    };
+    assert_eq!(recipient.chosen_player_index(), Some(0));
+}
+
+/// SHAPE P3 indexing: CR 608.2c, a nested branch following two choices names
+/// the latest player at index 1, not a restarted branch-local index 0.
+#[test]
+fn compound_choice_c9_coin_branch_after_two_choices_reads_index_one() {
+    let parsed = sorcery(
+        "Choose a creature you control and an opponent. Choose a player. Flip a coin. If you lose the flip, that player gains control of that creature.",
+        "Two Choice Gamble",
+    );
+    assert_eq!(parsed.abilities.len(), 1, "one complete spell chain");
+    let root = &parsed.abilities[0];
+    assert!(matches!(root.effect.as_ref(), Effect::TargetOnly { .. }));
+    let opponent = root.sub_ability.as_deref().expect("opponent instruction");
+    assert!(matches!(
+        opponent.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::Opponent { .. },
+            ..
+        }
+    ));
+    let player = opponent.sub_ability.as_deref().expect("second choice");
+    assert_eq!(
+        player.effect.as_ref(),
+        &Effect::Choose {
+            choice_type: ChoiceType::player(),
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        }
+    );
+    let give = flip_lose_branch(player.sub_ability.as_deref().expect("flip instruction"));
+    assert_eq!(
+        give.effect.as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::ParentTarget,
+            recipient: TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 1 })
+            ),
+        }
+    );
+    assert_attachment_chain_has_no_unimplemented(root);
+    assert_attachment_chain_has_no_unimplemented(give);
+}
+
+/// SHAPE U-C5: CR 608.2c, a player choice nested in the compound clause counts
+/// toward the index of a later choice; counting only clause heads yields zero.
+#[test]
+fn compound_choice_c5_nested_player_choice_increments_chain_counter() {
+    let head = parse_effect_chain(
+        "Choose a creature you control and an opponent. Choose a player. That player draws a card.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(head.effect.as_ref(), Effect::TargetOnly { .. }));
+    let opponent = head.sub_ability.as_deref().expect("nested opponent choice");
+    assert!(matches!(
+        opponent.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::Opponent { .. },
+            ..
+        }
+    ));
+    let player = opponent
+        .sub_ability
+        .as_deref()
+        .expect("second player choice");
+    assert_eq!(
+        player.effect.as_ref(),
+        &Effect::Choose {
+            choice_type: ChoiceType::player(),
+            persist: false,
+            selection: TargetSelectionMode::Chosen
+        }
+    );
+    let draw = player.sub_ability.as_deref().expect("chosen player draw");
+    let Effect::Draw { count, target } = draw.effect.as_ref() else {
+        panic!("expected draw after both choices, got {head:#?}");
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(target.chosen_player_index(), Some(1));
+    assert_attachment_chain_has_no_unimplemented(&head);
+}
+
+/// SHAPE U-C6: extracting the noun combinator preserves independent opponents
+/// and ordinal-cued player distinctness, including their verb continuations.
+#[test]
+fn compound_choice_c6_existing_player_nouns_keep_their_parse() {
+    for (noun, expected) in [
+        ("an opponent", ChoiceType::opponent()),
+        ("a second player", ChoiceType::player_distinct_from_prior()),
+    ] {
+        let bare = parse_effect_chain(&format!("Choose {noun}."), AbilityKind::Spell);
+        assert_eq!(
+            bare.effect.as_ref(),
+            &Effect::Choose {
+                choice_type: expected.clone(),
+                persist: false,
+                selection: TargetSelectionMode::Chosen
+            }
+        );
+        let with_verb = parse_effect_chain(
+            &format!("Choose {noun} to draw a card."),
+            AbilityKind::Spell,
+        );
+        assert_eq!(with_verb.effect.as_ref(), bare.effect.as_ref());
+        let draw = with_verb
+            .sub_ability
+            .as_deref()
+            .expect("chosen player's verb");
+        let Effect::Draw { count, target } = draw.effect.as_ref() else {
+            panic!("expected chosen-player Draw, got {with_verb:#?}");
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(target.chosen_player_index(), Some(0));
+    }
+}
+
 /// CR 607.2d + CR 608.2c: Gate A's four ordered conjuncts (`2-C2` + `2-C11`).
 /// Positive: Zenos's own head chunk in Zenos's own chain context. The paired
 /// head-gate controls use the SAME chunk text ("choose a land you control") in a

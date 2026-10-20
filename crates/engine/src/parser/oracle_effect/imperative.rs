@@ -4622,6 +4622,37 @@ fn try_parse_choose_battlefield_object(
     Some(ChooseImperativeAst::BattlefieldObject { filter, min, max })
 }
 
+/// CR 115.10a + CR 608.2d: the object and player are chosen during resolution.
+fn try_parse_choose_object_and_player(
+    rest: &str,
+    rest_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
+    let (offset, player, _) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(rest_lower, |i| {
+            all_consuming(preceded(tag("and "), super::parse_player_choice_noun)).parse(i)
+        })?;
+    let object_text = TextPair::new(rest, rest_lower)
+        .split_at(offset)
+        .0
+        .trim_end();
+    let mut choice_ctx = ctx.clone();
+    let (object, min, max) = parse_battlefield_object_choice_core(
+        object_text.original,
+        object_text.lower,
+        &mut choice_ctx,
+    )?;
+    if min != 1 || max != Some(1) {
+        return None;
+    }
+    choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+    choice_ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer {
+        index: choice_ctx.chosen_player_count,
+    });
+    *ctx = choice_ctx;
+    Some(ChooseImperativeAst::ObjectAndPlayer { object, player })
+}
+
 /// CR 607.2d + CR 608.2c: Gate B's head-shape provenance — does this head
 /// clause fragment have the standalone battlefield-object choice shape?
 ///
@@ -4767,6 +4798,10 @@ pub(super) fn parse_choose_ast(
         // the shared core. Must precede `is_choose_as_targeting`, which would
         // otherwise take the clause as the degraded targeting fallback.
         if let Some(ast) = try_parse_choose_battlefield_object(rest, rest_lower, lower, ctx) {
+            return Some(ast);
+        }
+
+        if let Some(ast) = try_parse_choose_object_and_player(rest, rest_lower, ctx) {
             return Some(ast);
         }
 
@@ -6379,6 +6414,10 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             Effect::ChooseDamageSource { source_filter }
         }
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
+        ChooseImperativeAst::ObjectAndPlayer { object, player } => Effect::unimplemented(
+            "compound_object_player_choice",
+            format!("object: {object:?}, player: {player:?}"),
+        ),
         ChooseImperativeAst::Reparse { text } => super::parse_effect(&text),
         ChooseImperativeAst::NamedChoice {
             choice_type,
@@ -15415,6 +15454,22 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             );
             target_b_clause.multi_target = target_b_multi_target;
             clause.sub_ability = Some(Box::new(target_b_clause));
+            clause
+        }
+        // CR 115.10a + CR 608.2d: untargeted object and player choices resolve
+        // in order. The parser marks only the object head as Resolution-timed.
+        ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            ChooseImperativeAst::ObjectAndPlayer { object, player },
+        )) => {
+            let mut clause = parsed_clause(Effect::TargetOnly { target: object });
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type: player,
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+            )));
             clause
         }
         // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers

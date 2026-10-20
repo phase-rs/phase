@@ -215,6 +215,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 156 — PendingCoinFlip gains branch_context, carrying the resolution's chosen
+ *      players and completed-empty object result across a coin-flip keep choice.
+ *      The persisted resolution state moves from version 7 to 8 — see
+ *      PROTOCOL_VERSION's own `/// 156` entry in crates/lobby-broker/src/protocol.rs.
+ *      A v155 peer silently drops the context, so the exact-match version check
+ *      refuses the pairing. Wire 138 moves with it.
  * 155 — PendingChangeZoneIteration members carry their pre-event entry modifications
  *      (ChangeZoneMemberEntry, CR 603.6a + CR 614.12), and the persisted resolution
  *      state moves from version 6 to 7 — see PROTOCOL_VERSION's own `/// 155` entry
@@ -944,7 +950,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 155;
+export const PROTOCOL_VERSION = 156;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

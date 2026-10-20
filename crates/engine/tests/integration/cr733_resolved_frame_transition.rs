@@ -49,6 +49,7 @@ fn coin_flip_frame() -> ResolutionFrame {
         lose_effect: None,
         kind: PendingCoinFlipKind::Single,
         chain_root_targets: Vec::new(),
+        branch_context: Default::default(),
     })
 }
 

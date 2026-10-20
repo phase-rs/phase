@@ -5627,11 +5627,15 @@ pub(super) fn handle_resolution_choice(
                 // control") is NOT a partition — its `sub_ability` is an
                 // independent trailing clause (e.g. the next `Choose`) and
                 // must not have the non-picked objects forced into its target
-                // list. Gate the forward on the continuation's own effect.
+                // list. Neither is an untargeted `TargetOnly` ("choose a
+                // creature you control", CR 115.10a): the pick is the whole
+                // choice, and the unchosen candidates are not "the rest".
+                // Gate the forward on the continuation's own effect.
                 let is_partition = !matches!(
                     cont.chain.effect,
                     crate::types::ability::Effect::PutCounter { .. }
                         | crate::types::ability::Effect::ChooseCounterKind { .. }
+                        | crate::types::ability::Effect::TargetOnly { .. }
                 );
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {

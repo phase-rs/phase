@@ -1779,6 +1779,12 @@ pub(crate) enum ChooseImperativeAst {
         min: u32,
         max: Option<u32>,
     },
+    /// CR 115.10a + CR 608.2d: "choose an object and a player" makes two
+    /// untargeted choices during resolution, in the printed order.
+    ObjectAndPlayer {
+        object: TargetFilter,
+        player: crate::types::ability::ChoiceType,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

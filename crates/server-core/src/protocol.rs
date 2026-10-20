@@ -3473,6 +3473,14 @@ mod tests {
         }
     }
 
+    /// v156: `PendingCoinFlip` gains `branch_context` (`FlipBranchContext`: the
+    /// players chosen earlier in the flipping resolution and a
+    /// completed-but-empty forwarded result, CR 608.2c + CR 609.3), and the
+    /// persisted resolution state moves from version 7 to 8; a v155 peer
+    /// re-encoding a Krark's-Thumb-parked coin flip would drop the field and
+    /// the resumed branch would lose its chosen opponent, so it must be refused
+    /// before it receives v156 state.
+    ///
     /// v155: `PendingChangeZoneIteration.remaining` carries each member's
     /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
     /// CR 614.12) and drops the raw gate fields, and the persisted resolution
@@ -3736,8 +3744,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_155_for_pre_event_change_zone_entries() {
-        assert_eq!(PROTOCOL_VERSION, 155);
+    fn protocol_version_is_156_for_coin_flip_branch_context() {
+        assert_eq!(PROTOCOL_VERSION, 156);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3748,7 +3756,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_155_for_pre_event_change_zone_entries` stays
+    /// `protocol_version_is_156_for_coin_flip_branch_context` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

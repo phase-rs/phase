@@ -10097,6 +10097,22 @@ pub(crate) fn awaits_resolution_object_choice(ability: &ResolvedAbility) -> bool
         Effect::ChooseCounterKind { target, .. } => {
             !matches!(target, TargetFilter::SpecificObject { .. })
         }
+        // CR 115.10a + CR 608.2d: an untargeted "choose a creature you control"
+        // (no literal "target") is made while the instruction resolves. Only an
+        // OBJECT target counts as the made choice, as for `PutCounter` above.
+        // A context reference or an attachment host ("enchanted creature") is
+        // determined by the game, not chosen, so it never prompts. Once the
+        // choice has completed with no candidates (`bound_result_is_empty`), it
+        // is not asked again: that stops the empty re-entry from looping.
+        Effect::TargetOnly { target } => {
+            !target.is_context_ref()
+                && !target.contains_source_attachment_host()
+                && !ability
+                    .targets
+                    .iter()
+                    .any(|target| matches!(target, TargetRef::Object(_)))
+                && !bound_result_is_empty(ability)
+        }
         _ => false,
     };
     ability.target_choice_timing == TargetChoiceTiming::Resolution
@@ -18824,6 +18840,78 @@ fn resolve_chain_body(
                         };
                         return Ok(ResolutionProgress::Waiting);
                     }
+                }
+            }
+        }
+    }
+
+    // CR 115.10a + CR 608.2d: an untargeted `TargetOnly` ("choose a creature you
+    // control", no literal "target") is the choice itself, made at THIS
+    // instruction's resolution. It shares the `PutCounter` block's plain filter
+    // scan (never targeting legality, so shroud, hexproof and protection do not
+    // restrict it) and its attachment-host exclusion. Unlike `PutCounter`, an
+    // empty pool is recorded rather than skipped, because a later "that
+    // creature" must name nothing rather than an inherited target or the
+    // ability's own source.
+    if awaits_resolution_object_choice(ability) {
+        if let Effect::TargetOnly { target } = &ability.effect {
+            let effective_filter = resolved_object_filter(state, ability, target);
+            let filter_ctx = filter::FilterContext::from_ability(ability);
+            let legal: Vec<ObjectId> = state
+                .battlefield_phased_in_ids()
+                .into_iter()
+                .filter(|id| {
+                    filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
+                })
+                .collect();
+            match legal.as_slice() {
+                [] => {
+                    // CR 608.2c + CR 609.3: the choice was made and named nothing.
+                    // Stamp the completed-but-empty result (the same vocabulary
+                    // as the partition complement and the forward-result seam)
+                    // and re-enter the body: `bound_result_is_empty` now keeps
+                    // this node from asking again, and the chain's dependents
+                    // are pruned by the shared missing-forward-result authority.
+                    //
+                    // The next instruction is stamped as well, exactly as the
+                    // partition forward does: the sub-boundary seam reads the
+                    // SUB's own marker, because the parent's context is only
+                    // inherited after that check. Without it a directly
+                    // dependent sub ("that creature") would reach the
+                    // `use_self` fallback and name the ability's own source.
+                    let empty_result = ForwardedResultContext::from_object_ids(state, &[]);
+                    let mut bound = ability.clone();
+                    if let Some(next_sub) = bound.sub_ability.as_mut() {
+                        next_sub.context.forwarded_result_context =
+                            Some(Box::new(empty_result.clone()));
+                    }
+                    bound.context.forwarded_result_context = Some(Box::new(empty_result));
+                    return resolve_chain_body(state, &bound, events, depth);
+                }
+                [only] => {
+                    // Re-enter the body, not the chain entry: the depth-0
+                    // prelude already ran for this resolution and must not run
+                    // twice (and the chain entry would clear the forwarded
+                    // result context at depth 0).
+                    let mut bound = ability.clone();
+                    bound.set_unpinned_targets(vec![TargetRef::Object(*only)]);
+                    return resolve_chain_body(state, &bound, events, depth);
+                }
+                _ => {
+                    state.park_ability_continuation(PendingContinuation::new(
+                        Box::new(ability.clone()),
+                        state,
+                    ));
+                    state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                        player: ability.controller,
+                        cards: legal,
+                        count: 1,
+                        up_to: false,
+                        constraint: None,
+                        source_id: ability.source_id,
+                        reciprocal_role: None,
+                    };
+                    return Ok(ResolutionProgress::Waiting);
                 }
             }
         }
@@ -54179,5 +54267,269 @@ mod resolution_progress_contract_tests {
         assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
         assert!(runner.state().pending_scoped_library_search.is_none());
         assert!(runner.state().resolution_stack.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod untargeted_target_only_choice_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, SubAbilityLink, TypedFilter};
+    use crate::types::actions::GameAction;
+    use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
+
+    /// "Choose a creature you control" as the parser lowers it for a Resolution
+    /// choice: a `TargetOnly` over the controller's creatures.
+    fn choose_creature_you_control(timing: TargetChoiceTiming) -> ResolvedAbility {
+        let mut head = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        );
+        head.target_choice_timing = timing;
+        head
+    }
+
+    /// "... that player gains control of that creature": a `ParentTarget`
+    /// handoff to a fixed opponent, so the recipient is not what these rows
+    /// exercise.
+    fn give_that_creature_to_p1() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::ParentTarget,
+                recipient: TargetFilter::SpecificPlayer { id: P1 },
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+    }
+
+    fn gain_life(amount: i32) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+    }
+
+    fn controller_changed(events: &[GameEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ControllerChanged { .. }))
+    }
+
+    /// U-D1: only a Resolution-timed `TargetOnly` that has not yet been given an
+    /// object, and whose result is not already completed-empty, awaits its choice.
+    #[test]
+    fn awaits_resolution_object_choice_for_untargeted_target_only() {
+        let chooser = choose_creature_you_control(TargetChoiceTiming::Resolution);
+        assert!(awaits_resolution_object_choice(&chooser));
+
+        // CR 115.10a: a Stack-timed `TargetOnly` is a declared target.
+        assert!(!awaits_resolution_object_choice(
+            &choose_creature_you_control(TargetChoiceTiming::Stack)
+        ));
+
+        // The choice has been made: an object target is bound.
+        let mut bound = chooser.clone();
+        bound.targets = vec![TargetRef::Object(ObjectId(5))];
+        assert!(!awaits_resolution_object_choice(&bound));
+
+        // A context reference is determined by the game, never chosen.
+        let mut context_ref = chooser.clone();
+        context_ref.effect = Effect::TargetOnly {
+            target: TargetFilter::ParentTarget,
+        };
+        assert!(!awaits_resolution_object_choice(&context_ref));
+
+        // CR 608.2c + CR 609.3: a completed-but-empty choice is not asked again,
+        // which is what stops the empty re-entry from looping.
+        let mut empty = chooser;
+        empty.context.forwarded_result_context = Some(Box::new(
+            ForwardedResultContext::from_object_ids(&GameState::new_two_player(42), &[]),
+        ));
+        assert!(!awaits_resolution_object_choice(&empty));
+    }
+
+    /// U-D2: a single candidate is forced and binds without a prompt. The
+    /// opponent's creature is not a candidate.
+    #[test]
+    fn single_candidate_binds_without_a_prompt() {
+        let mut scenario = GameScenario::new();
+        let mine = scenario.add_creature(P0, "Bear A", 2, 2).id();
+        let theirs = scenario.add_creature(P1, "Bear B", 2, 2).id();
+        let mut runner = scenario.build();
+
+        let chain = choose_creature_you_control(TargetChoiceTiming::Resolution)
+            .sub_ability(give_that_creature_to_p1());
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &chain, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseFromZoneChoice { .. }
+            ),
+            "a lone candidate is forced, not offered"
+        );
+        assert_eq!(runner.state().objects[&mine].controller, P1);
+        assert_eq!(runner.state().objects[&theirs].controller, P1);
+        assert!(controller_changed(&events));
+    }
+
+    /// U-D3: several candidates park and prompt the controller. The pick is
+    /// bound as the head's object and the unchosen candidates are NOT forwarded
+    /// to the next instruction (`is_partition`). A shroud creature is offered:
+    /// a choice is not a target (CR 115.10a).
+    #[test]
+    fn several_candidates_park_and_the_pick_alone_is_forwarded() {
+        let mut scenario = GameScenario::new();
+        let plain = scenario.add_creature(P0, "Bear A", 2, 2).id();
+        let shroud = scenario
+            .add_creature(P0, "Shroud Bear", 2, 2)
+            .with_keyword(Keyword::Shroud)
+            .id();
+        let theirs = scenario.add_creature(P1, "Bear B", 2, 2).id();
+        let mut runner = scenario.build();
+
+        let chain = choose_creature_you_control(TargetChoiceTiming::Resolution)
+            .sub_ability(give_that_creature_to_p1());
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &chain, &mut events, 0).unwrap();
+
+        let WaitingFor::ChooseFromZoneChoice {
+            player,
+            cards,
+            count,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected a ChooseFromZoneChoice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P0);
+        assert_eq!(count, 1);
+        let offered: HashSet<ObjectId> = cards.into_iter().collect();
+        assert_eq!(offered, HashSet::from([plain, shroud]));
+        assert!(
+            !controller_changed(&events),
+            "nothing moves before the pick"
+        );
+
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![shroud],
+            })
+            .unwrap();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+
+        assert_eq!(runner.state().objects[&shroud].controller, P1);
+        assert_eq!(
+            runner.state().objects[&plain].controller,
+            P0,
+            "the unchosen candidate is not forwarded to the handoff"
+        );
+        assert_eq!(runner.state().objects[&theirs].controller, P1);
+        assert!(runner.state().resolution_stack.is_empty());
+    }
+
+    /// U-D4 (B1): with no candidate the choice is made and names nothing. The
+    /// handoff of "that creature" does nothing (it must NOT fall back to the
+    /// ability's own source), while an independent sibling still happens.
+    #[test]
+    fn zero_candidates_name_nothing_and_leave_the_source_alone() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_basic_land(P0, ManaColor::Green);
+        let theirs = scenario.add_creature(P1, "Bear B", 2, 2).id();
+        let mut runner = scenario.build();
+
+        let mut independent = gain_life(3);
+        independent.source_id = source;
+        independent.sub_link = SubAbilityLink::SequentialSibling;
+        let mut give = give_that_creature_to_p1().sub_ability(independent);
+        give.source_id = source;
+        let mut chain =
+            choose_creature_you_control(TargetChoiceTiming::Resolution).sub_ability(give);
+        chain.source_id = source;
+
+        let life_before = runner.state().players[0].life;
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &chain, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+
+        assert_eq!(
+            runner.state().players[0].life,
+            life_before + 3,
+            "reach: the independent sibling after the pruned handoff still resolves"
+        );
+        assert!(!controller_changed(&events));
+        assert_eq!(runner.state().objects[&source].controller, P0);
+        assert_eq!(runner.state().objects[&theirs].controller, P1);
+        assert!(
+            runner.state().transient_continuous_effects.is_empty(),
+            "no control-change effect was installed"
+        );
+    }
+
+    /// U-D4 (B1): the completed-but-empty marker travels down the chain, so a
+    /// later parked instruction still reads "the choice named nothing".
+    #[test]
+    fn zero_candidates_stamp_the_completed_empty_result_on_the_chain() {
+        let mut runner = GameScenario::new().build();
+        create_object(
+            runner.state_mut(),
+            CardId(900),
+            P0,
+            "Library card".to_string(),
+            Zone::Library,
+        );
+
+        let mut scry = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+        .sub_ability(gain_life(3));
+        scry.sub_link = SubAbilityLink::SequentialSibling;
+        let chain = choose_creature_you_control(TargetChoiceTiming::Resolution)
+            .sub_ability(give_that_creature_to_p1().sub_ability(scry));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &chain, &mut events, 0).unwrap();
+
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ScryChoice { .. }),
+            "reach: the chain got past the pruned handoff to the scry"
+        );
+        let stamped = runner
+            .state()
+            .active_ability_continuation()
+            .and_then(|continuation| {
+                continuation
+                    .chain
+                    .context
+                    .forwarded_result_context
+                    .as_deref()
+                    .map(|context| context.targets.is_empty())
+            });
+        assert_eq!(stamped, Some(true));
     }
 }
