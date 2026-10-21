@@ -38,6 +38,8 @@ const PLATINUM_EMPERION_ORACLE: &str =
     "Your life total can't change. (You can't gain or lose life. You can't pay any amount of life except 0.)";
 const VIZIER_ORACLE: &str = "You may have this creature enter as a copy of any creature on the battlefield, except if this creature was embalmed, the token has no mana cost, it's white, and it's a Zombie in addition to its other types.\nEmbalm {3}{U}{U}";
 const SOUL_WARDEN_ORACLE: &str = "Whenever another creature enters, you gain 1 life.";
+const RITE_ORACLE: &str = "Kicker {5} (You may pay an additional {5} as you cast this spell.)\nCreate a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.";
+const ANOINTED_PROCESSION_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
 
 fn add_mana_for(runner: &mut GameRunner, player: PlayerId, ty: ManaType, count: usize) {
     let idx = runner
@@ -1633,4 +1635,371 @@ fn cant_lose_life_auto_commits_without_prompt() {
     assert_eq!(tokens.len(), 1);
     let token = runner.state().objects.get(&tokens[0]).unwrap();
     assert_eq!((token.power, token.toughness), (Some(1), Some(1)));
+}
+
+/// B1 (round 2): Anointed Procession doubles the Embalm Vizier token; EACH
+/// token copy-chooses Minion of the Wastes and answers its own copied payment.
+/// The second token's payment surface must carry the batch continuation (the
+/// `counter_pause_post_actions` stash in `finish_copy_target_choice_entry`):
+/// without it token[1] is never created.
+#[test]
+fn procession_doubled_embalm_tokens_each_pay_for_minion() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Anointed Procession", ANOINTED_PROCESSION_ORACLE);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let vizier = scenario
+        .add_creature_to_graveyard(P0, "Vizier of Many Faces", 0, 0)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Blue], 3))
+        .from_oracle_text_with_keywords(&["Embalm"], VIZIER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 6);
+    add_mana_for(&mut runner, P0, ManaType::Black, 3);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    // Minion enters first as the copy target.
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 15);
+
+    // Embalm the Vizier (doubled to two tokens by the Procession).
+    let embalm_index = runner.state().objects[&vizier]
+        .abilities
+        .iter()
+        .position(|ability| matches!(&*ability.effect, Effect::CopyTokenOf { .. }))
+        .expect("the synthesized Embalm ability is on the graveyard Vizier");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: vizier,
+            ability_index: embalm_index,
+        })
+        .expect("activate Embalm");
+
+    // Drive: each token copy-chooses Minion, then pays (3, then 7). Payment i
+    // is asserted against copy-choice i's entrant, so any interleave of the
+    // two tokens' prompts still binds each payment to its own token. Maxes are
+    // the life totals at prompt time: 15, then 12.
+    let amounts = [3u32, 7u32];
+    let maxes = [15u32, 12u32];
+    let mut copied: Vec<ObjectId> = Vec::new();
+    let mut paid: Vec<(ObjectId, u32)> = Vec::new();
+    for _ in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accept the copy");
+            }
+            WaitingFor::CopyTargetChoice {
+                source_id,
+                valid_targets,
+                ..
+            } => {
+                assert!(
+                    valid_targets.contains(&minion),
+                    "Minion must be a legal copy target"
+                );
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(minion)),
+                    })
+                    .expect("choose Minion");
+                copied.push(source_id);
+            }
+            WaitingFor::PayAmountChoice { .. } => {
+                let idx = paid.len();
+                assert!(
+                    idx < amounts.len(),
+                    "exactly two copied payments, got a third: {:?}",
+                    runner.state().waiting_for
+                );
+                let waiting = runner.state().waiting_for.clone();
+                let source = *copied
+                    .get(idx)
+                    .expect("each payment follows its token's copy choice");
+                assert_pay_prompt(&waiting, P0, 0, maxes[idx], source);
+                let amount = amounts[idx];
+                paid.push((source, amount));
+                runner
+                    .act(GameAction::SubmitPayAmount { amount })
+                    .expect("answer the copied payment");
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                if paid.len() == amounts.len() && runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+                continue;
+            }
+            other => panic!("unexpected prompt while driving doubled Embalm: {other:?}"),
+        }
+    }
+    assert_eq!(copied.len(), 2, "both tokens copy-chose");
+    assert_eq!(paid.len(), 2, "both tokens paid");
+    runner.advance_until_stack_empty();
+
+    // Completion boundary + per-token pins + independent latches.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.life(P0), 5, "20 - 5 - 3 - 7");
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 2, "both Embalm tokens entered");
+    let mut ids: Vec<ObjectId> = paid.iter().map(|(id, _)| *id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 2, "the two payments came from distinct entrants");
+    for (id, amount) in &paid {
+        assert!(tokens.contains(id), "payment source {id:?} entered");
+        let token = runner.state().objects.get(id).unwrap();
+        assert_eq!(token.name, "Minion of the Wastes");
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(*amount as i32), Some(*amount as i32)),
+            "token P/T reads its own latch"
+        );
+        assert_eq!(chosen_number_of(&runner, *id), Some(*amount));
+    }
+    let orig = runner.state().objects.get(&minion).unwrap();
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(5), Some(5)),
+        "original untouched"
+    );
+}
+
+/// B2 (round 2): a kicked Rite of Replication targeting Minion of the Wastes
+/// mints five direct token copies; EACH token's `TokenEntry` rides the
+/// entry-payment continuation — five sequential prompts, five independent
+/// latches. (The generic post-replacement payment would stamp a resolution
+/// amount with no latch, leaving every token 0/0.)
+#[test]
+fn kicked_rite_copies_each_pay_their_own_entry() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            2,
+        ))
+        .id();
+    let mut runner = scenario.build();
+    // Minion {3}{B}{B}{B} + kicked Rite {2}{U}{U} + {5}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 10);
+    add_mana_for(&mut runner, P0, ManaType::Black, 3);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    // Minion enters first as the copy target.
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 15);
+
+    // Cast Rite kicked targeting the Minion; resolution parks on the first
+    // token-entry payment.
+    runner
+        .cast(rite)
+        .target_object(minion)
+        .accept_optional()
+        .commit()
+        .resolve();
+
+    // Drive the five sequential token-entry payments (1, 2, 3, 1, 2). Each
+    // prompt's max is the life total at prompt time: 15, 14, 12, 9, 8.
+    let amounts = [1u32, 2, 3, 1, 2];
+    let maxes = [15u32, 14, 12, 9, 8];
+    let mut paid: Vec<(ObjectId, u32)> = Vec::new();
+    for _ in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::PayAmountChoice { .. } => {
+                let idx = paid.len();
+                assert!(
+                    idx < amounts.len(),
+                    "exactly five token payments, got a sixth: {:?}",
+                    runner.state().waiting_for
+                );
+                let waiting = runner.state().waiting_for.clone();
+                let source = match &waiting {
+                    WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+                    _ => unreachable!("matched above"),
+                };
+                assert_pay_prompt(&waiting, P0, 0, maxes[idx], source);
+                let amount = amounts[idx];
+                paid.push((source, amount));
+                runner
+                    .act(GameAction::SubmitPayAmount { amount })
+                    .expect("answer the token payment");
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                if paid.len() == amounts.len() && runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+                continue;
+            }
+            other => panic!("unexpected prompt while driving kicked Rite: {other:?}"),
+        }
+    }
+    assert_eq!(paid.len(), 5, "all five token payments were required");
+    runner.advance_until_stack_empty();
+
+    // Completion boundary + per-token pins + independent latches.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.life(P0), 6, "15 - 9 across the five token payments");
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 5, "kicked Rite mints five tokens");
+    let mut ids: Vec<ObjectId> = paid.iter().map(|(id, _)| *id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        5,
+        "the five payments came from distinct entrants"
+    );
+    let mut seen: Vec<u32> = Vec::new();
+    for (id, amount) in &paid {
+        assert!(tokens.contains(id), "payment source {id:?} entered");
+        let token = runner.state().objects.get(id).unwrap();
+        assert_eq!(token.name, "Minion of the Wastes");
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(*amount as i32), Some(*amount as i32)),
+            "token P/T reads its own latch"
+        );
+        assert_eq!(chosen_number_of(&runner, *id), Some(*amount));
+        seen.push(*amount);
+    }
+    seen.sort();
+    assert_eq!(seen, vec![1, 1, 2, 2, 3], "the paid distribution");
+    let orig = runner.state().objects.get(&minion).unwrap();
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(5), Some(5)),
+        "original untouched"
+    );
+}
+
+/// B2a (round 2): an unkicked Rite of Replication targeting Nameless Race at
+/// cap 0 routes the single token entry through the determined-0 funnel — no
+/// prompt, inline `Number(0)` latch, entry completes. Glorious Anthem keeps
+/// the 0/0 base alive as a 1/1 (base 0/0 + anthem), so the battlefield
+/// assertion pins latch + survival together. Cap-0 is preserved because the
+/// Nameless cap counts OPPONENTS' white nontoken permanents + white cards in
+/// OPPONENTS' graveyards only — our anthem doesn't count.
+#[test]
+fn unkicked_rite_nameless_cap_zero_auto_commits_token_entry() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM_ORACLE);
+    let nameless = scenario
+        .add_creature_to_hand_from_oracle(P0, "Nameless Race", 0, 0, NAMELESS_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 3))
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            2,
+        ))
+        .id();
+    let mut runner = scenario.build();
+    // Nameless {3}{B} + unkicked Rite {2}{U}{U}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 5);
+    add_mana_for(&mut runner, P0, ManaType::Black, 1);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    // Pre-cast Nameless: cap 0 auto-commits with no prompt; the 0/0 survives
+    // via the anthem as a 1/1, a legal Rite target.
+    let outcome = runner.cast(nameless).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "cap-0 pre-cast auto-commits with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(runner.life(P0), 20, "nothing paid");
+    assert_eq!(chosen_number_of(&runner, nameless), Some(0));
+    let orig = runner.state().objects.get(&nameless).unwrap();
+    assert_eq!(orig.zone, Zone::Battlefield);
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(1), Some(1)),
+        "0/0 base + anthem"
+    );
+
+    // Unkicked Rite targeting Nameless: the single token entry is determined-0
+    // and auto-commits SILENTLY through the TokenEntry funnel — the resolve
+    // runs to Priority with no prompt anywhere in the window.
+    let life_before = runner.life(P0);
+    let outcome = runner
+        .cast(rite)
+        .target_object(nameless)
+        .decline_optional()
+        .commit()
+        .resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "determined-0 token entry auto-commits with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(runner.life(P0), life_before, "the Rite paid nothing");
+    assert!(runner.state().stack.is_empty());
+
+    // Exactly 1 new token: 1/1 (0/0 base + anthem) with the Number(0) latch.
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 1, "exactly one token entered");
+    let token = runner.state().objects.get(&tokens[0]).unwrap();
+    assert_eq!(token.name, "Nameless Race");
+    assert_eq!(
+        (token.power, token.toughness),
+        (Some(1), Some(1)),
+        "0/0 base + anthem"
+    );
+    assert_eq!(
+        chosen_number_of(&runner, tokens[0]),
+        Some(0),
+        "determined-0 latch"
+    );
+    // The original is untouched and still on the battlefield.
+    let orig = runner.state().objects.get(&nameless).unwrap();
+    assert_eq!(orig.zone, Zone::Battlefield);
+    assert_eq!((orig.power, orig.toughness), (Some(1), Some(1)));
+    assert_eq!(chosen_number_of(&runner, nameless), Some(0));
 }

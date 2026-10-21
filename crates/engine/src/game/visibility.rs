@@ -7718,6 +7718,7 @@ mod tests {
                     entry_ref,
                     enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: std::collections::HashSet::new(),
                 },
             });

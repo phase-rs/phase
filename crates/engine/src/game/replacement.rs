@@ -10204,7 +10204,7 @@ fn apply_single_replacement(
                 // (`park_as_enters_pay_choice`) is answered the same way — paid
                 // and latched pre-zone-change — so its execute is suppressed too.
                 let post_effect = post_effect.filter(|_| {
-                    !((as_enters_choice_type(repl_def).is_some()
+                    !(((as_enters_choice_type(repl_def).is_some()
                         || as_enters_payment_shape(repl_def))
                         && matches!(
                             &proposed,
@@ -10214,6 +10214,19 @@ fn apply_single_replacement(
                                 ..
                             } if *object_id == rid.source
                         ))
+                        // CR 614.12a + CR 707.2: only the PAYMENT half extends
+                        // to TokenEntry — its answer rides the entry-payment
+                        // continuation. The choice half stays ZoneChange-only:
+                        // choice detection never parks a TokenEntry, so a
+                        // token-entry choice has no pre-entry answer and must
+                        // keep its generic post-replacement prompt;
+                        // suppressing it would drop the choice entirely.
+                        || (as_enters_payment_shape(repl_def)
+                            && matches!(
+                                &proposed,
+                                ProposedEvent::TokenEntry { entry_ref, .. }
+                                if *entry_ref == rid.source
+                            )))
                 });
                 let post_effect = post_effect.filter(|_| {
                     !(matches!(
@@ -11585,15 +11598,19 @@ fn as_enters_payment_for_entry<'a>(
     proposed: &ProposedEvent,
     rid: ReplacementId,
 ) -> Option<&'a ReplacementDefinition> {
-    let ProposedEvent::ZoneChange {
-        object_id,
-        to: Zone::Battlefield,
-        ..
-    } = proposed
-    else {
-        return None;
+    // CR 614.12a + CR 707.2: a direct token copy (Rite of Replication) enters
+    // via TokenEntry through the same pipeline — its copied payment rides the
+    // same continuation as a ZoneChange entry.
+    let entrant_id = match proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => *object_id,
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return None,
     };
-    if rid.source != *object_id {
+    if rid.source != entrant_id {
         return None;
     }
     let def = replacement_definition_for_id(state, rid)?;
@@ -11624,21 +11641,28 @@ fn as_enters_pay_terms(
     if proposed.already_applied(&rid) {
         return None;
     }
-    let ProposedEvent::ZoneChange {
-        object_id,
-        controller_override,
-        ..
-    } = proposed
-    else {
-        return None;
+    // Reached only for the two entry classes `as_enters_payment_for_entry`
+    // admits; a TokenEntry carries no controller override and owner==controller
+    // for tokens, so the entrant's controller pays.
+    let entrant_id = match proposed {
+        ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return None,
     };
-    let entrant = state.entering_or_live_object(*object_id)?;
-    let payer = controller_override.unwrap_or(entrant.owner);
+    let entrant = state.entering_or_live_object(entrant_id)?;
+    let payer = match proposed {
+        ProposedEvent::ZoneChange {
+            controller_override,
+            ..
+        } => controller_override.unwrap_or(entrant.owner),
+        ProposedEvent::TokenEntry { .. } => entrant.controller,
+        _ => return None,
+    };
     let pay_max = crate::game::effects::pay::max_pay_any_life_amount(state, payer);
     let max = match &def.entry_payment_max {
         Some(cap) => {
             let cap_eval =
-                crate::game::quantity::resolve_quantity(state, cap, payer, *object_id).max(0);
+                crate::game::quantity::resolve_quantity(state, cap, payer, entrant_id).max(0);
             pay_max.min(u32::try_from(cap_eval).unwrap_or(0))
         }
         None => pay_max,
@@ -11747,26 +11771,54 @@ pub(crate) fn pending_entry_payment_is_live(state: &GameState) -> bool {
     let [rid] = pending.candidates.as_slice() else {
         return false;
     };
-    let ProposedEvent::ZoneChange {
-        object_id,
-        controller_override,
-        ..
-    } = &pending.proposed
-    else {
-        return false;
+    // The parked proposal is either entry class; the TokenEntry payer is the
+    // entrant's controller (no override slot, owner==controller for tokens).
+    let (entrant_id, payer) = match &pending.proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            controller_override,
+            ..
+        } => {
+            let Some(entrant) = state.entering_or_live_object(*object_id) else {
+                return false;
+            };
+            (*object_id, controller_override.unwrap_or(entrant.owner))
+        }
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            let Some(entrant) = state.entering_or_live_object(*entry_ref) else {
+                return false;
+            };
+            (*entry_ref, entrant.controller)
+        }
+        _ => return false,
     };
-    if rid.source != *source_id || *object_id != *source_id {
+    if rid.source != *source_id || entrant_id != *source_id {
         return false;
     }
-    let Some(entrant) = state.entering_or_live_object(*object_id) else {
-        return false;
-    };
-    if *player != controller_override.unwrap_or(entrant.owner) {
+    if *player != payer {
         return false;
     }
     !pending.is_optional
         && !pending.proposed.already_applied(rid)
         && as_enters_payment_for_entry(state, &pending.proposed, *rid).is_some()
+}
+
+/// CR 614.12a: mutable access to the latch slot on a battlefield entry
+/// proposal — `ZoneChange` or `TokenEntry`. Both classes ride the entry-payment
+/// continuation, so the paid amount (and the determined-0 latch) rides the
+/// proposal identically through this one helper.
+pub(crate) fn proposed_entry_choices_mut(
+    proposed: &mut ProposedEvent,
+) -> Option<&mut Option<Box<crate::types::proposed_event::EntryChoices>>> {
+    match proposed {
+        ProposedEvent::ZoneChange {
+            enter_with_choices, ..
+        }
+        | ProposedEvent::TokenEntry {
+            enter_with_choices, ..
+        } => Some(enter_with_choices),
+        _ => None,
+    }
 }
 
 /// CR 614.12a + CR 609.3: tri-state pre-entry payment funnel shared by all
@@ -11786,12 +11838,8 @@ fn check_and_autocommit_entry_payment(
     // ordinary apply path run. No `pay_life_as_cost` call: paying 0 life is
     // vacuous (CR 119.4b; `life_costs.rs` short-circuits it identically).
     as_enters_pay_terms(state, proposed, rid).filter(|(max, _)| *max == 0)?;
-    if let ProposedEvent::ZoneChange {
-        enter_with_choices, ..
-    } = proposed
-    {
-        enter_with_choices
-            .get_or_insert_with(Default::default)
+    if let Some(slot) = proposed_entry_choices_mut(proposed) {
+        slot.get_or_insert_with(Default::default)
             .0
             .push(ChosenAttribute::Number(0));
     }
@@ -11812,15 +11860,18 @@ fn as_enters_choice_changes_applicability(
     candidates: &[ReplacementId],
     proposed: &ProposedEvent,
 ) -> bool {
-    // Only a battlefield entry can carry a pre-entry choice; every other event
-    // class leaves here without touching a candidate.
-    let ProposedEvent::ZoneChange {
-        object_id,
-        to: Zone::Battlefield,
-        ..
-    } = proposed
-    else {
-        return false;
+    // Only a battlefield entry can carry a pre-entry choice or payment; every
+    // other event class leaves here without touching a candidate. The choice
+    // half stays inert on TokenEntry (choice detection is ZoneChange-only);
+    // the payment half below goes live for it.
+    let entrant_id = match proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => *object_id,
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return false,
     };
     if candidates.len() < 2 {
         return false;
@@ -11856,7 +11907,7 @@ fn as_enters_choice_changes_applicability(
     if !has_choice {
         return false;
     }
-    let Some(entrant) = state.entering_or_live_object(*object_id) else {
+    let Some(entrant) = state.entering_or_live_object(entrant_id) else {
         return false;
     };
     if !crate::game::filter::entry_projection_reads_choices(entrant) {
@@ -14464,6 +14515,7 @@ mod tests {
                 entry_ref,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
+                enter_with_choices: None,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -14593,6 +14645,7 @@ mod tests {
                     entry_ref: ObjectId(77),
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::ChangeZone, ReplacementEvent::Moved],

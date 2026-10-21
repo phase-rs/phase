@@ -826,6 +826,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 entry_ref: token_id,
                 enter_tapped,
                 enter_with_counters: Vec::new(),
+                enter_with_choices: None,
                 applied: std::collections::HashSet::new(),
             };
             match crate::game::replacement::replace_event(state, proposed, events) {

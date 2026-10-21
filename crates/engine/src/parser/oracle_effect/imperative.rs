@@ -29100,6 +29100,51 @@ mod tests {
                 if name == "prevent"
         ));
     }
+
+    /// PR #10008 round 2 (B3): "pay one or more {E}" is DELIBERATELY declined
+    /// (an honest `unparsed_verb_arguments` downstream) rather than reduced to
+    /// a fixed payment. The five corpus cards carrying the range — Aether
+    /// Refinery, Localized Destruction, Pia Nalaar Chief Mechanic, Rampaging
+    /// Aetherhood, Territorial Aetherkite — all read "you may pay one or more
+    /// {E}. If/When you do, <X is the amount paid>", a min-1 variable payment
+    /// needing prompt-min machinery the engine does not have yet; the old
+    /// `parse_number` rest-discard silently stamped fixed 1, which was wrong.
+    /// The reach-guard pins the neighboring forms so the decline is proven
+    /// deliberate, not a broken extractor.
+    #[test]
+    fn one_or_more_energy_range_declines_while_neighbors_parse() {
+        assert_eq!(
+            parse_pay_residue_cost("one or more {e}", "one or more {E}"),
+            None,
+            "the min-1 range declines honestly instead of reducing to fixed 1"
+        );
+        // Reach-guard: the neighboring energy forms still parse.
+        assert_eq!(
+            parse_pay_residue_cost("{e}{e}", "{E}{E}"),
+            Some(AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }),
+            "pure sigils still parse"
+        );
+        assert_eq!(
+            parse_pay_residue_cost("eight {e}", "eight {E}"),
+            Some(AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 8 }
+            }),
+            "word-number counts still parse"
+        );
+        assert!(
+            matches!(
+                parse_pay_residue_cost("any amount of {e}", "any amount of {E}"),
+                Some(AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                })
+            ),
+            "variable energy still parses"
+        );
+    }
 }
 
 /// Row 1.O — the die-result ROW grammar adds no arm that duplicates an existing

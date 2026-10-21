@@ -2025,12 +2025,10 @@ pub(super) fn handle_entry_payment(
     let resume_at_resolution_depth = state.resolution_stack.len();
     match pay_life_as_cost(state, player, amount, events) {
         PayLifeCostResult::Paid { .. } => {
-            if let ProposedEvent::ZoneChange {
-                enter_with_choices, ..
-            } = &mut pending.proposed
+            if let Some(slot) =
+                super::replacement::proposed_entry_choices_mut(&mut pending.proposed)
             {
-                enter_with_choices
-                    .get_or_insert_with(Default::default)
+                slot.get_or_insert_with(Default::default)
                     .0
                     .push(ChosenAttribute::Number(amount));
             }
@@ -2041,12 +2039,10 @@ pub(super) fn handle_entry_payment(
         | PayLifeCostResult::DeferredReplacementChoice { .. } => {
             // The inner prompt owns `pending_replacement` now; the latched
             // outer rides the resume marker until the drain completes it.
-            if let ProposedEvent::ZoneChange {
-                enter_with_choices, ..
-            } = &mut pending.proposed
+            if let Some(slot) =
+                super::replacement::proposed_entry_choices_mut(&mut pending.proposed)
             {
-                enter_with_choices
-                    .get_or_insert_with(Default::default)
+                slot.get_or_insert_with(Default::default)
                     .0
                     .push(ChosenAttribute::Number(amount));
             }
@@ -2964,6 +2960,22 @@ fn finish_copy_target_choice_entry(
     if let Some(waiting_for) =
         super::replacement::surface_copied_entry_payment(state, source_id, events)
     {
+        // CR 616.1 carrier for the payment pause — verbatim mirror of the aura-site
+        // stash below: `counter_pause_post_actions` holds the liminal copy-token
+        // caller's committed-entry emit and its remaining-batch continuation, and
+        // returning the prompt without parking them would drop both (the drain
+        // side is `complete_copy_surfaced_payment`, which resumes through
+        // `resume_pending_continuation_if_priority` when the payment is answered).
+        // Empty-guarded so the single-token path (which passes nothing) acquires
+        // no spurious pending-counter frame.
+        if !counter_pause_post_actions.is_empty() {
+            super::effects::counters::stash_pending_counter_post_actions(
+                state,
+                crate::types::ability::EffectKind::CopyTokenOf,
+                source_id,
+                counter_pause_post_actions,
+            );
+        }
         return Ok(Some(waiting_for));
     }
     // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters

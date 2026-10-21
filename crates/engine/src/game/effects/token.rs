@@ -1803,6 +1803,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         entry_ref,
         enter_tapped,
         enter_with_counters,
+        enter_with_choices,
         ..
     } = event
     else {
@@ -1837,6 +1838,13 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     entry
         .object
         .set_tapped(enter_tapped.resolve(entry.object.projected().tapped));
+    // CR 614.12a + CR 400.7: the entrant's as-enters choices and paid-amount
+    // latch were made before it entered and rode the event; install them on
+    // the projection before the birth command is built (mirrors the ZoneChange
+    // delivery fold in `zone_pipeline.rs`).
+    if let Some(choices) = enter_with_choices {
+        entry.object.chosen_attributes_mut().extend(choices.0);
+    }
     let owner = entry.object.projected().owner;
 
     // CR 733: the settled copy-token birth journals at the single liminal insert
@@ -8370,6 +8378,7 @@ mod tests {
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: std::collections::HashSet::new(),
                 },
                 &mut events,
@@ -8478,6 +8487,7 @@ mod tests {
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: std::collections::HashSet::new(),
                 },
                 &mut events,
@@ -8606,6 +8616,7 @@ mod tests {
             entry_ref,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: vec![(CounterType::Plus1Plus1, 1)],
+            enter_with_choices: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();

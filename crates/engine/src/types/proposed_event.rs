@@ -808,6 +808,13 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
+        /// CR 614.12a + CR 707.2: the answers to the token entrant's own "As ~
+        /// enters, choose …" replacements plus its paid as-enters amount latch,
+        /// mirroring the ZoneChange field. Direct token copies (Rite of
+        /// Replication copying Minion of the Wastes) ride the entry-payment
+        /// continuation through this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_with_choices: Option<Box<EntryChoices>>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -965,8 +972,8 @@ fn default_produce_mana_count() -> u32 {
 }
 
 /// CR 614.12a: the answers to an entrant's own as-enters choices, carried by
-/// its battlefield entry (`ProposedEvent::ZoneChange::enter_with_choices`).
-/// Boxed there because it is rarely populated.
+/// its battlefield entry (`ZoneChange::enter_with_choices` or
+/// `TokenEntry::enter_with_choices`). Boxed there because it is rarely populated.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EntryChoices(pub Vec<crate::types::ability::ChosenAttribute>);
