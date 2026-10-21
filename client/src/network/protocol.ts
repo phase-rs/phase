@@ -106,12 +106,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  138 — game_setup and state_update carry GameState whose effects carry
+ *  141 — game_setup and state_update carry GameState whose effects carry
  *       Effect::FlipCoins { flips, .. } in place of FlipCoin, FlipCoins { count }
  *       and FlipCoinUntilLose, and whose coin-flip resolution frame kind is
- *       Exactly or UntilLoss. A v137 peer reads a multi-flip or until-loss run
+ *       Exactly or UntilLoss. A v140 or older peer reads a multi-flip or until-loss run
  *       as one flip, so first contact rejects the skew. Bumped in lockstep with
- *       full-game protocol 156.
+ *       full-game protocol 159.
  *  137 — game_setup and state_update carry GameState whose parked ChangeZone
  *       frame stores each remaining member with its pre-event entry
  *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves
@@ -738,7 +738,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 138 as const;
+export const WIRE_PROTOCOL_VERSION = 141 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
