@@ -6628,7 +6628,8 @@ pub(crate) fn sub_outlives_false_parent_gate(sub: &ResolvedAbility) -> bool {
 /// CR 608.2c: whether `node` is the next printed instruction of its chain
 /// rather than a resolution step of the node before it (see
 /// [`SubAbilityLink`]). The one instruction-unit authority for the walks that
-/// skip part of a printed chain: `first_independent_forward_result_sibling`,
+/// skip part of a printed chain: [`next_independent_instruction`] (used by
+/// `first_independent_forward_result_sibling` and the paid unless-cost path),
 /// [`declined_gate_surviving_instructions`], and the per-player decline scan
 /// in `resolve_chain_body`. A skipped node takes the resolution steps that
 /// follow it with it, because they depend on it; the nodes printed before it
@@ -13875,6 +13876,7 @@ fn drive_repeat_for_outermost(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    mut payment_choice: Option<AutoMayChoice>,
 ) -> Result<ResolutionProgress, EffectError> {
     let hydrated = hydrate_event_context_targets(state, ability);
     let effective = hydrated.as_ref();
@@ -13890,7 +13892,7 @@ fn drive_repeat_for_outermost(
         iter_ability.repeat_for = None;
         let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
         let progress = with_iteration_return_result_occurrence(state, &iter_ability, |state| {
-            resolve_chain_body(state, &iter_ability, events, depth)
+            resolve_chain_body(state, &iter_ability, events, depth, payment_choice.take())
         })?;
         if progress.is_pending() {
             let next_iteration = iteration + 1;
@@ -16613,6 +16615,67 @@ pub(crate) fn resolve_ability_chain_step(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<ResolutionProgress, EffectError> {
+    resolve_ability_chain_with_payment_choice(state, ability, events, depth, None)
+}
+
+/// CR 118.12a + CR 701.6a: the stack objects (by id) that an unless-paused
+/// `Counter` instruction would counter if its cost goes unpaid. `pending_effect`
+/// and `trigger_event` are the `WaitingFor::UnlessPayment` prompt's own
+/// payload. The referent is read with the resolver's own binding
+/// (`counter::countered_targets` + `counter::countered_stack_index`), with the
+/// prompt's captured trigger event as the event "that spell" names (CR 608.2k).
+/// Any other instruction counters nothing.
+pub fn unless_payment_countered_stack_ids(
+    state: &GameState,
+    pending_effect: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> Vec<ObjectId> {
+    if !matches!(pending_effect.effect, Effect::Counter { .. }) {
+        return Vec::new();
+    }
+    let countered_ids = |board: &GameState| -> Vec<ObjectId> {
+        counter::countered_targets(board, pending_effect)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => counter::countered_stack_index(board, pending_effect, id)
+                    .map(|index| board.stack[index].id),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
+    };
+    if state.current_trigger_event.as_ref() == trigger_event {
+        return countered_ids(state);
+    }
+    let mut board = state.clone();
+    board.current_trigger_event = trigger_event.cloned();
+    countered_ids(&board)
+}
+
+/// CR 118.12a + CR 608.2c: the unpaid root still reads its predecessor's
+/// context at admission. Its known payment choice owns only its outgoing result.
+pub(crate) fn resolve_unpaid_unless_ability_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    resolve_ability_chain_with_payment_choice(
+        state,
+        ability,
+        events,
+        depth,
+        Some(AutoMayChoice::Decline),
+    )
+    .map(|_| ())
+}
+
+fn resolve_ability_chain_with_payment_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    mut payment_choice: Option<AutoMayChoice>,
+) -> Result<ResolutionProgress, EffectError> {
     // CR 608.2c: A forwarded result belongs to one resolution chain. A root
     // ability can be resumed from serialized state, so discard any stale value
     // before it begins a new resolution; nested producers replace the context
@@ -16732,11 +16795,11 @@ pub(crate) fn resolve_ability_chain_step(
             "repeat_for (count) and repeat_until (predicate) are mutually exclusive"
         );
         match ability.repeat_until.clone() {
-            None => resolve_chain_body(state, ability, events, depth),
+            None => resolve_chain_body(state, ability, events, depth, payment_choice),
             Some(RepeatContinuation::ControllerChoice) => {
                 let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
                 let progress = with_iteration_return_result_occurrence(state, ability, |state| {
-                    resolve_chain_body(state, ability, events, depth)
+                    resolve_chain_body(state, ability, events, depth, payment_choice.take())
                 })?;
                 if progress.is_pending() {
                     // Inner pause: stash so the drain re-sets the repeat prompt
@@ -16786,7 +16849,7 @@ pub(crate) fn resolve_ability_chain_step(
                     .count();
                 let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
                 let progress = with_iteration_return_result_occurrence(state, ability, |state| {
-                    resolve_chain_body(state, ability, events, depth)
+                    resolve_chain_body(state, ability, events, depth, payment_choice.take())
                 })?;
                 if progress.is_pending() {
                     park_repeat_until_after_inner_pause(
@@ -16865,7 +16928,7 @@ pub(crate) fn resolve_ability_chain_step(
                         state.resolution_stack.capture_child_boundary();
                     let progress =
                         with_iteration_return_result_occurrence(state, ability, |state| {
-                            resolve_chain_body(state, ability, events, depth)
+                            resolve_chain_body(state, ability, events, depth, payment_choice.take())
                         })?;
                     if progress.is_pending() {
                         // Inner pause: stash the loop ability with its remaining cap
@@ -17272,6 +17335,7 @@ fn resolve_chain_body(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    payment_choice: Option<AutoMayChoice>,
 ) -> Result<ResolutionProgress, EffectError> {
     let mut progress = ResolutionProgress::Complete;
     let mut tail_ownership = TailOwnership::Caller;
@@ -17646,7 +17710,7 @@ fn resolve_chain_body(
     if repeat_for_outermost_with_scope_or_unless(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
     {
-        return drive_repeat_for_outermost(state, ability, events, depth);
+        return drive_repeat_for_outermost(state, ability, events, depth, payment_choice);
     }
 
     // CR 608.2: player_scope iteration — when an ability has player_scope set,
@@ -18092,7 +18156,13 @@ fn resolve_chain_body(
                         1 => {
                             let mut bound = ability.clone();
                             bound.set_unpinned_targets(legal);
-                            return resolve_ability_chain_step(state, &bound, events, depth);
+                            return resolve_ability_chain_with_payment_choice(
+                                state,
+                                &bound,
+                                events,
+                                depth,
+                                payment_choice,
+                            );
                         }
                         _ => {
                             // CR 608.2d: the chosen player picks one object.
@@ -18618,21 +18688,13 @@ fn resolve_chain_body(
             // that has no mana cost (lands, tokens, other costless permanents)
             // is UNPAYABLE — attempting to pay it is an illegal action. No
             // payment is offered and the unless-effect always resolves; even a
-            // Counter is not prevented (its controller cannot pay). This is the
-            // inverse of the `{0}` "players can always pay 0" branch below, and
-            // the two must stay distinct: `ManaCost::NoCost != ManaCost::zero()`.
+            // Counter is not prevented (its controller cannot pay). A payable
+            // {0} is different: CR 118.5 makes it an acknowledgment the payer
+            // is still asked for, like any other cost. `ManaCost::NoCost !=
+            // ManaCost::zero()` matters because the first falls through and the
+            // second prompts.
             if unless_cost_is_unpayable(&resolved_cost) {
                 // Unpayable: fall through to execute the effect unconditionally.
-            } else if matches!(ability.effect, Effect::Counter { .. })
-                && matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
-            {
-                // Legacy {0} counter auto-pay; aligning it with CR 118.5's acknowledgment is separate.
-                events.push(GameEvent::EffectResolved {
-                    kind: EffectKind::Counter,
-                    source_id: ability.source_id,
-                    subject: None,
-                });
-                return Ok(progress);
             } else if let Some((&payer, remaining_payers)) = unless_payers
                 .iter()
                 .position(|p| {
@@ -18797,7 +18859,13 @@ fn resolve_chain_body(
                         } else {
                             bound.set_unpinned_targets(vec![TargetRef::Object(legal[0])]);
                         }
-                        return resolve_ability_chain_step(state, &bound, events, depth);
+                        return resolve_ability_chain_with_payment_choice(
+                            state,
+                            &bound,
+                            events,
+                            depth,
+                            payment_choice,
+                        );
                     }
                     _ => {
                         let mut cont = ability.clone();
@@ -18851,7 +18919,7 @@ fn resolve_chain_body(
                 // this resolution and must not run twice.
                 let mut bound = ability.clone();
                 bound.set_unpinned_targets(candidates);
-                return resolve_chain_body(state, &bound, events, depth);
+                return resolve_chain_body(state, &bound, events, depth, payment_choice);
             }
             _ => {
                 let mut parked = ability.clone();
@@ -19559,15 +19627,24 @@ fn resolve_chain_body(
     //     `apply_parent_chain_context`, which re-clones the parent's whole
     //     context onto each child at every hand-off.
     let performed_outcome_owned;
-    let ability =
-        if let Some(performed) = resolver_performed_outcome(ability, &events[events_before..]) {
-            let mut owned = ability.clone();
-            owned.set_optional_effect_performed_recursive(performed);
-            performed_outcome_owned = owned;
-            &performed_outcome_owned
+    let ability = if let Some(performed) = payment_choice
+        .map(|choice| choice == AutoMayChoice::Accept)
+        .or_else(|| resolver_performed_outcome(ability, &events[events_before..]))
+    {
+        let mut owned = ability.clone();
+        if payment_choice.is_some() {
+            // CR 118.12 + CR 118.12a: Counter delivery is not payment, and
+            // declining payment cannot undo Flash's preceding optional put.
+            // Publish only after this root's incoming gate and effect.
+            owned.context.optional_effect_performed = performed;
         } else {
-            ability
-        };
+            owned.set_optional_effect_performed_recursive(performed);
+        }
+        performed_outcome_owned = owned;
+        &performed_outcome_owned
+    } else {
+        ability
+    };
 
     // CR 608.2c: Record the objects affected by this effect as a tracked set so
     // downstream sub-abilities can resolve "this way" references (pronouns,
@@ -19746,7 +19823,8 @@ fn resolve_chain_body(
     // `!cost_payment_failed_flag` (not this flag), and that guard already requires
     // `!cost_payment_failed_flag` — the same condition gating this seed.
     let mandatory_rider_owned;
-    let ability = if !ability.optional
+    let ability = if payment_choice.is_none()
+        && !ability.optional
         && !ability.context.optional_effect_performed
         && !compound_run_unperformed(ability)
         && !state.cost_payment_failed_flag
@@ -21493,11 +21571,9 @@ fn resolved_unless_cost(
                 other => {
                     // CR 702.24a: No current mechanic constructs a
                     // non-SelfRef `PerCounter`. If one ever does,
-                    // returning 0 routes through the CR 118.5 zero-
-                    // cost short-circuit (the unless-effect proceeds
-                    // without prompting), which is the least-
-                    // surprising default until the target-resolution
-                    // branch is implemented.
+                    // returns {0}, which is asked (CR 118.5), the
+                    // least-surprising default until the
+                    // target-resolution branch is implemented.
                     // CR 113.6b: TargetFilter resolution against game
                     // state belongs in `game/filter.rs`; wire it here
                     // when the second mechanic lands.
@@ -21515,7 +21591,8 @@ fn resolved_unless_cost(
             // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
             // X drives the unless-cost. The plain resolve_quantity path
             // passes chosen_x=None, making a bare {X} unless-cost always
-            // resolve to 0 and wrongly short-circuit via CR 118.5.
+            // resolve to the wrong cost, {0}, which would be asked for instead
+            // of the announced X.
             let amount =
                 crate::game::quantity::resolve_quantity_with_targets(state, quantity, ability);
             AbilityCost::Mana {
@@ -21832,9 +21909,18 @@ fn without_missing_forward_result_dependencies(
 fn first_independent_forward_result_sibling(
     ability: Option<&ResolvedAbility>,
 ) -> Option<ResolvedAbility> {
-    std::iter::successors(ability, |node| node.sub_ability.as_deref())
+    next_independent_instruction(ability).and_then(without_missing_forward_result_dependencies)
+}
+
+/// CR 608.2c: the first node at or below `node`, in printed order, that starts
+/// an independent instruction ([`starts_independent_instruction`]). The nodes
+/// passed on the way are resolution steps of a node before them, so a walk that
+/// skips that node skips them with it.
+pub(crate) fn next_independent_instruction(
+    node: Option<&ResolvedAbility>,
+) -> Option<&ResolvedAbility> {
+    std::iter::successors(node, |node| node.sub_ability.as_deref())
         .find(|node| starts_independent_instruction(node))
-        .and_then(without_missing_forward_result_dependencies)
 }
 
 fn effect_depends_on_missing_chosen_player(ability: &ResolvedAbility) -> bool {
@@ -23187,8 +23273,8 @@ fn resolve_unless_payers(
 }
 
 /// CR 702.24a: Expand `pay [base] for each counter on it` into the
-/// concrete N-fold cost the player actually pays. N=0 short-circuits to
-/// a zero mana cost (CR 118.5 — players can always pay 0). `OneOf`
+/// concrete N-fold cost the player actually pays. N=0 yields a {0} cost
+/// (CR 118.3a), which is still asked (CR 118.5). `OneOf`
 /// unfolds into a `Composite` of N independent disjunctive choices
 /// (CR 702.24a: each choice is made separately).
 fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
@@ -33055,7 +33141,7 @@ mod tests {
     /// must resolve against the carrying ability's announced `chosen_x`. The
     /// interceptor folds the dynamic cost into a fixed `Mana` cost before
     /// arming `WaitingFor::UnlessPayment` — without threading `chosen_x` the
-    /// value resolves to 0 and the unless prompt is wrongly skipped (CR 118.5).
+    /// value resolves to 0 and the prompt would carry {0} instead of the announced X.
     #[test]
     fn unless_pay_bare_x_threads_chosen_x_into_resolved_cost() {
         let mut state = GameState::new_two_player(42);
